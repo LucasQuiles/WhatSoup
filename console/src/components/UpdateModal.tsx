@@ -351,10 +351,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const stepIcon = (status: StepStatus) => {
     switch (status) {
-      case 'pending': return <span className="text-t5 inline-block text-center w-[var(--feed-col-icon)]">○</span>
+      case 'pending': return <span className="text-text-3 inline-block text-center w-[var(--feed-col-icon)]">○</span>
       case 'running': return <Loader2 size={16} className="text-m-cht animate-spin" />
       case 'done': return <Check size={16} className="text-s-ok" />
-      case 'skip': return <span className="text-t5 inline-block text-center w-[var(--feed-col-icon)]">–</span>
+      case 'skip': return <span className="text-text-3 inline-block text-center w-[var(--feed-col-icon)]">–</span>
       case 'error': return <AlertCircle size={16} className="text-s-crit" />
     }
   }
@@ -374,7 +374,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       <ModalBody>
         {/* Phase: confirm */}
         {phase === 'confirm' && (
-          <p className="text-t3 text-body">
+          <p className="text-text-2 text-body">
             Pull latest code, rebuild, and restart the fleet server?
           </p>
         )}
@@ -385,11 +385,11 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
             {steps.map(s => (
               <div key={s.step} className="flex items-center gap-[var(--sp-2)] py-[var(--sp-1)] px-0">
                 {stepIcon(s.status)}
-                <span className={`font-mono text-data ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}>
+                <span className={`font-mono text-data ${s.status === 'skip' ? 'text-text-3' : 'text-text-2'}`}>
                   {STEP_LABELS[s.step] ?? s.step}
                 </span>
                 {s.message && s.status !== 'error' && (
-                  <span className="text-t5 font-mono text-label">
+                  <span className="text-text-3 font-mono text-label">
                     {s.message}
                   </span>
                 )}
@@ -398,7 +398,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
             {phase === 'restarting-fleet' && (
               <div className="flex items-center gap-[var(--sp-2)] py-[var(--sp-2)] px-0">
                 <Loader2 size={16} className="text-m-cht animate-spin" />
-                <span className="text-t3 font-mono text-data">
+                <span className="text-text-2 font-mono text-data">
                   Waiting for fleet server...
                 </span>
               </div>
@@ -410,14 +410,14 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         {phase === 'error' && error && (
           <div className="flex items-start gap-[var(--sp-2)] p-[var(--sp-3)] bg-[var(--s-crit-soft)] rounded-md">
             <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
-            <span className="text-t2 font-mono text-data">{error}</span>
+            <span className="text-text-2 font-mono text-data">{error}</span>
           </div>
         )}
 
         {/* Phase: restart-instances */}
         {phase === 'restart-instances' && (
           <div className="flex flex-col gap-[var(--sp-2)]">
-            <p className="text-t3 font-medium text-body">
+            <p className="text-text-2 font-medium text-body">
               Restart instances with update?
             </p>
             <div className="flex flex-col gap-[var(--sp-1)]">
@@ -435,9 +435,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                     onChange={(on) => dispatch({ type: 'toggleInstance', name: line.name, on })}
                     className={`cursor-pointer py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
                     inputClassName="accent-[var(--color-m-cht)]"
-                    labelClassName="font-mono text-t2 flex-1"
+                    labelClassName="font-mono text-text-2 flex-1"
                     suffix={
-                      <span className="font-mono text-t5 text-xs">
+                      <span className="font-mono text-text-3 text-xs">
                         {isRestarting ? (
                           <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
                         ) : isDone ? (
@@ -460,7 +460,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         {phase === 'done' && (
           <div className="flex items-center justify-center gap-[var(--sp-2)] py-[var(--sp-4)] px-0">
             <Check size={20} className="text-s-ok" />
-            <span className="text-t2 font-medium text-body">
+            <span className="text-text-2 font-medium text-body">
               All instances restarted
             </span>
           </div>
