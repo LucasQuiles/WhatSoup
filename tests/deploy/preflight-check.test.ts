@@ -17,10 +17,13 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants as fsConstants,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
   existsSync,
+  readFileSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,6 +36,7 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
+const SPAWN_TIMEOUT_MS = 15_000;
 
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
@@ -42,12 +46,11 @@ const PINNED_NODE_VERSION = process.versions.node;
 const PINNED_NODE_MAJOR = Number(PINNED_NODE_VERSION.split('.')[0]);
 const FIXTURE_NODE_RANGE = `>=${PINNED_NODE_MAJOR}.0.0 <${PINNED_NODE_MAJOR + 1}`;
 
-// @skip-env the preflight script's import-graph probe behaves differently on
+// The preflight script's import-graph probe behaves differently on
 // Node >=26 (outside the repo's >=24 <26 pin) — every scenario exits 1 there
 // while the 24.x/25.x CI matrix is green. Skip on out-of-pin hosts rather than
 // reporting false failures; the pin itself is enforced by guard:node-pin-consistency.
-const NODE_MAJOR = Number(process.versions.node.split('.')[0]);
-const NODE_IN_PIN = NODE_MAJOR >= 24 && NODE_MAJOR < 26;
+const NODE_IN_PIN = PINNED_NODE_MAJOR >= 24 && PINNED_NODE_MAJOR < 26;
 
 const tmpDirs: string[] = [];
 
@@ -101,6 +104,7 @@ function runPreflight(
   const result = spawnSync('bash', [PREFLIGHT, repoRoot, instance], {
     encoding: 'utf8',
     env: { ...process.env, WHATSOUP_NODE: PINNED_NODE, ...env },
+    timeout: SPAWN_TIMEOUT_MS,
   });
   return {
     status: result.status ?? -1,
@@ -109,10 +113,16 @@ function runPreflight(
   };
 }
 
+// @skip-env this suite validates the restart-safety preflight under the repo's
+// supported Node pin; out-of-pin Node versions produce false preflight failures.
 describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate', () => {
   it('exists and is executable shell', () => {
     expect(existsSync(PREFLIGHT)).toBe(true);
-    const synCheck = spawnSync('bash', ['-n', PREFLIGHT], { encoding: 'utf8' });
+    expect(() => accessSync(PREFLIGHT, fsConstants.X_OK)).not.toThrow();
+    const synCheck = spawnSync('bash', ['-n', PREFLIGHT], {
+      encoding: 'utf8',
+      timeout: SPAWN_TIMEOUT_MS,
+    });
     expect(synCheck.status).toBe(0);
   });
 
@@ -179,7 +189,7 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     delete gitEnv['GIT_DIR'];
     delete gitEnv['GIT_WORK_TREE'];
     delete gitEnv['GIT_INDEX_FILE'];
-    spawnSync('git', ['init', '-q'], { cwd: root, env: gitEnv });
+    spawnSync('git', ['init', '-q'], { cwd: root, env: gitEnv, timeout: SPAWN_TIMEOUT_MS });
     writeFileSync(join(root, 'untracked.txt'), 'dirty\n', 'utf8');
     const { status, stderr } = runPreflight(root);
 
@@ -189,7 +199,9 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   });
 });
 
-describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight wiring', () => {
+// @skip-env this wrapper behavior test shells through the same pinned preflight
+// path; out-of-pin Node versions are covered by guard:node-pin-consistency.
+describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight behavior', () => {
   it('refuses to launch when preflight fails (phantom export), not exec node', () => {
     const root = makeFixtureTree(
       "import { phantom } from './helper.ts';\nconsole.log(phantom);\n",
@@ -201,51 +213,39 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight wiring', () => {
     expect(status).toBe(3);
     expect(stderr).toContain('REFUSING TO START');
   });
+});
 
-  it('(d) WHATSOUP_SKIP_PREFLIGHT=1 bypasses the gate with a logged warning', () => {
-    // Exercise the wrapper's skip branch directly via its source: a static
-    // assertion that the skip path logs and bypasses. We additionally prove the
-    // gate itself is never the blocker by confirming the wrapper sources the
-    // skip env. Behavioural skip is covered by the wrapper source contract below.
-    const result = spawnSync(
-      'bash',
-      [
-        '-c',
-        // Minimal harness: source nothing; assert the wrapper contains the
-        // skip branch that warns and bypasses preflight. (A full wrapper spawn
-        // would require keyring/instance config; the skip contract is the unit.)
-        `grep -q 'WHATSOUP_SKIP_PREFLIGHT' "${WRAPPER}" && grep -q 'pre-flight gate BYPASSED' "${WRAPPER}"`,
-      ],
-      { encoding: 'utf8' },
-    );
-    expect(result.status).toBe(0);
+describe('deploy/whatsoup — source wiring', () => {
+  it('declares skip-preflight as an explicit =1 emergency override with a warning', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    expect(wrapper).toContain('if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then');
+    expect(wrapper).toContain('restart-safety pre-flight gate BYPASSED');
+    expect(wrapper).toContain('Set WHATSOUP_SKIP_PREFLIGHT=1 to override in an emergency');
+  });
+
+  it('fails closed when preflight-check refuses wrapper startup', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const preflightStart = wrapper.indexOf('if ! WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then');
+    const bootstrapExec = wrapper.indexOf('"$REPO_ROOT/src/bootstrap.ts" "$INSTANCE"');
+    expect(preflightStart).toBeGreaterThan(-1);
+    expect(bootstrapExec).toBeGreaterThan(preflightStart);
+
+    const preBootstrap = wrapper.slice(preflightStart, bootstrapExec);
+    expect(preBootstrap).toContain('FATAL: restart-safety pre-flight gate refused to start');
+    expect(preBootstrap).toMatch(/\n\s*exit 1\n/);
   });
 
   it('wires preflight-check BEFORE the node exec of bootstrap.ts', () => {
-    const result = spawnSync(
-      'bash',
-      [
-        '-c',
-        // The preflight-check invocation must appear before the exec "$NODE" ... bootstrap.ts line.
-        `pf=$(grep -n 'preflight-check.sh' "${WRAPPER}" | head -1 | cut -d: -f1); ex=$(grep -n 'bootstrap.ts' "${WRAPPER}" | tail -1 | cut -d: -f1); [ -n "$pf" ] && [ -n "$ex" ] && [ "$pf" -lt "$ex" ]`,
-      ],
-      { encoding: 'utf8' },
-    );
-    expect(result.status).toBe(0);
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const preflightIndex = wrapper.indexOf('preflight-check.sh');
+    const bootstrapIndex = wrapper.lastIndexOf('bootstrap.ts');
+    expect(preflightIndex).toBeGreaterThan(-1);
+    expect(bootstrapIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeLessThan(bootstrapIndex);
   });
 
   it('shares node-pin logic via deploy/lib/resolve-node.sh (DRY with wrapper)', () => {
-    const wrapperSourcesLib = spawnSync(
-      'bash',
-      ['-c', `grep -q 'lib/resolve-node.sh' "${WRAPPER}"`],
-      { encoding: 'utf8' },
-    );
-    const preflightSourcesLib = spawnSync(
-      'bash',
-      ['-c', `grep -q 'lib/resolve-node.sh' "${PREFLIGHT}"`],
-      { encoding: 'utf8' },
-    );
-    expect(wrapperSourcesLib.status).toBe(0);
-    expect(preflightSourcesLib.status).toBe(0);
+    expect(readFileSync(WRAPPER, 'utf8')).toContain('lib/resolve-node.sh');
+    expect(readFileSync(PREFLIGHT, 'utf8')).toContain('lib/resolve-node.sh');
   });
 });
