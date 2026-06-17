@@ -1326,3 +1326,801 @@ describe('operationTracker config', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// expandTilde: standalone ~ and HOME fallback
+// ---------------------------------------------------------------------------
+
+describe('config — expandTilde edge cases', () => {
+  it('expands standalone ~ to HOME when vaultPath is exactly "~"', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { vaultPath: '~' },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe(process.env.HOME);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stringRecordProp: error paths (null value, empty key, non-string value,
+// empty string value, duplicate key after trim)
+// ---------------------------------------------------------------------------
+
+describe('config — stringRecordProp validation', () => {
+  it('rejects chatAliases when a value is a non-string (number)', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      chatAliases: { ops: 42 },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /chatAliases must be an object of non-empty string values/,
+    );
+  });
+
+  it('rejects chatAliases when a value is an empty string', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      chatAliases: { ops: '' },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /chatAliases must be an object of non-empty string values/,
+    );
+  });
+
+  it('rejects chatAliases when the key is empty after trimming', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      chatAliases: { '   ': 'some-jid@s.whatsapp.net' },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /chatAliases must be an object of non-empty string values/,
+    );
+  });
+
+  it('rejects chatAliases when the entire value is not an object', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      chatAliases: 'not-an-object',
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /chatAliases must be an object of non-empty string values/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// profileRecordProp: additional error paths
+// ---------------------------------------------------------------------------
+
+describe('config — profileRecordProp error paths', () => {
+  it('rejects profiles when a profile name is empty after trimming', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        '   ': { prefix: 'x' },
+      },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /profiles.*empty profile names|must not contain empty profile names/i,
+    );
+  });
+
+  it('rejects profiles when a profile value is not an object', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        bot: 'string-not-object',
+      },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /profiles.*must be an object/i,
+    );
+  });
+
+  it('rejects profile prefix that is not a string', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        bot: { prefix: 123 },
+      },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /prefix must be a string/i,
+    );
+  });
+
+  it('rejects profile tag that is not a string', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        bot: { tag: true },
+      },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /tag must be a string/i,
+    );
+  });
+
+  it('accepts profile with only a tag (no prefix)', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        tagsonly: { tag: ' #tag' },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.profiles).toEqual({ tagsonly: { tag: ' #tag' } });
+  });
+
+  it('accepts profile with linkPreview: "auto"', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        autobot: { linkPreview: 'auto' },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.profiles).toEqual({ autobot: { linkPreview: 'auto' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeToolThresholds: null, array, partial field overrides, unknown tool key
+// ---------------------------------------------------------------------------
+
+describe('config — mergeToolThresholds edge cases', () => {
+  it('handles null operationTracker.toolThresholds — uses defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: { toolThresholds: null },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.toolThresholds.agent).toEqual({
+      expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,
+    });
+    expect(config.operationTracker.toolThresholds.bash).toEqual({
+      expectedMs: 15_000, slowMultiplier: 2, stallMultiplier: 5,
+    });
+  });
+
+  it('handles array operationTracker.toolThresholds — uses defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: { toolThresholds: [{ expectedMs: 999 }] },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.toolThresholds.agent).toEqual({
+      expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,
+    });
+  });
+
+  it('merges partial tool threshold overrides with defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: {
+        toolThresholds: {
+          bash: { expectedMs: 30_000 },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.toolThresholds.bash).toEqual({
+      expectedMs: 30_000,
+      slowMultiplier: 2,
+      stallMultiplier: 5,
+    });
+  });
+
+  it('adds a new unknown tool using default base thresholds', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: {
+        toolThresholds: {
+          custom_tool: { expectedMs: 5_000, slowMultiplier: 3, stallMultiplier: 8 },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.toolThresholds['custom_tool']).toEqual({
+      expectedMs: 5_000,
+      slowMultiplier: 3,
+      stallMultiplier: 8,
+    });
+  });
+
+  it('skips null values inside toolThresholds object', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: {
+        toolThresholds: {
+          bash: null,
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    // null override is skipped, bash retains defaults
+    expect(config.operationTracker.toolThresholds.bash).toEqual({
+      expectedMs: 15_000, slowMultiplier: 2, stallMultiplier: 5,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rateLimitWindowMs: instance has rateLimitWindowMs or only rateLimitNoticeWindowMs
+// ---------------------------------------------------------------------------
+
+describe('config — rateLimitWindowMs migration (SP6)', () => {
+  it('uses rateLimitWindowMs from instance when explicitly set', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      rateLimitWindowMs: 1_800_000,
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.rateLimitWindowMs).toBe(1_800_000);
+  });
+
+  it('falls back to rateLimitNoticeWindowMs with deprecation warning when rateLimitWindowMs is absent', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+        rateLimitNoticeWindowMs: 900_000,
+      }));
+      const { config } = await import('../src/config.ts');
+      expect(config.rateLimitWindowMs).toBe(900_000);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('DEPRECATION'),
+        900_000,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('defaults rateLimitWindowMs to 1 hour when neither field is set', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.rateLimitWindowMs).toBe(60 * 60 * 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePineconeNamespaces: non-string values are skipped
+// ---------------------------------------------------------------------------
+
+describe('config — resolvePineconeNamespaces edge cases', () => {
+  it('skips non-string namespace overrides, keeps defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: {
+          namespaces: {
+            facts: 42,
+            chunks: null,
+            summaries: 'custom-summaries',
+          },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    // non-string values are skipped; defaults apply for facts + chunks
+    expect(config.memory.pinecone.namespaces.facts).toBe('whatsapp-facts');
+    expect(config.memory.pinecone.namespaces.chunks).toBe('whatsapp-chunks');
+    expect(config.memory.pinecone.namespaces.summaries).toBe('custom-summaries');
+  });
+
+  it('skips empty-string namespace overrides, keeps defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: {
+          namespaces: {
+            facts: '',
+            summaries: 'my-summaries',
+          },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.pinecone.namespaces.facts).toBe('whatsapp-facts');
+    expect(config.memory.pinecone.namespaces.summaries).toBe('my-summaries');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pineconeSearchMode: invalid value falls back to default
+// ---------------------------------------------------------------------------
+
+describe('config — pineconeSearchMode invalid value fallback', () => {
+  it('falls back to default searchMode when an invalid value is provided', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const result = resolveMemoryConfig({
+      memory: {
+        pinecone: {
+          index: 'whatsapp-bot',
+          searchMode: 'invalid-mode',
+        },
+      },
+    });
+    // default index → default mode 'memory'
+    expect(result.pinecone.searchMode).toBe('memory');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeKnowledgeProfiles: non-object profile value skipped, new custom profile
+// ---------------------------------------------------------------------------
+
+describe('config — mergeKnowledgeProfiles edge cases', () => {
+  it('skips non-object knowledge profile values', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const result = resolveMemoryConfig({
+      memory: {
+        pinecone: {
+          knowledgeProfiles: {
+            'bad-profile': 'not-an-object',
+          },
+        },
+      },
+    });
+    // non-object profile is skipped; bad-profile is not present
+    expect(result.pinecone.knowledgeProfiles['bad-profile']).toBeUndefined();
+    // built-ins still present
+    expect(result.pinecone.knowledgeProfiles['mw-mind'].searchMode).toBe('vector');
+  });
+
+  it('creates a new custom knowledge profile from scratch', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const result = resolveMemoryConfig({
+      memory: {
+        pinecone: {
+          knowledgeProfiles: {
+            'my-custom-index': {
+              namespace: 'my-ns',
+              namespaces: ['ns-a', 'ns-b'],
+              searchMode: 'text',
+              rerank: true,
+              topK: 15,
+              rerankTopN: 4,
+              description: 'My custom index',
+            },
+          },
+        },
+      },
+    });
+    const profile = result.pinecone.knowledgeProfiles['my-custom-index'];
+    expect(profile).toBeDefined();
+    expect(profile.namespace).toBe('my-ns');
+    expect(profile.namespaces).toEqual(['ns-a', 'ns-b']);
+    expect(profile.searchMode).toBe('text');
+    expect(profile.rerank).toBe(true);
+    expect(profile.topK).toBe(15);
+    expect(profile.rerankTopN).toBe(4);
+    expect(profile.description).toBe('My custom index');
+  });
+
+  it('merges override namespaces into existing profile (non-empty replaces base)', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const result = resolveMemoryConfig({
+      memory: {
+        pinecone: {
+          knowledgeProfiles: {
+            'mw-mind': {
+              namespaces: ['override-ns-1', 'override-ns-2'],
+            },
+          },
+        },
+      },
+    });
+    expect(result.pinecone.knowledgeProfiles['mw-mind'].namespaces).toEqual([
+      'override-ns-1',
+      'override-ns-2',
+    ]);
+  });
+
+  it('falls back to base namespaces when override namespaces is empty', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const result = resolveMemoryConfig({
+      memory: {
+        pinecone: {
+          knowledgeProfiles: {
+            'mw-mind': {
+              namespaces: [],
+            },
+          },
+        },
+      },
+    });
+    // empty override → base namespaces retained
+    expect(result.pinecone.knowledgeProfiles['mw-mind'].namespaces.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveTwilioSmsConfig: various branches
+// ---------------------------------------------------------------------------
+
+describe('config — resolveTwilioSmsConfig', () => {
+  it('returns undefined when rawSource is null', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    expect(resolveTwilioSmsConfig(null)).toBeUndefined();
+  });
+
+  it('returns undefined when rawSource is undefined', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    expect(resolveTwilioSmsConfig(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when rawSource lacks account field', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    expect(resolveTwilioSmsConfig({ accountSid: 'AC123' })).toBeUndefined();
+  });
+
+  it('returns config with defaults when minimal valid rawSource provided', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({ account: 'ml-bot' });
+    expect(result).not.toBeUndefined();
+    expect(result!.account).toBe('ml-bot');
+    expect(result!.accountSid).toBe('');
+    expect(result!.authTokenService).toBe('');
+    expect(result!.inboundMode).toBe('poll');
+    expect(result!.pollIntervalMs).toBe(15000);
+    expect(result!.rateLimit.smsPerMinute).toBe(30);
+    expect(result!.phoneNumber).toBeUndefined();
+    expect(result!.messagingServiceSid).toBeUndefined();
+    expect(result!.webhook).toBeUndefined();
+    expect(result!.voice).toBeUndefined();
+    expect(result!.inboundMode).toBe('poll');
+  });
+
+  it('applies explicit inboundMode: webhook', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({ account: 'ml-bot', inboundMode: 'webhook' });
+    expect(result!.inboundMode).toBe('webhook');
+  });
+
+  it('falls back to default inboundMode when invalid value given', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({ account: 'ml-bot', inboundMode: 'fax' });
+    expect(result!.inboundMode).toBe('poll');
+  });
+
+  it('sets phoneNumber when provided', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({ account: 'ml-bot', phoneNumber: '+15551230001' });
+    expect(result!.phoneNumber).toBe('+15551230001');
+  });
+
+  it('sets messagingServiceSid when provided', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      messagingServiceSid: 'MGabc123',
+    });
+    expect(result!.messagingServiceSid).toBe('MGabc123');
+  });
+
+  it('resolves webhook block and strips trailing slash from publicBaseUrl', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      webhook: {
+        publicBaseUrl: 'https://example.ngrok.app/',
+        listenPort: 5080,
+        listenAddress: '0.0.0.0',
+      },
+    });
+    expect(result!.webhook).toEqual({
+      publicBaseUrl: 'https://example.ngrok.app',
+      listenPort: 5080,
+      listenAddress: '0.0.0.0',
+    });
+  });
+
+  it('resolves webhook block without trailing slash — publicBaseUrl unchanged', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      webhook: {
+        publicBaseUrl: 'https://example.ngrok.app',
+        listenPort: 5080,
+      },
+    });
+    expect(result!.webhook!.publicBaseUrl).toBe('https://example.ngrok.app');
+  });
+
+  it('resolves webhook block without listenAddress — field absent from result', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      webhook: { publicBaseUrl: 'https://example.ngrok.app', listenPort: 5080 },
+    });
+    expect(result!.webhook).toBeDefined();
+    expect('listenAddress' in result!.webhook!).toBe(false);
+  });
+
+  it('resolves voice block with explicit enabled: true', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      voice: { enabled: true, voicemailMaxLengthSec: 90, voicemailGreeting: 'Hi there!' },
+    });
+    expect(result!.voice).toEqual({
+      enabled: true,
+      voicemailMaxLengthSec: 90,
+      voicemailGreeting: 'Hi there!',
+    });
+  });
+
+  it('resolves voice block with non-boolean enabled — falls back to default (false)', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      voice: { enabled: 'yes', voicemailMaxLengthSec: 60 },
+    });
+    expect(result!.voice!.enabled).toBe(false);
+    expect(result!.voice!.voicemailMaxLengthSec).toBe(60);
+  });
+
+  it('resolves voice block without voicemailGreeting — field absent', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      voice: { enabled: false },
+    });
+    expect(result!.voice).toBeDefined();
+    expect('voicemailGreeting' in result!.voice!).toBe(false);
+  });
+
+  it('resolves rateLimit.smsPerMinute override', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      rateLimit: { smsPerMinute: 60 },
+    });
+    expect(result!.rateLimit.smsPerMinute).toBe(60);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transport + twilioConfig wiring
+// ---------------------------------------------------------------------------
+
+describe('config — transport + twilioConfig', () => {
+  it('resolves twilioConfig when transport is twilio and twilioConfig is present', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'ml-bot',
+        accountSid: 'ACabc123',
+        authTokenService: 'twilio-token',
+        phoneNumber: '+15551230001',
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.transport).toBe('twilio');
+    expect(config.twilioConfig).toBeDefined();
+    expect(config.twilioConfig!.account).toBe('ml-bot');
+    expect(config.twilioConfig!.accountSid).toBe('ACabc123');
+    expect(config.twilioConfig!.phoneNumber).toBe('+15551230001');
+  });
+
+  it('leaves twilioConfig undefined when transport is baileys even if twilioConfig is present', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transport: 'baileys',
+      twilioConfig: { account: 'ml-bot' },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.transport).toBe('baileys');
+    expect(config.twilioConfig).toBeUndefined();
+    expect(config.botName).toBe('profile-test');
+  });
+
+  it('defaults transport to baileys when not specified', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.transport).toBe('baileys');
+    expect(config.twilioConfig).toBeUndefined();
+    expect(config.botName).toBe('profile-test');
+  });
+
+  it('falls back to default transport when instance.transport is invalid', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transport: 'smoke-signals',
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.transport).toBe('baileys');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// siblingPhones, pausedChats, echoGuard
+// ---------------------------------------------------------------------------
+
+describe('config — siblingPhones, pausedChats, echoGuard', () => {
+  it('populates siblingPhones from instance config', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      siblingPhones: ['+15550000099'],
+    }));
+    const { config } = await import('../src/config.ts');
+    // normalizePhoneE164('+15550000099') strips leading +
+    expect(config.siblingPhones.size).toBe(1);
+    expect(config.siblingPhones.has('15550000099')).toBe(true);
+  });
+
+  it('filters blank strings from siblingPhones', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      siblingPhones: ['+15550000099', '', '   '],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.siblingPhones.size).toBe(1);
+    expect(config.siblingPhones.has('15550000099')).toBe(true);
+  });
+
+  it('defaults siblingPhones to empty set when field is absent', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.siblingPhones.size).toBe(0);
+    expect(config.siblingPhones.has('15550000001')).toBe(false);
+  });
+
+  it('defaults siblingPhones to empty set when field is not an array', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      siblingPhones: 'not-an-array',
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.siblingPhones.size).toBe(0);
+    expect(config.siblingPhones.has('15550000001')).toBe(false);
+  });
+
+  it('populates pausedChats from instance config', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChats: ['111111100000000002@g.us', 'abc@s.whatsapp.net'],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChats.has('111111100000000002@g.us')).toBe(true);
+    expect(config.pausedChats.has('abc@s.whatsapp.net')).toBe(true);
+    expect(config.pausedChats.size).toBe(2);
+  });
+
+  it('filters blank strings from pausedChats', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChats: ['111111100000000002@g.us', '', '  '],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChats.size).toBe(1);
+    expect(config.pausedChats.has('111111100000000002@g.us')).toBe(true);
+  });
+
+  it('defaults pausedChats to empty set when field is not an array', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      pausedChats: null,
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.pausedChats.size).toBe(0);
+    expect(config.pausedChats.has('111111100000000002@g.us')).toBe(false);
+  });
+
+  it('echoGuard defaults to enabled with 1000ms cooldown', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.echoGuard.enabled).toBe(true);
+    expect(config.echoGuard.groupCooldownMs).toBe(1_000);
+  });
+
+  it('echoGuard can be explicitly disabled', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      echoGuard: { enabled: false, groupCooldownMs: 500 },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.echoGuard.enabled).toBe(false);
+    expect(config.echoGuard.groupCooldownMs).toBe(500);
+  });
+
+  it('echoGuard stays enabled when enabled field is absent', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      echoGuard: { groupCooldownMs: 2_000 },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.echoGuard.enabled).toBe(true);
+    expect(config.echoGuard.groupCooldownMs).toBe(2_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// accessMode: invalid value throws
+// ---------------------------------------------------------------------------
+
+describe('config — accessMode validation', () => {
+  it('throws for invalid accessMode in INSTANCE_CONFIG', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      accessMode: 'superadmin',
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /Invalid accessMode "superadmin"/,
+    );
+  });
+
+  it('accepts valid accessMode: open_dm', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      accessMode: 'open_dm',
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.accessMode).toBe('open_dm');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adminJid fallback to resolvedAdminPhones[0]
+// ---------------------------------------------------------------------------
+
+describe('config — adminJid fallback', () => {
+  it('falls back to resolvedAdminPhones[0] when admin_jid is absent', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      adminPhones: ['+15550001111'],
+    }));
+    const { config } = await import('../src/config.ts');
+    // normalizePhoneE164('+15550001111') → '15550001111'
+    expect(config.memory.adminJid).toBe('15550001111');
+  });
+
+  it('uses memory.admin_jid when explicitly set, ignoring adminPhones', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      adminPhones: ['+15550001111'],
+      memory: { admin_jid: '15559999999@s.whatsapp.net' },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.adminJid).toBe('15559999999@s.whatsapp.net');
+  });
+
+  it('defaults to empty string when no adminPhones and no admin_jid', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      adminPhones: [],
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.adminJid).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// processTmpDir: instance.paths.tmpDir
+// ---------------------------------------------------------------------------
+
+describe('config — processTmpDir from instance.paths.tmpDir', () => {
+  it('uses instance.paths.tmpDir when provided', async () => {
+    const customTmpDir = path.join(tmpDir, 'inst-custom-tmp');
+    const basePaths = {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      paths: { ...basePaths, tmpDir: customTmpDir },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.tmpDir).toBe(customTmpDir);
+    expect(process.env.TMPDIR).toBe(customTmpDir);
+  });
+
+  it('falls back to <dataRoot>/tmp when instance.paths.tmpDir is absent', async () => {
+    const instDataRoot = path.join(tmpDir, 'inst-data');
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.tmpDir).toBe(path.join(instDataRoot, 'tmp'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PINECONE_PROJECT_ID / PINECONE_EXPECTED_HOST_SUFFIX env var overrides
+// ---------------------------------------------------------------------------
+
+describe('config — pinecone env var overrides', () => {
+  it('picks up PINECONE_PROJECT_ID env var when not set in instance', async () => {
+    process.env.PINECONE_PROJECT_ID = 'env-proj-id';
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.pinecone.projectId).toBe('env-proj-id');
+  });
+
+  it('picks up PINECONE_EXPECTED_HOST_SUFFIX env var when not set in instance', async () => {
+    process.env.PINECONE_EXPECTED_HOST_SUFFIX = '.svc.aped.pinecone.io';
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.pinecone.expectedHostSuffix).toBe('.svc.aped.pinecone.io');
+  });
+
+  it('instance memory.pinecone.projectId takes priority over env var', async () => {
+    process.env.PINECONE_PROJECT_ID = 'env-proj-id';
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { pinecone: { index: 'whatsapp-bot', projectId: 'instance-proj-id' } },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.pinecone.projectId).toBe('instance-proj-id');
+  });
+});
