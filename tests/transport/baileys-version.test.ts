@@ -43,5 +43,6 @@ describe('baileys-version', () => {
     expect(() => parsePinnedBaileysVersion('2.3000')).toThrow(/dotted version tuple/);
     expect(() => parsePinnedBaileysVersion('2.latest.1021')).toThrow(/numeric tuple parts/);
     expect(() => parsePinnedBaileysVersion('-1.3000.1021')).toThrow(/numeric tuple parts/);
+    expect(() => parsePinnedBaileysVersion('2.9007199254740992.1021')).toThrow(/safe non-negative integers/);
   });
 });

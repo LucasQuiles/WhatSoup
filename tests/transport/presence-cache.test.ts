@@ -99,4 +99,63 @@ describe('PresenceCache', () => {
     expect(cache.get('bob@s.whatsapp.net')!.status).toBe('unavailable');
     expect(cache.get('charlie@s.whatsapp.net')).toBeUndefined();
   });
+
+  it('evicts the least-recently-used JID when capacity is reached', () => {
+    const cache = new PresenceCache(2);
+    cache.update('alice@s.whatsapp.net', { status: 'available' });
+    cache.update('bob@s.whatsapp.net', { status: 'composing' });
+
+    cache.update('charlie@s.whatsapp.net', { status: 'recording' });
+
+    expect(cache.size).toBe(2);
+    expect(cache.get('alice@s.whatsapp.net')).toBeUndefined();
+    expect(cache.get('bob@s.whatsapp.net')!.status).toBe('composing');
+    expect(cache.get('charlie@s.whatsapp.net')!.status).toBe('recording');
+  });
+
+  it('promotes reads before choosing the next eviction victim', () => {
+    const cache = new PresenceCache(2);
+    cache.update('alice@s.whatsapp.net', { status: 'available' });
+    cache.update('bob@s.whatsapp.net', { status: 'composing' });
+
+    expect(cache.get('alice@s.whatsapp.net')!.status).toBe('available');
+    cache.update('charlie@s.whatsapp.net', { status: 'recording' });
+
+    expect(cache.get('alice@s.whatsapp.net')!.status).toBe('available');
+    expect(cache.get('bob@s.whatsapp.net')).toBeUndefined();
+    expect(cache.get('charlie@s.whatsapp.net')!.status).toBe('recording');
+  });
+
+  it('getAll returns updatedAt and stale flags for every cached JID', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-13T15:00:00Z'));
+
+    const cache = new PresenceCache();
+    cache.update('alice@s.whatsapp.net', { status: 'available', lastSeen: 1700000000 });
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+    cache.update('bob@s.whatsapp.net', { status: 'composing' });
+
+    const rows = Array.from(cache.getAll());
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toStrictEqual([
+      'alice@s.whatsapp.net',
+      {
+        status: 'available',
+        lastSeen: 1700000000,
+        updatedAt: new Date('2026-06-13T15:00:00Z').getTime(),
+        stale: true,
+      },
+    ]);
+    expect(rows[1][0]).toBe('bob@s.whatsapp.net');
+    expect(rows[1][1]).toMatchObject({ status: 'composing', stale: false });
+  });
+
+  it('handles zero-capacity construction without deleting an undefined key', () => {
+    const cache = new PresenceCache(0);
+
+    expect(() => cache.update('alice@s.whatsapp.net', { status: 'available' })).not.toThrow();
+    expect(cache.size).toBe(1);
+    expect(cache.get('alice@s.whatsapp.net')!.status).toBe('available');
+  });
 });

@@ -93,6 +93,23 @@ describe('FanoutDispatcher', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it('fails closed by persisting unknown runtime event kinds before dispatch', async () => {
+    const persistDurableEvent = vi.fn();
+    const handler = vi.fn();
+    const d = new FanoutDispatcher({ ...opts, persistDurableEvent });
+    d.subscribe('s', handler);
+    const malformedEvent = {
+      ...reactionEv(2),
+      kind: 'future-adapter-kind',
+    } as unknown as InboundEvent;
+
+    d.enqueue(malformedEvent);
+    await d.flush();
+
+    expect(persistDurableEvent).toHaveBeenCalledExactlyOnceWith(malformedEvent);
+    expect(handler).toHaveBeenCalledExactlyOnceWith(malformedEvent);
+  });
+
   it('does not dispatch a durable event when the persistence hook throws', async () => {
     const handler = vi.fn();
     const d = new FanoutDispatcher({

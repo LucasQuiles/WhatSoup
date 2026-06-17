@@ -129,4 +129,24 @@ describe('withTransaction', () => {
     expect(sawCallback).toBe(true);
     expect(rollbackSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('swallows rollback failures and re-throws the original callback error', () => {
+    const rollbackSpy = vi.fn(() => {
+      throw new Error('rollback-io-error');
+    });
+    const callbackError = new Error('callback-failed');
+    const fakeDb = stubDb({ ROLLBACK: rollbackSpy });
+
+    let thrown: unknown;
+    try {
+      withTransaction(fakeDb, () => {
+        throw callbackError;
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBe(callbackError);
+    expect(rollbackSpy).toHaveBeenCalledTimes(1);
+  });
 });

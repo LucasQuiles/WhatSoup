@@ -31,6 +31,7 @@ describe('heal protocol contracts', () => {
       reportId: 'r1',
       type: 'crash',
     });
+    expect(extractPayload('[LOOPS_HEAL] {"reportId":}')).toBeNull();
     expect(extractPayload('[LOOPS_HEAL] {"reportId":"r1"')).toBeNull();
     expect(extractPayload('[LOOPS_HEAL] no json here')).toBeNull();
   });
@@ -54,6 +55,20 @@ describe('heal protocol contracts', () => {
     const degraded = normalizeErrorClass('degraded', 'Hook PreToolUse:Bash denied this tool');
 
     expect(crash).not.toBe(degraded);
+  });
+
+  it('falls back to unknown when an error hint normalizes to no stable tokens', () => {
+    expect(normalizeErrorClass('crash', ':534 pid=247943 2026-03-31T19:17:46Z 0xdeadbeef'))
+      .toBe('crash__unknown');
+  });
+
+  it('uses only the first normalized line and caps long error classes', () => {
+    const longFirstLine = `Error ${'x'.repeat(200)}`;
+    const result = normalizeErrorClass('degraded', `${longFirstLine}\nsecond line should not appear`);
+
+    expect(result).toMatch(/^degraded__Error_x+/);
+    expect(result).not.toContain('second');
+    expect(result.length).toBe('degraded__'.length + 100);
   });
 
   it('accepts valid LOOPS_HEAL payloads and rejects missing required fields', () => {

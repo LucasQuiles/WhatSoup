@@ -31,6 +31,7 @@ describe('provider crash diagnostics', () => {
   it.each([
     ['Please run /login before using provider CLI', 'provider_auth_required'],
     ['Invalid API key provided', 'provider_auth_required'],
+    ['OAuth token expired; reconnect the provider account.', 'provider_auth_required'],
     ['Session limit reached until 5pm', 'provider_usage_limit'],
     ['429 Too Many Requests', 'provider_rate_limit'],
     ['spawn claude ENOENT', 'provider_binary_missing'],

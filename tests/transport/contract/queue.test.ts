@@ -7,6 +7,15 @@ describe('BoundedQueue', () => {
     vi.useRealTimers();
   });
 
+  it('rejects non-positive capacity', () => {
+    expect(() => new BoundedQueue<number>(0)).toThrow('capacity must be >= 1');
+  });
+
+  it('exposes configured capacity', () => {
+    const q = new BoundedQueue<number>(3);
+    expect(q.capacity).toBe(3);
+  });
+
   it('tryEnqueue returns true while under capacity', () => {
     const q = new BoundedQueue<number>(3);
     expect(q.tryEnqueue(1)).toBe(true);
@@ -69,5 +78,11 @@ describe('BoundedQueue', () => {
     expect(q.dropOldest()).toBe(1);
     expect(q.size).toBe(1);
     expect(q.counters.dropped).toBe(1);
+  });
+
+  it('dropOldest returns undefined without incrementing dropped for an empty queue', () => {
+    const q = new BoundedQueue<number>(2);
+    expect(q.dropOldest()).toBeUndefined();
+    expect(q.counters.dropped).toBe(0);
   });
 });

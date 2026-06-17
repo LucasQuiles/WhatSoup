@@ -112,6 +112,11 @@ describe('mergeSettingsJson', () => {
     const result = mergeSettingsJson('agent', invalid);
     expect(result).toEqual(defaultSettingsJson('agent'));
   });
+
+  it('falls back to defaults for non-object custom settings', () => {
+    const result = mergeSettingsJson('agent', 'not-an-object' as never);
+    expect(result).toEqual(defaultSettingsJson('agent'));
+  });
 });
 
 describe('isValidPermissionsSettings', () => {

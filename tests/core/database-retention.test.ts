@@ -151,6 +151,43 @@ describe('database retention', () => {
     }
   });
 
+  it('timer handles immediate and periodic cleanup failures and keeps scheduling', async () => {
+    vi.useFakeTimers();
+    try {
+      const timer = new DatabaseRetentionTimer(db, {
+        intervalMs: 1_000,
+        terminalDurabilityDays: 30,
+        exportedFactDays: 30,
+      });
+      const emptyResult = {
+        inboundEvents: 0,
+        outboundOps: 0,
+        toolCalls: 0,
+        factExportQueue: 0,
+      };
+      const runSpy = vi.spyOn(timer, 'runCleanup')
+        .mockRejectedValueOnce(new Error('immediate-retention-failed'))
+        .mockRejectedValueOnce(new Error('periodic-retention-failed'))
+        .mockResolvedValueOnce(emptyResult);
+
+      timer.start();
+      await Promise.resolve();
+      expect(runSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.resolve();
+      expect(runSpy).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.resolve();
+      expect(runSpy).toHaveBeenCalledTimes(3);
+
+      timer.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   function rowCount(tableName: string): number {
     const row = db.raw.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get() as { count: number };
     return row.count;

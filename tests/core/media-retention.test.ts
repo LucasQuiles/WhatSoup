@@ -374,6 +374,33 @@ describe('MediaRetentionTimer', () => {
       timer.stop();
     }).not.toThrow();
   });
+
+  it('logs and suppresses immediate cleanup failures on start', async () => {
+    const db = makeDb();
+    const timer = new MediaRetentionTimer(baseDir, db);
+    const runSpy = vi.spyOn(timer, 'runCleanup').mockRejectedValueOnce(new Error('boom'));
+
+    timer.start(1000);
+    await vi.runAllTicks();
+
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    timer.stop();
+  });
+
+  it('logs and suppresses periodic cleanup failures', async () => {
+    const db = makeDb();
+    const timer = new MediaRetentionTimer(baseDir, db);
+    const emptyResult = { deleted: 0, skipped: 0, bytesFreed: 0 };
+    const runSpy = vi.spyOn(timer, 'runCleanup')
+      .mockResolvedValueOnce(emptyResult)
+      .mockRejectedValueOnce(new Error('tick failed'));
+
+    timer.start(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(runSpy).toHaveBeenCalledTimes(2);
+    timer.stop();
+  });
 });
 
 describe('purgeFailedScheduledMessages (SP9)', () => {
