@@ -116,6 +116,29 @@ def test_skip_and_revert_same_output_distinct_commitment():
     assert skip["effective_chain_hash"] != revert["effective_chain_hash"]
 
 
+def test_skip_vs_revert_distinct_even_on_a_noop_step():
+    """ocw-verify refuter's degenerate case: when the step is a NO-OP (output == in-force), skip and
+    revert leave identical in-force text AND identical in_force_after hashes — yet the commitment must
+    STILL distinguish them, because the decision field is part of the committed tuple."""
+    cid = "noop-degenerate"
+    g = mpc.genesis_anchor(cid)
+    a0 = mpc.attest_step(chain_id=cid, step_index=0, prev_record_hash=g, prev_text=START, new_text=T_MASK,
+                         declared_purpose="mask",
+                         benefit=mpc.Benefit(0.0, "leak_count", "decrease", "measured", "ev"), determinism_ok=True)
+    # step 1 is an identity no-op (canonicalize T_MASK -> T_MASK): output_hash == input_hash == in-force
+    a1 = mpc.attest_step(chain_id=cid, step_index=1, prev_record_hash=a0.record_hash, prev_text=T_MASK,
+                         new_text=T_MASK, declared_purpose="canonicalize",
+                         benefit=mpc.Benefit(0.0, "token_fraction", "decrease", "measured", "ev"), determinism_ok=True)
+    recs = [a0.as_dict(), a1.as_dict()]
+    skip = pag.compute_effective_chain(recs, _dec([(0, "adopt"), (1, "skip")]))
+    revert = pag.compute_effective_chain(recs, _dec([(0, "adopt"), (1, "revert")]))
+    # both leave the SAME in-force text at step 1 (the no-op output), so outputs + per-step hashes match
+    assert skip["effective_output_hash_16"] == revert["effective_output_hash_16"]
+    assert skip["steps"][1]["in_force_after_16"] == revert["steps"][1]["in_force_after_16"]
+    # the commitment STILL distinguishes the decision-sets (refuter's claimed gap does not exist here)
+    assert skip["effective_chain_hash"] != revert["effective_chain_hash"]
+
+
 # --- malformed / fail-closed --------------------------------------------------
 
 def test_malformed_decisions():
