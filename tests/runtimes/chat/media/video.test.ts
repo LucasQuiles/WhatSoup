@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // vi.hoisted ensures these refs are available inside vi.mock factories (which are hoisted)
 const { mockExecFile, mockReaddir, mockReadFile } = vi.hoisted(() => ({
@@ -35,6 +35,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 import { extractFrames, extractFramesDetailed } from '../../../../src/runtimes/chat/media/video.ts';
+import { cleanupTempFile } from '../../../../src/core/media-download.ts';
 
 // The module uses promisify(execFile). promisify-wrapped callbacks expect node-style
 // (err, value) callbacks. We simulate this by implementing execFile as a function
@@ -59,9 +60,14 @@ const FAKE_FRAME_BUF = Buffer.from('frame-data');
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(Date, 'now').mockReturnValue(1_000_000_000_000);
   // Default: readdir returns no frames, readFile returns fake frame buffer
   mockReaddir.mockResolvedValue([]);
   mockReadFile.mockResolvedValue(FAKE_FRAME_BUF);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -169,7 +175,7 @@ describe('extractFrames — long-video threshold (> 200s)', () => {
     expect(ffmpegArgs[framesIdx + 1]).toBe('20');
   });
 
-  it('returns timestamped frames spaced by duration/MAX_FRAMES when long-video branch is taken', async () => {
+  it('extractFrames returns timestamped long-video frames', async () => {
     const duration = 400;
     mockExecFile
       .mockImplementationOnce(
@@ -181,27 +187,57 @@ describe('extractFrames — long-video threshold (> 200s)', () => {
           cb(null, { stdout: '', stderr: '' }),
       );
 
-    // Simulate two output frames with predictable names matching the timestamp prefix
-    // We need names that match: f.endsWith('.jpg') && f.startsWith(`frames_<ts>`)
-    // The outputPattern is built with Date.now() — capture that via the writeTempFile mock
-    const { writeTempFile } = await import('../../../../src/core/media-download.ts');
-    vi.mocked(writeTempFile).mockReturnValue('/tmp/test-video.mp4');
-
-    // Provide frames named using a prefix we know appears in outputPattern
     mockReaddir.mockResolvedValue([
       'frames_1000000000000_001.jpg',
       'frames_1000000000000_002.jpg',
     ]);
-
-    // Make readFile return real buffers for these
-    mockReadFile.mockResolvedValue(Buffer.from('frame-pixel-data'));
-
-    // We cannot control Date.now() in the filter without mocking time; use an empty
-    // readdir result to verify graceful empty-frame return instead.
-    mockReaddir.mockResolvedValue([]);
+    mockReadFile
+      .mockResolvedValueOnce(Buffer.from('frame-one'))
+      .mockResolvedValueOnce(Buffer.from('frame-two'));
 
     const frames = await extractFrames(Buffer.from('fake-video'));
-    expect(Array.isArray(frames)).toBe(true);
+    expect(frames).toEqual([
+      { timestamp: '0:00', buffer: Buffer.from('frame-one') },
+      { timestamp: '0:20', buffer: Buffer.from('frame-two') },
+    ]);
+  });
+
+  it('reads normal ffmpeg frames, formats long-video timestamps, and cleans frame files', async () => {
+    const duration = 400;
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: `${duration}\n`, stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([
+      'frames_1000000000000_001.jpg',
+      'frames_1000000000000_002.jpg',
+      'unrelated.jpg',
+    ]);
+    mockReadFile
+      .mockResolvedValueOnce(Buffer.from('frame-one'))
+      .mockResolvedValueOnce(Buffer.from('frame-two'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [
+        { timestamp: '0:00', buffer: Buffer.from('frame-one') },
+        { timestamp: '0:20', buffer: Buffer.from('frame-two') },
+      ],
+      status: 'ok',
+      fallbackUsed: false,
+      durationSeconds: duration,
+    });
+    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_1000000000000_001.jpg');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_1000000000000_002.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_002.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/test-video.mp4');
   });
 });
 
@@ -236,6 +272,75 @@ describe('extractFrames — short-video frame-count cap', () => {
     expect(framesIdx).toBeGreaterThan(-1);
     // -frames:v is always passed as String(MAX_FRAMES) = '20'
     expect(ffmpegArgs[framesIdx + 1]).toBe('20');
+  });
+
+  it('reads short-video frames with 10-second timestamps and skips read failures', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '25\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([
+      'frames_1000000000000_001.jpg',
+      'frames_1000000000000_002.jpg',
+      'frames_9999999999999_001.jpg',
+    ]);
+    mockReadFile
+      .mockResolvedValueOnce(Buffer.from('frame-one'))
+      .mockRejectedValueOnce(new Error('frame unreadable'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [
+        { timestamp: '0:00', buffer: Buffer.from('frame-one') },
+      ],
+      status: 'ok',
+      fallbackUsed: false,
+      durationSeconds: 25,
+    });
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_002.jpg');
+  });
+
+  it('uses the broad frames prefix when the output timestamp is not numeric', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Number.NaN);
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '12\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([
+      'frames_001.jpg',
+      'frames_extra.jpg',
+      'frames_ignored.txt',
+      'unrelated.jpg',
+    ]);
+    mockReadFile
+      .mockResolvedValueOnce(Buffer.from('first'))
+      .mockResolvedValueOnce(Buffer.from('second'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [
+        { timestamp: '0:00', buffer: Buffer.from('first') },
+        { timestamp: '0:10', buffer: Buffer.from('second') },
+      ],
+      status: 'ok',
+      fallbackUsed: false,
+      durationSeconds: 12,
+    });
+    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_001.jpg');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_extra.jpg');
   });
 });
 
@@ -298,6 +403,69 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     });
   });
 
+  it('reads one fallback frame and cleans it after primary ffmpeg failure', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg primary error')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([
+      'frames_1000000000000_001.jpg',
+      'frames_1000000000000_002.jpg',
+    ]);
+    mockReadFile.mockResolvedValue(Buffer.from('fallback-frame'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [
+        { timestamp: '0:00', buffer: Buffer.from('fallback-frame') },
+      ],
+      status: 'fallback_ok',
+      fallbackUsed: true,
+      durationSeconds: 30,
+    });
+    expect(mockReadFile).toHaveBeenCalledTimes(1);
+    expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+  });
+
+  it('marks fallback no-frame when the fallback frame cannot be read', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg primary error')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue(['frames_1000000000000_001.jpg']);
+    mockReadFile.mockRejectedValue(new Error('fallback frame unreadable'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'fallback_no_frames',
+      fallbackUsed: true,
+      durationSeconds: 30,
+    });
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+  });
+
   it('returns empty array when both primary and fallback ffmpeg calls reject', async () => {
     mockExecFile
       .mockImplementationOnce(
@@ -344,6 +512,32 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     });
   });
 
+  it('serializes non-Error fallback ffmpeg failures', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg primary error')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb('fallback process exited 2' as unknown as Error),
+      );
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'fallback_failed',
+      fallbackUsed: true,
+      durationSeconds: 30,
+      error: 'fallback process exited 2',
+    });
+  });
+
   it('returns empty array when ffprobe fails and ffmpeg also fails', async () => {
     failWith(new Error('binary not found'));
 
@@ -351,5 +545,50 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     // ffprobe error → duration=0, ffmpeg then fails → fallback ffmpeg also fails (same mock)
     // outer catch returns []
     expect(frames).toEqual([]);
+  });
+
+  it('returns failed details when frame directory listing throws after primary ffmpeg succeeds', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockRejectedValue(new Error('cannot list frames'));
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'failed',
+      fallbackUsed: false,
+      error: 'cannot list frames',
+    });
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/test-video.mp4');
+  });
+
+  it('serializes non-Error failures from the outer extraction path', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockRejectedValue('directory unavailable');
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'failed',
+      fallbackUsed: false,
+      error: 'directory unavailable',
+    });
   });
 });

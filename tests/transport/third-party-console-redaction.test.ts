@@ -59,6 +59,85 @@ describe('third-party console redaction', () => {
     expect(redacted).not.toContain('<Buffer 01 02 03>');
   });
 
+  it('redacts scalar, binary, date, and error values without losing diagnostic shape', () => {
+    expect(redactThirdPartyConsoleValue('api_key=live-secret')).toBe('api_key=<redacted>');
+    expect(redactThirdPartyConsoleValue(42n)).toBe('42');
+    expect(redactThirdPartyConsoleValue(null)).toBeNull();
+    expect(redactThirdPartyConsoleValue(false)).toBe(false);
+    expect(redactThirdPartyConsoleValue('raw-secret', 'accessToken')).toBe('<redacted>');
+    expect(redactThirdPartyConsoleValue(Buffer.from('private-material'))).toBe('<Buffer redacted length=16>');
+    expect(redactThirdPartyConsoleValue(new Uint8Array([1, 2, 3, 4]))).toBe('<Uint8Array redacted length=4>');
+    expect(redactThirdPartyConsoleValue(new Date('2026-06-15T20:00:00.000Z'))).toBe('2026-06-15T20:00:00.000Z');
+
+    const withoutStack = new TypeError('password=super-secret');
+    withoutStack.stack = undefined;
+    expect(redactThirdPartyConsoleValue(withoutStack)).toEqual({
+      type: 'TypeError',
+      message: 'password=<redacted>',
+      stack: undefined,
+    });
+
+    const withStack = new Error('token=super-secret');
+    withStack.stack = 'Error: token=super-secret\n    at 15555550123@s.whatsapp.net';
+    const redactedError = JSON.stringify(redactThirdPartyConsoleValue(withStack));
+    expect(redactedError).toContain('Error');
+    expect(redactedError).toContain('token=<redacted>');
+    expect(redactedError).toContain('<jid:redacted>');
+    expect(redactedError).not.toContain('super-secret');
+    expect(redactedError).not.toContain('15555550123');
+  });
+
+  it('bounds recursive data structures while preserving useful non-secret context', () => {
+    const circular: Record<string, unknown> = { safe: 'visible' };
+    circular['self'] = circular;
+    expect(redactThirdPartyConsoleValue(circular)).toEqual({
+      safe: 'visible',
+      self: '<circular>',
+    });
+
+    expect(redactThirdPartyConsoleValue(['visible', { token: 'array-secret' }])).toEqual([
+      'visible',
+      { '<redacted_sensitive_fields>': 1 },
+    ]);
+
+    const deep = { a: { b: { c: { d: { e: { token: 'deep-secret' } } } } } };
+    expect(redactThirdPartyConsoleValue(deep)).toEqual({
+      a: { b: { c: { d: { e: '<max-depth>' } } } },
+    });
+
+    const longArray = Array.from({ length: 32 }, (_, index) => `item-${index}`);
+    const redactedArray = redactThirdPartyConsoleValue(longArray);
+    expect(redactedArray).toHaveLength(31);
+    expect(redactedArray).toContain('item-0');
+    expect(redactedArray).toContain('<truncated:2>');
+
+    const manyKeys = Object.fromEntries(Array.from({ length: 42 }, (_, index) => [`field${index}`, index]));
+    const redactedObject = redactThirdPartyConsoleValue(manyKeys) as Record<string, unknown>;
+    expect(Object.keys(redactedObject)).toHaveLength(41);
+    expect(redactedObject['field0']).toBe(0);
+    expect(redactedObject['<truncated_keys>']).toBe(2);
+  });
+
+  it('redacts non-plain objects without relying on prototype data', () => {
+    class CustomDiagnostic {
+      visible = 'metadata';
+      token = 'super-secret';
+    }
+
+    expect(redactThirdPartyConsoleValue(new CustomDiagnostic())).toEqual({
+      type: 'CustomDiagnostic',
+      redacted: true,
+    });
+
+    const objectNamedPrototype = Object.create({ inherited: 'prototype-value' });
+    objectNamedPrototype.visible = 'metadata';
+
+    expect(redactThirdPartyConsoleValue(objectNamedPrototype)).toEqual({
+      type: 'Object',
+      redacted: true,
+    });
+  });
+
   it('drops libsignal session dumps when installed', () => {
     const captured: unknown[][] = [];
     const target = {
@@ -77,6 +156,44 @@ describe('third-party console redaction', () => {
 
     expect(originalInfo).not.toHaveBeenCalled();
     expect(captured).toHaveLength(0);
+  });
+
+  it('drops every known libsignal session dump prefix but passes ordinary diagnostics', () => {
+    const captured: unknown[][] = [];
+    const target = {
+      debug: vi.fn((...args: unknown[]) => captured.push(args)),
+      error: vi.fn((...args: unknown[]) => captured.push(args)),
+      info: vi.fn((...args: unknown[]) => captured.push(args)),
+      log: vi.fn((...args: unknown[]) => captured.push(args)),
+      warn: vi.fn((...args: unknown[]) => captured.push(args)),
+    } as any;
+
+    installThirdPartyConsoleRedaction(target);
+
+    for (const prefix of [
+      'Closing session:',
+      'Removing old closed session:',
+      'Opening session:',
+      'Migrating session to:',
+      'Session already closed',
+      'Session already open',
+    ]) {
+      target.warn(prefix, { privKey: Buffer.from('private-material') });
+    }
+
+    target.warn({ event: 'non-string-first-arg', privKey: Buffer.from('private-material') });
+    target.warn('ordinary diagnostic', { token: 'super-secret', safe: 'visible' });
+
+    expect(captured).toHaveLength(2);
+    const rendered = JSON.stringify(captured);
+    expect(rendered).toContain('non-string-first-arg');
+    expect(rendered).toContain('ordinary diagnostic');
+    expect(rendered).toContain('visible');
+    expect(rendered).toContain('<redacted_sensitive_fields>');
+    expect(rendered).not.toContain('private-material');
+    expect(rendered).not.toContain('super-secret');
+    expect(rendered).not.toContain('privKey');
+    expect(rendered).not.toContain('token');
   });
 
   it('installs once and wraps console methods with redaction', () => {
