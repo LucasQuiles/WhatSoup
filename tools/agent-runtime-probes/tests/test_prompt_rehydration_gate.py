@@ -270,6 +270,52 @@ def test_sanitizer_rejected_artifact_forces_passthrough():
     assert result["restored"].encode("utf-8") == SENSITIVE_TEXT.encode("utf-8")
 
 
+def test_accepted_false_with_materialized_masked_swapmap_forces_passthrough():
+    # The discriminating rejection case: the masker can set accepted=False while STILL
+    # returning a non-None masked text and swapmap. prompt_sanitizer.sanitize does exactly
+    # this on its production residual-leak and roundtrip-failure paths
+    # (accepted = (not residual) and roundtrip_ok and (not collision); the masked/swapmap are
+    # the real materialized values). The gate must honor accepted=False and short-circuit to
+    # verbatim passthrough WITHOUT ever invoking the untrusted delegate — the rejection guard
+    # is `masked is None OR swapmap is None OR not accepted`, and the load-bearing disjunct
+    # HERE is `not accepted` (masked/swapmap are present). A guard that only rejected when
+    # masked/swapmap were None would route a masker-REJECTED-but-materialized artifact straight
+    # to the worker: a fail-open. (The sibling test above exercises the masked-is-None disjunct,
+    # under which the rejection holds regardless of the `not accepted` term.)
+    invoked = {"called": False}
+
+    def spy_delegate(masked: str) -> str:
+        invoked["called"] = True
+        return masked
+
+    orig_sanitize = gate.sanitize
+
+    def rejecting_sanitize_with_output(text, key, patterns, **kw):
+        # masked + swapmap PRESENT (non-None), but the masker did NOT accept the artifact.
+        return {
+            "session_key_status": "ok",
+            "masked": "__CAPE_deadbeefdeadbeef_PATH_0__ ping",
+            "swapmap": {"__CAPE_deadbeefdeadbeef_PATH_0__": "/Users/alice/x"},
+            "report": {"accepted": False, "placeholder_collision": False},
+        }
+
+    gate.sanitize = rejecting_sanitize_with_output
+    try:
+        with tempfile.TemporaryDirectory() as store_dir:
+            result = gate.run_gate(SENSITIVE_TEXT, SESSION_KEY, store_dir, delegate=spy_delegate)
+    finally:
+        gate.sanitize = orig_sanitize
+    report = result["report"]
+    # Load-bearing: the delegate must NEVER see a masker-rejected artifact.
+    assert invoked["called"] is False, "delegate invoked on a masker-REJECTED artifact (fail-open)"
+    assert report["integrity"] == "violated"
+    assert report["fallback"] == "verbatim_passthrough"
+    assert report["store_status"] == "not_attempted"
+    assert report["mask_status"] == "rejected"
+    assert report["violation_reason"] == "mask_rejected"
+    assert result["restored"].encode("utf-8") == SENSITIVE_TEXT.encode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # (5) Determinism: identical inputs produce identical metadata + restored bytes.
 # ---------------------------------------------------------------------------
