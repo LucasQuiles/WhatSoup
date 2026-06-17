@@ -1856,7 +1856,16 @@ def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
             continue
         if cand.endswith(STALE_RENOTIFY_SUPPRESS_SUFFIXES) or cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
             return True
-    return requested_action_text(event) == NONACTIONABLE_ACTION
+    # SSOT signal: the derived action is non-actionable. This covers both the
+    # plain info "none" sentinel AND the stale "verify whether it recovered —
+    # unless fresh alerts resume" filler that stale_incident_event bakes as the
+    # operatorAction for any stale incident carrying a failure_code (e.g. a
+    # daily-health provider_probe quiet for days). That filler describes a no-op
+    # by definition: if the source were still broken it would re-emit FRESH
+    # events (which renotify normally) instead of going silent. A genuine
+    # standing action (physical relink / manual intervention) resolves to a
+    # different, real action string and is NOT caught here.
+    return requested_action_text(event) in (NONACTIONABLE_ACTION, stale_action_text())
 
 
 def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
