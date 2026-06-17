@@ -958,9 +958,9 @@ describe('entity mode', () => {
     expect(details).toMatchObject({
       results: [],
       status: 'failed',
+      retried: true,
       error: 'entity index still down',
     });
-    expect(details).not.toHaveProperty('retried');
     expect(details.durationMs).toEqual(expect.any(Number));
   });
 
@@ -973,7 +973,7 @@ describe('entity mode', () => {
     const details = await memory.searchEntitiesDetailed('query');
 
     expect(details.status).toBe('ok');
-    expect(details).not.toHaveProperty('retried');
+    expect(details.retried).toBe(true);
     expect(details.results.map((r) => r.id)).toEqual(['entity-retry-hit']);
   });
 
