@@ -11,7 +11,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleSend,
   handleAccessUpdate,
+  handleMarkRead,
+  handleSaveContact,
   handleRestart,
+  handleStop,
   handleConfigUpdate,
   handleCreateLine,
   handleDeleteLine,
@@ -39,6 +42,16 @@ vi.mock('node:fs', async (importOriginal) => {
     existsSync: vi.fn(actual.existsSync),
   };
 });
+// Keyring is mocked so individual tests can simulate a present health token
+// (covering the tokens.env write branch in handleCreateLine). Default behaviour
+// mirrors the unmocked CI environment: no credential resolves.
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...orig,
+    lookupCredential: vi.fn(() => null),
+  };
+});
 
 const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 const { existsSync: actualExistsSync } = actualFs;
@@ -46,6 +59,7 @@ const { existsSync: actualExistsSync } = actualFs;
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
 import { execFile, spawn } from 'node:child_process';
+import { lookupCredential } from '../../../src/lib/keyring.ts';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -1768,5 +1782,1202 @@ describe('handleConfigUpdate', () => {
     await handleConfigUpdate(mockReq('{"x":1}'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/failed to read config/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ops.ts uncovered-branch coverage (wave)
+// ---------------------------------------------------------------------------
+
+describe('ops.ts uncovered-branch coverage (wave)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  // validateInstanceName: invalid name path (ops.ts:39-41)
+  it('handleSend rejects an invalid instance name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleSend(mockReq('{}'), res, deps, { name: 'Bad_Name!' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
+  });
+
+  it('handleAccessUpdate rejects an invalid instance name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleAccessUpdate(mockReq('{}'), res, deps, { name: 'UPPER' });
+    expect(res._status).toBe(400);
+  });
+
+  // handleSend: passive instance with healthPort but no socketPath -> route 2 (ops.ts:227-238)
+  it('handleSend proxies through healthPort when passive instance has no socket', async () => {
+    const inst = fakeInstance({
+      type: 'passive',
+      socketPath: null,
+      healthPort: 4567,
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+    const res = mockRes();
+    const body = JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' });
+    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledWith(4567, '/send', 'POST', body, 'tok123');
+    expect(res._status).toBe(200);
+    // Realtime publish on 2xx success
+    expect(deps.realtime.publish).toHaveBeenCalled();
+  });
+
+  // handleSend: passive instance, socketPath exists but socket missing -> fall to healthPort
+  // (ops.ts:206 false branch -> 227)
+  it('handleSend falls back to healthPort when passive socket path does not exist', async () => {
+    const inst = fakeInstance({
+      type: 'passive',
+      socketPath: '/state/test-line/whatsoup.sock',
+      healthPort: 4568,
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).toHaveBeenCalledWith(4568, '/send', 'POST', expect.any(String), 'tok123');
+  });
+
+  // handleSend: proxy returns non-2xx -> no realtime publish (ops.ts:231 false branch)
+  it('handleSend does not publish realtime events when proxy returns non-2xx', async () => {
+    const inst = fakeInstance({ type: 'chat', healthPort: 4569 });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"down"}' });
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(500);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  // handleSend: chatJid without @ gets normalized (ops.ts:194-198)
+  it('handleSend normalizes a bare phone chatJid to a personal JID via proxy', async () => {
+    const inst = fakeInstance({ type: 'chat', healthPort: 4570 });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: '15550000001', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    const forwarded = JSON.parse(vi.mocked(proxyToInstance).mock.calls[0][3] as string);
+    expect(forwarded.chatJid).toBe('15550000001@s.whatsapp.net');
+  });
+
+  // handleSend: mcpCall returns toolError=true -> no publish, still responds (ops.ts:212 false branch)
+  it('handleSend does not publish realtime when mcpCall returns toolError', async () => {
+    const inst = fakeInstance({
+      type: 'passive',
+      socketPath: '/state/test-line/whatsoup.sock',
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({
+      success: true,
+      toolError: true,
+      result: { partial: true },
+    });
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: '15550000001@s.whatsapp.net', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  // handleAccessUpdate: invalid JSON body (ops.ts:263-266)
+  it('handleAccessUpdate returns 400 for invalid JSON body', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleAccessUpdate(mockReq('not json'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+  });
+
+  // handleAccessUpdate: invalid subjectType (ops.ts:268-272)
+  it('handleAccessUpdate returns 400 for invalid subjectType', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleAccessUpdate(
+      mockReq(JSON.stringify({ subjectType: 'user', subjectId: '15550000001', action: 'allow' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(proxyToInstance).not.toHaveBeenCalled();
+  });
+
+  // handleAccessUpdate: missing/empty subjectId (ops.ts:269)
+  it('handleAccessUpdate returns 400 when subjectId is empty', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleAccessUpdate(
+      mockReq(JSON.stringify({ subjectType: 'phone', subjectId: '', action: 'allow' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+  });
+
+  // handleAccessUpdate: invalid action (ops.ts:270)
+  it('handleAccessUpdate returns 400 for invalid action', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleAccessUpdate(
+      mockReq(JSON.stringify({ subjectType: 'group', subjectId: '15550000001', action: 'delete' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+  });
+
+  // handleAccessUpdate: group subjectType proxies successfully (ops.ts:268 false branch + publish)
+  it('handleAccessUpdate proxies a group access action', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+    const res = mockRes();
+    const body = JSON.stringify({
+      subjectType: 'group',
+      subjectId: '1111111000000000',
+      action: 'block',
+    });
+    await handleAccessUpdate(mockReq(body), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/access', 'POST', body, 'tok123');
+    expect(res._status).toBe(200);
+    expect(deps.realtime.publish).toHaveBeenCalled();
+  });
+
+  // handleAccessUpdate: non-2xx proxy -> no publish (ops.ts:278 false branch)
+  it('handleAccessUpdate does not publish on non-2xx proxy response', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 403, body: '{"error":"denied"}' });
+    const res = mockRes();
+    await handleAccessUpdate(
+      mockReq(JSON.stringify({ subjectType: 'phone', subjectId: '15550000001', action: 'allow' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(403);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  // handleMarkRead: full coverage (ops.ts:287-308)
+  it('handleMarkRead returns 404 for unknown instance', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleMarkRead(mockReq('{}'), res, deps, { name: 'nope' });
+    expect(res._status).toBe(404);
+  });
+
+  it('handleMarkRead rejects invalid instance name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleMarkRead(mockReq('{}'), res, deps, { name: 'bad name' });
+    expect(res._status).toBe(400);
+  });
+
+  it('handleMarkRead proxies to instance and publishes on 2xx', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+    const res = mockRes();
+    const body = '{"chatJid":"15550000001@s.whatsapp.net"}';
+    await handleMarkRead(mockReq(body), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/mark-read', 'POST', body, 'tok123');
+    expect(res._status).toBe(200);
+    expect(deps.realtime.publish).toHaveBeenCalled();
+  });
+
+  it('handleMarkRead does not publish on non-2xx response', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 500, body: '{"error":"x"}' });
+    const res = mockRes();
+    await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(500);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  // handleSaveContact: full coverage (ops.ts:311-356)
+  it('handleSaveContact returns 400 for invalid JSON body', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleSaveContact(mockReq('not json'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+  });
+
+  it('handleSaveContact returns 400 when jid is missing', async () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleSaveContact(
+      mockReq(JSON.stringify({ firstName: 'Kio' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/jid is required/);
+  });
+
+  it('handleSaveContact returns 503 when MCP socket is not available', async () => {
+    const inst = fakeInstance({ socketPath: null });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    const res = mockRes();
+    await handleSaveContact(
+      mockReq(JSON.stringify({ jid: '15550000001@s.whatsapp.net', firstName: 'Kio' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(503);
+    expect(JSON.parse(res._body).error).toMatch(/MCP socket not available/);
+  });
+
+  it('handleSaveContact calls mcpCall when socket exists and returns 200', async () => {
+    const inst = fakeInstance({ socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { added: true } });
+    const res = mockRes();
+    await handleSaveContact(
+      mockReq(JSON.stringify({
+        jid: '15550000001@s.whatsapp.net',
+        firstName: 'Kio',
+        lastName: 'Bot',
+        company: 'Acme',
+        phone: '15550000001',
+      })),
+      res, deps, { name: 'test-line' });
+    expect(mcpCall).toHaveBeenCalledWith(
+      '/state/test-line/whatsoup.sock',
+      'add_or_edit_contact',
+      expect.objectContaining({
+        jid: '15550000001@s.whatsapp.net',
+        firstName: 'Kio',
+        lastName: 'Bot',
+        company: 'Acme',
+        phone: '15550000001',
+      }),
+    );
+    expect(res._status).toBe(200);
+  });
+
+  it('handleSaveContact falls back to 503 when mcpCall throws', async () => {
+    const inst = fakeInstance({ socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockRejectedValue(new Error('socket dead'));
+    const res = mockRes();
+    await handleSaveContact(
+      mockReq(JSON.stringify({ jid: '15550000001@s.whatsapp.net' })),
+      res, deps, { name: 'test-line' });
+    expect(res._status).toBe(503);
+  });
+
+  // handleStop: stop verb (ops.ts:426-432, 372-374, 377)
+  it('handleStop calls serviceManager.stop and returns 202 on success', async () => {
+    const inst = fakeInstance();
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+    await handleStop(mockReq(), res, deps, { name: 'test-line' });
+    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    expect(svc.restart).not.toHaveBeenCalled();
+    expect(res._status).toBe(202);
+    expect(JSON.parse(res._body).status).toBe('stop_requested');
+  });
+
+  it('handleStop returns 500 when serviceManager.stop fails', async () => {
+    const inst = fakeInstance();
+    const svc = mockServiceManager();
+    svc.stop.mockRejectedValueOnce(new Error('systemd unreachable'));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      serviceManager: svc,
+    });
+    const res = mockRes();
+    await handleStop(mockReq(), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+  });
+
+  it('handleStop returns 404 for unknown instance', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleStop(mockReq(), res, deps, { name: 'nope' });
+    expect(res._status).toBe(404);
+  });
+
+  it('handleStop rejects invalid instance name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleStop(mockReq(), res, deps, { name: '1nv@lid' });
+    expect(res._status).toBe(400);
+  });
+
+  // handleCreateLine: invalid name (ops.ts:1005-1008)
+  it('handleCreateLine rejects a name shorter than 2 chars with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 'a', type: 'chat', adminPhones: ['15550000001'] })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/name must be/);
+  });
+
+  // handleCreateLine: name not a string
+  it('handleCreateLine rejects a non-string name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 42, type: 'chat', adminPhones: ['15550000001'] })),
+      res, deps);
+    expect(res._status).toBe(400);
+  });
+
+  // handleCreateLine: instance already exists in discovery (ops.ts:1012-1015)
+  it('handleCreateLine returns 409 when instance already exists in discovery', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => fakeInstance({ name: 'dup' })),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 'dup', type: 'chat', adminPhones: ['15550000001'] })),
+      res, deps);
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/already exists/);
+  });
+
+  // handleCreateLine: invalid type (ops.ts:1019-1022)
+  it('handleCreateLine rejects an unknown type with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 'good-name', type: 'magic', adminPhones: ['15550000001'] })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/type must be/);
+  });
+
+  // handleCreateLine: adminPhones invalid (ops.ts:1026-1030)
+  it('handleCreateLine rejects empty adminPhones with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: [] })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+  });
+
+  it('handleCreateLine rejects non-array adminPhones with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({ name: 'good-name', type: 'chat', adminPhones: '15550000001' })),
+      res, deps);
+    expect(res._status).toBe(400);
+  });
+
+  // handleCreateLine: passive with systemPrompt (ops.ts:1037-1040)
+  it('handleCreateLine rejects a passive instance with systemPrompt', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'good-name', type: 'passive',
+        adminPhones: ['15550000001'], systemPrompt: 'be nice',
+      })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/systemPrompt/);
+  });
+
+  // handleCreateLine: healthPort out of range (ops.ts:1044-1047)
+  it('handleCreateLine rejects an out-of-range healthPort with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'good-name', type: 'chat',
+        adminPhones: ['15550000001'], healthPort: 80,
+      })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/healthPort/);
+  });
+
+  // handleCreateLine: invalid accessMode (ops.ts:1067-1070)
+  it('handleCreateLine rejects an invalid accessMode with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'good-name', type: 'chat',
+        adminPhones: ['15550000001'], accessMode: 'wide_open',
+      })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/accessMode/);
+  });
+
+  // handleCreateLine: agent with invalid sessionScope (ops.ts:1082-1085)
+  it('handleCreateLine rejects an invalid agent sessionScope with 400', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'good-name', type: 'agent',
+        adminPhones: ['15550000001'],
+        agentOptions: { cwd: '/tmp', sessionScope: 'bogus' },
+      })),
+      res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/sessionScope/);
+  });
+
+  // handleCreateLine: invalid JSON body (ops.ts:994-1001)
+  it('handleCreateLine rejects an invalid JSON body with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleCreateLine(mockReq('not json'), res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/invalid JSON/);
+  });
+
+  it('handleCreateLine rejects a JSON array body with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleCreateLine(mockReq('[1,2,3]'), res, deps);
+    expect(res._status).toBe(400);
+  });
+
+  // handleDeleteLine: 404 / 400? handleDeleteLine has NO requireInstance — it just stops+removes.
+  // Cover the success path with default benign mocks.
+  it('handleDeleteLine completes when stop and disable succeed', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave-del-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
+    process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
+    process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+    try {
+      const name = 'wave-del';
+      const configDir = path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', name);
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(path.join(configDir, 'config.json'), '{}');
+      const svc = mockServiceManager();
+      const deps = makeDeps({
+        discovery: { scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const res = mockRes();
+      await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+      expect(res._status).toBe(200);
+      expect(JSON.parse(res._body)).toEqual({ deleted: name });
+      expect(fs.existsSync(configDir)).toBe(false);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('handleDeleteLine rejects an invalid instance name with 400', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleDeleteLine(mockReq(''), res, deps, { name: 'BAD NAME' });
+    expect(res._status).toBe(400);
+  });
+
+  // handleConfigUpdate: agentOptions defaulting for agent type with non-object agentOptions patch
+  // (ops.ts:478-481) — patched agentOptions resolved from existing as array.
+  it('handleConfigUpdate returns 400 when merged agentOptions is an array', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave-cfg-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: ['legacy'],
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ description: 'patched' })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/agentOptions must be an object/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // handleConfigUpdate: invalid adminPhones in patch (ops.ts:487-494)
+  it('handleConfigUpdate rejects an empty adminPhones patch with 400', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave-cfg-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ adminPhones: [] })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('handleConfigUpdate rejects a non-array adminPhones patch with 400', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave-cfg-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ adminPhones: '15550000001' })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/adminPhones/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ops.ts handleCreateLine uncovered-branch coverage
+// ---------------------------------------------------------------------------
+// Targets specific source lines in src/fleet/routes/ops.ts that were previously
+// not exercised by this suite. See leaf directive for the exact line list.
+describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
+  let tmpDir: string;
+  let agentCwd: string;
+  let originalCwd: string;
+  let originalHome: string | undefined;
+  let originalConfigHome: string | undefined;
+  let originalDataHome: string | undefined;
+  let originalStateHome: string | undefined;
+  let originalUmask: number;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-create-cov-'));
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-create-cov-'));
+
+    originalCwd = process.cwd();
+    originalHome = process.env.HOME;
+    originalConfigHome = process.env.XDG_CONFIG_HOME;
+    originalDataHome = process.env.XDG_DATA_HOME;
+    originalStateHome = process.env.XDG_STATE_HOME;
+    originalUmask = process.umask(0o022);
+
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
+    process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
+    process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    vi.mocked(lookupCredential).mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    process.umask(originalUmask);
+    process.chdir(originalCwd);
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    vi.mocked(lookupCredential).mockReset();
+    vi.mocked(lookupCredential).mockReturnValue(null);
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalDataHome;
+    if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = originalStateHome;
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(agentCwd, { recursive: true, force: true });
+  });
+
+  function freshDeps() {
+    return makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+  }
+
+  // Line 1005: NAME_RE / length guard rejects an uppercase name.
+  it('rejects an uppercase name with 400 (line 1005)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'Upper-Name',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/name must be 2-30 lowercase/);
+  });
+
+  // Line 1005: name too short (< 2 chars).
+  it('rejects a one-character name with 400 (line 1005)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'a',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/name must be 2-30/);
+  });
+
+  // Line 1012: discovery.getInstance() != null path → 409 already exists.
+  it('returns 409 when discovery already reports the instance (line 1012)', async () => {
+    const inst = fakeInstance({ name: 'dup-line' });
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => inst),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'dup-line',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      deps,
+    );
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/already exists/);
+  });
+
+  // Line 1019: invalid type value.
+  it('rejects an unknown type with 400 (line 1019)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-type',
+        type: 'superuser',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/type must be one of: passive, chat, agent/);
+  });
+
+  // Line 1026: adminPhones is a non-array.
+  it('rejects a non-array adminPhones with 400 (line 1026)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-phones',
+        type: 'chat',
+        adminPhones: '15550000001',
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/adminPhones must be a non-empty array/);
+  });
+
+  // Line 1026: adminPhones array containing an empty string.
+  it('rejects an adminPhones array with an empty entry with 400 (line 1026)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-phones2',
+        type: 'chat',
+        adminPhones: [''],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/adminPhones must be a non-empty array/);
+  });
+
+  // Line 1037: passive type + systemPrompt is forbidden.
+  it('rejects a passive instance with a systemPrompt with 400 (line 1037)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-passive',
+        type: 'passive',
+        adminPhones: ['15550000001'],
+        systemPrompt: 'should not be allowed',
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/passive instances must not have a systemPrompt/);
+  });
+
+  // Line 1044: explicit healthPort below the 1024 floor.
+  it('rejects a healthPort below 1024 with 400 (line 1044)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-port',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+        healthPort: 80,
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/healthPort must be between 1024 and 65535/);
+  });
+
+  // Line 1044: explicit healthPort above the 65535 ceiling.
+  it('rejects a healthPort above 65535 with 400 (line 1044)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-port-hi',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+        healthPort: 70000,
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/healthPort must be between 1024 and 65535/);
+  });
+
+  // Lines 1054-1055: auto-assign path picks Math.max(...used)+1 when a sibling
+  // already occupies a port (the >0 ternary branch).
+  it('auto-assigns healthPort as max(existing)+1 when a sibling exists (lines 1054-1055)', async () => {
+    const siblingDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'sibling-line');
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
+      name: 'sibling-line',
+      type: 'chat',
+      adminPhones: ['15550000001'],
+      healthPort: 9301,
+      accessMode: 'self_only',
+    }));
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-auto-port',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(201);
+    expect(JSON.parse(res._body)).toEqual({ name: 'cov-auto-port', healthPort: 9302 });
+  });
+
+  // Line 1055: when no instances exist, the default 9095 is selected.
+  it('auto-assigns the 9095 default when no siblings exist (line 1055)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-default-port',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(201);
+    expect(JSON.parse(res._body)).toEqual({ name: 'cov-default-port', healthPort: 9095 });
+  });
+
+  // Line 1066: passive type forces accessMode to 'self_only' regardless of body.
+  it('forces accessMode to self_only for a passive instance (line 1066)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-passive-am',
+        type: 'passive',
+        adminPhones: ['15550000001'],
+        accessMode: 'open_dm',
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(201);
+    const cfg = JSON.parse(fs.readFileSync(
+      path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'cov-passive-am', 'config.json'),
+      'utf-8',
+    ));
+    expect(cfg.accessMode).toBe('self_only');
+  });
+
+  // Line 1067: an explicitly invalid accessMode for a non-passive type is rejected.
+  it('rejects an invalid accessMode for a chat instance with 400 (line 1067)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-bad-am',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+        accessMode: 'everyone',
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/accessMode must be one of/);
+  });
+
+  // Line 1082: invalid sessionScope for an agent instance.
+  it('rejects an invalid agentOptions.sessionScope with 400 (line 1082)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-scope',
+        type: 'agent',
+        adminPhones: ['15550000001'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'global' },
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/sessionScope must be single, shared, or per_chat/);
+  });
+
+  // Lines 1088-1089: pluginDirs containing a non-home-confined path is rejected.
+  it('rejects a pluginDirs entry outside the home directory with 400 (lines 1088-1089)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-plugindirs',
+        type: 'agent',
+        adminPhones: ['15550000001'],
+        agentOptions: {
+          cwd: agentCwd,
+          sessionScope: 'single',
+          pluginDirs: ['/etc/not-allowed'],
+        },
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/pluginDirs entries must be within the home directory/);
+  });
+
+  // Line 1104: validateNumericBounds rejects an out-of-range tokenBudget.
+  it('rejects an out-of-range tokenBudget with 400 (line 1104)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-budget',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+        tokenBudget: 10,
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/tokenBudget must be between/);
+  });
+
+  // Lines 1129-1130: the shared validateInstanceConfig in create mode catches an
+  // oversized claudeMd (32KB cap, create-mode-only rule).
+  it('rejects an oversized claudeMd via the shared validator with 400 (lines 1129-1130)', async () => {
+    const res = mockRes();
+    const oversize = '# x\n'.repeat(9000); // > 32_768 bytes
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-claudemd',
+        type: 'agent',
+        adminPhones: ['15550000001'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+        claudeMd: oversize,
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/claudeMd exceeds maximum size/);
+  });
+
+  // Lines 1165-1166: when the keyring holds a health token, it is written to
+  // the new instance's tokens.env.
+  it('writes tokens.env when the keyring resolves a health token (lines 1165-1166)', async () => {
+    vi.mocked(lookupCredential).mockReturnValue('secret-health-token-xyz');
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-token',
+        type: 'chat',
+        adminPhones: ['15550000001'],
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(201);
+    const tokensPath = path.join(
+      process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'cov-token', 'tokens.env',
+    );
+    expect(fs.existsSync(tokensPath)).toBe(true);
+    expect(fs.readFileSync(tokensPath, 'utf-8'))
+      .toBe('WHATSOUP_HEALTH_TOKEN=secret-health-token-xyz\n');
+  });
+
+  // Lines 1193-1200: when agentOptions.enabledPlugins is provided, it is merged
+  // into the written settings.json.
+  it('merges enabledPlugins into the written settings.json (lines 1193-1196)', async () => {
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'cov-plugins',
+        type: 'agent',
+        adminPhones: ['15550000001'],
+        agentOptions: {
+          cwd: agentCwd,
+          sessionScope: 'single',
+          enabledPlugins: { 'whatsoup/diagnostics': true, 'whatsoup/legacy': false },
+        },
+      })),
+      res,
+      freshDeps(),
+    );
+    expect(res._status).toBe(201);
+    const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
+    expect(fs.existsSync(settingsPath)).toBe(true);
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(settings.enabledPlugins).toEqual({
+      'whatsoup/diagnostics': true,
+      'whatsoup/legacy': false,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ops.ts handleAuth uncovered-branch coverage (stdout/stderr parsing)
+// ---------------------------------------------------------------------------
+// Targets the JSON event-parser and stderr logging branches inside handleAuth
+// (lines ~1329-1367): non-JSON skip, allowed-events filter, data default, and
+// stderr trimming/log call.
+describe('ops.ts handleAuth uncovered-branch coverage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  it('skips non-JSON stdout lines without emitting an SSE event (line 1360)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    child.stdout.emit('data', Buffer.from('this is not json\n'));
+
+    // Only the final exit-driven end runs; no error/connected SSE was emitted.
+    expect(res._chunks.join('')).toBe('');
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
+  });
+
+  it('drops stdout events whose event name is not in the allow-list (line 1337)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'debug', data: { x: 1 } }) + '\n'));
+
+    expect(res._chunks.join('')).toBe('');
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
+  });
+
+  it('forwards an allowed "qr" stdout event through SSE (lines 1338-1339)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'qr', data: { code: 'QR-DATA' } }) + '\n'));
+
+    const chunks = res._chunks.join('');
+    expect(chunks).toContain('event: qr');
+    expect(chunks).toContain('QR-DATA');
+
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
+  });
+
+  it('forwards an "error" stdout event that omits data, using the empty default (line 1338)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    // No `data` field — handler must substitute `{}` and still emit the event.
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'error' }) + '\n'));
+
+    const chunks = res._chunks.join('');
+    expect(chunks).toContain('event: error');
+
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
+  });
+
+  it('handles a partial stdout line followed by completion on the next chunk (line 1332)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    const eventJson = JSON.stringify({ event: 'qr', data: { code: 'SPLIT' } });
+    // Split across two data chunks without a newline in between.
+    child.stdout.emit('data', Buffer.from(eventJson.slice(0, 10)));
+    expect(res._chunks.join('')).toBe('');
+    child.stdout.emit('data', Buffer.from(eventJson.slice(10) + '\n'));
+
+    const chunks = res._chunks.join('');
+    expect(chunks).toContain('event: qr');
+    expect(chunks).toContain('SPLIT');
+
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
   });
 });
