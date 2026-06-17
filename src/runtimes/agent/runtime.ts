@@ -279,16 +279,23 @@ const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
  * (proactive per-chat resume → resume-fail → context-recovery / replayed turns)
  * emits empty results while the usability probe is still transiently `unknown`,
  * which `primaryModelUsabilityRequiresAlert` treats as unusable. Arming on that
- * noise via the single-empty probe fast-path falsely fails the bot over to the
- * backup on every restart (and persists the window, so it reloads on the next
- * restart — an opus/sonnet flap). Within this window, before the bot has proven
- * it can serve a turn (`lastSuccessfulTurnAt === null`), ONLY the probe
- * fast-path is suppressed: empty turns are still counted toward
+ * noise via the single-empty probe fast-path falsely fails the instance over to
+ * the backup on every restart (and persists the window, so it reloads on the
+ * next restart — a primary/backup flap). Within this window, before the instance
+ * has proven it can serve a turn (`lastSuccessfulTurnAt === null`), ONLY the
+ * probe fast-path is suppressed: empty turns are still counted toward
  * {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} so the consecutive-empty threshold can
  * still arm (a genuinely-dead primary on real early traffic still fails over,
  * and the per-chat replay that arms via the threshold is preserved). The
  * fast-path is live again immediately after the window elapses or the first
- * successful turn. See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
+ * successful turn.
+ *
+ * The elapsed measurement uses `performance.now()` (monotonic clock) rather
+ * than `Date.now()` so wall-clock steps — NTP corrections, host sleep/wake, VM
+ * migration, all most likely in the first seconds of process life — cannot
+ * prematurely end or over-extend the window (R1 hardening).
+ *
+ * See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = 60_000;
 type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
@@ -1643,9 +1650,12 @@ export class AgentRuntime implements Runtime {
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
   private consecutivePrimaryEmptyTurns = 0;
-  /** Wall-clock construction time, used for the empty-output arming startup
-   *  grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS. */
-  private readonly runtimeBootMs = Date.now();
+  /** Monotonic construction timestamp (performance.now()), used for the
+   *  empty-output arming startup grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS.
+   *  Using performance.now() rather than Date.now() so NTP steps and
+   *  sleep-wake clock jumps cannot prematurely end or over-extend the grace
+   *  window (R1 hardening). */
+  private readonly runtimeBootPerfMs = performance.now();
   private lastSuccessfulTurnAt: number | null = null;
   private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   private lastTurnErrorAt: number | null = null;
@@ -6378,7 +6388,17 @@ export class AgentRuntime implements Runtime {
     if (this.agentFallbacks.length === 0) return false;
 
     this.consecutivePrimaryEmptyTurns += 1;
-    const probeFlagsUnusable = this.primaryModelUsability
+    // R2 guard: mirror getTurnCapability's probeInFlight check. When the
+    // startup probe has not yet resolved ({probeInFlight:true}), the usability
+    // field carries {status:'unknown', reason:'probe-in-flight'}, which
+    // primaryModelUsabilityRequiresAlert() would (correctly) treat as unusable
+    // — but that is indeterminate, not confirmed-unusable.  Treating it as
+    // confirmed-unusable arms the probe fast-path against a healthy primary
+    // whenever the probe takes longer than the grace window.  Gate exactly as
+    // getTurnCapability does: skip the alert check while the probe is still
+    // in-flight.  A resolved-unusable probe (probeInFlight:false) still arms
+    // normally; the threshold path is entirely unaffected.
+    const probeFlagsUnusable = this.primaryModelUsability && !this.primaryModelUsability.probeInFlight
       ? this.primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
       : false;
     const reachedThreshold =
@@ -6387,18 +6407,21 @@ export class AgentRuntime implements Runtime {
     // Startup grace (anti-flap): during the boot/recovery window the usability
     // probe is transiently 'unknown', which primaryModelUsabilityRequiresAlert
     // treats as unusable. That makes the single-empty *probe fast-path* arm on
-    // the very first empty turn and flap the bot onto the backup on every
-    // restart (observed on eh-bot 2026-06-17: 4/4 activations were single-empty
-    // 'probe-unusable' at startup, 0 from the threshold). Suppress ONLY the
+    // the very first empty turn and flap the instance onto the backup on every
+    // restart (seen in production: the spurious startup activations were all
+    // single-empty 'probe-unusable', none from the threshold). Suppress ONLY the
     // probe fast-path during the grace window. We still COUNT the empty and
     // still honour the consecutive-empty threshold — so a genuinely dead
     // primary taking real inbound traffic in the first 60s still fails over
     // (at most one extra turn of latency, no silent blind spot), and the
     // per-chat empty-output replay that arms via the threshold (#972) is
     // preserved. The counter resets on any successful turn.
+    // R1 hardening: use monotonic performance.now() so wall-clock steps (NTP
+    // corrections, host sleep/wake, VM migration — all most likely right after
+    // process start) cannot prematurely end or over-extend the grace window.
     const inStartupGrace =
       this.lastSuccessfulTurnAt === null &&
-      Date.now() - this.runtimeBootMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS;
+      performance.now() - this.runtimeBootPerfMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS;
     const armViaProbe = probeFlagsUnusable && !inStartupGrace;
     if (!armViaProbe && !reachedThreshold) return false;
 
