@@ -576,3 +576,758 @@ describe('handleGetLines sharedCwdWith', () => {
     expect(JSON.parse(res._body)[0].sharedCwdWith).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// formatUptime coverage — exercised indirectly via health snapshot uptime
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines uptime formatting', () => {
+  function lineWithUptime(uptimeSec: number | null): Record<string, unknown> {
+    const health: Record<string, unknown> = uptimeSec !== null ? { uptime_seconds: uptimeSec } : {};
+    const inst = fakeInstance({ name: 'u' });
+    const status = fakeStatus({ name: 'u', health });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['u', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['u', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    return (JSON.parse(res._body) as Record<string, unknown>[])[0];
+  }
+
+  it('formats uptime in days and hours when >= 86400s', () => {
+    // 2 days + 3 hours = 2*86400 + 3*3600 = 183600
+    const line = lineWithUptime(183600);
+    expect(line.uptime).toBe('2d 3h');
+  });
+
+  it('formats uptime in hours and minutes when < 86400s and >= 3600s', () => {
+    // 2 hours 30 minutes = 9000
+    const line = lineWithUptime(9000);
+    expect(line.uptime).toBe('2h 30m');
+  });
+
+  it('formats uptime in minutes only when < 3600s', () => {
+    const line = lineWithUptime(600);
+    expect(line.uptime).toBe('10m');
+  });
+
+  it('returns null uptime when uptime_seconds is absent from health', () => {
+    const line = lineWithUptime(null);
+    expect(line.uptime).toBeNull();
+    // name is still populated — the null is uptime specifically, not the whole line
+    expect(line.name).toBe('u');
+  });
+
+  it('returns null uptime when uptime_seconds is negative', () => {
+    const inst = fakeInstance({ name: 'neg' });
+    const status = fakeStatus({ name: 'neg', health: { uptime_seconds: -1 } });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['neg', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['neg', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    expect(JSON.parse(res._body)[0].uptime).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildHeartbeat coverage — consecutive failures drive down/up distribution
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines heartbeat', () => {
+  it('builds an all-down heartbeat when poller has no data', () => {
+    const inst = fakeInstance({ name: 'hb' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['hb', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      // no status in map → poll is undefined
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map()),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const body = JSON.parse(res._body);
+    expect(body[0].heartbeat).toHaveLength(20);
+    expect(body[0].heartbeat.every((v: string) => v === 'down')).toBe(true);
+  });
+
+  it('places recent failures at the end of the heartbeat array', () => {
+    const inst = fakeInstance({ name: 'hb2' });
+    const status = fakeStatus({ name: 'hb2', consecutiveFailures: 5 });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['hb2', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['hb2', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const hb = JSON.parse(res._body)[0].heartbeat as string[];
+    expect(hb).toHaveLength(20);
+    // Last 5 are 'down', first 15 are 'up'
+    expect(hb.slice(0, 15).every(v => v === 'up')).toBe(true);
+    expect(hb.slice(15).every(v => v === 'down')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getMessageStats — row-level branch coverage via query callback interception
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a dbReader mock that executes the query callback synchronously with a
+ * fake DB object whose prepare() returns the given rows.
+ */
+function makeLiveDbReader(rows: { content_type: string; is_from_me: number; cnt: number }[]): LinesDeps['dbReader'] {
+  return {
+    getSummaryStats: vi.fn(() => ({ ok: true, data: { messageCount: 0, chatCount: 0, pendingAccess: 0 } })),
+    query: vi.fn((_name, _dbPath, fn) => {
+      const fakeDb = {
+        prepare: vi.fn(() => ({
+          all: vi.fn(() => rows),
+          get: vi.fn(() => undefined),
+        })),
+      };
+      try {
+        const data = fn(fakeDb as any);
+        return { ok: true, data };
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+    }),
+  } as any;
+}
+
+describe('handleGetLines message stats row processing', () => {
+  it('counts sent, received, images, audio, and documents from same-day messages', () => {
+    const rows = [
+      { content_type: 'text', is_from_me: 1, cnt: 3 },
+      { content_type: 'text', is_from_me: 0, cnt: 2 },
+      { content_type: 'image', is_from_me: 0, cnt: 1 },
+      { content_type: 'audio', is_from_me: 1, cnt: 4 },
+      { content_type: 'document', is_from_me: 0, cnt: 2 },
+    ];
+    const inst = fakeInstance({ name: 'ms1' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['ms1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map()),
+        getStatus: vi.fn(),
+      } as any,
+      dbReader: makeLiveDbReader(rows),
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    // sent = 3 (text) + 4 (audio) = 7; received = 2 (text) + 1 (image) + 2 (doc) = 5
+    expect(line.messageStats).toMatchObject({
+      sent: 7,
+      received: 5,
+      images: 1,
+      audio: 4,
+      documents: 2,
+    });
+    expect(line.messagesToday).toBe(12);
+  });
+
+  it('returns zero stats when the db query fails', () => {
+    const inst = fakeInstance({ name: 'msfail' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['msfail', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map()),
+        getStatus: vi.fn(),
+      } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: false, error: 'db locked' })),
+        query: vi.fn(() => ({ ok: false, error: 'db locked' })),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.messageStats).toMatchObject({ sent: 0, received: 0, images: 0, audio: 0, documents: 0 });
+    expect(line.messagesToday).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getTotalSessions — agent vs non-agent, and db failure path
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines totalSessions', () => {
+  it('returns 0 total sessions for non-agent instances without querying the db', () => {
+    const inst = fakeInstance({ name: 'chat1', type: 'chat' });
+    // query mock must return row arrays (not scalars) because getMessageStats
+    // runs first and iterates result.data. getTotalSessions is skipped for
+    // non-agent instances before the session COUNT(*) query is ever issued.
+    const issuedSql: string[] = [];
+    const querySpy = vi.fn((_name: string, _dbPath: string, fn: (db: unknown) => unknown) => {
+      const fakeDb = {
+        prepare: vi.fn((sql: string) => {
+          issuedSql.push(sql);
+          return {
+            all: vi.fn(() => []),
+            get: vi.fn(() => ({ ts: null, i: 0, o: 0, total: 0, groups: 0 })),
+          };
+        }),
+      };
+      return { ok: true, data: fn(fakeDb) };
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['chat1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: querySpy,
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.totalSessions).toBe(0);
+    // The session-count COUNT(*) query is never issued for non-agent instances.
+    expect(issuedSql.some((s) => s.includes('COUNT(*) as cnt FROM agent_sessions'))).toBe(false);
+  });
+
+  it('queries agent_sessions count for agent instances', () => {
+    const inst = fakeInstance({ name: 'ag1', type: 'agent' });
+    // getMessageStats runs first (calls .all()), then getTotalSessions (calls .get()).
+    // The fake DB must provide both methods so neither call throws.
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['ag1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          const fakeDb = {
+            prepare: vi.fn(() => ({
+              all: vi.fn(() => []),
+              get: vi.fn(() => ({ cnt: 7, ts: null, i: 0, o: 0, total: 0, groups: 0 })),
+            })),
+          };
+          return { ok: true, data: fn(fakeDb as any) };
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.totalSessions).toBe(7);
+  });
+
+  it('returns 0 total sessions when the agent_sessions query fails', () => {
+    const inst = fakeInstance({ name: 'ag2', type: 'agent' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['ag2', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn(() => ({ ok: false, error: 'no such table' })),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.totalSessions).toBe(0);
+  });
+
+  it('returns 0 when agent_sessions table does not exist (caught exception path)', () => {
+    const inst = fakeInstance({ name: 'ag3', type: 'agent' });
+    // getMessageStats runs first and needs .all(); getTotalSessions then calls
+    // .get() on 'agent_sessions' which should throw to exercise the catch branch.
+    let callCount = 0;
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['ag3', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          callCount++;
+          // First call is getMessageStats (.all()), subsequent calls include
+          // getTotalSessions (.get() on agent_sessions — must throw).
+          const isSessionsQuery = callCount > 1;
+          const fakeDb = {
+            prepare: vi.fn((sql: string) => {
+              if (isSessionsQuery && sql.includes('agent_sessions')) {
+                throw new Error('no such table: agent_sessions');
+              }
+              return { all: vi.fn(() => []), get: vi.fn(() => ({ ts: null, i: 0, o: 0, total: 0, groups: 0 })) };
+            }),
+          };
+          return { ok: true, data: fn(fakeDb as any) };
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.totalSessions).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getLastMessageTime — timestamp-present branch
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines lastMessageTime from DB', () => {
+  it('uses DB last message timestamp for lastActive when health provides no runtime timestamps', () => {
+    const inst = fakeInstance({ name: 'lmt1' });
+    // Unix timestamp: 2026-01-01T00:00:00Z = 1767225600
+    const unixTs = 1767225600;
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['lmt1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        // health has no runtime timestamps → falls through to lastMessageTime from DB
+        getStatuses: vi.fn(() => new Map([['lmt1', fakeStatus({ name: 'lmt1', health: {} })]])),
+        getStatus: vi.fn(),
+      } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          // First call: getMessageStats (returns rows), second: getChatCounts,
+          // third: getTokenStats (messages), fourth: getTokenStats (agent_sessions),
+          // fifth: getLastMessageTime
+          // Use a counter to return the right shape per call
+          const fakeDb = {
+            prepare: vi.fn(() => ({
+              all: vi.fn(() => []),
+              get: vi.fn(() => ({ ts: unixTs })),
+            })),
+          };
+          return { ok: true, data: fn(fakeDb as any) };
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    // lastActive should be ISO from the unix timestamp
+    expect(typeof line.lastActive).toBe('string');
+    expect(line.lastActive).toMatch(/2026-01-01/);
+  });
+
+  it('returns null lastActive when DB timestamp is null', () => {
+    const inst = fakeInstance({ name: 'lmt2' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['lmt2', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['lmt2', fakeStatus({ name: 'lmt2', health: {} })]])),
+        getStatus: vi.fn(),
+      } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          const fakeDb = {
+            prepare: vi.fn(() => ({
+              all: vi.fn(() => []),
+              get: vi.fn(() => ({ ts: null })),
+            })),
+          };
+          return { ok: true, data: fn(fakeDb as any) };
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.lastActive).toBeNull();
+    // status is still emitted — only lastActive is absent
+    expect(line.status).toBe('online');
+  });
+
+  it('returns null lastActive when lastMessageTime db query fails', () => {
+    const inst = fakeInstance({ name: 'lmt3' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['lmt3', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['lmt3', fakeStatus({ name: 'lmt3', health: {} })]])),
+        getStatus: vi.fn(),
+      } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn(() => ({ ok: false, error: 'db unreachable' })),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.lastActive).toBeNull();
+    // status is still correctly emitted even when the db query fails
+    expect(line.status).toBe('online');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getChatCounts — db failure path
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines chatCounts', () => {
+  it('returns zero chat counts when db query fails', () => {
+    const inst = fakeInstance({ name: 'cc1' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['cc1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: false, error: 'fail' })),
+        query: vi.fn(() => ({ ok: false, error: 'fail' })),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.chatCounts).toEqual({ chats: 0, groups: 0 });
+  });
+
+  it('returns token usage zero when db query fails', () => {
+    const inst = fakeInstance({ name: 'tu1' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['tu1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: false, error: 'fail' })),
+        query: vi.fn(() => ({ ok: false, error: 'fail' })),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.tokenUsage).toEqual({ input: 0, output: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getTokenStats — live db with actual token values
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines tokenStats live db', () => {
+  it('sums message and agent_session tokens from the database', () => {
+    const inst = fakeInstance({ name: 'tok1' });
+    let callCount = 0;
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['tok1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+      dbReader: {
+        getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+        query: vi.fn((_name, _dbPath, fn) => {
+          callCount++;
+          const fakeDb = {
+            prepare: vi.fn(() => ({
+              all: vi.fn(() => []),
+              // Token queries return specific values
+              get: vi.fn(() => ({ i: 100, o: 50 })),
+            })),
+          };
+          return { ok: true, data: fn(fakeDb as any) };
+        }),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    // Both message tokens and session tokens contribute: 100+100=200, 50+50=100
+    expect(line.tokenUsage.input).toBeGreaterThan(0);
+    expect(line.tokenUsage.output).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enrichInstance config_error coverage
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines config_error instance', () => {
+  it('surfaces config_error status and populates error and configError fields', () => {
+    const inst = fakeInstance({
+      name: 'broken',
+      configError: 'config file not found',
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['broken', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: { getStatuses: vi.fn(() => new Map()), getStatus: vi.fn() } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.status).toBe('config_error');
+    expect(line.statusConfidence).toBe('confirmed');
+    expect(line.statusReason).toBe('config_error');
+    expect(line.statusEvidence).toEqual(['config file not found']);
+    expect(line.configError).toBe('config file not found');
+    expect(line.error).toBe('config file not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enrichInstance lastSessionStatus derivation
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines lastSessionStatus derivation', () => {
+  it('derives lastSessionStatus=idle when status is online and health lacks runtime.agent', () => {
+    const inst = fakeInstance({ name: 'idle1', type: 'agent' });
+    const status = fakeStatus({ name: 'idle1', status: 'online', health: {} });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['idle1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['idle1', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.lastSessionStatus).toBe('idle');
+  });
+
+  it('derives lastSessionStatus=error when status is unreachable and health lacks runtime.agent', () => {
+    const inst = fakeInstance({ name: 'err1', type: 'agent' });
+    const status = fakeStatus({ name: 'err1', status: 'unreachable', health: null });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['err1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['err1', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.lastSessionStatus).toBe('error');
+  });
+
+  it('returns null lastSessionStatus when status is degraded and no runtime.agent present', () => {
+    const inst = fakeInstance({ name: 'deg1', type: 'agent' });
+    const status = fakeStatus({ name: 'deg1', status: 'degraded', health: {} });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['deg1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['deg1', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.lastSessionStatus).toBeNull();
+    // The degraded status is still surfaced — only lastSessionStatus is null
+    // because degraded is neither 'online' (idle) nor 'unreachable' (error).
+    expect(line.status).toBe('degraded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// linkedStatusFromHealth — accountJid present but connected not true
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines linkedStatus inferred from account_jid', () => {
+  it('returns linked/inferred when account_jid is present but connected is not true', () => {
+    const inst = fakeInstance({ name: 'jid1' });
+    const status = fakeStatus({
+      name: 'jid1',
+      health: {
+        whatsapp: {
+          connected: false,
+          account_jid: '15550001111@s.whatsapp.net',
+          // no connection block → connectionState is undefined
+        },
+      },
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['jid1', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['jid1', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const line = JSON.parse(res._body)[0];
+    expect(line.linkedStatus).toBe('linked');
+    expect(line.linkedStatusConfidence).toBe('inferred');
+    expect(line.linkedStatusReason).toBe('whatsapp_account_present');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetLine — config successfully read, adminPhones LID resolution
+// ---------------------------------------------------------------------------
+
+describe('handleGetLine config and adminPhones', () => {
+  it('includes config from instance configPath when readable', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-cfg-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ name: 'mybot', webhookUrl: 'http://example.com' }));
+      const inst = fakeInstance({ name: 'cfgtest', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+      });
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'cfgtest' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.config).toEqual({ name: 'mybot', webhookUrl: 'http://example.com' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves LID admin phones to human-readable numbers via lid_mappings DB', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-cfg-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      // adminPhones entry > 11 chars triggers LID lookup
+      const lidPhone = '123456789012345';
+      fs.writeFileSync(configPath, JSON.stringify({ adminPhones: [lidPhone] }));
+
+      const inst = fakeInstance({ name: 'lidtest', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+        dbReader: {
+          getSummaryStats: vi.fn(() => ({ ok: true, data: { messageCount: 0, chatCount: 0, pendingAccess: 0 } })),
+          query: vi.fn((_name, _dbPath, fn) => {
+            const fakeDb = {
+              prepare: vi.fn(() => ({
+                all: vi.fn(() => [{ lid: lidPhone, phone_jid: '15551234567@s.whatsapp.net' }]),
+                get: vi.fn(() => undefined),
+              })),
+            };
+            return { ok: true, data: fn(fakeDb as any) };
+          }),
+        } as any,
+      });
+
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'lidtest' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.adminPhonesDisplay).toBeDefined();
+      expect(body.adminPhonesDisplay[lidPhone]).toBe('15551234567');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('omits adminPhonesDisplay when LID query fails', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-cfg-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const lidPhone = '123456789012345';
+      fs.writeFileSync(configPath, JSON.stringify({ adminPhones: [lidPhone] }));
+
+      const inst = fakeInstance({ name: 'lidfail', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+        dbReader: {
+          getSummaryStats: vi.fn(() => ({ ok: true, data: {} })),
+          query: vi.fn(() => ({ ok: false, error: 'db locked' })),
+        } as any,
+      });
+
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'lidfail' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.adminPhonesDisplay).toBeUndefined();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('omits adminPhonesDisplay when adminPhones are all short (no LID lookup needed)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-cfg-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      // All entries <= 11 chars — no LID lookup triggered
+      fs.writeFileSync(configPath, JSON.stringify({ adminPhones: ['15551234567'] }));
+
+      const inst = fakeInstance({ name: 'shortph', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+      });
+
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'shortph' });
+      expect(res._status).toBe(200);
+      expect(JSON.parse(res._body).adminPhonesDisplay).toBeUndefined();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
