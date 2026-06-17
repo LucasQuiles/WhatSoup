@@ -198,6 +198,57 @@ tail -F ~/.config/whatsoup/instances/<instance>/stdout.log
 Expect credential-load or runtime health logs within a few seconds. For agent
 instances, a restart interrupts in-flight turns.
 
+### Plist changes and the keychain-session hazard
+
+`launchctl kickstart -k` restarts a job with its **already-loaded** config. After
+editing a plist on disk (e.g. repointing `ProgramArguments`/`WorkingDirectory` to a
+new release directory) you must reload it with `bootout` + `bootstrap`:
+
+```bash
+launchctl bootout   gui/$(id -u)/com.whatsoup.<instance>
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
+```
+
+Hazard: a `bootout`+`bootstrap` performed **over SSH** drops the job out of the
+Aqua (GUI-login) keychain *session*. For an instance whose model uses the
+`with-claude-oauth-keychain` wrapper, the wrapper's `security unlock-keychain` then
+fails even with the correct password, so the bot starts but is **model-degraded**:
+`/health` returns HTTP 200 with `status=degraded` and
+`turn_capability.model_usable=false` (WhatsApp stays connected — Baileys auth is
+file-based, not keychain). Always **finish a plist change with a
+`kickstart -k`**, which restarts the job *within* the now-bootstrapped GUI domain
+and re-joins the keychain session so the wrapper self-unlocks from its password
+file:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
+```
+
+**Acceptance gate after any restart of a keychain-backed instance: confirm
+`turn_capability.model_usable=true`, not just health HTTP 200** (which is true even
+while degraded):
+
+```bash
+curl -s --fail-with-body http://127.0.0.1:<port>/health | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print(d["status"], d["turn_capability"]["model_usable"])'
+```
+
+If an instance is found model-degraded, run the bounded, fail-closed remediation
+helper (it re-probes `/health` and, while degraded, issues `kickstart -k` up to a
+bounded number of times, exiting non-zero to escalate if it cannot recover):
+
+```bash
+deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port <port>
+```
+
+Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
+login keychain itself needs unlocking from the GUI session context — open a GUI
+Terminal on the host (e.g. via RustDesk) and run
+`security unlock-keychain ~/Library/Keychains/login.keychain-db`, then re-run the
+heal helper. The wrapper sets `security set-keychain-settings` (no idle/sleep
+relock) on each successful start, so once unlocked it should stay accessible while
+the bot user is logged in.
+
 ## Health Signals
 
 | Surface | Healthy signal | Where to check |
