@@ -262,6 +262,55 @@ def test_cli_summary_compact_and_default_status_paths():
             sys.argv = old_argv
 
 
+def test_value_level_path_leak_is_scrubbed_at_record_time():
+    # a benign-named free-text field carrying an absolute path must be scrubbed (field-name redaction misses it)
+    ev = run_ledger.normalize_event(
+        {"kind": "probe", "name": "x", "duration_ms": 1, "exit": 1, "leak_hits": 0,
+         "_error": "failed reading /Users/testuser/agent-runtime-probes/private.key"})
+    assert ev["_error"] == "<leak_redacted>"
+    assert ev["leak_hits"] >= 1 and ev["leak_redacted"] is True
+    assert "testuser" not in json.dumps(ev)
+
+
+def test_value_level_secret_leak_is_scrubbed_at_record_time():
+    # secret-shaped VALUES are caught by probelib.redact (which normalize_event applies first); the raw
+    # token must not survive in the normalized event regardless of which layer scrubbed it
+    ev = run_ledger.normalize_event(
+        {"kind": "probe", "name": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "duration_ms": 1,
+         "exit": 0, "leak_hits": 0})
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in json.dumps(ev)
+
+
+def test_scrub_value_helper_detects_secret_and_path():
+    # the ledger's own value-level scrubber: secret token AND filesystem path -> redacted; clean -> intact
+    assert run_ledger._scrub_value("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == ("<leak_redacted>", 1)
+    scrubbed, hits = run_ledger._scrub_value("see /Users/testuser/agent-runtime-probes/x")
+    assert scrubbed == "<leak_redacted>" and hits == 1
+    assert run_ledger._scrub_value("clean telemetry name") == ("clean telemetry name", 0)
+    assert run_ledger._scrub_value(12345) == (12345, 0)  # non-string passes through
+
+
+def test_clean_event_is_unchanged_backward_compatible():
+    # a clean event gains NO new key and keeps leak_hits intact -> older readers + self-hash unaffected
+    ev = run_ledger.normalize_event(
+        {"kind": "probe", "name": "test_faithfulness_evaluator", "duration_ms": 5, "exit": 0, "leak_hits": 0})
+    assert "leak_redacted" not in ev
+    assert ev["name"] == "test_faithfulness_evaluator" and ev["leak_hits"] == 0
+
+
+def test_clean_event_round_trips_readable_format_unchanged():
+    # the clean-event format is unchanged (leak_redacted is additive only on leaks), so a recorded clean
+    # event parses cleanly and carries no new key -> readers (old or new) are unaffected (backward compat)
+    with tempfile.TemporaryDirectory(prefix="run-ledger-rt-") as tmp_dir:
+        ledger = Path(tmp_dir) / "rt.jsonl"
+        run_ledger.record({"kind": "probe", "name": "legacy_clean", "duration_ms": 3, "exit": 0,
+                           "leak_hits": 0}, ledger_path=ledger)
+        parsed = run_ledger.parse_lines(ledger)
+        assert parsed["status"] == "ok"
+        ev = next(e for e in parsed["events"] if e.get("name") == "legacy_clean")
+        assert "leak_redacted" not in ev
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

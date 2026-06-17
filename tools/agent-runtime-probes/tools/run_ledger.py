@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -89,6 +90,19 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         if key in safe and safe[key] is not None:
             normalized[key] = safe[key]
     normalized["status"] = normalized.get("status") or ("pass" if normalized["exit"] == 0 else "fail")
+    # Value-level leak scrub: field-name redaction (above) misses a secret/path embedded in a benign-named
+    # free-text field (e.g. name / _error). Independently scan + scrub the normalized string values rather
+    # than trusting the caller's leak_hits. Clean events are unchanged (no new key, leak_hits intact), so
+    # older readers and self-hashes are unaffected; only a genuinely leaky event gains leak_redacted=True.
+    scrub_hits = 0
+    for key, value in list(normalized.items()):
+        scrubbed, hits = _scrub_value(value)
+        if hits:
+            normalized[key] = scrubbed
+            scrub_hits += hits
+    if scrub_hits:
+        normalized["leak_hits"] = normalized["leak_hits"] + scrub_hits
+        normalized["leak_redacted"] = True
     return with_self_hash(normalized)
 
 
@@ -96,6 +110,23 @@ def count_secret_hits(text: str) -> int:
     if not text:
         return 0
     return len(SECRET_VALUE.findall(text))
+
+
+# Absolute filesystem paths are the dominant telemetry leak (error messages / names that carry a real
+# path). Combined with SECRET_VALUE (the estate's secret-token shapes), this is a lightweight value-level
+# leak scrub for the ledger's free-text fields — no heavy SSOT-pattern load on the record hot path.
+LEAK_PATH = re.compile(r"/(?:Users|home|root|var|private|tmp|etc|opt)/[^\s\"'<>]+")
+
+
+def _scrub_value(value: Any) -> tuple[Any, int]:
+    """Redact a string value that carries a secret-token shape or an absolute filesystem path. Returns
+    (possibly-redacted value, leak hit count). Non-strings and clean strings pass through unchanged."""
+    if not isinstance(value, str):
+        return value, 0
+    hits = len(SECRET_VALUE.findall(value)) + len(LEAK_PATH.findall(value))
+    if hits:
+        return "<leak_redacted>", hits
+    return value, 0
 
 
 def _json_line(obj: dict[str, Any]) -> bytes:
