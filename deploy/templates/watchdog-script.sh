@@ -110,7 +110,11 @@ state = conn.get("state")
 last_pong = conn.get("last_pong_at")
 
 reasons = []
-if status != "healthy":
+# `degraded` is a soft signal (e.g. binary-model-probe-failed) that a restart
+# cannot fix; restarting on it just resets the cold-start clock and re-fires the
+# alert burst. Only a hard-down status warrants a restart here — the
+# connectivity checks below are the authoritative liveness triggers.
+if status not in ("healthy", "degraded"):
     reasons.append(f"status={status!r}")
 if not connected:
     reasons.append("whatsapp.connected=false")
