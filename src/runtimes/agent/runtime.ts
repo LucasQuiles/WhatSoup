@@ -93,6 +93,7 @@ import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './aut
 import { ImageCoalescer } from './image-coalescer.ts';
 import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
+import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -855,16 +856,12 @@ export class AgentRuntime implements Runtime {
   private fallbackArmReason: string | null = null;
   private fallbackResetAt: number | null = null;
   private fallbackRecoveryProbeRequired = false;
-  // Process-local fallback telemetry — deliberately NOT persisted (reset on
-  // restart); the durable artifact is the window itself (agent_fallback_state).
-  private fallbackTurnsServed = 0;
-  private fallbackTurnsEmpty = 0;
-  // Arm-time snapshots of the lifetime turn counters. The lifetime counters
-  // accrue across windows (getFallbackState contract), so the revert alert
-  // subtracts these to report THIS window's turns instead of cumulative totals.
-  private fallbackTurnsServedAtArm = 0;
-  private fallbackTurnsEmptyAtArm = 0;
-  private lastFallbackTurnAt: number | null = null;
+  // Process-local fallback-window telemetry (turns served/empty + arm-time
+  // snapshots, lifetime activation/revert/replay totals, and window USD cost).
+  // Increment/snapshot/delta logic lives in the collaborator; the orchestration
+  // (window-active gate on cost, served-vs-empty decision + alerting, and the
+  // arm/deactivate/replay call sites) stays in AgentRuntime.
+  private readonly fallbackMetrics = new FallbackWindowMetrics();
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private failedFallbackEntryKeys = new Set<string>();
   // Consecutive empty (no-text, no-tool) turns served by the CURRENT active
@@ -892,23 +889,8 @@ export class AgentRuntime implements Runtime {
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
   private fallbackLastProbeAt: number | null = null;
-  // Lifetime-of-process transition totals (countable report fields for the
-  // expensive fallback paths — never just logs). Activations count first arms
-  // only (extensions and post-restart restores excluded), reverts count
-  // deactivations of an active window, replays count COMPLETED
-  // continue-on-fallback replays (failed replays count nothing here).
-  private fallbackActivations = 0;
-  private fallbackReverts = 0;
-  private fallbackReplays = 0;
   // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
   private lastDiagnosticBundleAt = 0;
-  // Lifetime-of-process USD cost of turns served while a fallback window was
-  // active (provider-reported costUsd on result events; opencode-only today).
-  // Mirrors fallbackTurnsServed semantics: accumulates only during windows,
-  // never resets on deactivation, resets on restart. The expensive fallback
-  // path must be countable — a silent expensive fallback is a billing
-  // surprise waiting to be found on the invoice instead of in /health.
-  private fallbackWindowCostUsd = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
   private primaryModelUsabilityAlertActive = false;
   /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
@@ -5632,15 +5614,15 @@ export class AgentRuntime implements Runtime {
       fallbackModel: fallbackEntry?.model ?? null,
       fallbackResetAt: active ? this.fallbackResetAt : null,
       fallbackRecoveryProbeRequired: active ? this.fallbackRecoveryProbeRequired : false,
-      fallbackTurnsServed: this.fallbackTurnsServed,
-      fallbackTurnsEmpty: this.fallbackTurnsEmpty,
-      lastFallbackTurnAt: this.lastFallbackTurnAt,
+      fallbackTurnsServed: this.fallbackMetrics.turnsServed,
+      fallbackTurnsEmpty: this.fallbackMetrics.turnsEmpty,
+      lastFallbackTurnAt: this.fallbackMetrics.lastTurnAt,
       probeAttempts: this.fallbackProbeAttempts,
       lastProbeAt: this.fallbackLastProbeAt,
-      fallbackActivations: this.fallbackActivations,
-      fallbackReverts: this.fallbackReverts,
-      fallbackReplays: this.fallbackReplays,
-      fallbackWindowCostUsd: this.fallbackWindowCostUsd,
+      fallbackActivations: this.fallbackMetrics.activations,
+      fallbackReverts: this.fallbackMetrics.reverts,
+      fallbackReplays: this.fallbackMetrics.replays,
+      fallbackWindowCostUsd: this.fallbackMetrics.windowCostUsd,
       primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
@@ -5722,7 +5704,7 @@ export class AgentRuntime implements Runtime {
       onFallback,
     }, 'provider reported turn cost');
     if (onFallback) {
-      this.fallbackWindowCostUsd += event.costUsd;
+      this.fallbackMetrics.addWindowCost(event.costUsd);
     }
   }
 
@@ -5856,8 +5838,7 @@ export class AgentRuntime implements Runtime {
     session: SessionManager | null = null,
   ): void {
     if (!this.isFallbackWindowActive) return;
-    this.fallbackTurnsServed += 1;
-    this.lastFallbackTurnAt = Date.now();
+    this.fallbackMetrics.recordServedTurn();
     if (hadVisibleOutput || hadToolWork) {
       // The active entry produced a real reply — it is healthy. Clear the
       // empty-advance accounting so a later isolated empty turn starts fresh.
@@ -5865,15 +5846,15 @@ export class AgentRuntime implements Runtime {
       this.fallbackEmptyAdvanceAttemptedForKey = null;
       return;
     }
-    this.fallbackTurnsEmpty += 1;
+    this.fallbackMetrics.recordEmptyTurn();
     this.consecutiveFallbackEmptyTurns += 1;
     const entry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
       fallbackProvider: entry?.provider,
       fallbackModel: entry?.model,
-      served: this.fallbackTurnsServed,
-      empty: this.fallbackTurnsEmpty,
+      served: this.fallbackMetrics.turnsServed,
+      empty: this.fallbackMetrics.turnsEmpty,
     }, 'fallback turn completed with zero visible output');
     // Per-chat dedup: reuse PROVIDER_FALLBACK_NOTICE_DEDUP_MS window to avoid
     // one alert per empty turn in a sustained silent-bot episode.
@@ -5887,7 +5868,7 @@ export class AgentRuntime implements Runtime {
         this.instanceName,
         'fallback_empty_turn',
         'Fallback turn produced no visible output',
-        `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
+        `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackMetrics.turnsServed} empty=${this.fallbackMetrics.turnsEmpty} chat=${queue.targetChatJid}`,
       );
     }
 
@@ -5973,8 +5954,7 @@ export class AgentRuntime implements Runtime {
       // (the null-guard skips extensions; restores hit it too because the
       // guard is per-process, which is correct — the counters are also
       // per-process, so a restored window counts from this process's zero).
-      this.fallbackTurnsServedAtArm = this.fallbackTurnsServed;
-      this.fallbackTurnsEmptyAtArm = this.fallbackTurnsEmpty;
+      this.fallbackMetrics.snapshotAtArm();
       if (opts?.restored) {
         // A restored window is the SAME window resuming after a restart, so
         // it never re-counts as an activation — but the resume itself is an
@@ -5989,7 +5969,7 @@ export class AgentRuntime implements Runtime {
             + ` until=${new Date(until).toISOString()} probeAttempts=${this.fallbackProbeAttempts}`,
         );
       } else {
-        this.fallbackActivations += 1;
+        this.fallbackMetrics.recordActivation();
         emitAlertChecked(
           this.instanceName,
           'provider_fallback_activated',
@@ -6265,8 +6245,7 @@ export class AgentRuntime implements Runtime {
     const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
     // Per-window deltas against the arm-time snapshots — the lifetime counters
     // are NOT reset here (getFallbackState keeps reporting process totals).
-    const windowTurnsServed = this.fallbackTurnsServed - this.fallbackTurnsServedAtArm;
-    const windowTurnsEmpty = this.fallbackTurnsEmpty - this.fallbackTurnsEmptyAtArm;
+    const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6291,7 +6270,7 @@ export class AgentRuntime implements Runtime {
       primaryProvider: this.agentProvider,
       reason,
     }, 'reverting to primary provider');
-    this.fallbackReverts += 1;
+    this.fallbackMetrics.recordRevert();
     emitAlertChecked(
       this.instanceName,
       'provider_fallback_reverted',
@@ -6921,7 +6900,7 @@ export class AgentRuntime implements Runtime {
       actorJid,
       oldSession: args.oldSession,
     }).then(() => {
-      this.fallbackReplays += 1;
+      this.fallbackMetrics.recordReplay();
       emitAlertChecked(
         this.instanceName,
         'provider_fallback_replayed',
