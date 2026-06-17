@@ -4,6 +4,8 @@ import { registerCommunityTools } from '../../../src/mcp/tools/community.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 
+const COMMUNITY_MEMBER_JID = 'member-community@s.whatsapp.net';
+
 function globalSession(): SessionContext {
   return { tier: 'global' };
 }
@@ -21,8 +23,10 @@ function makeMockSock(): WhatsAppSocket {
     communityLinkGroup: vi.fn().mockResolvedValue({ status: 'success' }),
     communityUnlinkGroup: vi.fn().mockResolvedValue({ status: 'success' }),
     communityFetchLinkedGroups: vi.fn().mockResolvedValue([{ id: 'group1@g.us', subject: 'Linked Group' }]),
-    communityParticipantsUpdate: vi.fn().mockResolvedValue([{ status: '200', jid: '111@s.whatsapp.net' }]),
+    communityParticipantsUpdate: vi.fn().mockResolvedValue([{ status: '200', jid: COMMUNITY_MEMBER_JID }]),
     communityInviteCode: vi.fn().mockResolvedValue('COMM123'),
+    communityRevokeInvite: vi.fn().mockResolvedValue('COMM456'),
+    communityAcceptInvite: vi.fn().mockResolvedValue('accepted-community@g.us'),
     communitySettingUpdate: vi.fn().mockResolvedValue(undefined),
     communityFetchAllParticipating: vi.fn().mockResolvedValue({
       'community1@g.us': { id: 'community1@g.us', subject: 'Test Community' },
@@ -63,12 +67,12 @@ describe('community tools', () => {
   });
 
   it.each(globalTools)('%s is NOT visible in chat-scoped session', (name) => {
-    const tools = registry.listTools(chatSession('111'));
+    const tools = registry.listTools(chatSession('community-member'));
     expect(tools.find((t) => t.name === name)).toBeUndefined();
   });
 
   it.each(globalTools)('%s is rejected when called from chat-scoped session', async (name) => {
-    const result = await registry.call(name, { jid: 'community1@g.us' }, chatSession('111'));
+    const result = await registry.call(name, { jid: 'community1@g.us' }, chatSession('community-member'));
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
   });
@@ -129,7 +133,7 @@ describe('community tools', () => {
         'community_create_group',
         {
           subject: 'Sub Group',
-          participants: ['111@s.whatsapp.net'],
+          participants: [COMMUNITY_MEMBER_JID],
           parentJid: 'community1@g.us',
         },
         globalSession(),
@@ -137,7 +141,7 @@ describe('community tools', () => {
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).communityCreateGroup).toHaveBeenCalledWith(
         'Sub Group',
-        ['111@s.whatsapp.net'],
+        [COMMUNITY_MEMBER_JID],
         'community1@g.us',
       );
     });
@@ -217,13 +221,13 @@ describe('community tools', () => {
     it('calls communityParticipantsUpdate with add action', async () => {
       const result = await registry.call(
         'community_participants_update',
-        { jid: 'community1@g.us', participants: ['111@s.whatsapp.net'], action: 'add' },
+        { jid: 'community1@g.us', participants: [COMMUNITY_MEMBER_JID], action: 'add' },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).communityParticipantsUpdate).toHaveBeenCalledWith(
         'community1@g.us',
-        ['111@s.whatsapp.net'],
+        [COMMUNITY_MEMBER_JID],
         'add',
       );
     });
@@ -231,12 +235,12 @@ describe('community tools', () => {
     it('calls communityParticipantsUpdate with remove action', async () => {
       await registry.call(
         'community_participants_update',
-        { jid: 'community1@g.us', participants: ['111@s.whatsapp.net'], action: 'remove' },
+        { jid: 'community1@g.us', participants: [COMMUNITY_MEMBER_JID], action: 'remove' },
         globalSession(),
       );
       expect((mockSock as any).communityParticipantsUpdate).toHaveBeenCalledWith(
         'community1@g.us',
-        ['111@s.whatsapp.net'],
+        [COMMUNITY_MEMBER_JID],
         'remove',
       );
     });
@@ -244,12 +248,12 @@ describe('community tools', () => {
     it('calls communityParticipantsUpdate with promote action', async () => {
       await registry.call(
         'community_participants_update',
-        { jid: 'community1@g.us', participants: ['111@s.whatsapp.net'], action: 'promote' },
+        { jid: 'community1@g.us', participants: [COMMUNITY_MEMBER_JID], action: 'promote' },
         globalSession(),
       );
       expect((mockSock as any).communityParticipantsUpdate).toHaveBeenCalledWith(
         'community1@g.us',
-        ['111@s.whatsapp.net'],
+        [COMMUNITY_MEMBER_JID],
         'promote',
       );
     });
@@ -257,7 +261,7 @@ describe('community tools', () => {
     it('rejects invalid action', async () => {
       const result = await registry.call(
         'community_participants_update',
-        { jid: 'community1@g.us', participants: ['111@s.whatsapp.net'], action: 'invalid' },
+        { jid: 'community1@g.us', participants: [COMMUNITY_MEMBER_JID], action: 'invalid' },
         globalSession(),
       );
       expect(result.isError).toBe(true);
@@ -296,6 +300,106 @@ describe('community tools', () => {
         jid: 'community1@g.us',
         inviteCode: null,
         inviteLink: null,
+      });
+    });
+
+    it('revokes the invite and returns the rotated code', async () => {
+      const result = await registry.call(
+        'community_invite_code',
+        { jid: 'community1@g.us', action: 'revoke' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).communityRevokeInvite).toHaveBeenCalledWith('community1@g.us');
+      const data = JSON.parse(result.content[0].text) as {
+        jid: string;
+        inviteCode: string;
+        inviteLink: string;
+        revoked: boolean;
+      };
+      expect(data).toStrictEqual({
+        jid: 'community1@g.us',
+        inviteCode: 'COMM456',
+        inviteLink: 'https://chat.whatsapp.com/COMM456',
+        revoked: true,
+      });
+    });
+
+    it('returns null invite details when revoke yields no code', async () => {
+      (mockSock as any).communityRevokeInvite = vi.fn().mockResolvedValue(null);
+      const result = await registry.call(
+        'community_invite_code',
+        { jid: 'community1@g.us', action: 'revoke' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        jid: string;
+        inviteCode: null;
+        inviteLink: null;
+        revoked: boolean;
+      };
+      expect(data).toStrictEqual({
+        jid: 'community1@g.us',
+        inviteCode: null,
+        inviteLink: null,
+        revoked: true,
+      });
+    });
+
+    it('requires a code when accepting an invite', async () => {
+      const result = await registry.call(
+        'community_invite_code',
+        { jid: 'community1@g.us', action: 'accept' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/code is required for action=accept/);
+      expect((mockSock as any).communityAcceptInvite).not.toHaveBeenCalled();
+    });
+
+    it('accepts an invite code and returns the community jid', async () => {
+      const result = await registry.call(
+        'community_invite_code',
+        { jid: 'community1@g.us', action: 'accept', code: 'COMM123' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).communityAcceptInvite).toHaveBeenCalledWith('COMM123');
+      const data = JSON.parse(result.content[0].text) as {
+        communityJid: string;
+        code: string;
+        accepted: boolean;
+      };
+      expect(data).toStrictEqual({
+        communityJid: 'accepted-community@g.us',
+        code: 'COMM123',
+        accepted: true,
+      });
+    });
+
+    it('returns null community jid when accept yields no jid', async () => {
+      (mockSock as any).communityAcceptInvite = vi.fn().mockResolvedValue(null);
+      const result = await registry.call(
+        'community_invite_code',
+        { jid: 'community1@g.us', action: 'accept', code: 'COMM123' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        communityJid: null;
+        code: string;
+        accepted: boolean;
+      };
+      expect(data).toStrictEqual({
+        communityJid: null,
+        code: 'COMM123',
+        accepted: true,
       });
     });
   });

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
@@ -22,9 +22,9 @@ const EXPECTED_TOOLS = [
   'regenerate_vault',
 ];
 
-const adminPhone = '1001';
+const adminPhone = 'admin-user';
 const adminActor = `${adminPhone}@s.whatsapp.net`;
-const guestActor = '1002@s.whatsapp.net';
+const guestActor = 'guest-user@s.whatsapp.net';
 
 const adminSession: SessionContext = { tier: 'global', actorJid: adminActor };
 const guestSession: SessionContext = { tier: 'global', actorJid: guestActor };
@@ -35,6 +35,29 @@ function parseResult(r: { content: Array<{ type: string; text: string }>; isErro
   return JSON.parse(r.content[0].text);
 }
 
+function registerDefaultTools(
+  registry: ToolRegistry,
+  db: Database,
+  vaultPath: string,
+  overrides: {
+    dbWrapper?: Database;
+    observationConfidenceMin?: number;
+  } = {},
+) {
+  registerSubstrateTools(registry, {
+    db: db.raw,
+    dbWrapper: overrides.dbWrapper ?? db,
+    adminPhones: new Set<string>([adminPhone]),
+    memory: {
+      adminJid: adminPhone,
+      vaultPath,
+      observationConfidenceMin: overrides.observationConfidenceMin ?? 0.4,
+      sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
+      watchTtl: { defaultHours: 24, maxHours: 72 },
+    },
+  });
+}
+
 describe('substrate MCP tools', () => {
   let dbPath: string; let vaultPath: string; let db: Database; let registry: ToolRegistry;
 
@@ -43,17 +66,7 @@ describe('substrate MCP tools', () => {
     vaultPath = tmpDir();
     db = new Database(dbPath); db.open();
     registry = new ToolRegistry();
-    registerSubstrateTools(registry, {
-      db: db.raw,
-      dbWrapper: db,
-      adminPhones: new Set<string>([adminPhone]),
-      memory: {
-        adminJid: adminPhone, vaultPath,
-        observationConfidenceMin: 0.4,
-        sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
-        watchTtl: { defaultHours: 24, maxHours: 72 },
-      },
-    });
+    registerDefaultTools(registry, db, vaultPath);
   });
   afterEach(() => {
     db.close();
@@ -108,6 +121,27 @@ describe('substrate MCP tools', () => {
     expect(res.content[0].text).toMatch(/not on the instance admin list/i);
   });
 
+  it('fails closed when LID admin resolution throws', async () => {
+    const throwingWrapper = {
+      raw: {
+        prepare: () => {
+          throw new Error('lid resolver unavailable');
+        },
+      },
+    } as unknown as Database;
+    const gatedRegistry = new ToolRegistry();
+    registerDefaultTools(gatedRegistry, db, vaultPath, { dbWrapper: throwingWrapper });
+
+    const res = await gatedRegistry.call(
+      'capture_task',
+      { title: 'blocked by resolver failure' },
+      { tier: 'global', actorJid: 'admin-lid@lid' },
+    );
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('caller phone "unresolved"');
+  });
+
   it('capture_task round-trip', async () => {
     const res = parseResult(await registry.call('capture_task', { title: 'test task' }, adminSession));
     expect(res.bead_id).toBeGreaterThan(0);
@@ -146,6 +180,22 @@ describe('substrate MCP tools', () => {
     expect(readFileSync(file, 'utf8')).toContain('# project now');
   });
 
+  it('contains bead projection failures without failing the mutation', async () => {
+    const blockedVaultPath = tmpFile();
+    writeFileSync(blockedVaultPath, 'not a directory');
+    const blockedRegistry = new ToolRegistry();
+    registerDefaultTools(blockedRegistry, db, blockedVaultPath);
+
+    try {
+      const res = parseResult(await blockedRegistry.call('capture_task', { title: 'project later' }, adminSession));
+
+      expect(res.bead_id).toBeGreaterThan(0);
+      expect(getBead(db.raw, res.bead_id)?.bead.title).toBe('project later');
+    } finally {
+      if (existsSync(blockedVaultPath)) unlinkSync(blockedVaultPath);
+    }
+  });
+
   it('complete_bead moves the projected bead to completed', async () => {
     const res = parseResult(await registry.call('capture_task', { title: 'finish me' }, adminSession));
     const activeFile = join(vaultPath, 'Beads/active', `task-${res.bead_id}.md`);
@@ -181,7 +231,7 @@ describe('substrate MCP tools', () => {
     const res = parseResult(await registry.call('create_agent_job', {
       prompt: 'daily digest',
       schedule: { kind: 'schedule.cron', expr: '0 8 * * *' },
-      report_chat: '1003@s.whatsapp.net',
+      report_chat: 'digest-report@s.whatsapp.net',
     }, adminSession));
     expect(res.trigger_id).toBeGreaterThan(0);
     const triggers = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
@@ -191,11 +241,29 @@ describe('substrate MCP tools', () => {
     expect(after.triggers[0].status).toBe('paused');
   });
 
+  it('create_agent_job supports one-shot at-time schedules', async () => {
+    const fireAt = Math.floor(Date.now() / 1000) + 3600;
+
+    const res = parseResult(await registry.call('create_agent_job', {
+      prompt: 'one-shot digest',
+      schedule: { kind: 'schedule.at_time', fire_at: fireAt },
+      report_chat: 'report-chat@s.whatsapp.net',
+    }, adminSession));
+
+    const triggers = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(triggers.triggers[0]).toMatchObject({
+      id: res.trigger_id,
+      kind: 'schedule.at_time',
+      next_fire_at: fireAt,
+    });
+    expect(JSON.parse(triggers.triggers[0].spec_json)).toEqual({ fire_at: fireAt });
+  });
+
   it('create_agent_job rejects invalid trigger input without leaving a bead', async () => {
     const res = await registry.call('create_agent_job', {
       prompt: 'daily digest',
       schedule: { kind: 'schedule.cron' },
-      report_chat: '1003@s.whatsapp.net',
+      report_chat: 'digest-report@s.whatsapp.net',
     }, adminSession);
 
     expect(res.isError).toBe(true);
@@ -216,11 +284,30 @@ describe('substrate MCP tools', () => {
     expect(res.terminal_at - now).toBeLessThanOrEqual(72 * 3600 + 5);
   });
 
+  it('extend_trigger updates terminal_at within policy', async () => {
+    const watch = parseResult(await registry.call('create_watch', {
+      source: 'poll.email',
+      criteria: { source: 'gmail', sender: 'sender-example-invalid' },
+      report_chat: 'watch-report@s.whatsapp.net',
+      ttl_hours: 1,
+    }, adminSession));
+    const requestedUntil = Math.floor(Date.now() / 1000) + 48 * 3600;
+
+    const res = parseResult(await registry.call('extend_trigger', {
+      id: watch.trigger_id,
+      until: requestedUntil,
+    }, adminSession));
+
+    expect(res).toEqual({ ok: true });
+    const triggers = parseResult(await registry.call('list_triggers', { bead_id: watch.bead_id }, adminSession));
+    expect(triggers.triggers[0].terminal_at).toBe(requestedUntil);
+  });
+
   it('create_watch rejects invalid criteria without leaving a bead', async () => {
     const res = await registry.call('create_watch', {
       source: 'poll.url',
       criteria: { url: 'not-a-url', hash_mode: 'text' },
-      report_chat: '1003@s.whatsapp.net',
+      report_chat: 'watch-report@s.whatsapp.net',
     }, adminSession);
 
     expect(res.isError).toBe(true);
@@ -248,6 +335,62 @@ describe('substrate MCP tools', () => {
     expect(getBead(db.raw, proposal.id)?.bead.status).toBe('proposed');
   });
 
+  it('approve_proposal succeeds with optional overrides and reject_proposal cancels with reason', async () => {
+    const approve = createBead(db.raw, {
+      kind: 'task',
+      title: 'approve this',
+      ownerJid: adminPhone,
+      status: 'proposed',
+      actor: 'test',
+    });
+    const reject = createBead(db.raw, {
+      kind: 'task',
+      title: 'reject this',
+      ownerJid: adminPhone,
+      status: 'proposed',
+      actor: 'test',
+    });
+    const approveWithOverrides = createBead(db.raw, {
+      kind: 'task',
+      title: 'approve with overrides',
+      ownerJid: adminPhone,
+      status: 'proposed',
+      actor: 'test',
+    });
+
+    expect(parseResult(await registry.call('approve_proposal', { id: approve.id }, adminSession))).toEqual({ ok: true });
+    expect(parseResult(await registry.call('approve_proposal', {
+      id: approveWithOverrides.id,
+      overrides: { title: 'approved title' },
+    }, adminSession))).toEqual({ ok: true });
+    expect(parseResult(await registry.call('reject_proposal', { id: reject.id, reason: 'not needed' }, adminSession))).toEqual({ ok: true });
+
+    expect(getBead(db.raw, approve.id)?.bead.status).toBe('active');
+    expect(getBead(db.raw, approveWithOverrides.id)?.bead.title).toBe('approved title');
+    const rejected = getBead(db.raw, reject.id);
+    expect(rejected?.bead.status).toBe('cancelled');
+    expect(rejected?.events.at(-1)?.payload_json).toContain('not needed');
+  });
+
+  it('get_bead and get_profile return null payloads for missing records', async () => {
+    const bead = parseResult(await registry.call('get_bead', { id: 9999 }, adminSession));
+    const profile = parseResult(await registry.call('get_profile', {
+      entity_ref: { canonical_name: 'Missing Person', kind: 'person' },
+    }, adminSession));
+
+    expect(bead).toEqual({ bead: null });
+    expect(profile).toEqual({ profile: null });
+  });
+
+  it('get_bead returns the bead with events when present', async () => {
+    const created = parseResult(await registry.call('capture_task', { title: 'inspect me' }, adminSession));
+
+    const res = parseResult(await registry.call('get_bead', { id: created.bead_id }, adminSession));
+
+    expect(res.bead.title).toBe('inspect me');
+    expect(res.events.map((event: { event_type: string }) => event.event_type)).toContain('status_change');
+  });
+
   it('capture_observation + get_profile', async () => {
     await registry.call('capture_observation', {
       entity_ref: { canonical_name: 'Alex', kind: 'person' },
@@ -258,6 +401,21 @@ describe('substrate MCP tools', () => {
     }, adminSession));
     expect(profile.entity.canonical_name).toBe('Alex');
     expect(profile.observations.map((o: { text: string }) => o.text)).toContain('prefers mornings');
+  });
+
+  it('capture_observation skips low-confidence observations without creating entities', async () => {
+    const res = parseResult(await registry.call('capture_observation', {
+      entity_ref: { canonical_name: 'Low Confidence', kind: 'person' },
+      kind: 'fact',
+      text: 'should not persist',
+      confidence: 0.39,
+    }, adminSession));
+
+    expect(res).toEqual({ skipped: true, reason: 'confidence < observation_confidence_min (0.4)' });
+    const profile = parseResult(await registry.call('get_profile', {
+      entity_ref: { canonical_name: 'Low Confidence', kind: 'person' },
+    }, adminSession));
+    expect(profile).toEqual({ profile: null });
   });
 
   it('capture_observation projects the affected entity profile', async () => {
@@ -273,6 +431,45 @@ describe('substrate MCP tools', () => {
     expect(readFileSync(file, 'utf8')).toContain('likes precise review notes');
   });
 
+  it('contains entity projection failures without failing the observation mutation', async () => {
+    const blockedVaultPath = tmpFile();
+    writeFileSync(blockedVaultPath, 'not a directory');
+    const blockedRegistry = new ToolRegistry();
+    registerDefaultTools(blockedRegistry, db, blockedVaultPath);
+
+    try {
+      const res = parseResult(await blockedRegistry.call('capture_observation', {
+        entity_ref: { canonical_name: 'Projection Blocked', kind: 'person' },
+        kind: 'note',
+        text: 'still persisted',
+        confidence: 0.8,
+      }, adminSession));
+
+      expect(res.observation_id).toBeGreaterThan(0);
+      expect(res.entity_id).toBeGreaterThan(0);
+      const profile = parseResult(await registry.call('get_profile', {
+        entity_ref: { entity_id: res.entity_id },
+      }, adminSession));
+      expect(profile.observations.map((o: { text: string }) => o.text)).toContain('still persisted');
+    } finally {
+      if (existsSync(blockedVaultPath)) unlinkSync(blockedVaultPath);
+    }
+  });
+
+  it('list_entities filters by kind and text match', async () => {
+    upsertEntity(db.raw, { canonicalName: 'Alpha Project', kind: 'project' });
+    upsertEntity(db.raw, { canonicalName: 'Alpha Person', kind: 'person' });
+    upsertEntity(db.raw, { canonicalName: 'Beta Project', kind: 'project' });
+
+    const res = parseResult(await registry.call('list_entities', {
+      kind: 'project',
+      text_match: 'alpha',
+      limit: 5,
+    }, adminSession));
+
+    expect(res.entities.map((entity: { canonical_name: string }) => entity.canonical_name)).toEqual(['Alpha Project']);
+  });
+
   it('forget_observation reprojects the affected entity profile', async () => {
     const res = parseResult(await registry.call('capture_observation', {
       entity_ref: { canonical_name: 'Taylor', kind: 'person' },
@@ -286,6 +483,12 @@ describe('substrate MCP tools', () => {
     await registry.call('forget_observation', { id: res.observation_id, reason: 'stale' }, adminSession);
 
     expect(readFileSync(file, 'utf8')).not.toContain('temporary profile note');
+  });
+
+  it('forget_observation is a no-op when the observation id is missing', async () => {
+    const res = parseResult(await registry.call('forget_observation', { id: 9999, reason: 'already gone' }, adminSession));
+
+    expect(res).toEqual({ ok: true });
   });
 
   it('merge_entities removes stale loser profile projection', async () => {

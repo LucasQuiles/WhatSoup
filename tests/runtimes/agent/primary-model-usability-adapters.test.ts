@@ -1,7 +1,39 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 
 describe('createPrimaryModelProbeAdapters', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['binary resolver throws', () => { throw new Error('resolver failed'); }],
+    ['binary resolver returns null', () => null],
+  ])('maps %s to provider_unavailable', async (_label, getProviderBinary) => {
+    const probeBinaryCommand = vi.fn();
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary,
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+  });
+
+  it('uses the default binary resolver when no resolver dependency is injected', async () => {
+    const probeBinaryCommand = vi.fn();
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'openai-api', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+  });
+
   it('maps the real Claude CLI selected-model rejection through the shared binary status contract', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),
@@ -40,6 +72,67 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it.each([
+    ['auth-required', 'Error: invalid API key provided', { status: 'credential_unavailable' }],
+    ['usage-limit', 'Claude usage limit reached. Your limit will reset at 9pm.', { status: 'provider_unavailable' }],
+    ['rate-limit', 'Provider rate limited request with HTTP 429.', { status: 'provider_unavailable' }],
+    ['context-overflow', 'maximum context length exceeded', { status: 'unknown', reason: 'context-overflow' }],
+    ['policy-block', 'Request blocked by policy.', { status: 'unknown', reason: 'policy-block' }],
+    ['unclassified failure output', 'child process exited before model probe completed', { status: 'unknown', reason: 'binary-model-probe-failed' }],
+    ['silent failure output', '', { status: 'provider_unavailable' }],
+  ] as const)('maps CLI probe %s output through the provider taxonomy', async (_label, output, expected) => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand: vi.fn(async () => ({
+        status: 'failed' as const,
+        output,
+      })),
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual(expected);
+  });
+
+  it('falls back to the shared binary command probe when no probe dependency is injected', async () => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => process.execPath),
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'unknown', reason: 'binary-model-probe-failed' });
+  });
+
+  it('uses the default OpenCode child environment builder when no env builder is injected', async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-test-secret';
+    const probeBinaryCommand = vi.fn(async () => ({
+      status: 'ok' as const,
+      output: '{"type":"message","role":"assistant","content":"OK"}',
+    }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+    });
+
+    try {
+      await expect(
+        adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'openai/configured-primary' }),
+      ).resolves.toEqual({ status: 'ok' });
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
+      expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
+      { timeoutMs: 15_000 },
+    );
+  });
+
   it('probes OpenCode custom-endpoint models from cwd config without overriding -m', async () => {
     const probeBinaryCommand = vi.fn(async () => ({
       status: 'ok' as const,
@@ -64,6 +157,45 @@ describe('createPrimaryModelProbeAdapters', () => {
       ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
       { cwd: '/agent-cwd', timeoutMs: 15_000 },
+    );
+  });
+
+  it('maps an unavailable fetch implementation without resolving model access', async () => {
+    vi.stubGlobal('fetch', undefined);
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+  });
+
+  it('uses the default API-key resolver and OpenAI endpoint when no resolver is injected', async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-test-secret';
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ data: [{ id: 'api-live-model' }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+
+    try {
+      await expect(
+        adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+      ).resolves.toEqual({ status: 'found' });
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/models',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer sk-test-secret' },
+      }),
     );
   });
 
@@ -92,6 +224,36 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it('uses Anthropic model listings with default endpoint and provider headers', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ data: [{ id: 'claude-live-model' }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const resolveApiKey = vi.fn(() => 'anthropic-test-secret');
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey,
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'anthropic-api', model: 'claude-live-model' }),
+    ).resolves.toEqual({ status: 'found' });
+
+    expect(resolveApiKey).toHaveBeenCalledWith({
+      service: undefined,
+      envVar: 'ANTHROPIC_API_KEY',
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://api.anthropic.com/v1/models?limit=100',
+      expect.objectContaining({
+        headers: {
+          'x-api-key': 'anthropic-test-secret',
+          'anthropic-version': '2023-06-01',
+        },
+      }),
+    );
+  });
+
   it('maps missing API credentials without making a network call', async () => {
     const fetchImpl = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
@@ -103,6 +265,25 @@ describe('createPrimaryModelProbeAdapters', () => {
       adapters.probeApiModelAccess?.({ provider: 'anthropic-api', model: 'api-live-model' }),
     ).resolves.toEqual({ status: 'credential_failed' });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [401, { status: 'credential_failed' }],
+    [403, { status: 'credential_failed' }],
+    [404, { status: 'not_found' }],
+    [408, { status: 'timeout' }],
+    [500, { status: 'provider_unavailable' }],
+    [504, { status: 'timeout' }],
+  ] as const)('maps API model-list HTTP %s to provider status', async (status, expected) => {
+    const fetchImpl = vi.fn(async () => new Response('', { status }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual(expected);
   });
 
   it('maps authenticated model-list misses to not_found', async () => {
@@ -118,5 +299,48 @@ describe('createPrimaryModelProbeAdapters', () => {
     await expect(
       adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-missing-model' }),
     ).resolves.toEqual({ status: 'not_found' });
+  });
+
+  it('maps unreadable model-list JSON to not_found rather than throwing', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{not-json', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'not_found' });
+  });
+
+  it('maps non-Error fetch throws to provider_unavailable', async () => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: vi.fn(async () => { throw 'network down'; }) as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+  });
+
+  it.each([
+    ['AbortError', { status: 'timeout' }],
+    ['TimeoutError', { status: 'timeout' }],
+    ['TypeError', { status: 'provider_unavailable' }],
+  ] as const)('maps fetch %s exceptions without leaking details', async (name, expected) => {
+    const err = new Error(`${name} from fetch`);
+    err.name = name;
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: vi.fn(async () => { throw err; }) as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual(expected);
   });
 });
