@@ -99,6 +99,28 @@ Also mapped: `authentication_error` / `invalid_api_key` → auth-required;
 The chat `api-error-classifier` maps HTTP 400/413 → bad_request and 5xx incl. 529
 overloaded → server (retryable).
 
+## Empty-output fallback trigger (textless primary failure)
+
+A broken primary auth/session (e.g. `claude-cli` after a silent CLI auto-update
+invalidated its keychain login) exits cleanly with **no text** — there is no
+failure *message* to classify, so none of the token matchers above fire. To stop
+the bot pinning itself to a dead primary and looping on `status:degraded`, the
+runtime arms the fallback **deterministically** on empty PRIMARY output
+(`maybeArmFallbackAfterEmptyPrimaryTurn`):
+
+- immediately on the **first** empty turn when the independent usability probe
+  (`primaryModelUsability`) already flags the primary unusable, or
+- after **2 consecutive** empty primary turns (`EMPTY_OUTPUT_FALLBACK_THRESHOLD`)
+  — a healthy primary never returns two pure-empty user turns in a row.
+
+The trigger (probe state + consecutive-empty count) is fully deterministic; only
+the user-facing message is templated. It arms with the **`auth-required`** reason
+so fallback selection skips same-provider entries (a broken `claude-cli` login
+breaks every `claude-cli` fallback too → jump to the independent provider) and
+revert is gated on a fresh primary probe — so it self-heals once the primary auth
+is restored. The counter resets on any successful turn; the path is a no-op while
+already on a fallback window or when no fallback is configured.
+
 ## Warm handoff distiller (flag-gated)
 
 The cross-harness context handoff is now fully wired behind three opt-in flags
