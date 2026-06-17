@@ -187,8 +187,10 @@ virtualization. DD-10, DD-27, DD-30, and DD-42 are closed in the current registe
 lib/format-wa-text.tsx (LT×4), lib/providers.ts (LT×2 + hex 5 — provider brand colors),
 lib/status-map.ts (LT×3: 150, 159, 165 — inside the canonical status driver), lib/chart-utils.ts
 (above), lib/type-guards.ts + lib/api.ts + lib/realtime-events.ts (hex hits are JID/ID strings
-and escape sequences — false positives, verified by reading), mock-data.ts (hex×5 +
-no-restricted-syntax×5 — mock fixtures). hooks/use-toast.tsx (above). The former
+and escape sequences — false positives, verified by reading), mock-data.ts (raw `#NNNN`×5
+decimal order/build numbers in mock message text — no longer flagged after the hex-in-string
+selector was tightened to a valid CSS hex-color shape; no-restricted-syntax now 0 in-file).
+hooks/use-toast.tsx (above). The former
 lib/log-theme.ts row was removed with the color-semantics helper-scope hardening.
 
 NOT AUDITED: `tests/` (out of scope — code surfaces only), `console/index.html` beyond the title
@@ -216,18 +218,18 @@ was not decomposed).
 | M13 | Hand-rolled mode radio-cards in ModeSwitchDialog duplicate the CardSelector pattern with inline legacy mode-color styles | ModeSwitchDialog.tsx:70-92 | CardSelector (DD-14 radiogroup) exists and is unused here | Migrate to CardSelector in the C3 LineDetail pass |
 | M14 | Local SearchInput recipe parallel to ToolbarSearch | shared/SearchInput.tsx | toolbar.md owns search-in-toolbar; standalone search input has no primitive | Promote into the form kit (or absorb into ToolbarSearch) during B-residue work |
 
-## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 8)
+## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 3)
 
 | Rule | Falls | Files | Top files |
 |---|---|---|---|
 | ~~soup/no-legacy-tokens~~ | 0 | 0 | closed: Nav and UpdateModal migrated to v3 semantic tokens; pages + wizard + shared + App surfaces fully migrated |
-| no-restricted-syntax (base wall) | 5 | 1 | mock-data 5 (`#NNNN` order/build numbers in mock message text — false-positive hex match, not colors; left for rule-scope review). Nav, MessageContent, PipelineTab, ModeTab inline-style falls migrated to className utilities (value-identical). |
+| ~~no-restricted-syntax (base wall)~~ | 0 | 0 | closed: the mock-data 5 (`#NNNN` order/build numbers in mock message text) were false-positive hex matches, not colors — the hex-in-string selector now requires a valid CSS hex-color shape (3/6/8 hex digits, 3-digit only when it carries an a-f letter), so decimal `#NNNN` no longer fires while real raw hex colors still do. Nav, MessageContent, PipelineTab, ModeTab inline-style falls migrated to className utilities (value-identical). |
 | soup/no-brand-regression | 2 | 2 | Nav (split wordmark) · UpdateModal ("Update WhatSoup") — both flip at the P4/C4 brand slice by design |
 | ~~soup/no-raw-form-control~~ | 0 | 0 | closed: `ConfigStep` file uploads route through `FileInput`; generated raw-form inventory is empty |
 | ~~soup/no-focus-suppression~~ | 0 | 0 | closed: zero TSX `outline-none` sites; former Inbox and HistoryTab composer carve-outs retired |
 | soup/no-utility-smell | 1 | 1 | GroupCard |
 
-Reconciliation: the live shadow baseline is 8 (= 5 + 2 + 1) and the live
+Reconciliation: the live shadow baseline is 3 (= 0 + 2 + 1) and the live
 burndown queue is 657/592 with `focus-suppression` and `raw-form-control` absent. Focus
 suppression now reads zero in two independent checks: `design-regression` check 12 and
 whole-tree `outline-none` grep over `console/src`; both former chat composers route

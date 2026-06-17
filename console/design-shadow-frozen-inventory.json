@@ -22,11 +22,11 @@
   ],
   "totals": {
     "by_category": {
-      "base-wall": 5,
+      "base-wall": 0,
       "brand-regression": 2
     },
-    "files": 3,
-    "total": 7
+    "files": 2,
+    "total": 2
   },
   "by_file": [
     {
@@ -50,64 +50,9 @@
         370
       ],
       "total": 1
-    },
-    {
-      "by_category": {
-        "base-wall": 5,
-        "brand-regression": 0
-      },
-      "file": "console/src/mock-data.ts",
-      "lines": [
-        723,
-        728,
-        852,
-        939,
-        940
-      ],
-      "total": 5
     }
   ],
   "hits": [
-    {
-      "category": "base-wall",
-      "column": 36,
-      "file": "console/src/mock-data.ts",
-      "line": 723,
-      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 36,
-      "file": "console/src/mock-data.ts",
-      "line": 728,
-      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 83,
-      "file": "console/src/mock-data.ts",
-      "line": 852,
-      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 66,
-      "file": "console/src/mock-data.ts",
-      "line": 939,
-      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 60,
-      "file": "console/src/mock-data.ts",
-      "line": 940,
-      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
-      "rule": "no-restricted-syntax"
-    },
     {
       "category": "brand-regression",
       "column": 11,

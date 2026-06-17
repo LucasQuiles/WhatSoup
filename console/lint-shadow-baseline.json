@@ -1,8 +1,7 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 8,
+  "total": 3,
   "rules": {
-    "no-restricted-syntax :: src/mock-data.ts": 5,
     "soup/no-brand-regression :: src/components/Nav.tsx": 1,
     "soup/no-brand-regression :: src/components/UpdateModal.tsx": 1,
     "soup/no-utility-smell :: src/components/line-detail/GroupCard.tsx": 1

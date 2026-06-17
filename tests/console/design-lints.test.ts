@@ -1334,4 +1334,39 @@ export function Dialog({ onClose }: { onClose: () => void }) {
       expect(hasError(messages, 'no-focus-suppression')).toBe(true)
     })
   })
+
+  // ─── Raw hex-color precision (scheduledGroups "hex color in string") ───────
+  // The unanchored hex-in-string selector must catch real raw CSS hex colors
+  // while NOT flagging decimal order/build numbers that share the "#NNNN" shape
+  // (e.g. "Order #4921 shipped", "Build #512 passed" in mock message text).
+  // Valid CSS hex colors are exactly 3, 6, or 8 hex digits; a 3-digit token is
+  // only a color when it contains an a-f letter (so #fff matches but #512 does not).
+  describe('raw hex-color-in-string precision', () => {
+    const HEX_MSG = 'Hardcoded hex color in string'
+
+    it('fires on a real 6-digit raw hex color embedded in a string', async () => {
+      const messages = await lintWarnings('const style = { color: "#1a2b3c" }')
+      expect(hasWarning(messages, HEX_MSG)).toBe(true)
+    })
+
+    it('fires on a real 3-digit raw hex color (#fff)', async () => {
+      const messages = await lintWarnings('const style = { color: "#fff" }')
+      expect(hasWarning(messages, HEX_MSG)).toBe(true)
+    })
+
+    it('fires on a real 8-digit raw hex color (#11223344)', async () => {
+      const messages = await lintWarnings('const style = { color: "#11223344" }')
+      expect(hasWarning(messages, HEX_MSG)).toBe(true)
+    })
+
+    it('is silent on a 4-digit decimal order number in message text', async () => {
+      const messages = await lintWarnings('const x = "Order #4921 shipped"')
+      expect(hasWarning(messages, HEX_MSG)).toBe(false)
+    })
+
+    it('is silent on a 3-digit decimal build number in message text', async () => {
+      const messages = await lintWarnings('const x = "Build #512 passed"')
+      expect(hasWarning(messages, HEX_MSG)).toBe(false)
+    })
+  })
 })
