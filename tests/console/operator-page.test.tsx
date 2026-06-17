@@ -79,7 +79,7 @@ vi.mock('../../console/src/components/RelinkModal', () => ({
   ) : null,
 }))
 
-import Ops from '../../console/src/pages/Ops'
+import Ops from '../../console/src/pages/Operator'
 
 function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
   return {
@@ -238,7 +238,7 @@ describe('Ops page fleet states', () => {
       </ToastContext.Provider>,
     )
 
-    expect(screen.getByText('No instances discovered. Create one from the Soup Kitchen.')).toBeDefined()
+    expect(screen.getByText('No Lines discovered. Create one from the Fleet.')).toBeDefined()
     expect(screen.getAllByText('0 entries')).toHaveLength(2)
     expect(screen.getByText('Select an instance to view logs.')).toBeDefined()
   })
@@ -272,7 +272,7 @@ describe('Ops page fleet states', () => {
     renderOps({ lines, feed })
 
     expect(screen.getByText('2 alerts')).toBeDefined()
-    expect(screen.getByText('3 instances')).toBeDefined()
+    expect(screen.getByText('3 Lines')).toBeDefined()
     expect(screen.getByText('1 online')).toBeDefined()
     expect(screen.getByText('2 unhealthy')).toBeDefined()
     expect(screen.getByText('5 msgs')).toBeDefined()
@@ -292,7 +292,7 @@ describe('Ops page fleet states', () => {
     // Instance names appear in the card and status bar; getAllByText confirms presence
     expect(screen.getAllByText('alpha').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('bravo').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('2 instances')).toBeDefined()
+    expect(screen.getByText('2 Lines')).toBeDefined()
     expect(screen.getByText('2 online')).toBeDefined()
   })
 })
@@ -472,7 +472,7 @@ describe('Ops page — retryable error states', () => {
     })
 
     expect(screen.getByText('Failed to load fleet status: fleet API down')).toBeDefined()
-    expect(screen.queryByText('No instances discovered. Create one from the Soup Kitchen.')).toBeNull()
+    expect(screen.queryByText('No Lines discovered. Create one from the Fleet.')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry fleet status' }))
 

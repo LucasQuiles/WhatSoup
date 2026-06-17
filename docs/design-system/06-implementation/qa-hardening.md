@@ -112,6 +112,8 @@ Before a screen is accepted, compare it against locked SOUP v2 Blend. Flag any o
 
 Use `/frontend-design` for this review and record the verdict.
 
+**Harness note (Operator destination):** the browser/visual harnesses (`tests/browser/viewport-matrix.test.tsx`, `tests/browser/a11y-contracts.test.tsx`) target the operational console page by import; that page was renamed `Ops` → `Operator` (route `/operator`, rail label "Operator"), so the harness imports now resolve `console/src/pages/Operator.tsx`. No visual/contrast contract changed — path-only update accompanying the rename + rebrand-copy fix.
+
 ## 6. Coverage Matrix
 
 Maintain one coverage row per slice-surface combination:

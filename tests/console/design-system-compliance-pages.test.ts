@@ -244,7 +244,7 @@ describe('design system compliance — Shannon slice', () => {
   })
 
   it('migrates Ops and SoupKitchen page panels to c-card and labels search input', () => {
-    const ops = read('console/src/pages/Ops.tsx')
+    const ops = read('console/src/pages/Operator.tsx')
     const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
 
     expect((ops.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)

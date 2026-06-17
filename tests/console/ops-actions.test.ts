@@ -59,13 +59,13 @@ describe('displayInstanceName', () => {
 
 describe('Ops page structure', () => {
   it('Ops component is a default export', async () => {
-    const mod = await import('../../console/src/pages/Ops');
+    const mod = await import('../../console/src/pages/Operator');
     expect(typeof mod.default).toBe('function');
   });
 
   it('imports required hooks and components', async () => {
     // Verify the Ops module can be loaded without errors
-    const mod = await import('../../console/src/pages/Ops');
+    const mod = await import('../../console/src/pages/Operator');
     expect(Object.keys(mod)).toEqual(['default']);
     expect(mod.default).toEqual(expect.any(Function));
   });

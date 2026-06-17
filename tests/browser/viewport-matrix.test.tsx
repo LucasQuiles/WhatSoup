@@ -230,7 +230,7 @@ vi.mock('../../console/src/components/SaveContactDialog', () => ({
 
 import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import LineDetail from '../../console/src/pages/LineDetail';
-import Ops from '../../console/src/pages/Ops';
+import Ops from '../../console/src/pages/Operator';
 import Inbox from '../../console/src/pages/Inbox';
 import {
   Drawer,

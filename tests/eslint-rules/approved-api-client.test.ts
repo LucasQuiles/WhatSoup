@@ -40,7 +40,7 @@ ruleTester.run('approved-api-client', approvedApiClient, {
       errors: [{ messageId: 'directFetch' }],
     },
     {
-      filename: '/repo/console/src/pages/Ops.tsx',
+      filename: '/repo/console/src/pages/Operator.tsx',
       code: `export const load = () => fetch('/api/lines');`,
       errors: [{ messageId: 'directFetch' }],
     },

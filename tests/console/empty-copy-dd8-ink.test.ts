@@ -31,7 +31,7 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
   })
 
   it('keeps Ops empty/loading fleet state copy off ghost ink (text-text-3)', () => {
-    const source = read('console/src/pages/Ops.tsx')
+    const source = read('console/src/pages/Operator.tsx')
 
     // v3 semantic class names: secondary ink is text-text-2 (--text-2),
     // ghost ink is text-text-3 (--text-3). Empty/loading fleet copy is sole

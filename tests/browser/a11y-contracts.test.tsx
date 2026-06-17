@@ -63,7 +63,7 @@ vi.mock('../../console/src/pages/Inbox', () => ({
   default: () => <section aria-label="Inbox route"><h1>Inbox</h1></section>,
 }));
 
-vi.mock('../../console/src/pages/Ops', () => ({
+vi.mock('../../console/src/pages/Operator', () => ({
   default: () => <section aria-label="Ops route"><h1>Ops</h1></section>,
 }));
 

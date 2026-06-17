@@ -37,7 +37,7 @@ function logLevelTone(level: LevelFilter) {
   return 'neutral' as const
 }
 
-export default function Ops() {
+export default function Operator() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
@@ -129,7 +129,7 @@ export default function Ops() {
           className="flex items-center justify-between flex-shrink-0 c-cell c-border-b-b2"
         >
           <div className="flex items-center gap-[var(--sp-3)]">
-            <span className="c-label">{lines.length} instances</span>
+            <span className="c-label">{lines.length} Lines</span>
             <span className="c-label">{lines.filter(l => l.status === 'online').length} online</span>
             {alerts.length > 0 && (
               <span className="font-mono text-s-crit text-label">
@@ -177,7 +177,7 @@ export default function Ops() {
               </div>
             ) : lines.length === 0 ? (
               <div className="text-text-2 text-center py-8 font-mono text-data">
-                No instances discovered. Create one from the Soup Kitchen.
+                No Lines discovered. Create one from the Fleet.
               </div>
             ) : lines.map(line => (
               <div
