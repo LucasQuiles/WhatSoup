@@ -165,6 +165,46 @@ describe('group resolver attemptedCache eviction', () => {
     expect(mocks.run).toHaveBeenCalledWith('1203631@g.us', 'HTTP Room', 0);
   });
 
+  it('falls back to HTTP metadata when MCP content has no text item', async () => {
+    mocks.existsSync.mockReturnValue(true);
+    mocks.mcpCall.mockResolvedValueOnce({
+      success: true,
+      toolError: false,
+      result: { content: [{ type: 'image', text: 'ignored' }] },
+    });
+    mocks.proxyToInstance.mockResolvedValueOnce({
+      status: 200,
+      body: JSON.stringify({ subject: 'Textless MCP' }),
+    });
+
+    groupResolverModule.resolveGroupNames(BASE_INSTANCE, ['1203640_at_g.us']);
+
+    await flushBackfill();
+
+    expect(mocks.proxyToInstance).toHaveBeenCalled();
+    expect(mocks.run).toHaveBeenCalledWith('1203640@g.us', 'Textless MCP', 0);
+  });
+
+  it('falls back to HTTP metadata when MCP text is not valid JSON', async () => {
+    mocks.existsSync.mockReturnValue(true);
+    mocks.mcpCall.mockResolvedValueOnce({
+      success: true,
+      toolError: false,
+      result: { content: [{ type: 'text', text: '{not-json' }] },
+    });
+    mocks.proxyToInstance.mockResolvedValueOnce({
+      status: 200,
+      body: JSON.stringify({ subject: 'Parsed Via HTTP', size: 6 }),
+    });
+
+    groupResolverModule.resolveGroupNames(BASE_INSTANCE, ['1203641_at_g.us']);
+
+    await flushBackfill();
+
+    expect(mocks.proxyToInstance).toHaveBeenCalled();
+    expect(mocks.run).toHaveBeenCalledWith('1203641@g.us', 'Parsed Via HTTP', 6);
+  });
+
   it('skips database writes when HTTP metadata has no subject', async () => {
     mocks.existsSync.mockReturnValue(false);
     mocks.proxyToInstance.mockResolvedValueOnce({
@@ -229,6 +269,23 @@ describe('group resolver attemptedCache eviction', () => {
     await flushBackfill();
 
     expect(mocks.mcpCall).not.toHaveBeenCalled();
+  });
+
+  it('records attempts for distinct keys across batches when no resolution channel is available', async () => {
+    mocks.existsSync.mockReturnValue(false);
+    const offline = { ...BASE_INSTANCE, healthPort: 0 };
+
+    groupResolverModule.resolveGroupNames(offline, ['1203650_at_g.us']);
+    await flushBackfill();
+    groupResolverModule.resolveGroupNames(offline, ['1203651_at_g.us']);
+    await flushBackfill();
+
+    expect((groupResolverModule as any).__getAttemptedCacheKeysForTests()).toEqual([
+      'q:1203650_at_g.us',
+      'q:1203651_at_g.us',
+    ]);
+    expect(mocks.mcpCall).not.toHaveBeenCalled();
+    expect(mocks.proxyToInstance).not.toHaveBeenCalled();
   });
 
   it('logs and closes the database when storing resolved metadata fails', async () => {
