@@ -144,3 +144,9 @@ export type {
   MenuItemProps,
   MenuSectionProps,
 } from './Menu';
+
+export { Switch } from './Switch';
+export type { SwitchProps } from './Switch';
+
+export { Tooltip } from './Tooltip';
+export type { TooltipProps } from './Tooltip';

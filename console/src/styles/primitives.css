@@ -1982,3 +1982,154 @@ button.soup-pill[aria-disabled="true"] {
 .soup-av-stack > .soup-av:first-child {
   margin-left: var(--sp-0);
 }
+
+/* ═══ Switch — boolean toggle (showcase §15). role="switch" track + thumb. ═══
+   Distinct from CheckboxField: a single on/off setting, not set membership.
+   Track 40×24 (--sp-10 × --sp-6); thumb 16 (--sp-4); travel one --sp-4 step.
+   Keyboard activation is native to the <button> element; focus ring uses the
+   shared --focus-ring recipe. */
+.soup-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.soup-switch__label {
+  font-size: var(--text-data);
+  color: var(--text-1);
+}
+
+.soup-switch {
+  flex: none;
+  position: relative;
+  width: var(--sp-10);
+  height: var(--sp-6);
+  padding: var(--sp-0);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--sp-6);
+  background: var(--surface-inset);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-enter),
+    border-color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-switch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.soup-switch--on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.soup-switch:disabled {
+  cursor: not-allowed;
+  opacity: var(--opacity-muted);
+}
+
+.soup-switch__thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--sp-1);
+  width: var(--sp-4);
+  height: var(--sp-4);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-hover);
+  transform: translateY(-50%);
+  transition: transform var(--dur-fast) var(--ease-enter);
+}
+
+.soup-switch--on .soup-switch__thumb {
+  transform: translateY(-50%) translateX(var(--sp-4));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-switch,
+  .soup-switch__thumb {
+    transition: none;
+  }
+}
+
+/* ═══ Tooltip — hover/focus bubble (showcase §24). Retires DetailCard. ═══
+   role="tooltip" associated via aria-describedby on the trigger; top/bottom flip
+   from useViewportPlacement; Esc dismiss; reduced-motion removes the lift. Paid
+   tokens --tooltip-min-w / --tooltip-val-max carry the geometry. */
+.soup-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.soup-tooltip__bubble {
+  position: absolute;
+  left: 50%;
+  min-width: var(--tooltip-min-w);
+  max-width: calc(var(--tooltip-min-w) + var(--sp-12));
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text-1);
+  font-size: var(--text-data);
+  line-height: var(--text-sm--line-height);
+  z-index: var(--z-toast);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(var(--sp-1));
+  transition: opacity var(--dur-fast) var(--ease-enter),
+    transform var(--dur-fast) var(--ease-enter);
+}
+
+.soup-tooltip__bubble--top {
+  bottom: 100%;
+  margin-bottom: var(--sp-2);
+}
+
+.soup-tooltip__bubble--bottom {
+  top: 100%;
+  margin-top: var(--sp-2);
+  transform: translateX(-50%) translateY(calc(-1 * var(--sp-1)));
+}
+
+.soup-tooltip__bubble--show {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(var(--sp-0));
+}
+
+.soup-tooltip__caret {
+  position: absolute;
+  left: 50%;
+  width: var(--sp-2);
+  height: var(--sp-2);
+  margin-left: calc(-1 * var(--sp-1));
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-hairline);
+  transform: rotate(45deg);
+}
+
+.soup-tooltip__bubble--top .soup-tooltip__caret {
+  bottom: calc(-1 * var(--sp-1));
+  border-top: none;
+  border-left: none;
+}
+
+.soup-tooltip__bubble--bottom .soup-tooltip__caret {
+  top: calc(-1 * var(--sp-1));
+  border-bottom: none;
+  border-right: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-tooltip__bubble {
+    transition: none;
+    transform: translateX(-50%);
+  }
+  .soup-tooltip__bubble--bottom,
+  .soup-tooltip__bubble--show {
+    transform: translateX(-50%);
+  }
+}

@@ -35,6 +35,12 @@ const ALLOWLIST = new Map<string, string>([
     'Local hover/focus-detail onKeyDown with stopPropagation (one-layer law §2); ' +
       'scoped to the bubble, not a global overlay — intentionally not useDismissable.',
   ],
+  [
+    'console/src/components/primitives/Tooltip.tsx',
+    'Local hover/focus tooltip onKeyDown with stopPropagation (one-layer law §2); ' +
+      'Esc dismisses the bubble without moving focus off the trigger (showcase §24) — ' +
+      'scoped to the anchored bubble, not a global overlay, so intentionally not useDismissable.',
+  ],
 ])
 
 function tsxFiles(dir: string): string[] {
