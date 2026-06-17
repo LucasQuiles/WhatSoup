@@ -1089,3 +1089,342 @@ describe('handleCheckExists', () => {
     expect(JSON.parse(available._body)).toEqual({ exists: false });
   });
 });
+
+// === Additional edge-case coverage (cheap-fleet drafted, wave-3) ===
+// ---------------------------------------------------------------------------
+// handleGetChats — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleGetChats', () => {
+  it('falls back to the conversation key as display name for a group lacking metadata and participants', () => {
+    const inst = fakeInstance();
+    const conversationKey = '111111100000000003_at_g.us';
+    const chatData = [{ conversationKey, messageCount: 0, senderName: null, lastMessageAt: null }];
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('SELECT content, sender_name, is_from_me')) return { get: () => undefined };
+        if (sql.includes('SELECT unread_count')) return { get: () => undefined };
+        if (sql.includes('SELECT subject FROM groups')) return { get: () => undefined };
+        if (sql.includes('SELECT name FROM chats')) return { get: () => undefined };
+        if (sql.includes('SELECT DISTINCT sender_name')) return { all: () => [] };
+        if (sql.includes('SELECT sender_name FROM messages')) return { get: () => undefined };
+        throw new Error(`unexpected SQL: ${sql}`);
+      }),
+    };
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: chatData })),
+        query: vi.fn((_name, _dbPath, fn) => ({ ok: true, data: fn(db as any) })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([{
+      conversationKey,
+      name: conversationKey,
+      lastMessagePreview: '',
+      lastMessageAt: '',
+      unreadCount: 0,
+      isGroup: true,
+    }]);
+  });
+
+  it('uses the raw preview without a sender prefix for a group message lacking a sender name', () => {
+    const inst = fakeInstance();
+    const conversationKey = '111111100000000004_at_g.us';
+    const chatData = [{ conversationKey, messageCount: 1, senderName: null, lastMessageAt: 1712333200 }];
+    const previews = new Map([
+      [conversationKey, { content: 'anonymous note', sender_name: null, is_from_me: 0 }],
+    ]);
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('SELECT content, sender_name, is_from_me')) return { get: (k: string) => previews.get(k) };
+        if (sql.includes('SELECT unread_count')) return { get: () => undefined };
+        if (sql.includes('SELECT subject FROM groups')) return { get: () => ({ subject: 'Named Group' }) };
+        if (sql.includes('SELECT name FROM chats')) return { get: () => undefined };
+        if (sql.includes('SELECT DISTINCT sender_name')) return { all: () => [] };
+        if (sql.includes('SELECT sender_name FROM messages')) return { get: () => undefined };
+        throw new Error(`unexpected SQL: ${sql}`);
+      }),
+    };
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: chatData })),
+        query: vi.fn((_name, _dbPath, fn) => ({ ok: true, data: fn(db as any) })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([expect.objectContaining({
+      conversationKey,
+      name: 'Named Group',
+      lastMessagePreview: 'anonymous note',
+      unreadCount: 0,
+      isGroup: true,
+    })]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetMessages — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleGetMessages', () => {
+  it('treats a non-numeric before_pk as undefined', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { getMessages: vi.fn(() => ({ ok: true, data: [] })) } as any,
+    });
+
+    const res = mockRes();
+    handleGetMessages(
+      mockReq('/api/lines/test-line/messages?conversation_key=15550000001%40s.whatsapp.net&before_pk=abc'),
+      res, deps, { name: 'test-line' },
+    );
+    expect(res._status).toBe(200);
+    expect(deps.dbReader.getMessages).toHaveBeenCalledWith(
+      'test-line', inst.dbPath,
+      { conversationKey: '15550000001@s.whatsapp.net', beforePk: undefined, limit: 50 },
+    );
+  });
+
+  it('clamps an oversized limit to the maximum of 500', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { getMessages: vi.fn(() => ({ ok: true, data: [] })) } as any,
+    });
+
+    const res = mockRes();
+    handleGetMessages(
+      mockReq('/api/lines/test-line/messages?conversation_key=15550000002%40s.whatsapp.net&limit=99999'),
+      res, deps, { name: 'test-line' },
+    );
+    expect(res._status).toBe(200);
+    expect(deps.dbReader.getMessages).toHaveBeenCalledWith(
+      'test-line', inst.dbPath,
+      expect.objectContaining({ limit: 500 }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleSearchMessages — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleSearchMessages', () => {
+  it('clamps an oversized limit to the maximum of 100', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: true, data: [] }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(
+      mockReq('/api/lines/test-line/messages/search?q=receipt&limit=99999'),
+      res, deps, { name: 'test-line' },
+    );
+    expect(res._status).toBe(200);
+    expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, expect.objectContaining({ limit: 100 }));
+  });
+
+  it('omits conversationKey when conversation_key is not supplied', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: true, data: [] }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(
+      mockReq('/api/lines/test-line/messages/search?q=receipt'),
+      res, deps, { name: 'test-line' },
+    );
+    expect(res._status).toBe(200);
+    expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, {
+      query: 'receipt',
+      conversationKey: undefined,
+      limit: 20,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetLogs — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleGetLogs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-log-edge-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('passes all entries through when the level filter is an unknown label', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    const logLines = [
+      JSON.stringify({ level: 30, msg: 'info-a', name: 'system' }),
+      JSON.stringify({ level: 50, msg: 'error-a', name: 'system' }),
+    ];
+    fs.writeFileSync(path.join(tmpDir, 'current.log'), logLines.join('\n') + '\n');
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq('/api/lines/test-line/logs?level=bogus'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body).toHaveLength(2);
+  });
+
+  it('defaults a non-numeric obj.level to info', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      JSON.stringify({ level: 'warn', msg: 'string-level', name: 'system' }) + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body).toHaveLength(1);
+    expect(body[0].level).toBe('info');
+  });
+
+  it('omits the component field when the log entry has none', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      JSON.stringify({ level: 30, msg: 'no-component', name: 'system' }) + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body).toHaveLength(1);
+    expect(body[0]).not.toHaveProperty('component');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetTyping — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleGetTyping', () => {
+  beforeEach(() => {
+    mockProxyToInstance.mockReset();
+  });
+
+  it('returns an empty array when no instances are registered', async () => {
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => new Map()) } as any,
+    });
+
+    const res = mockRes();
+    await handleGetTyping(mockReq('/api/typing'), res, deps);
+
+    expect(mockProxyToInstance).not.toHaveBeenCalled();
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([]);
+  });
+
+  it('skips an instance whose health probe rejects without failing the aggregate', async () => {
+    const inst = fakeInstance({ name: 'rejecting', healthPort: 3014, healthToken: 'token' });
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => new Map([[inst.name, inst]])) } as any,
+    });
+    mockProxyToInstance.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const res = mockRes();
+    await handleGetTyping(mockReq('/api/typing'), res, deps);
+
+    expect(mockProxyToInstance).toHaveBeenCalledTimes(1);
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleCheckDirectory — additional edge/error branches
+// ---------------------------------------------------------------------------
+
+describe('handleCheckDirectory', () => {
+  let tmpDir: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-dir-edge-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = path.join(tmpDir, 'home');
+    fs.mkdirSync(process.env.HOME, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('accepts the home directory root itself as within-bounds', () => {
+    const home = process.env.HOME!;
+    const res = mockRes();
+    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(home)}`), res);
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual({ exists: true, writable: true });
+  });
+
+  it('reports a non-directory path as not existing and not writable', () => {
+    const filePath = path.join(process.env.HOME!, 'not-a-dir.txt');
+    fs.writeFileSync(filePath, 'x');
+
+    const res = mockRes();
+    handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(filePath)}`), res);
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual({ exists: false, writable: false });
+  });
+
+  it('reports an existing read-only directory as not writable', () => {
+    const roDir = path.join(process.env.HOME!, 'readonly');
+    fs.mkdirSync(roDir);
+    fs.chmodSync(roDir, 0o555);
+    try {
+      const res = mockRes();
+      handleCheckDirectory(mockReq(`/api/directories/check?path=${encodeURIComponent(roDir)}`), res);
+      expect(res._status).toBe(200);
+      expect(JSON.parse(res._body)).toEqual({ exists: true, writable: false });
+    } finally {
+      fs.chmodSync(roDir, 0o755);
+    }
+  });
+});
