@@ -616,6 +616,60 @@ def test_load_records_skips_blank_lines():
         assert len(records) == 1
 
 
+def test_token_account_one_sided_absent_is_unknown_not_crash():
+    # token_account must yield honest unknown when exactly ONE side has neither usage nor text
+    # (guard `tokens_before is None OR tokens_after is None`). An and-weakening short-circuits
+    # only when BOTH are None, then falls through to `tokens_after - tokens_before` with one
+    # operand None -> TypeError on a reachable input (a step that produced output text but
+    # carried no before-side usage or text).
+    acct = pt.token_account(
+        usage_before=None, before_text=None,                       # neither usage nor text
+        usage_after=None, after_text="produced some output text",  # heuristic-able
+    )
+    assert acct["proof_class"] == pt.PROOF_UNKNOWN
+    assert acct["token_delta"] == pt.PROOF_UNKNOWN
+    assert acct["tokens_before"] == pt.PROOF_UNKNOWN
+
+
+def test_record_mutation_one_sided_byte_absent_is_unknown_delta():
+    # byte_delta is an int ONLY when both byte lengths are present (guard `byte_before is not
+    # None AND byte_after is not None`). _byte_len(None) is None, so an or-weakening would
+    # compute `byte_after - byte_before` with one operand None -> TypeError on a reachable
+    # input (a mutation with before_text but no after_text).
+    rec = pt.record_mutation(
+        step="s1", plane="reducer", mutation_class="compress",
+        before_text="abc", after_text=None,
+    )
+    assert rec["byte_delta"] == pt.PROOF_UNKNOWN
+    assert rec["byte_before"] == 3
+    assert rec["byte_after"] is None
+
+
+def test_record_mutation_whitespace_claim_is_not_backed():
+    # has_claim = bool(claim and str(claim).strip()): a whitespace-only claim is NOT a claim.
+    # An or-weakening (`claim or str(claim).strip()`) treats the truthy whitespace string as a
+    # real claim and, with evidence present, would wrongly mark claim_backed=True.
+    rec = pt.record_mutation(
+        step="s1", plane="reducer", mutation_class="compress",
+        before_text="a", after_text="b",
+        claim="   ", evidence_ref="ev-1",
+    )
+    assert rec["claim_backed"] is False
+
+
+def test_summarize_whitespace_claim_not_listed_as_unbacked():
+    # The unbacked-claims audit fires on `has_claim and not backed` with the SAME has_claim
+    # guard. A whitespace-only claim must not register as a claim (so it is not a false
+    # unbacked finding); a genuinely-unbacked real claim still must. An or-weakening would
+    # raise a spurious unbacked finding on the whitespace claim.
+    ws_rec = {"step": "ws", "plane": "reducer", "claim": "   ", "claim_backed": False}
+    real_rec = {"step": "real", "plane": "reducer", "claim": "needs proof", "claim_backed": False}
+    summary = pt.summarize([ws_rec, real_rec])
+    steps = {c.get("step") for c in summary["unbacked_claims"]}
+    assert "ws" not in steps, "whitespace-only claim wrongly listed as an unbacked claim"
+    assert "real" in steps
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

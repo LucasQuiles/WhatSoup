@@ -387,6 +387,60 @@ def test_cli_entrypoint_fences_real_file():
         os.unlink(artifact)
 
 
+def test_build_report_content_empty_is_strict_bool():
+    # content_empty = `not safe.strip()`: a strict bool. Dropping the `not` would emit the
+    # stripped CONTENT STRING itself as content_empty — both a wrong type AND a raw-content
+    # leak into a metadata-only report. Pin the bool identity on both empty and non-empty.
+    rep_full = fence.build_report("real untrusted content", NONCE_A)
+    assert rep_full["content_empty"] is False
+    rep_empty = fence.build_report("   ", NONCE_A)
+    assert rep_empty["content_empty"] is True
+
+
+def test_cli_exit_nonzero_on_single_fence_failure():
+    # main()'s fail-closed exit is `not roundtrip_ok OR not forge_contained`: EITHER proof
+    # failing must exit nonzero. An and-weakening would exit 0 when exactly ONE fails — a
+    # degraded fence read as clean. Drive each single-failure case via a build_report stub.
+    import tempfile
+
+    def stub_report(roundtrip_ok, forge_contained):
+        def _stub(content, nonce):
+            return {
+                "schema": fence.SCHEMA,
+                "schema_version": fence.SCHEMA_VERSION,
+                "redaction": "metadata-only",
+                "sanitized_delimiter_hits": 0,
+                "claim_guard_flags": [],
+                "fence_nonce_len": len(nonce),
+                "roundtrip_ok": roundtrip_ok,
+                "forge_contained": forge_contained,
+                "content_empty": False,
+                "content_sha256_16": "0" * 16,
+            }
+        return _stub
+
+    orig_build = fence.build_report
+    orig_argv = sys.argv
+    with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as f:
+        f.write("untrusted content")
+        path = f.name
+    try:
+        for roundtrip_ok, forge_contained in [(True, False), (False, True)]:
+            fence.build_report = stub_report(roundtrip_ok, forge_contained)
+            sys.argv = ["injection_fence.py", "--content-artifact", path]
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = fence.main()
+            assert rc != 0, (
+                f"single-failure fence (roundtrip_ok={roundtrip_ok}, "
+                f"forge_contained={forge_contained}) must exit nonzero"
+            )
+    finally:
+        fence.build_report = orig_build
+        sys.argv = orig_argv
+        Path(path).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
