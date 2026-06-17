@@ -108,6 +108,15 @@ STALE_RENOTIFY_SUPPRESS_SOURCES = {
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
 STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
 STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
+# Pattern F — flap-storm detection (consolidate AND escalate). Default-on;
+# fail-open (any flap error falls through to normal per-event handling).
+FLAP_DETECTION = env_flag("BOT_ERRORS_FLAP_DETECTION", True)
+FLAP_TRIP_THRESHOLD = positive_env_int("BOT_ERRORS_FLAP_TRIP_THRESHOLD", 5)
+FLAP_WINDOW_SECONDS = positive_env_int("BOT_ERRORS_FLAP_WINDOW_SECONDS", 600)
+FLAP_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_PROMOTE_SECONDS", 1800)
+FLAP_CRITICAL_COUNT = positive_env_int("BOT_ERRORS_FLAP_CRITICAL_COUNT", 50)
+FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
+FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
@@ -536,6 +545,12 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # whitelist would drop it and the once-per-day summary would re-fire every run.
     if isinstance(loaded.get("testLeakDaily"), dict):
         state["testLeakDaily"] = loaded["testLeakDaily"]
+    # Pattern F (§10 C0): flap-storm trip state must survive across dispatcher
+    # invocations (each run loads → processes → saves → exits), else an in-memory
+    # sliding-window counter resets every run and a sustained burst never
+    # accumulates. Keyed by incident_key.
+    if isinstance(loaded.get("flapState"), dict):
+        state["flapState"] = loaded["flapState"]
     return state
 
 
@@ -1514,6 +1529,16 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     key = incident_key(event)
     current = int(time.time())
     open_incidents = incident_state.setdefault("openIncidents", {})
+    # Pattern F — suppress individual members of an OPEN flap storm; the
+    # consolidated flap_storm alert (emitted by the pre-collapse scan) already
+    # carries the count/rate. The storm itself never routes through here
+    # (it is sent directly), so this cannot suppress the storm alert.
+    if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
+        flap_state = incident_state.get("flapState")
+        if isinstance(flap_state, dict):
+            flap_rec = flap_state.get(key)
+            if isinstance(flap_rec, dict) and flap_rec.get("stormAt"):
+                return f"flap_storm_member: {key} consolidated into open flap storm"
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
@@ -2024,6 +2049,276 @@ def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], cu
     record["lastStaleRenotifyFailedEventId"] = event.get("id")
     record["lastStaleRenotifyError"] = truncate(error, 500)
     record["staleRenotifyFailureCount"] = int_field(record, "staleRenotifyFailureCount") + 1
+
+
+# ---------------------------------------------------------------------------
+# Pattern F — flap-storm detection (design §9 + §10 C0/C1/C2/C4)
+#
+# A flapping source (self-heal-then-fail) is a fault signature, not just noise:
+# we CONSOLIDATE its member events into one alert AND ESCALATE on intensity.
+# Trip state is disk-persisted under incident_state["flapState"], keyed by
+# incident_key, because the dispatcher loads→processes→saves→exits and an
+# in-memory window counter would reset every run (C0). Timestamps are
+# dispatcher wall-clock (never author createdAt — collector clock skew, C0).
+# Trips are counted on raw INPUT before storm-collapse consumes members (C1).
+# ---------------------------------------------------------------------------
+
+def flap_entry(flap_state: dict[str, Any], key: str) -> dict[str, Any]:
+    entry = flap_state.get(key)
+    if not isinstance(entry, dict):
+        entry = {"tripTimestamps": [], "cumulativeCount": 0}
+        flap_state[key] = entry
+    if not isinstance(entry.get("tripTimestamps"), list):
+        entry["tripTimestamps"] = []
+    return entry
+
+
+def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
+    return sum(
+        1
+        for t in entry.get("tripTimestamps", [])
+        if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS
+    )
+
+
+def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str, Any]:
+    """Record one raw trip for incident_key at wall-clock `now`, pruning the
+    sliding window. Counts input per raw trip (C1)."""
+    entry = flap_entry(flap_state, key)
+    pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
+    pruned.append(now)
+    entry["tripTimestamps"] = pruned
+    entry["cumulativeCount"] = int(entry.get("cumulativeCount") or 0) + 1
+    entry["lastTripAt"] = now
+    if not entry.get("firstTripAt"):
+        entry["firstTripAt"] = now
+    return entry
+
+
+def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
+    """Decide whether to emit a flap_storm alert for this entry now (after its
+    trip was recorded). Mutates storm lifecycle fields. Returns
+    {emit: bool, severity: str|None, reason: str}.
+
+    - First crossing of FLAP_TRIP_THRESHOLD in the window opens the storm at
+      `warning` and emits once; member events are then suppressed.
+    - Promote to `critical` when the storm persists FLAP_PROMOTE_SECONDS or the
+      cumulative count crosses FLAP_CRITICAL_COUNT (the 263-case). Re-emits once
+      on escalation, and on the FLAP_PROMOTE_SECONDS cadence while active.
+    """
+    trips = flap_trips_in_window(entry, now)
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    if not entry.get("stormAt"):
+        if trips >= FLAP_TRIP_THRESHOLD:
+            entry["stormAt"] = now
+            entry["stormSeverity"] = "warning"
+            entry["lastStormEmitAt"] = now
+            return {"emit": True, "severity": "warning", "reason": "flap_storm_opened"}
+        return {"emit": False, "severity": None, "reason": "below_threshold"}
+    storm_at = int(entry.get("stormAt") or now)
+    promoted = (now - storm_at >= FLAP_PROMOTE_SECONDS) or (cumulative >= FLAP_CRITICAL_COUNT)
+    new_severity = "critical" if promoted else "warning"
+    escalated = new_severity == "critical" and entry.get("stormSeverity") != "critical"
+    last_emit = int(entry.get("lastStormEmitAt") or storm_at)
+    cadence_due = now - last_emit >= FLAP_PROMOTE_SECONDS
+    entry["stormSeverity"] = new_severity
+    if escalated or cadence_due:
+        entry["lastStormEmitAt"] = now
+        return {
+            "emit": True,
+            "severity": new_severity,
+            "reason": "flap_storm_escalated" if escalated else "flap_storm_cadence",
+        }
+    return {"emit": False, "severity": new_severity, "reason": "flap_storm_member_suppressed"}
+
+
+def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
+    """An open storm resolves only after FLAP_STABLE_SECONDS of zero trips in the
+    window. (C2 notes liveness should also gate this; collector silence alone is
+    a weaker signal — tracked as a follow-up; time-stable is the Wave-1 gate.)"""
+    if not entry.get("stormAt"):
+        return False
+    last_trip = int(entry.get("lastTripAt") or 0)
+    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+
+
+def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -> dict[str, Any]:
+    """Build the consolidated flap_storm alert with Pattern E enrichment and a
+    real requested_action (never 'none'); exempt from Pattern A suppression."""
+    fields = incident_event_fields_from_key(key)
+    underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
+    trips = flap_trips_in_window(entry, now)
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    first = int(entry.get("firstTripAt") or now)
+    last = int(entry.get("lastTripAt") or now)
+    additions = [
+        "flap_storm=true",
+        f"incident_key={key}",
+        f"underlying_source={underlying}",
+        f"flap_trips_in_window={trips}",
+        f"flap_window_seconds={FLAP_WINDOW_SECONDS}",
+        f"flap_cumulative_count={cumulative}",
+        f"flap_first_seen={iso_from_epoch(first)}",
+        f"flap_last_seen={iso_from_epoch(last)}",
+        f"flap_rate_per_window={trips}",
+        "severity_rationale=" + (
+            f"critical: sustained ≥{FLAP_PROMOTE_SECONDS}s or count ≥{FLAP_CRITICAL_COUNT}"
+            if severity == "critical"
+            else f"warning: ≥{FLAP_TRIP_THRESHOLD} trips in {FLAP_WINDOW_SECONDS}s"
+        ),
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"flap-storm-{safe_segment(key)}-{now}",
+        "eventType": "alert",
+        "severity": severity,
+        "createdAt": now_iso(),
+        **fields,
+        "source": "flap_storm",
+        "alertSource": underlying,
+        "summary": f"Flap storm: {underlying} unstable — {cumulative} trips, {trips} in last {FLAP_WINDOW_SECONDS}s",
+        "evidence": "\n".join(additions),
+        "criticalAsset": {
+            "asset": {"kind": "monitored_source", "instance": fields.get("instance", "unknown"), "owner": "whatsoup"},
+            "failure": {
+                "code": "FLAP_STORM",
+                "domain": "operational_reliability",
+                "recoverability": "operator_recoverable",
+                "confidence": "confirmed",
+                "operatorAction": FLAP_STORM_ACTION,
+                "clearRequirement": f"source quiet ≥ {FLAP_STABLE_SECONDS}s",
+            },
+        },
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "flap-storm", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, Any]:
+    """One terminal 'resolved after N flaps over Tm' summary (info)."""
+    fields = incident_event_fields_from_key(key)
+    underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    first = int(entry.get("firstTripAt") or now)
+    storm_at = int(entry.get("stormAt") or first)
+    minutes = max(1, (now - storm_at) // 60)
+    additions = [
+        "flap_storm_resolved=true",
+        f"incident_key={key}",
+        f"underlying_source={underlying}",
+        f"flap_total_count={cumulative}",
+        f"flap_duration_minutes={minutes}",
+        f"flap_first_seen={iso_from_epoch(first)}",
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"flap-resolved-{safe_segment(key)}-{now}",
+        "eventType": "alert",
+        "severity": "info",
+        "createdAt": now_iso(),
+        **fields,
+        "source": "flap_storm_resolved",
+        "alertSource": underlying,
+        "summary": f"Flap storm resolved: {underlying} stable after {cumulative} flaps over {minutes}m",
+        "evidence": "\n".join(additions),
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "flap-resolved", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def flap_scan_outbox(paths: dict[str, Path]) -> int:
+    """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
+    event currently in the outbox, keyed by incident_key, and emit consolidated
+    flap_storm alerts when a key crosses threshold / promotes. Runs BEFORE
+    collapse_ready_storms so trips count raw input, not post-collapse survivors.
+    Member events are suppressed later in should_suppress_send via flapState.
+    Returns the number of storm alerts emitted. Fail-open throughout.
+    """
+    if not FLAP_DETECTION:
+        return 0
+    try:
+        incident_state = load_incident_state(paths)
+    except Exception:  # noqa: BLE001 - never block dispatch on a flap read
+        return 0
+    flap_state = incident_state.setdefault("flapState", {})
+    now = int(time.time())
+    emitted = 0
+    changed = False
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            if not ready(path, paths["quarantine"]):
+                continue
+            event = read_json(path)
+        except Exception:  # noqa: BLE001 - skip unreadable, process_one will quarantine
+            continue
+        if not is_incident_alert(event) or is_incident_clear(event):
+            continue
+        if str(event.get("source") or "") == "flap_storm":
+            continue
+        key = incident_key(event)
+        try:
+            entry = record_flap_trip(flap_state, key, now)
+            changed = True
+            decision = flap_evaluate(entry, now)
+            if decision.get("emit"):
+                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                emitted += 1
+                append_dispatch_log(paths, {
+                    "type": "flap_storm",
+                    "incidentKey": key,
+                    "severity": decision.get("severity"),
+                    "reason": decision.get("reason"),
+                    "cumulativeCount": entry.get("cumulativeCount"),
+                    "tripsInWindow": flap_trips_in_window(entry, now),
+                })
+        except Exception as exc:  # noqa: BLE001 - one bad event must not block the scan
+            append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
+            continue
+    if changed:
+        save_incident_state(paths, incident_state)
+    return emitted
+
+
+def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
+    """Sweep open flap storms for resolution. Returns (resolved, errors).
+    Called from run_once after per-event processing. Fail-open per entry."""
+    if not FLAP_DETECTION:
+        return 0, 0
+    incident_state = load_incident_state(paths)
+    flap_state = incident_state.get("flapState")
+    if not isinstance(flap_state, dict) or not flap_state:
+        return 0, 0
+    now = int(time.time())
+    resolved = 0
+    errors = 0
+    changed = False
+    for key in sorted(flap_state.keys()):
+        entry = flap_state.get(key)
+        if not isinstance(entry, dict):
+            continue
+        try:
+            if flap_should_resolve(entry, now):
+                send_whatsapp(format_event(flap_resolve_event(str(key), entry, now)))
+                append_dispatch_log(paths, {
+                    "type": "flap_storm_resolved",
+                    "incidentKey": key,
+                    "cumulativeCount": entry.get("cumulativeCount"),
+                })
+                flap_state.pop(key, None)
+                resolved += 1
+                changed = True
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not block the sweep
+            errors += 1
+            append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
+    if changed:
+        save_incident_state(paths, incident_state)
+    return resolved, errors
 
 
 def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
@@ -3269,6 +3564,10 @@ def run_once(max_events: int) -> dict[str, Any]:
         reclaimed = reclaim_processing(paths)
         test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
+        # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
+        # consumes members. Emits consolidated flap_storm alerts; members are
+        # suppressed downstream in should_suppress_send via persisted flapState.
+        flap_storms = flap_scan_outbox(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
@@ -3304,6 +3603,9 @@ def run_once(max_events: int) -> dict[str, Any]:
         if stale_failed:
             failed += stale_failed
             last_error = stale_error
+        # Pattern F: resolve flap storms quiet beyond the stable window (one
+        # terminal "resolved after N flaps" summary each, then terminal removal).
+        flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
 
         # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
         dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
@@ -3341,6 +3643,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             testProvenanceMetaAlerted=test_provenance_meta_alerted,
             recoveryDeduped=recovery_deduped,
             stormCollapsed=storm_collapsed,
+            flapStorms=flap_storms,
+            flapResolved=flap_resolved,
+            flapResolveErrors=flap_resolve_errors,
             suppressedPruned=suppressed_pruned,
             deadLetterMetaAlerted=dead_letter_meta_alerted,
             lastError=last_error,
@@ -3359,6 +3664,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testProvenanceMetaAlerted": test_provenance_meta_alerted,
             "recoveryDeduped": recovery_deduped,
             "stormCollapsed": storm_collapsed,
+            "flapStorms": flap_storms,
+            "flapResolved": flap_resolved,
+            "flapResolveErrors": flap_resolve_errors,
             "suppressedPruned": suppressed_pruned,
             "deadLetterMetaAlerted": dead_letter_meta_alerted,
             "lastError": last_error,
