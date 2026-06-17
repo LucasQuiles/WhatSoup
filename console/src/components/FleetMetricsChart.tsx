@@ -1,6 +1,6 @@
 import {
-  Area,
-  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Legend,
   ResponsiveContainer,
@@ -16,11 +16,11 @@ interface FleetMetricsChartProps {
   range?: MetricsRange;
 }
 
-/** Stacked area chart showing fleet-wide inbound/outbound/media message volume. */
+/** Stacked bar chart showing fleet-wide inbound/outbound/media message volume. */
 export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProps) {
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={data} margin={CHART_MARGIN}>
+      <BarChart data={data} margin={CHART_MARGIN}>
         <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
         <XAxis
           dataKey="bucket"
@@ -42,34 +42,10 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
         <Legend wrapperStyle={LEGEND_STYLE} />
-        <Area
-          type="monotone"
-          dataKey="inbound"
-          name="Inbound"
-          stackId="msgs"
-          stroke={MESSAGE_VOLUME_SERIES_COLORS.inbound}
-          fill={MESSAGE_VOLUME_SERIES_COLORS.inbound}
-          fillOpacity={0.3}
-        />
-        <Area
-          type="monotone"
-          dataKey="outbound"
-          name="Outbound"
-          stackId="msgs"
-          stroke={MESSAGE_VOLUME_SERIES_COLORS.outbound}
-          fill={MESSAGE_VOLUME_SERIES_COLORS.outbound}
-          fillOpacity={0.3}
-        />
-        <Area
-          type="monotone"
-          dataKey="media"
-          name="Media"
-          stackId="msgs"
-          stroke={MESSAGE_VOLUME_SERIES_COLORS.media}
-          fill={MESSAGE_VOLUME_SERIES_COLORS.media}
-          fillOpacity={0.2}
-        />
-      </AreaChart>
+        <Bar dataKey="inbound" name="Inbound" stackId="msgs" fill={MESSAGE_VOLUME_SERIES_COLORS.inbound} radius={[2, 2, 0, 0]} />
+        <Bar dataKey="outbound" name="Outbound" stackId="msgs" fill={MESSAGE_VOLUME_SERIES_COLORS.outbound} radius={[2, 2, 0, 0]} />
+        <Bar dataKey="media" name="Media" stackId="msgs" fill={MESSAGE_VOLUME_SERIES_COLORS.media} radius={[2, 2, 0, 0]} />
+      </BarChart>
     </ResponsiveContainer>
   );
 }

@@ -28,7 +28,7 @@ vi.mock('recharts', async () => {
         </section>
       );
     },
-    AreaChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
+    BarChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
       return (
         <ChartDataContext.Provider value={data}>
           <div aria-label="Stacked message volume" role="group">
@@ -73,18 +73,14 @@ vi.mock('recharts', async () => {
         </div>
       );
     },
-    Area({
+    Bar({
       dataKey,
       fill,
-      fillOpacity,
       name,
-      stroke,
     }: {
       dataKey?: string;
       fill?: string;
-      fillOpacity?: number;
       name?: string;
-      stroke?: string;
     }) {
       const data = React.useContext(ChartDataContext);
       const seriesName = name ?? dataKey ?? 'Series';
@@ -93,8 +89,6 @@ vi.mock('recharts', async () => {
         <section
           aria-label={`${seriesName} series`}
           data-fill={fill}
-          data-fill-opacity={fillOpacity}
-          data-stroke={stroke}
           role="region"
         >
           <h3>{seriesName}</h3>
@@ -200,9 +194,8 @@ describe('FleetMetricsChart', () => {
 
     for (const [name, token] of Object.entries(expected)) {
       const region = series(name);
-      expect(region.getAttribute('data-stroke')).toBe(token);
       expect(region.getAttribute('data-fill')).toBe(token);
-      expect(region.getAttribute('data-stroke')).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
+      expect(region.getAttribute('data-fill')).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
     }
   });
 });
