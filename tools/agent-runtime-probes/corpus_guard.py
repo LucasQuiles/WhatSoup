@@ -369,6 +369,111 @@ def check_fail_open_scan(probe_dir: Path) -> dict:
     }
 
 
+# --- two-plane separation (H5: planes never share verdict logic) ----------------
+# Release gate proving the reducer gate (B3 paired_trial_harness) and the enricher gate
+# (enricher_lift_gate) stay verdict-independent, and that only the sanctioned adoption_orchestrator
+# bridges the two planes — and then ONLY via each gate's SCHEMA constant (the pure-projector contract).
+# Becomes meaningful once adoption_orchestrator exists (plan bead 4.3 gate).
+_PLANE_GATES = frozenset({"paired_trial_harness", "enricher_lift_gate"})
+_PLANE_DISPATCHER = "adoption_orchestrator.py"
+_DISPATCHER_ALLOWED_GATE_ATTRS = frozenset({"SCHEMA"})
+
+
+def gate_import_aliases(tree: ast.AST) -> tuple[dict, set]:
+    """`import <gate> [as alias]` -> {alias: gate}; `from <gate> import name` -> {(gate, name)}."""
+    aliases: dict = {}
+    from_symbols: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _PLANE_GATES:
+                    aliases[a.asname or a.name] = a.name
+        elif isinstance(node, ast.ImportFrom) and node.module in _PLANE_GATES:
+            for a in node.names:
+                from_symbols.add((node.module, a.name))
+    return aliases, from_symbols
+
+
+def gate_attr_accesses(tree: ast.AST, aliases: dict) -> list:
+    """All `<alias>.<attr>` accesses where alias resolves to a plane gate module."""
+    out: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            gate = aliases.get(node.value.id)
+            if gate is not None:
+                out.append((gate, node.attr))
+    return out
+
+
+def two_plane_violations_for(name: str, tree: ast.AST) -> list[dict]:
+    """The per-file H5 violations: a gate importing the other gate; an unsanctioned module bridging
+    both planes or importing a gate verdict symbol; the dispatcher touching gate logic beyond SCHEMA."""
+    violations: list[dict] = []
+    aliases, from_symbols = gate_import_aliases(tree)
+    imported_gates = set(aliases.values()) | {g for g, _ in from_symbols}
+
+    self_gate = name[:-3] if name.endswith(".py") and name[:-3] in _PLANE_GATES else None
+    if self_gate is not None:
+        for g in sorted(imported_gates - {self_gate}):
+            violations.append({"kind": "gate_imports_other_gate", "severity": "high",
+                               "file": name, "imports": g})
+
+    if name != _PLANE_DISPATCHER:
+        if len(imported_gates) >= 2:
+            violations.append({"kind": "unsanctioned_plane_bridge", "severity": "high",
+                               "file": name, "imports": sorted(imported_gates)})
+        for gate, sym in sorted(from_symbols):
+            if sym != "SCHEMA":
+                violations.append({"kind": "gate_symbol_import", "severity": "high",
+                                   "file": name, "symbol": f"{gate}.{sym}"})
+    else:
+        # the dispatcher is a PURE PROJECTOR: it may reference the gate modules only via .SCHEMA.
+        for gate, attr in gate_attr_accesses(tree, aliases):
+            if attr not in _DISPATCHER_ALLOWED_GATE_ATTRS:
+                violations.append({"kind": "dispatcher_uses_gate_logic", "severity": "high",
+                                   "file": name, "access": f"{gate}.{attr}"})
+        for gate, sym in sorted(from_symbols):
+            if sym not in _DISPATCHER_ALLOWED_GATE_ATTRS:
+                violations.append({"kind": "dispatcher_imports_gate_symbol", "severity": "high",
+                                   "file": name, "symbol": f"{gate}.{sym}"})
+    return violations
+
+
+def check_two_plane_separation(probe_dir: Path) -> dict:
+    """Mechanical H5 release gate over the top-level probe sources (tests excluded — they may import
+    gates freely). Fail-closed on parse error."""
+    violations: list[dict] = []
+    parse_errors: list[dict] = []
+    for path in non_library_probes(probe_dir):
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError as exc:
+            parse_errors.append({"file": path.name, "line": exc.lineno, "error": "SyntaxError"})
+            continue
+        except OSError as exc:
+            parse_errors.append({"file": path.name, "error": type(exc).__name__})
+            continue
+        violations.extend(two_plane_violations_for(path.name, tree))
+
+    all_violations: list[dict] = []
+    if parse_errors:
+        all_violations.append({"kind": "two_plane_separation_parse_error", "severity": "high",
+                               "errors": parse_errors})
+    if violations:
+        all_violations.append({
+            "kind": "plane_verdict_logic_shared", "severity": "high",
+            "note": "H5: reducer/enricher gates must not share verdict logic; only adoption_orchestrator "
+                    "may bridge planes, and only via gate.SCHEMA",
+            "sites": violations,
+        })
+    return {
+        "name": "two_plane_separation",
+        "severity": "high",
+        "status": "fail" if all_violations else "pass",
+        "violations": all_violations,
+    }
+
+
 # Minimum number of probe *.py files (excluding corpus_guard.py) expected under
 # <root>/agent-runtime-probes/. Actual count as of 2026-06-16 is 61; floor is
 # conservative (40) to leave headroom for deliberate pruning without false alarms.
@@ -558,6 +663,7 @@ def main() -> int:
             check_lean_corpus(root, docs, args.ceiling),
             check_probe_hygiene(root / "agent-runtime-probes"),
             check_fail_open_scan(root / "agent-runtime-probes"),
+            check_two_plane_separation(root / "agent-runtime-probes"),
         ]
     except Exception as e:  # fail-closed: never silently pass
         report = {"schema": SCHEMA, "schema_version": SCHEMA_VERSION,

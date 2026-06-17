@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import subprocess
 
-from corpus_guard import check_fail_open_scan, check_lean_corpus, check_probe_hygiene  # noqa: E402
+from corpus_guard import (  # noqa: E402
+    check_fail_open_scan, check_lean_corpus, check_probe_hygiene, check_two_plane_separation,
+)
 
 
 def write_probe(root: Path, name: str, body: str) -> None:
@@ -255,6 +257,90 @@ def test_corpus_presence_passes_on_real_root():
     # Overall verdict must remain PASS (no regression)
     assert report["summary"]["verdict"] == "PASS", f"real root verdict regressed: {report['summary']}"
     assert rc == 0, f"real root should exit 0, got: {rc}"
+
+
+def _sites(report: dict) -> list:
+    shared = violation(report, "plane_verdict_logic_shared")
+    return shared["sites"] if shared else []
+
+
+def _site_kinds(report: dict) -> set:
+    return {s["kind"] for s in _sites(report)}
+
+
+def test_two_plane_separation_passes_on_clean_tree():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        # two independent gates + a pure-projector dispatcher touching each only via .SCHEMA
+        write_probe(root, "paired_trial_harness.py", "SCHEMA = 'b3'\ndef evaluate():\n    return {}\n")
+        write_probe(root, "enricher_lift_gate.py", "SCHEMA = 'lift'\ndef evaluate():\n    return {}\n")
+        write_probe(root, "adoption_orchestrator.py",
+                    "import paired_trial_harness as b3\nimport enricher_lift_gate as lift\n"
+                    "GATES = {'reducer': b3.SCHEMA, 'enricher': lift.SCHEMA}\n")
+        report = check_two_plane_separation(root)
+        assert report["status"] == "pass" and report["violations"] == []
+
+
+def test_two_plane_separation_flags_gate_importing_other_gate():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        # the reducer gate reaches into the enricher gate -> verdict-logic coupling
+        write_probe(root, "paired_trial_harness.py",
+                    "import enricher_lift_gate\nSCHEMA = 'b3'\n")
+        write_probe(root, "enricher_lift_gate.py", "SCHEMA = 'lift'\n")
+        report = check_two_plane_separation(root)
+        assert report["status"] == "fail"
+        assert "gate_imports_other_gate" in _site_kinds(report)
+
+
+def test_two_plane_separation_flags_unsanctioned_bridge_and_symbol_import():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        write_probe(root, "paired_trial_harness.py", "SCHEMA = 'b3'\ndef evaluate():\n    return {}\n")
+        write_probe(root, "enricher_lift_gate.py", "SCHEMA = 'lift'\ndef evaluate():\n    return {}\n")
+        # a non-dispatcher module importing BOTH gates AND pulling a verdict symbol
+        write_probe(root, "rogue_merger.py",
+                    "import paired_trial_harness\nfrom enricher_lift_gate import evaluate\nX = 1\n")
+        report = check_two_plane_separation(root)
+        kinds = _site_kinds(report)
+        assert "unsanctioned_plane_bridge" in kinds
+        assert "gate_symbol_import" in kinds
+
+
+def test_two_plane_separation_flags_dispatcher_using_gate_logic():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        write_probe(root, "paired_trial_harness.py", "SCHEMA = 'b3'\ndef evaluate():\n    return {}\n")
+        write_probe(root, "enricher_lift_gate.py", "SCHEMA = 'lift'\ndef evaluate():\n    return {}\n")
+        # the dispatcher CALLS a gate's verdict fn instead of only reading .SCHEMA -> impure projector
+        write_probe(root, "adoption_orchestrator.py",
+                    "import paired_trial_harness as b3\nimport enricher_lift_gate as lift\n"
+                    "R = b3.evaluate()\nS = lift.SCHEMA\n")
+        report = check_two_plane_separation(root)
+        kinds = _site_kinds(report)
+        assert "dispatcher_uses_gate_logic" in kinds
+
+
+def test_two_plane_separation_dispatcher_symbol_import_flagged():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        write_probe(root, "paired_trial_harness.py", "SCHEMA = 'b3'\ndef evaluate():\n    return {}\n")
+        write_probe(root, "enricher_lift_gate.py", "SCHEMA = 'lift'\n")
+        # dispatcher pulling a non-SCHEMA symbol via from-import -> verdict-logic reuse
+        write_probe(root, "adoption_orchestrator.py",
+                    "from paired_trial_harness import evaluate\nimport enricher_lift_gate as lift\n"
+                    "S = lift.SCHEMA\n")
+        report = check_two_plane_separation(root)
+        assert "dispatcher_imports_gate_symbol" in _site_kinds(report)
+
+
+def test_two_plane_separation_fails_closed_on_parse_error():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        write_probe(root, "paired_trial_harness.py", "SCHEMA = 'b3'\ndef evaluate(:\n")  # syntax error
+        report = check_two_plane_separation(root)
+        assert report["status"] == "fail"
+        assert violation(report, "two_plane_separation_parse_error") is not None
 
 
 if __name__ == "__main__":
