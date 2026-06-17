@@ -4138,10 +4138,17 @@ export class AgentRuntime implements Runtime {
         // Consume the seq for this completed user turn
         seqQueue.shift();
         const fallbackReason = event.text ? fallbackReasonForResultText(event.text) : null;
-        // Turn completed successfully — clear pending replay text. Provider
-        // limit/auth/rate failures keep it so the fallback replay can continue
-        // the interrupted request.
-        if (fallbackReason === null) {
+        // Turn completed successfully with visible output — clear pending replay
+        // text. Provider limit/auth/rate failures keep it so the fallback replay
+        // can continue the interrupted request.
+        // Empty-output turns (event.text null/empty) also keep it: the
+        // empty-output arming path (maybeArmFallbackAfterEmptyPrimaryTurn →
+        // scheduleFallbackReplay) runs inside handleEventWithContext and reads
+        // pendingTurnText to dispatch the replay. Deleting here before that call
+        // would cause scheduleFallbackReplay to find undefined and silently drop
+        // the replay. The entry is cleaned up by sendTurnPerChat when the replay
+        // turn is dispatched, or overwritten by the next sendTurnPerChat call.
+        if (event.text && fallbackReason === null) {
           this.pendingTurnText.delete(mapKey);
           this.pendingTurnActorJid.delete(mapKey);
         }
