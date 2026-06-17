@@ -602,3 +602,597 @@ describe('agent type rules', () => {
     ).toBeNull();
   });
 });
+
+describe('agent-config-validator.ts uncovered-branch coverage', () => {
+  // ---- validateAgentModelConsistency (lines 176-195) ----
+  it('rejects top-level model that disagrees with models.conversation', () => {
+    const raw = baseAgent({ model: 'claude-sonnet-4', models: { conversation: 'gpt-4o' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({ field: 'model', status: 400 });
+    expect(result?.message).toContain('must match when both are set');
+  });
+
+  it('passes model-consistency when only models.conversation is set (non-string models ignored)', () => {
+    const raw = baseAgent({ models: 'not-an-object' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toStrictEqual(null);
+  });
+
+  // ---- agentOptions.autoCompactInputTokens (lines 453-467) ----
+  it('rejects autoCompactInputTokens below the 50,000 floor', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', autoCompactInputTokens: 1000 } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({ field: 'agentOptions.autoCompactInputTokens', status: 400 });
+    expect(result?.message).toContain('between 50,000 and 100,000,000');
+  });
+
+  it('rejects non-integer autoCompactInputTokens', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', autoCompactInputTokens: 60000.5 },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.autoCompactInputTokens');
+  });
+
+  it('accepts in-range integer autoCompactInputTokens', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', autoCompactInputTokens: 60000 },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  // ---- agentOptions.allowM365Mutations non-boolean (lines 443-451) ----
+  it('rejects non-boolean allowM365Mutations', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', allowM365Mutations: 'yes' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({
+      field: 'agentOptions.allowM365Mutations',
+      status: 400,
+    });
+    expect(result?.message).toContain('must be a boolean when provided');
+  });
+
+  // ---- agentOptions.fallbacks[] (lines 484-537) ----
+  it('rejects fallbacks combined with fallbackProvider', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [{ provider: 'openai-api', model: 'gpt-4o' }],
+        fallbackProvider: 'openai-api',
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks');
+    expect(result?.message).toContain('cannot be combined');
+  });
+
+  it('rejects non-array fallbacks', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', fallbacks: 'nope' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({ field: 'agentOptions.fallbacks', status: 400 });
+    expect(result?.message).toContain('must be an array when provided');
+  });
+
+  it('rejects fallbacks arrays exceeding 8 entries', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: Array.from({ length: 9 }, () => ({ provider: 'openai-api', model: 'gpt-4o' })),
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks');
+    expect(result?.message).toContain('at most 8 entries');
+  });
+
+  it('rejects a non-record fallback entry', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbacks: ['not-an-object'] },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0]');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects a fallback entry with an unknown provider', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbacks: [{ provider: 'nope' }] },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0].provider');
+    expect(result?.message).toContain('must be one of');
+  });
+
+  it('rejects a fallback entry with an empty-string model', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [{ provider: 'claude-cli', model: '   ' }],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0].model');
+    expect(result?.message).toContain('non-empty string when provided');
+  });
+
+  it('rejects an API-provider fallback entry that omits model', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbacks: [{ provider: 'openai-api' }] },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0].model');
+    expect(result?.message).toContain('requires model to be set');
+  });
+
+  it('rejects a fallback entry duplicating an earlier entry', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        fallbacks: [
+          { provider: 'claude-cli', model: 'sonnet' },
+          { provider: 'claude-cli', model: 'sonnet' },
+        ],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[1]');
+    expect(result?.message).toContain('duplicates an earlier fallback entry');
+  });
+
+  it('rejects a fallback entry that matches the primary provider/model pair', () => {
+    const raw = baseAgent({
+      model: 'claude-sonnet-4',
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        fallbacks: [{ provider: 'claude-cli', model: 'claude-sonnet-4' }],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbacks[0]');
+    expect(result?.message).toContain('matches the primary provider/model pair');
+  });
+
+  it('accepts a well-formed distinct fallback chain', () => {
+    const raw = baseAgent({
+      model: 'claude-sonnet-4',
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        fallbacks: [{ provider: 'openai-api', model: 'gpt-4o' }],
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  // ---- fallbackProvider / fallbackModel cross-field (lines 542-582) ----
+  it('rejects unknown fallbackProvider', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbackProvider: 'unknown-cli' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbackProvider');
+    expect(result?.message).toContain('must be one of');
+  });
+
+  it('rejects blank-string fallbackModel', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbackModel: '  ' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbackModel');
+    expect(result?.message).toContain('non-empty string');
+  });
+
+  it('rejects API fallbackProvider without a fallbackModel', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', fallbackProvider: 'openai-api' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.fallbackModel');
+    expect(result?.message).toContain('requires agentOptions.fallbackModel to be set');
+  });
+
+  // ---- providerConfig.baseUrl + apiKeyService (lines 614-675) ----
+  it('rejects non-string providerConfig.baseUrl', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { baseUrl: 123 } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.baseUrl');
+    expect(result?.message).toContain('non-empty string');
+  });
+
+  it('rejects unparseable providerConfig.baseUrl', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { baseUrl: 'not a url' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.baseUrl');
+    expect(result?.message).toContain('must be a valid URL');
+  });
+
+  it('rejects non-http(s) providerConfig.baseUrl', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { baseUrl: 'ftp://host.example' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.baseUrl');
+    expect(result?.message).toContain('http or https');
+  });
+
+  it('rejects opencode-cli baseUrl without any configured model', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+        providerConfig: { baseUrl: 'https://host.example' },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.baseUrl');
+    expect(result?.message).toContain('no model is configured');
+  });
+
+  it('rejects non-string providerConfig.apiKeyService', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { apiKeyService: 5 } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(result?.message).toContain('non-empty string');
+  });
+
+  it('rejects unknown providerConfig.apiKeyService', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', providerConfig: { apiKeyService: 'nope-svc' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(result?.message).toContain('not a known keyring service');
+  });
+
+  it('rejects providerConfig.apiKeyService set without baseUrl', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: { apiKeyService: 'openai' },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(result?.message).toContain('baseUrl is not');
+  });
+
+  // ---- validateTransportConfig (lines 685-725) ----
+  it('rejects unknown transport id', () => {
+    const raw = baseChat({ transport: 'carrier-pigeon' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({ field: 'transport', status: 400 });
+    expect(result?.message).toContain('must be one of: baileys, twilio');
+    expect(result?.message).toContain('"carrier-pigeon"');
+  });
+
+  it('rejects twilioConfig present alongside default (baileys) transport', () => {
+    const raw = baseChat({ twilioConfig: { account: 'acme' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig');
+    expect(result?.message).toContain('inconsistent with transport "baileys"');
+  });
+
+  it('rejects twilio transport without a twilioConfig object', () => {
+    const raw = baseChat({ transport: 'twilio' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result).toMatchObject({ field: 'twilioConfig', status: 400 });
+    expect(result?.message).toContain('required when transport is "twilio"');
+  });
+
+  it('rejects non-object twilioConfig on twilio transport', () => {
+    const raw = baseChat({ transport: 'twilio', twilioConfig: ['array'] });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  // Helper: a fully valid twilioConfig (messagingServiceSid sender).
+  const validTwilio = () => ({
+    account: 'acme',
+    accountSid: 'AC' + '0'.repeat(32),
+    authTokenService: 'twilio-auth-token',
+    messagingServiceSid: 'MG' + '0'.repeat(32),
+  });
+
+  it('accepts a minimal valid twilio transport config', () => {
+    const raw = baseChat({ transport: 'twilio', twilioConfig: validTwilio() });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  // ---- validateTwilioConfig field rules (lines 727-965) ----
+  it('rejects twilioConfig.account that fails ACCOUNT_RE', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), account: 'UPPER' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.account');
+  });
+
+  it('rejects twilioConfig.accountSid not matching AC + 32 hex', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), accountSid: 'ACdeadbeef' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.accountSid');
+  });
+
+  it('rejects twilioConfig.authTokenService with whitespace', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), authTokenService: 'has space' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.authTokenService');
+  });
+
+  it('rejects twilioConfig with both phoneNumber and messagingServiceSid', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        phoneNumber: '+15550000001',
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.phoneNumber');
+    expect(result?.message).toContain('not both');
+  });
+
+  it('rejects twilioConfig with neither phoneNumber nor messagingServiceSid', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'acme',
+        accountSid: 'AC' + '0'.repeat(32),
+        authTokenService: 'twilio-auth-token',
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.phoneNumber');
+    expect(result?.message).toContain('exactly one of');
+  });
+
+  it('rejects twilioConfig.phoneNumber not matching E.164', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'acme',
+        accountSid: 'AC' + '0'.repeat(32),
+        authTokenService: 'twilio-auth-token',
+        phoneNumber: 'not-a-number',
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.phoneNumber');
+    expect(result?.message).toContain('E.164');
+  });
+
+  it('rejects twilioConfig.messagingServiceSid not matching MG + 32 hex', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'acme',
+        accountSid: 'AC' + '0'.repeat(32),
+        authTokenService: 'twilio-auth-token',
+        messagingServiceSid: 'MGshort',
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.messagingServiceSid');
+  });
+
+  it('rejects twilioConfig.inboundMode other than poll/webhook', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), inboundMode: 'stream' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.inboundMode');
+  });
+
+  it('rejects webhook block set while inboundMode is poll (fail closed)', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'poll',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080 },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook');
+    expect(result?.message).toContain("must not be set when inboundMode is 'poll'");
+  });
+
+  it('rejects webhook mode with a non-https publicBaseUrl', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'http://host.example', listenPort: 8080 },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+    expect(result?.message).toContain('https://');
+  });
+
+  it('rejects webhook mode with out-of-range listenPort', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 99999 },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook.listenPort');
+  });
+
+  it('rejects webhook listenPort that collides with healthPort', () => {
+    const raw = baseChat({
+      healthPort: 8080,
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080 },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook.listenPort');
+    expect(result?.message).toContain('conflicts with healthPort');
+  });
+
+  it('rejects webhook listenAddress of the wrong type', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080, listenAddress: 5 },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook.listenAddress');
+  });
+
+  it('rejects webhook block being a non-object', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: ['array'],
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.webhook');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects a non-object twilioConfig.voice block', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), voice: 'loud' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice');
+  });
+
+  it('rejects non-boolean twilioConfig.voice.enabled', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), voice: { enabled: 'yes' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice.enabled');
+  });
+
+  it('rejects out-of-range twilioConfig.voice.voicemailMaxLengthSec', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), voice: { voicemailMaxLengthSec: 2 } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice.voicemailMaxLengthSec');
+  });
+
+  it('rejects over-long twilioConfig.voice.voicemailGreeting', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), voice: { voicemailGreeting: 'x'.repeat(501) } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice.voicemailGreeting');
+  });
+
+  it('rejects voice.enabled=true without webhook inboundMode', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'acme',
+        accountSid: 'AC' + '0'.repeat(32),
+        authTokenService: 'twilio-auth-token',
+        phoneNumber: '+15550000001',
+        voice: { enabled: true },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice');
+    expect(result?.message).toContain("inboundMode:'webhook'");
+  });
+
+  it('rejects voice.enabled=true on webhook config that lacks phoneNumber', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        ...validTwilio(),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080 },
+        voice: { enabled: true },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.voice');
+    expect(result?.message).toContain('requires phoneNumber');
+  });
+
+  it('rejects out-of-range twilioConfig.pollIntervalMs', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), pollIntervalMs: 1000 },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.pollIntervalMs');
+  });
+
+  it('rejects non-object twilioConfig.rateLimit', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), rateLimit: 'nope' },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.rateLimit');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects out-of-range twilioConfig.rateLimit.smsPerMinute', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: { ...validTwilio(), rateLimit: { smsPerMinute: 0 } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('twilioConfig.rateLimit.smsPerMinute');
+  });
+
+  it('accepts a full valid twilio transport with webhook inboundMode + phoneNumber', () => {
+    const raw = baseChat({
+      transport: 'twilio',
+      twilioConfig: {
+        account: 'acme',
+        accountSid: 'AC' + '0'.repeat(32),
+        authTokenService: 'twilio-auth-token',
+        phoneNumber: '+15550000001',
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://host.example', listenPort: 8080 },
+        voice: { enabled: true, voicemailMaxLengthSec: 60, voicemailGreeting: 'hi' },
+        pollIntervalMs: 30000,
+        rateLimit: { smsPerMinute: 30 },
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+});
