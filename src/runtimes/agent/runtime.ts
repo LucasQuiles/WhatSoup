@@ -262,6 +262,17 @@ function oneMessageHandoffEnabled(): boolean {
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
+
+/**
+ * Consecutive empty PRIMARY-provider user turns that force a provider fallback
+ * even when the independent usability probe has not (yet) flagged the primary.
+ * A healthy primary effectively never returns two pure-empty user turns in a
+ * row; a broken primary auth/session (e.g. claude-cli after a silent CLI
+ * auto-update invalidated its keychain login) exits cleanly with NO text on
+ * every turn. Deterministic trigger threshold — see
+ * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
+ */
+const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
 type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
@@ -1610,6 +1621,10 @@ export class AgentRuntime implements Runtime {
   private fallbackWindowCostUsd = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
   private primaryModelUsabilityAlertActive = false;
+  /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
+   *  or when an empty-output fallback is armed. Drives the empty-output fallback
+   *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
+  private consecutivePrimaryEmptyTurns = 0;
   private lastSuccessfulTurnAt: number | null = null;
   private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   private lastTurnErrorAt: number | null = null;
@@ -5465,16 +5480,21 @@ export class AgentRuntime implements Runtime {
             // Empty/tool-only turn: surface any still-pending handoff notice
             // standalone rather than deferring it to the next reply.
             this.flushPendingHandoffNotice(queue);
+            let armedFallbackNow = false;
             if (!turnCapabilityFailureRecorded) {
               if (hadVisible || turnHadToolWork) {
                 this.recordTurnCapabilitySuccess(true);
               } else {
                 this.recordTurnCapabilityFailure(true, 'empty-output');
+                armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey);
               }
             }
-            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive) {
+            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive && !armedFallbackNow) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
+              // Suppressed when we JUST armed the provider fallback above: the
+              // activation notice already told the user and the turn is being
+              // replayed on the backup, so this would be a contradictory message.
               queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
             }
           }
@@ -6297,6 +6317,79 @@ export class AgentRuntime implements Runtime {
     return key;
   }
 
+  /**
+   * Arm provider fallback when the PRIMARY provider returns empty output — the
+   * failure mode a broken primary auth/session produces (e.g. claude-cli after
+   * a silent CLI auto-update invalidated its keychain login). Such a turn exits
+   * cleanly with NO text, so it never classifies as a provider-failure message
+   * and the normal text-driven arming path never fires; without this the bot
+   * stays pinned to the dead primary and only reports `degraded` forever while
+   * the configured fallback ladder sits idle.
+   *
+   * Deterministic trigger (the user-facing message is templated; the DECISION
+   * is fully deterministic):
+   *   - arm on the FIRST empty primary turn when the independent usability probe
+   *     already flags the primary unusable, OR
+   *   - arm after {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} consecutive empty
+   *     primary turns (a healthy primary never returns two pure-empty turns).
+   *
+   * Armed with the `auth-required` reason so fallback SELECTION skips
+   * same-provider entries (a broken claude-cli login breaks every claude-cli
+   * fallback too → jump straight to the independent provider) and REVERT is
+   * gated on a fresh primary probe — so it self-heals once the primary auth is
+   * restored. No-op (returns false) when already on a fallback window or when no
+   * fallback is configured. Returns true only when it armed a window this call.
+   */
+  private maybeArmFallbackAfterEmptyPrimaryTurn(
+    queue: IOutboundQueue,
+    session: SessionManager | null,
+    turnHadToolWork: boolean,
+    mapKey: string | undefined,
+  ): boolean {
+    if (this.isFallbackWindowActive) return false;
+    if (this.agentFallbacks.length === 0) return false;
+
+    this.consecutivePrimaryEmptyTurns += 1;
+    const probeFlagsUnusable = this.primaryModelUsability
+      ? this.primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
+      : false;
+    const reachedThreshold =
+      this.consecutivePrimaryEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD;
+    if (!probeFlagsUnusable && !reachedThreshold) return false;
+
+    log.warn(
+      {
+        instanceName: this.instanceName,
+        primaryProvider: this.agentProvider,
+        consecutivePrimaryEmptyTurns: this.consecutivePrimaryEmptyTurns,
+        trigger: probeFlagsUnusable ? 'probe-unusable' : 'consecutive-empty-output',
+      },
+      'primary provider returned empty output — arming provider fallback',
+    );
+
+    const activation = this.activateProviderFallbackAfterTerminalResult(
+      null,
+      'auth-required',
+      session,
+      '',
+    );
+    if (!activation) return false;
+
+    const replayScheduled = this.scheduleFallbackReplay({
+      activation,
+      chatJid: queue.targetChatJid,
+      mapKey,
+      oldSession: session,
+      hadToolActivity: turnHadToolWork,
+    });
+    this.notifyProviderFallbackActivated(queue, activation, {
+      replayScheduled,
+      blockedByToolActivity: turnHadToolWork,
+    });
+    this.consecutivePrimaryEmptyTurns = 0;
+    return true;
+  }
+
   private activateProviderFallbackAfterTerminalResult(
     resetAt: Date | null,
     reason: ProviderFallbackReason,
@@ -6419,6 +6512,7 @@ export class AgentRuntime implements Runtime {
     this.lastSuccessfulTurnAt = Date.now();
     this.lastTurnErrorClass = null;
     this.lastTurnErrorAt = null;
+    this.consecutivePrimaryEmptyTurns = 0;
   }
 
   private recordTurnCapabilityFailure(
@@ -8813,6 +8907,7 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
+        let armedFallbackNow = false;
         if (!wasSilentCompact && !isSystemResult) {
           this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
           // Empty/tool-only turn: surface any still-pending handoff notice
@@ -8823,12 +8918,15 @@ export class AgentRuntime implements Runtime {
               this.recordTurnCapabilitySuccess(true);
             } else {
               this.recordTurnCapabilityFailure(true, 'empty-output');
+              armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, this.session, turnHadToolWork, undefined);
             }
           }
         }
         this.singleTurnHadToolActivity = false;
-        // If nothing visible was emitted this turn, send an explicit fallback
-        if (!this.turnHadVisibleOutput && !wasSilentCompact) {
+        // If nothing visible was emitted this turn, send an explicit fallback —
+        // unless we just armed the provider fallback (its activation notice has
+        // already informed the user and the turn is being replayed on the backup).
+        if (!this.turnHadVisibleOutput && !wasSilentCompact && !armedFallbackNow) {
           queue.enqueueText('_(no response)_');
         }
         this.turnHadVisibleOutput = false;
