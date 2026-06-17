@@ -123,6 +123,20 @@ def test_output_is_metadata_only():
     assert "alice@example.com" not in blob and "refund policy" not in blob
 
 
+def test_honest_scope_marker_is_not_authenticated():
+    """HONEST SCOPE (ocw-verify refuter finding, verified real): this gate validates STRUCTURAL
+    consistency of a DECLARED outcome, NOT its authenticity. The marker carries no binding to the chain,
+    so the SAME records accept BOTH a 'completed' and a 'failed@k' marker — i.e. an adversary can relabel
+    the outcome and this gate alone will not detect it. Unforgeability requires binding the marker into the
+    producer MAC (chain_authenticity). This test pins that boundary so the claim is not overstated."""
+    recs = _chain()
+    completed = cog.verify_outcome(recs, {"status": "completed"})
+    relabeled = cog.verify_outcome(recs, {"status": "failed", "failed_at_step": 2, "failure_class": "x"})
+    # both pass structural validation over the IDENTICAL records — the gate does not authenticate which is true
+    assert completed["overall_verdict"] == "PASS" and relabeled["overall_verdict"] == "PASS"
+    assert completed["is_partial"] is False and relabeled["is_partial"] is True
+
+
 # --- CLI e2e ------------------------------------------------------------------
 
 def _run_main(argv):

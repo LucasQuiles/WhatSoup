@@ -5,8 +5,16 @@ Closes the consensus §7 lifecycle gap "mid-chain failure (partial chain)". A ch
 ambiguous on its own: it could be (a) a normally completed plan, (b) a chain that ABORTED because step k
 failed (and so produced no record for it), or (c) a maliciously truncated chain. The terminal seal
 (`chain_lifecycle_gate`, closes F2) already rules out (c) — truncation is detected against the seal. This
-gate types the rest: it validates a declared terminal-outcome marker and makes a failure-terminated partial
-chain UNAMBIGUOUSLY distinct from a completed one.
+gate types the rest: it validates that a declared terminal-outcome marker is STRUCTURALLY CONSISTENT with
+the recorded steps (right status shape, right failure index).
+
+HONEST SCOPE (integrity, NOT authenticity — verified via adversarial review): this gate checks the
+CONSISTENCY of a DECLARED outcome; it does NOT authenticate it. The marker carries no binding to the chain,
+so the SAME k records accept both a `completed` and a `failed@k` marker — `failed_at_step == k` is trivially
+satisfiable for every k-record chain, so it cannot by itself flag a forged relabel (`completed -> failed`,
+status swap, or a stripped marker). Detecting outcome TAMPER requires binding the marker into the producer
+keyed MAC (`chain_authenticity`); the two compose — this gate is the structural-consistency check, the MAC
+is the authenticity over it. This is the same integrity-vs-authenticity boundary as the spine's F1/F3.
 
 Outcome marker: {status in [completed, failed, aborted], failed_at_step?, failure_class?}
   - completed : the chain ran to its planned end; it carries NO failure marker.
