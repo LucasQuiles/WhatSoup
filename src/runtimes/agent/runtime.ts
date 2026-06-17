@@ -277,12 +277,18 @@ const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
 /**
  * Startup grace for empty-output fallback arming. The boot/recovery sequence
  * (proactive per-chat resume → resume-fail → context-recovery / replayed turns)
- * emits empty results while the usability probe is still transiently `unknown`.
- * Arming on that noise falsely fails the bot over to the backup on every restart
- * (and persists the window, so it reloads on the next restart — an opus/sonnet
- * flap). Within this window, before the bot has proven it can serve a turn,
- * empty-output neither counts nor arms. A genuinely-dead primary still fails
- * over once the window elapses (or on the first real post-grace empty).
+ * emits empty results while the usability probe is still transiently `unknown`,
+ * which `primaryModelUsabilityRequiresAlert` treats as unusable. Arming on that
+ * noise via the single-empty probe fast-path falsely fails the bot over to the
+ * backup on every restart (and persists the window, so it reloads on the next
+ * restart — an opus/sonnet flap). Within this window, before the bot has proven
+ * it can serve a turn (`lastSuccessfulTurnAt === null`), ONLY the probe
+ * fast-path is suppressed: empty turns are still counted toward
+ * {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} so the consecutive-empty threshold can
+ * still arm (a genuinely-dead primary on real early traffic still fails over,
+ * and the per-chat replay that arms via the threshold is preserved). The
+ * fast-path is live again immediately after the window elapses or the first
+ * successful turn. See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = 60_000;
 type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
@@ -6401,7 +6407,13 @@ export class AgentRuntime implements Runtime {
         instanceName: this.instanceName,
         primaryProvider: this.agentProvider,
         consecutivePrimaryEmptyTurns: this.consecutivePrimaryEmptyTurns,
+        // `trigger` names the dominant signal (probe fast-path vs threshold);
+        // `triggeredByThreshold` is the one non-derivable observable kept beside
+        // it so a dual-arm (probe unusable AND threshold reached) stays visible —
+        // the load-bearing signal for catching a startup-flap regression on this
+        // failover path. The probe-arm fact is recoverable from `trigger` alone.
         trigger: armViaProbe ? 'probe-unusable' : 'consecutive-empty-output',
+        triggeredByThreshold: reachedThreshold,
       },
       'primary provider returned empty output — arming provider fallback',
     );
