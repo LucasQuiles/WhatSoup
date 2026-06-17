@@ -42,7 +42,7 @@ describe('ErrorBoundary', () => {
     expect(app).toContain('element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>}')
     expect(app).toContain('element={<ErrorBoundary><LineDetail /></ErrorBoundary>}')
     expect(app).toContain('element={<ErrorBoundary><Inbox /></ErrorBoundary>}')
-    expect(app).toContain('element={<ErrorBoundary><Ops /></ErrorBoundary>}')
+    expect(app).toContain('element={<ErrorBoundary><Operator /></ErrorBoundary>}')
 
     // The error fallback surface is the Card primitive (DD-38 no-card-recipe
     // migration replaced the raw `c-card` recipe class with <Card>).

@@ -15,7 +15,7 @@ const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
 const Metrics = lazy(() => import('./pages/Metrics'))
-const Ops = lazy(() => import('./pages/Ops'))
+const Operator = lazy(() => import('./pages/Operator'))
 const Landing = lazy(() => import('./pages/Landing'))
 
 // Modal code splitting — loaded only when opened
@@ -96,7 +96,8 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
               <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
               <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
               <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
-              <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
+              <Route path="/operator" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
+              <Route path="/ops" element={<Navigate to="/operator" replace />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

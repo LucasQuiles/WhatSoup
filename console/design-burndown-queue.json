@@ -240,7 +240,7 @@
           ]
         },
         {
-          "path": "src/pages/Ops.tsx",
+          "path": "src/pages/Operator.tsx",
           "count": 1,
           "lines": [
             345

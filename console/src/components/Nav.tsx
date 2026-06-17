@@ -67,7 +67,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         </span>
       </div>
 
-      {/* Stacked primary nav items (Fleet / Inbox / Ops). Scroll-owner so a short
+      {/* Stacked primary nav items (Fleet / Inbox / Metrics / Operator). Scroll-owner so a short
           viewport keeps the nameplate pinned and the bottom dock reachable. */}
       <div className="soup-rail__scroll">
         <div className="soup-rail__nav">
@@ -116,11 +116,11 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           </NavLink>
 
           <NavLink
-            to="/ops"
+            to="/operator"
             className={({ isActive }) => railItemClass(isActive)}
           >
             <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
-            <RailLabel>Ops</RailLabel>
+            <RailLabel>Operator</RailLabel>
           </NavLink>
         </div>
       </div>

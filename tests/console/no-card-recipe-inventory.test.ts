@@ -32,7 +32,7 @@ const ALLOWLIST = new Set<string>([
   'console/src/components/line-detail/ScheduledMessageRow.tsx',
   'console/src/components/line-detail/SummaryTab.tsx',
   'console/src/pages/Inbox.tsx',
-  'console/src/pages/Ops.tsx',
+  'console/src/pages/Operator.tsx',
   'console/src/pages/SoupKitchen.tsx',
   // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx
 ])

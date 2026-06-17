@@ -59,7 +59,7 @@ describe('Nav routing targets', () => {
     expect(navLink('Fleet').getAttribute('href')).toBe('/');
     expect(navLink('Inbox').getAttribute('href')).toBe('/inbox');
     expect(navLink('Metrics').getAttribute('href')).toBe('/metrics');
-    expect(navLink('Ops').getAttribute('href')).toBe('/ops');
+    expect(navLink('Operator').getAttribute('href')).toBe('/operator');
   });
 });
 
@@ -82,7 +82,7 @@ describe('Nav route state', () => {
     expectCurrentLink('Inbox');
     expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Metrics').getAttribute('aria-current')).toBeNull();
-    expect(navLink('Ops').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Operator').getAttribute('aria-current')).toBeNull();
   });
 
   it('marks Metrics current only on the metrics route', () => {
@@ -91,13 +91,13 @@ describe('Nav route state', () => {
     expectCurrentLink('Metrics');
     expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
-    expect(navLink('Ops').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Operator').getAttribute('aria-current')).toBeNull();
   });
 
-  it('marks Ops current only on the ops route', () => {
-    renderNav({}, '/ops');
+  it('marks Operator current only on the operator route', () => {
+    renderNav({}, '/operator');
 
-    expectCurrentLink('Ops');
+    expectCurrentLink('Operator');
     expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
     expect(navLink('Metrics').getAttribute('aria-current')).toBeNull();
@@ -113,9 +113,9 @@ describe('Nav route state', () => {
   });
 
   it('marks the active item with a full accent fill (not a bar or bottom underline)', () => {
-    renderNav({}, '/ops');
+    renderNav({}, '/operator');
 
-    const active = navLink('Ops');
+    const active = navLink('Operator');
     // Full-row accent fill with dark accent-fg text/icon — showcase-accurate.
     expect(active.className).toContain('bg-[var(--accent)]');
     expect(active.className).toContain('text-[var(--accent-fg)]');
@@ -151,7 +151,7 @@ describe('Nav rail structure', () => {
     expect(navLink('Fleet').className).toContain('soup-rail__item');
     expect(navLink('Inbox').className).toContain('soup-rail__item');
     expect(navLink('Metrics').className).toContain('soup-rail__item');
-    expect(navLink('Ops').className).toContain('soup-rail__item');
+    expect(navLink('Operator').className).toContain('soup-rail__item');
   });
 
   it('docks the secondary controls (theme toggle + status) at the bottom of the rail', () => {
@@ -180,7 +180,7 @@ describe('Nav unread badge placement', () => {
     expect(within(navLink(/Inbox/)).getByText('7')).toBeDefined();
     expect(within(navLink('Fleet')).queryByText('7')).toBeNull();
     expect(within(navLink('Metrics')).queryByText('7')).toBeNull();
-    expect(within(navLink('Ops')).queryByText('7')).toBeNull();
+    expect(within(navLink('Operator')).queryByText('7')).toBeNull();
   });
 
   it('uses the action accent, not warning status color, for unread count badges', () => {

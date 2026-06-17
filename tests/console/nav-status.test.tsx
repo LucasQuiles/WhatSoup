@@ -47,7 +47,7 @@ describe('Nav — navigation links', () => {
     renderNav();
     expect(screen.getByText('Fleet')).toBeDefined();
     expect(screen.getByText('Inbox')).toBeDefined();
-    expect(screen.getByText('Ops')).toBeDefined();
+    expect(screen.getByText('Operator')).toBeDefined();
   });
 
   it('renders nav element with correct aria label', () => {

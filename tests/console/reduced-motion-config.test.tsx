@@ -115,7 +115,7 @@ vi.mock('../../console/src/pages/LineDetail', () => ({
 vi.mock('../../console/src/pages/Inbox', () => ({
   default: () => createElement('div', { 'data-testid': 'page-inbox' }, 'Inbox'),
 }));
-vi.mock('../../console/src/pages/Ops', () => ({
+vi.mock('../../console/src/pages/Operator', () => ({
   default: () => createElement('div', { 'data-testid': 'page-ops' }, 'Ops'),
 }));
 vi.mock('../../console/src/components/UpdateModal', () => ({
