@@ -212,3 +212,36 @@ def test_fail_open_on_classifier_error(tmp_path):
 
     assert sent == 1  # fell through to send despite classifier error
     assert key in _open_incidents(mod)
+
+
+# ---------------------------------------------------------------------------
+# T6: stale incident with a failure_code but only the "verify if recovered"
+#     filler action (e.g. daily-health provider_probe, operator_recoverable) is
+#     non-actionable and suppressed — NOT kept alive as actionable just because
+#     stale_incident_event baked a criticalAsset.operatorAction.
+# ---------------------------------------------------------------------------
+
+def test_stale_verify_filler_with_failure_code_is_suppressed(tmp_path):
+    mod = _load(tmp_path)
+    now = int(time.time())
+    key = "host-a|instance-x|daily-health:provider_probe:q:provider_probe_failed"
+    _write_state(mod, {
+        key: {
+            "status": "stale",
+            "openedAt": now - 5 * 86400,
+            "lastSeenAt": now - 5 * 86400,
+            "lastSummary": "BOT ERRORS daily health found issues",
+            "failureCode": "AGENT_PROVIDER_PROBE_FAILED",
+            "recoverability": "operator_recoverable",
+            "assetKind": "agent_provider",
+            "clearRequirement": "daily-health clear after the provider probe succeeds",
+        },
+    })
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0
+    # past escalate horizon (5d > 1d default) -> consolidated auto-close summary
+    assert len(sends) == 1
+    assert "Auto-closed" in sends[0]
+    assert key not in _open_incidents(mod)
