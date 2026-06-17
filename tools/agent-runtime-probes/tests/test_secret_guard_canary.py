@@ -923,6 +923,35 @@ def test_main_function_max_observability_files_arg():
     assert report["historical_observability_correlation"]["max_files"] == 5
 
 
+def test_safe_tool_label_exactly_80_chars_passes_through_not_hashed():
+    # The length cap is the STRICT `len(value) > 80`: a value of EXACTLY 80 chars (no slash) is
+    # within the cap and passes through redact, not hashed. The existing overlong test uses 81
+    # (hashed by both > and >=), so it cannot exercise the boundary. A >= weakening would hash an
+    # at-cap value.
+    result = safe_tool_label("A" * 80)
+    assert result is not None
+    assert not result.startswith("tool_hash:"), f"80-char value should pass through, got: {result}"
+
+
+def test_guard_bundle_summary_read_only_matcher_covers_read_not_bash():
+    # present_covers_read = `any(matcher == "Read")`: a bundle whose ONLY pretool matcher is Read
+    # must report present_covers_read True and present_covers_bash False. The existing tests assert
+    # the Bash side (True) and the empty side (both False), but never present_covers_read True in
+    # isolation — so a != weakening of the Read comparison survives.
+    orig_load = probe.load_json
+    probe.load_json = lambda path: {
+        "hooks": {"PreToolUse": [
+            {"matcher": "Read", "hooks": [{"command": "echo r", "type": "interceptor"}]},
+        ]}
+    }
+    try:
+        result = guard_bundle_summary()
+        assert result["present_covers_read"] is True
+        assert result["present_covers_bash"] is False
+    finally:
+        probe.load_json = orig_load
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
