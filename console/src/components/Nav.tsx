@@ -38,14 +38,14 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     <nav
       role="navigation"
       aria-label="Main navigation"
-      className="bg-d1 flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-3)] sm:px-[var(--sp-5)] c-border-b gap-[var(--sp-3)] sm:gap-[var(--sp-6)] min-w-0"
+      className="bg-surface-inset flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-3)] sm:px-[var(--sp-5)] c-border-b gap-[var(--sp-3)] sm:gap-[var(--sp-6)] min-w-0"
     >
       {/* Left cluster: logo + nav items */}
       <div className="flex items-center gap-[var(--sp-2)] sm:gap-[var(--sp-6)] min-w-0">
         <span
           className="text-xl font-sans font-black select-none tracking-[var(--tracking-tighter)]"
         >
-          <span className="text-t2">What</span>
+          <span className="text-text-2">What</span>
           <span className="text-s-ok">Soup</span>
         </span>
 
@@ -54,8 +54,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           aria-current={isFleetActive ? 'page' : undefined}
           className={`text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
             isFleetActive
-              ? "text-t1 bg-d4"
-              : "text-t4 hover:text-t2"
+              ? "text-text-1 bg-btn-neutral-bg"
+              : "text-text-2 hover:text-text-2"
           }`}
         >
           <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
@@ -77,8 +77,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           className={({ isActive }) =>
             `text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
               isActive
-                ? "text-t1 bg-d4"
-                : "text-t4 hover:text-t2"
+                ? "text-text-1 bg-btn-neutral-bg"
+                : "text-text-2 hover:text-text-2"
             }`
           }
         >
@@ -116,8 +116,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           className={({ isActive }) =>
             `text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
               isActive
-                ? "text-t1 bg-d4"
-                : "text-t4 hover:text-t2"
+                ? "text-text-1 bg-btn-neutral-bg"
+                : "text-text-2 hover:text-text-2"
             }`
           }
         >
@@ -146,7 +146,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           onClick={toggleTheme}
           label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
           icon={theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
-          className="flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-t4 hover:text-t2"
+          className="flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-text-2 hover:text-text-2"
         />
         {connected ? (
           <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
@@ -154,16 +154,16 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
             <span className="hidden md:inline">Live</span>
           </span>
         ) : (
-          <span className="flex items-center gap-1 text-t2" title="Polling (WebSocket disconnected)">
+          <span className="flex items-center gap-1 text-text-2" title="Polling (WebSocket disconnected)">
             <WifiOff size={12} strokeWidth={1.75} />
             <span className="hidden md:inline">Polling</span>
           </span>
         )}
-        <span className="text-t5 hidden md:inline">|</span>
+        <span className="text-text-3 hidden md:inline">|</span>
         {alertCount === 0 ? (
           <>
             <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok" />
-            <span className="text-t4 hidden md:inline">All systems operational</span>
+            <span className="text-text-2 hidden md:inline">All systems operational</span>
           </>
         ) : (
           <>
@@ -186,18 +186,18 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span>{version} → {remoteSha}</span>
             </Button>
           ) : (
-            <span className="text-t5 hidden md:inline" title={`Version ${version}`}>
+            <span className="text-text-3 hidden md:inline" title={`Version ${version}`}>
               v{version}
             </span>
           )
         )}
         {onLogout && (
           <>
-            <span className="text-t5">|</span>
+            <span className="text-text-3">|</span>
             <Button
               variant="ghost"
               onClick={onLogout}
-              className="flex items-center gap-1 c-hover cursor-pointer text-t4 hover:text-t2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)]"
+              className="flex items-center gap-1 c-hover cursor-pointer text-text-2 hover:text-text-2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)]"
               title="Lock console (revoke session)"
               aria-label="Lock console"
               icon={<LogOut size={14} strokeWidth={1.75} />}
