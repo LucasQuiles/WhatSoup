@@ -372,6 +372,72 @@ def test_error_exit_code_for_missing_file():
     assert "_error" in report
 
 
+def test_error_exit_code_for_malformed_capture():
+    """CLI exits nonzero on MALFORMED (not just missing) input. The exit guard is
+    `"_error" in report or error_type == "missing_input"`; a malformed-JSON report carries
+    `_error` with error_type="malformed_input", so the load-bearing disjunct HERE is the
+    `"_error" in report` term — the missing-file test cannot exercise it because a missing
+    file satisfies BOTH terms. A guard that required error_type=="missing_input" too would
+    exit 0 on malformed input (a fail-open CI exit code), masking a degraded run."""
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        f.write(MALFORMED_JSON)
+        path = Path(f.name)
+    try:
+        rc, report = _run_main_with_capture(path)
+    finally:
+        path.unlink(missing_ok=True)
+    assert rc != 0, "CLI must exit nonzero on malformed input, not just missing input"
+    assert report.get("error_type") == "malformed_input"
+    assert "_error" in report
+
+
+def test_message_delta_usage_wins_over_later_message_stop_usage():
+    """Provenance precedence: message_delta carries the authoritative final cumulative usage;
+    a later message_stop usage is a FALLBACK only (used iff no delta usage was seen — the guard
+    is `isinstance(su, dict) and delta_usage is None`). A stream with BOTH must report the
+    message_delta figures, never let message_stop clobber them. (Mutating the guard's `and` to
+    `or` would overwrite the authoritative delta usage with the trailing message_stop usage.)"""
+    data = "\n".join([
+        json.dumps({"type": "message_delta", "usage": {"input_tokens": 1000,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                    "output_tokens": 50}}),
+        json.dumps({"type": "message_stop", "usage": {"input_tokens": 9999,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                    "output_tokens": 9999}}),
+    ]) + "\n"
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        f.write(data)
+        path = Path(f.name)
+    try:
+        report = probe.build_report(path)
+    finally:
+        path.unlink(missing_ok=True)
+    assert report["input_tokens"] == 1000, "message_stop usage clobbered authoritative message_delta usage"
+    assert report["output_tokens"] == 50
+
+
+def test_message_start_without_usage_does_not_crash():
+    """Defensive parse: a message_start whose `message` is a dict but carries NO usage field
+    must be skipped, not indexed. The guard `isinstance(msg, dict) and isinstance(msg.get(
+    "usage"), dict)` short-circuits BEFORE `msg["usage"]`; weakening the `and` to `or` would
+    index a missing key (KeyError) on otherwise-valid provider output. The stream still has a
+    real message_delta usage, so the report must build cleanly and report those figures."""
+    data = "\n".join([
+        json.dumps({"type": "message_start", "message": {"id": "msg_x"}}),  # no usage key
+        json.dumps({"type": "message_delta", "usage": {"input_tokens": 1234,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                    "output_tokens": 7}}),
+    ]) + "\n"
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
+        f.write(data)
+        path = Path(f.name)
+    try:
+        report = probe.build_report(path)  # must NOT raise
+    finally:
+        path.unlink(missing_ok=True)
+    assert report["input_tokens"] == 1234
+
+
 def test_zero_total_tokens_hit_fraction_unknown():
     """All buckets 0 → hit fraction is 'unknown' (avoid division by zero)."""
     data = json.dumps({"usage": {
