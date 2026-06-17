@@ -4,7 +4,9 @@
 :root {
   /* ═══ Layout constants ═══ */
   --toolbar-h: 50px;         /* toolbar row min-height (nav is 52px) */
-  --nav-h: 52px;             /* top nav bar height */
+  --nav-h: 52px;             /* top nav bar height (legacy top-bar chrome; retained for toolbar parity) */
+  --rail-w: 220px;           /* vertical left-rail chrome width — expanded (label-bearing) state */
+  --rail-w-collapsed: 64px;  /* vertical left-rail chrome width — narrow/icon-only collapse */
   /* ═══ Element sizes — from design spec §2 ═══ */
   --dot-table: 8px;          /* status dot in tables */
   --dot-feed: 6px;           /* status dot in feeds */

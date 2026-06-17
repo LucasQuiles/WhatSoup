@@ -305,6 +305,7 @@ promoted from v2 + the legacy census:
 | `--drawer-w` | `min(360px, 86%)` | Drawer |
 | `--modal-w-sm` / `--modal-w-md` / `--modal-w-lg` | 480px / 560px / 720px | Modal (lg carries the legacy wizard width) |
 | `--panel-side-w` | 320px | Fleet dashboard side column |
+| `--rail-w` / `--rail-w-collapsed` | 220px / 64px | Nav left rail (vertical app chrome; collapsed = narrow/icon-only state, decision-log "top bar → left rail") |
 | `--inbox-pane-chats` / `--inbox-pane-contact` | 264px / 248px | Inbox |
 | `--chart-panel-h` / `--chart-panel-h-expanded` | 140px / 240px | ChartPanel |
 | `--pipeline-node-pad-y` | 5px | PipelineNode |

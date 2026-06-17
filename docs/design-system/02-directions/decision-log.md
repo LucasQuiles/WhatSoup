@@ -199,3 +199,33 @@ same lock) before any code consumes them. G7 expands to include the channel-agno
 a visible-copy guard (`no-channel-specific-copy`, or the equivalent vocabulary-drift extension) with
 allowlists for protected protocol/system-prompt contexts. Reference exploration: a standalone identity
 showcase (both themes) — not wired to the product.
+
+## App chrome — top bar → vertical left rail — APPROVED
+
+User-approved IA restructure: the console app chrome is promoted from a horizontal **top bar** to a
+vertical **left rail**. This supersedes the earlier "reskin, not restructure" stance (research-digest
+§5 "keep the shallow IA"; layout-density §9 "this program reskins, it does not restructure IA") for
+the chrome specifically — the showcase left-rail treatment is now spec, not reference-only.
+
+Decision, locked:
+
+1. **Chrome is a vertical left rail.** The `<nav>` becomes a fixed-width vertical column docked to the
+   left of `<main>` (App shell flips `flex-col` → `flex-row`). Width is the new `--rail-w` component
+   token (220px expanded), registered in tokens-v3 §4.
+2. **Nameplate top, controls bottom.** The SOUP nameplate docks at the rail top; the primary nav items
+   (Fleet / Inbox / Ops) stack below as icon+label rows; a flex spacer pushes the secondary controls
+   (theme toggle, realtime status, version, logout) to the rail bottom.
+3. **Active item = left-edge accent bar.** The active-route indicator moves from a horizontal bottom
+   underline to a **left-edge vertical accent bar** (`--bw-accent` × action accent), inset by the row
+   radius. Accent semantics are unchanged (action accent, never a status channel).
+4. **Surface and edge unchanged in role.** The rail keeps the chrome surface posture: `surface-inset`
+   (one ladder notch below content, research-digest §5 "chrome recedes") with a hairline right edge
+   (`c-border-r`, replacing the former `c-border-b`).
+5. **Narrow viewport collapses to icon-only.** At ≤760px the rail collapses to `--rail-w-collapsed`
+   (64px): labels go visually hidden (icon + aria/title carry meaning), so it never overflows a phone
+   viewport and `<main>` keeps its width. Reduced height is owned by an internal scroll region
+   (scroll-owner law) so the nameplate stays pinned and the dock stays reachable.
+
+Scope guard: the destinations are unchanged (Fleet / Inbox / Ops + line-detail) — no new Metrics or
+Operator pages were added (the showcase shows them as future candidates; they remain out of scope).
+The `/welcome` Landing route stays full-screen, outside the rail shell.
