@@ -32,6 +32,7 @@ import { FleetMetricsChart } from "../components/FleetMetricsChart";
 import { FleetTokenChart } from "../components/FleetTokenChart";
 import { FleetSessionChart } from "../components/FleetSessionChart";
 import LineTags from "../components/LineTags";
+import FleetRowMenu from "../components/FleetRowMenu";
 import { formatRelative } from "../lib/format-time";
 import {
   formatPhone,
@@ -95,8 +96,8 @@ type SortKey =
   | "active"
   | null;
 
-/** Column count for colSpan states. */
-const COL_COUNT = 12;
+/** Column count for colSpan states (includes the trailing Actions column). */
+const COL_COUNT = 13;
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
 
@@ -348,6 +349,14 @@ const SoupKitchen: FC = () => {
 
   const lines = lineData ?? EMPTY_LINES;
   const feed = feedData ?? EMPTY_FEED;
+
+  // Capability gate for per-row lifecycle actions (Restart / Stop / Delete).
+  // The console is already gated behind the session-unlock screen (see
+  // useConsoleSession); any reachable operator may manage lines, so the fleet
+  // table exposes the row-action Menu. Surfaced as a single boolean — mirroring
+  // ActivityFeed's `canAct` — so the menu is hidden wholesale when the
+  // capability is withheld, and the gate has one obvious place to tighten.
+  const canManageLines = true;
   const fleetLoadError = linesError || feedError;
   const feedLoadErrorMessage = feedQueryError?.message ?? "Unable to load activity feed";
   const fleetLoadErrorMessage =
@@ -880,6 +889,11 @@ const SoupKitchen: FC = () => {
                     >
                       Active
                     </TableHeaderCell>
+                    {/* Trailing actions column — per-row overflow Menu. Not
+                        sortable; header label is screen-reader only. */}
+                    <TableHeaderCell>
+                      <span className="sr-only">Actions</span>
+                    </TableHeaderCell>
                   </tr>
                 </TableHeader>
 
@@ -1031,6 +1045,13 @@ const SoupKitchen: FC = () => {
                                 <EM_DASH />
                               )}
                             </span>
+                          </TableCell>
+                          {/* Trailing actions — per-row overflow Menu
+                              (Restart / Stop / Delete). Gated behind canAct so
+                              an operator without the capability sees no menu,
+                              mirroring ActivityFeed's per-row action gate. */}
+                          <TableCell>
+                            <FleetRowMenu name={line.name} canAct={canManageLines} />
                           </TableCell>
                         </TableRow>
                       );

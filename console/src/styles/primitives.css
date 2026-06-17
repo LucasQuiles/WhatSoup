@@ -1920,6 +1920,31 @@ button.soup-pill[aria-disabled="true"] {
   outline-offset: 2px;
 }
 
+/* Icon-only kebab trigger — square hit area, ghost treatment (reuses the
+   --input-btn 28px icon-button token, same recipe as .soup-actbtn). Used for
+   the per-row overflow menu on the fleet table (showcase §22 row actions). */
+.soup-menu-trigger--icon {
+  gap: 0;
+  padding: 0;
+  justify-content: center;
+  min-width: var(--input-btn);
+  min-height: var(--input-btn);
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.soup-menu-trigger--icon:hover {
+  border-color: var(--border-hairline);
+  color: var(--text-1);
+}
+
+/* Right-docks the kebab in the row's trailing action cell. */
+.soup-menu-trigger-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 /* --------------------------------------------------------------------------
    INBOX LAYOUT BAND — soup-inbox-layout / soup-inbox-contact (DD-18r)
    Container query root: the Inbox page flex root carries container-type so
