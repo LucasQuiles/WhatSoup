@@ -27,7 +27,14 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { clearAlertSource, emitAlert, observeAlertEmission, resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
+import {
+  clearAlertSource,
+  clearAlertSourceChecked,
+  emitAlert,
+  emitAlertChecked,
+  observeAlertEmission,
+  resetEmitAlertThrottle,
+} from '../../src/lib/emit-alert.ts';
 import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
@@ -74,11 +81,15 @@ function readOnlyWritefail() {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.doUnmock('../../src/lib/bot-errors-outbox.ts');
+  vi.resetModules();
   if (outboxDir) rmSync(outboxDir, { recursive: true, force: true });
   if (writefailDir) rmSync(writefailDir, { recursive: true, force: true });
   delete process.env['BOT_ERRORS_OUTBOX_DIR'];
   delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
   delete process.env['BOT_ERRORS_STATE_DIR'];
+  delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
   delete process.env['EMIT_ALERT_THROTTLE_MS'];
 });
 
@@ -358,6 +369,24 @@ describe('emitAlert', () => {
     );
   });
 
+  it('suppresses repeated missing-target configuration warnings', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['BOT_ERRORS_EXPECTED_JID'];
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed once');
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted again', 'crashed twice');
+
+    const targetConfigWarnings = loggerWarn.mock.calls.filter(([, message]) => (
+      message === 'BOT_ERRORS_JID not configured; legacy alert helper disabled'
+    ));
+    expect(targetConfigWarnings.length).toBeLessThanOrEqual(1);
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { instance: 'whatsoup-prod', source: 'agent_respawn_failed' },
+      'alert emission failed; legacy alert target not configured',
+    );
+  });
+
   it('refuses legacy fallback when BOT_ERRORS_JID is not a group JID', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
     process.env['BOT_ERRORS_JID'] = '15551234567@s.whatsapp.net';
@@ -374,6 +403,20 @@ describe('emitAlert', () => {
       { instance: 'whatsoup-prod', source: 'agent_respawn_failed' },
       'alert emission failed; legacy alert target not configured',
     );
+  });
+
+  it('suppresses repeated invalid-target configuration warnings', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = 'not-a-group';
+    process.env['BOT_ERRORS_EXPECTED_JID'] = 'not-a-group';
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed once');
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted again', 'crashed twice');
+
+    const invalidTargetWarnings = loggerWarn.mock.calls.filter(([, message]) => (
+      message === 'BOT_ERRORS_JID is not a WhatsApp group JID; legacy alert helper disabled'
+    ));
+    expect(invalidTargetWarnings.length).toBeLessThanOrEqual(1);
   });
 
   it('refuses legacy fallback when BOT_ERRORS_JID drifts from BOT_ERRORS_EXPECTED_JID', () => {
@@ -394,6 +437,20 @@ describe('emitAlert', () => {
     );
   });
 
+  it('suppresses repeated drifted-target configuration warnings', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID.replace('000', '999');
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed once');
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted again', 'crashed twice');
+
+    const driftWarnings = loggerWarn.mock.calls.filter(([, message]) => (
+      message === 'BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID; legacy alert helper disabled'
+    ));
+    expect(driftWarnings.length).toBeLessThanOrEqual(1);
+  });
+
   it('refuses legacy fallback when BOT_ERRORS_EXPECTED_JID is missing by default', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
     process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
@@ -411,6 +468,21 @@ describe('emitAlert', () => {
       { instance: 'whatsoup-prod', source: 'agent_respawn_failed' },
       'alert emission failed; legacy alert target not configured',
     );
+  });
+
+  it('suppresses repeated missing-expected-target configuration warnings', () => {
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    delete process.env['BOT_ERRORS_EXPECTED_JID'];
+    delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed once');
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted again', 'crashed twice');
+
+    const missingExpectedWarnings = loggerWarn.mock.calls.filter(([, message]) => (
+      message === 'BOT_ERRORS_EXPECTED_JID not configured; legacy alert helper disabled'
+    ));
+    expect(missingExpectedWarnings.length).toBeLessThanOrEqual(1);
   });
 
   it('allows legacy fallback without BOT_ERRORS_EXPECTED_JID only when explicitly disabled', () => {
@@ -481,6 +553,94 @@ describe('emitAlert — in-process throttle (legacy fallback path)', () => {
     expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
   });
 
+  it('uses the module default throttle when runtime env is non-finite', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = 'not-a-number';
+
+    emitAlert('inst', 'src', 'summary', 'evidence 1');
+    emitAlert('inst', 'src', 'summary', 'evidence 2');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('prunes expired throttle entries before accepting a new legacy fallback', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '10';
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValueOnce(1_000).mockReturnValueOnce(1_011);
+
+    emitAlert('inst', 'src', 'summary', 'evidence 1');
+    emitAlert('inst', 'src', 'summary', 'evidence 2');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs legacy helper exits that fail by code or signal', () => {
+    emitAlert('inst', 'src', 'summary', 'evidence');
+    const child = spawnedChild();
+
+    child?.emit('exit', 1, null);
+    child?.emit('exit', 0, 'SIGTERM');
+    child?.emit('exit', 0, null);
+
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { instance: 'inst', source: 'src', exitCode: 1, signal: null },
+      'alert emission failed; legacy helper exited non-zero or via signal',
+    );
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { instance: 'inst', source: 'src', exitCode: 0, signal: 'SIGTERM' },
+      'alert emission failed; legacy helper exited non-zero or via signal',
+    );
+  });
+
+  it('returns a failed fallback result when legacy spawn throws', () => {
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw new Error('spawn denied');
+    });
+
+    const result = emitAlert('inst', 'src', 'summary', 'evidence');
+
+    expect(result).toMatchObject({
+      ok: false,
+      channel: 'none',
+      status: 'failed',
+      legacy: {
+        attempted: true,
+        accepted: false,
+        reason: 'spawn_failed',
+        error: 'spawn denied',
+      },
+      outboxError: expect.any(String),
+    });
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { instance: 'inst', source: 'src', err: 'spawn denied' },
+      'alert emission failed; legacy helper failed',
+    );
+  });
+
+  it('stringifies non-Error legacy spawn failures', () => {
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw 'spawn denied string';
+    });
+
+    const result = emitAlert('inst', 'src', 'summary', 'evidence');
+
+    expect(result).toMatchObject({
+      ok: false,
+      channel: 'none',
+      status: 'failed',
+      legacy: {
+        attempted: true,
+        accepted: false,
+        reason: 'spawn_failed',
+        error: 'spawn denied string',
+      },
+      outboxError: expect.any(String),
+    });
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { instance: 'inst', source: 'src', err: 'spawn denied string' },
+      'alert emission failed; legacy helper failed',
+    );
+  });
+
   it('killSignal: SIGKILL is present in the spawn options', () => {
     emitAlert('inst', 'src', 'summary', 'evidence');
 
@@ -508,6 +668,65 @@ describe('BOT ERRORS alert emission governance', () => {
       });
 
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('emitAlert module initialization', () => {
+  it('honors a finite default throttle value captured at import time', async () => {
+    vi.clearAllMocks();
+    loggerWarn.mockClear();
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '-5';
+    vi.resetModules();
+    const { emitAlert: emitWithImportedThrottle, resetEmitAlertThrottle: resetImportedThrottle } = await import('../../src/lib/emit-alert.ts');
+    resetImportedThrottle();
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    writefailDir = writefailDir || mkdtempSync(join(tmpdir(), 'bot-errors-writefail-'));
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'] = writefailDir;
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    delete process.env['EMIT_ALERT_THROTTLE_MS'];
+
+    emitWithImportedThrottle('inst', 'src', 'summary', 'evidence 1');
+    emitWithImportedThrottle('inst', 'src', 'summary', 'evidence 2');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('emitAlert non-Error outbox failures', () => {
+  it('stringifies non-Error outbox failures for alert and clear fallback results', async () => {
+    vi.clearAllMocks();
+    loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    vi.resetModules();
+    vi.doMock('../../src/lib/bot-errors-outbox.ts', () => ({
+      writeBotErrorsEvent: vi.fn((input: { eventType: string }) => {
+        throw `${input.eventType} string failure`;
+      }),
+    }));
+    const {
+      clearAlertSource: clearWithStringFailure,
+      emitAlert: emitWithStringFailure,
+    } = await import('../../src/lib/emit-alert.ts');
+
+    const alert = emitWithStringFailure('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed');
+    const clear = clearWithStringFailure('whatsoup-prod', 'agent_respawn_failed');
+
+    expect(alert).toMatchObject({
+      ok: true,
+      channel: 'legacy',
+      status: 'legacy_accepted_unconfirmed',
+      outboxError: 'alert string failure',
+    });
+    expect(clear).toMatchObject({
+      ok: true,
+      channel: 'legacy',
+      status: 'legacy_accepted_unconfirmed',
+      outboxError: 'clear string failure',
+    });
   });
 });
 
@@ -639,6 +858,45 @@ describe('clearAlertSource', () => {
     );
   });
 
+  it('returns true without warning when callers observe a durable outbox result', () => {
+    const result = emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+    expect(observeAlertEmission(result, {
+      instance: 'whatsoup-prod',
+      source: 'agent_respawn_failed',
+      operation: 'alert',
+    })).toBe(true);
+    expect(loggerWarn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'outbox' }),
+      expect.any(String),
+    );
+  });
+
+  it('logs legacy observation even when the accepted flag is absent', () => {
+    const ok = observeAlertEmission({
+      ok: true,
+      channel: 'legacy',
+      status: 'legacy_accepted_unconfirmed',
+    }, {
+      instance: 'whatsoup-prod',
+      source: 'agent_respawn_failed',
+      operation: 'alert',
+    });
+
+    expect(ok).toBe(true);
+    expect(loggerWarn).toHaveBeenCalledWith(
+      {
+        instance: 'whatsoup-prod',
+        source: 'agent_respawn_failed',
+        operation: 'alert',
+        channel: 'legacy',
+        status: 'legacy_accepted_unconfirmed',
+        legacyAccepted: false,
+      },
+      'bot-errors legacy helper accepted alert; delivery is unconfirmed',
+    );
+  });
+
   it('returns false when callers observe a total emission failure', () => {
     process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
     existsSyncMock.mockReturnValue(false);
@@ -664,5 +922,29 @@ describe('clearAlertSource', () => {
       },
       'bot-errors alert emission failed in every channel',
     );
+  });
+
+  it('checked wrappers observe default alert severity and clear evidence', () => {
+    expect(emitAlertChecked('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times')).toBe(true);
+    expect(clearAlertSourceChecked('whatsoup-prod', 'agent_respawn_failed')).toBe(true);
+
+    const events = readdirSync(outboxDir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(join(outboxDir, file), 'utf8')) as Record<string, unknown>);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: 'alert',
+        severity: 'critical',
+        instance: 'whatsoup-prod',
+        source: 'agent_respawn_failed',
+      }),
+      expect.objectContaining({
+        eventType: 'clear',
+        severity: 'info',
+        instance: 'whatsoup-prod',
+        source: 'agent_respawn_failed',
+        evidence: 'repair_lane:whatsoup-prod',
+      }),
+    ]));
   });
 });
