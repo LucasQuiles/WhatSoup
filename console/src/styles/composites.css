@@ -1056,3 +1056,37 @@ input, textarea {
     scroll-behavior: auto !important;
   }
 }
+
+/* ═══ Bulk action bar — sticky multi-row action surface (showcase §17). ═══
+   Floats above the fleet table when ≥1 row is selected. Renders only when
+   count > 0 (the component returns null otherwise, so the parent does not
+   need a render-gate). Tokens only: --sp-* padding, --bw hairline border,
+   --surface-raised fill, --z-float when it floats. */
+.soup-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-1);
+}
+
+.soup-bulk-bar__count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  color: var(--text-1);
+}
+
+.soup-bulk-bar__spring {
+  flex: 1 1 auto;
+}
+
+.soup-bulk-bar__divider {
+  width: var(--bw);
+  align-self: stretch;
+  background: var(--border-hairline);
+  margin: 0 var(--sp-1);
+}

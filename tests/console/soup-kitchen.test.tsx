@@ -268,15 +268,15 @@ function alertBanner(): HTMLElement | null {
  * Return the list of line names visible in the instance table, preserving
  * the order produced by the component. Scoped to <tbody>.
  *
- * C2.3 change: "Line" is now col 0 (StatusCell renders name text inside it).
- * Old col index was 1; new col index is 0.
+ * Column layout: col 0 is the bulk-select checkbox, col 1 is "Line" (StatusCell
+ * renders the name text inside it). The Line cell index is 1.
  */
 function visibleTableLineNames(lines: LineInstance[]): string[] {
   const known = new Map(lines.map((line) => [displayInstanceName(line.name), line.name]));
   return tableRows()
     .map((row) => {
-      // Col 0 now holds the StatusCell + name label.
-      const lineCell = tableCell(row, 0);
+      // Col 1 holds the StatusCell + name label (col 0 is the select checkbox).
+      const lineCell = tableCell(row, 1);
       for (const [displayName, rawName] of known) {
         if (within(lineCell).queryByText(displayName)) return rawName;
       }
@@ -436,12 +436,13 @@ describe('SoupKitchen instance table rendering', () => {
     }
   });
 
-  it('renders a StatusCell in col 0 of each data row (shape law)', () => {
+  it('renders a StatusCell in the Line column (col 1) of each data row (shape law)', () => {
     renderPage({ lines });
     // StatusCell renders soup-status-cell class. Assert at least one per row.
     // This is a shape-law check — does NOT assert color (visual only).
+    // Col 0 is the bulk-select checkbox; the StatusCell/Line is col 1.
     for (const row of tableRows()) {
-      const cell = tableCell(row, 0);
+      const cell = tableCell(row, 1);
       // StatusCell renders a span.soup-status-cell containing a shape span + label
       expect(cell.querySelector('.soup-status-cell')).not.toBeNull();
     }
@@ -467,18 +468,18 @@ describe('SoupKitchen instance table rendering', () => {
 
   it('shows totalSessions for agent-mode rows and em-dash for non-agent rows', () => {
     renderPage({ lines });
-    // Sessions is col 8 in the new layout (Line=0, Mode=1, Chats=2, Groups=3,
-    // Unread=4, Sent=5, Recv=6, Tokens=7, Sessions=8).
+    // Col 0 is the bulk-select checkbox, so the data columns shift +1:
+    // Line=1, Mode=2, Chats=3, Groups=4, Unread=5, Sent=6, Recv=7, Tokens=8, Sessions=9.
     const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
-    expect(tableCell(agentRow, 8).textContent).toBe('47');
-    for (const index of [5, 6, 8]) {
+    expect(tableCell(agentRow, 9).textContent).toBe('47');
+    for (const index of [6, 7, 9]) {
       const value = tableCell(agentRow, index).querySelector('.c-data') as HTMLElement;
       expect(value.className).not.toMatch(/text-(m-|s-)/);
       expect(value.getAttribute('style')).toContain('--text-2');
     }
 
     const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
-    expect(tableCell(passiveRow, 8).textContent).toBe('—');
+    expect(tableCell(passiveRow, 9).textContent).toBe('—');
     expect(within(passiveRow).queryByText('47')).toBeNull();
   });
 
@@ -500,6 +501,24 @@ describe('SoupKitchen instance table rendering', () => {
     fireEvent.keyDown(row, { key: 'Enter' });
     expect(screen.getByRole('complementary')).toBeDefined();
     expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('toggling a row select checkbox selects the line WITHOUT opening the drawer, and shows the bulk bar', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    // The select checkbox stops propagation, so the row's open-drawer is NOT triggered.
+    expect(screen.queryByRole('complementary')).toBeNull();
+    // The bulk-action bar appears with one line selected.
+    const bar = screen.getByRole('region', { name: 'Bulk actions' });
+    expect(bar.textContent).toContain('1');
+  });
+
+  it('the header select-all checkbox selects every visible line', () => {
+    renderPage({ lines });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all lines' }));
+    const bar = screen.getByRole('region', { name: 'Bulk actions' });
+    expect(bar.textContent).toContain(String(lines.length));
   });
 
   it('"Open line" button inside the drawer navigates to /lines/<name>', () => {

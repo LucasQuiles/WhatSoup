@@ -13,6 +13,7 @@ import { useNavigate } from "react-router-dom";
 import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
+import { useQueryClient } from "@tanstack/react-query";
 import { useLines, useFeed, useLogs } from "../hooks/use-fleet";
 import { useTransportStatus } from "../hooks/use-transport-status";
 import EmptyState from "../components/EmptyState";
@@ -35,6 +36,10 @@ import { FleetTokenChart } from "../components/FleetTokenChart";
 import { FleetSessionChart } from "../components/FleetSessionChart";
 import LineTags from "../components/LineTags";
 import FleetRowMenu from "../components/FleetRowMenu";
+import BulkActionBar from "../components/BulkActionBar";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { api } from "../lib/api";
+import { useToast } from "../hooks/toast-context";
 import { formatRelative } from "../lib/format-time";
 import {
   formatPhone,
@@ -60,6 +65,7 @@ import {
   ToolbarTimeRange,
   StatusCell,
   ModeBadge,
+  Checkbox,
   Button,
   DrawerLayout,
   Drawer,
@@ -98,8 +104,9 @@ type SortKey =
   | "active"
   | null;
 
-/** Column count for colSpan states (includes the trailing Actions column). */
-const COL_COUNT = 13;
+/** Column count for colSpan states (includes the leading select column
+ * and the trailing Actions column). */
+const COL_COUNT = 14;
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
 
@@ -349,6 +356,8 @@ const SoupKitchen: FC = () => {
   } = useFeed();
   const navigate = useNavigate();
   const transport = useTransportStatus();
+  const queryClient = useQueryClient();
+  const toast = useToast();
 
   const lines = lineData ?? EMPTY_LINES;
   const feed = feedData ?? EMPTY_FEED;
@@ -383,6 +392,22 @@ const SoupKitchen: FC = () => {
   // Element of the currently-selected row. Updated by the current row's ref
   // callback (never nulled — restoreFocus checks document.contains at close).
   const selectedRowRef = useRef<HTMLElement | null>(null);
+  // Bulk select: set of line names currently selected for bulk actions.
+  // SEPARATE from the drawer's selectedName; the multi-select column must
+  // never bleed into the row-click → drawer flow. Toggling a row's checkbox
+  // does not change selectedName and toggling selectedName does not affect
+  // this set.
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(
+    () => new Set()
+  );
+  // Bulk confirm: which destructive action (if any) is awaiting one shared
+  // ConfirmDialog. Distinct from the per-row Menu's internal confirm, which
+  // only fires for the single-line flow.
+  type BulkAction = "stop" | "delete";
+  const [pendingBulk, setPendingBulk] = useState<{
+    action: BulkAction;
+    names: string[];
+  } | null>(null);
 
   // handleSort adapts the primitive's three-way cycle (none/asc/desc) onto
   // our two-way sortDir; 'none' clears the sort key.
@@ -568,6 +593,133 @@ const SoupKitchen: FC = () => {
     },
     [navigate]
   );
+
+  // Bulk select handlers — toggling a row's checkbox MUST NOT open the drawer
+  // (the checkbox cell stops propagation, see render below). The set is keyed
+  // on the raw line name (not the display name) so the underlying lifecycle
+  // API can consume it without re-deriving keys.
+  const toggleSelected = useCallback((name: string, next: boolean) => {
+    setSelectedNames((prev) => {
+      const updated = new Set(prev);
+      if (next) updated.add(name);
+      else updated.delete(name);
+      return updated;
+    });
+  }, []);
+
+  const visibleNames = useMemo(
+    () => filtered.map((line) => line.name),
+    [filtered]
+  );
+
+  const allVisibleSelected =
+    visibleNames.length > 0 &&
+    visibleNames.every((name) => selectedNames.has(name));
+  const someVisibleSelected =
+    !allVisibleSelected &&
+    visibleNames.some((name) => selectedNames.has(name));
+
+  const toggleAllVisible = useCallback(
+    (next: boolean) => {
+      setSelectedNames((prev) => {
+        const updated = new Set(prev);
+        if (next) {
+          for (const name of visibleNames) updated.add(name);
+        } else {
+          for (const name of visibleNames) updated.delete(name);
+        }
+        return updated;
+      });
+    },
+    [visibleNames]
+  );
+
+  const clearSelection = useCallback(() => {
+    setSelectedNames(new Set());
+  }, []);
+
+  // Bulk lifecycle handlers — mirror FleetRowMenu's per-action semantics:
+  //   - Restart fires directly (optimistic toast, then success/failure).
+  //   - Stop and Delete require ONE shared ConfirmDialog naming the count,
+  //     then Promise.allSettled the calls and clear selection.
+  const handleBulkRestart = useCallback(() => {
+    const names = Array.from(selectedNames);
+    if (names.length === 0) return;
+    toast.info(`Restarting ${names.length} line${names.length === 1 ? "" : "s"}…`);
+    void Promise.allSettled(names.map((n) => api.restart(n))).then(
+      (results) => {
+        const ok = results.filter((r) => r.status === "fulfilled").length;
+        const fail = results.length - ok;
+        if (fail === 0) {
+          toast.success(
+            `Restarted ${ok} line${ok === 1 ? "" : "s"}`
+          );
+        } else {
+          toast.error(
+            `Restarted ${ok}, failed ${fail}`
+          );
+        }
+        void queryClient.invalidateQueries({ queryKey: ["lines"] });
+      }
+    );
+  }, [selectedNames, queryClient, toast]);
+
+  const requestBulkStop = useCallback(() => {
+    const names = Array.from(selectedNames);
+    if (names.length === 0) return;
+    setPendingBulk({ action: "stop", names });
+  }, [selectedNames]);
+
+  const requestBulkDelete = useCallback(() => {
+    const names = Array.from(selectedNames);
+    if (names.length === 0) return;
+    setPendingBulk({ action: "delete", names });
+  }, [selectedNames]);
+
+  const cancelBulk = useCallback(() => {
+    setPendingBulk(null);
+  }, []);
+
+  const confirmBulk = useCallback(() => {
+    const pending = pendingBulk;
+    if (!pending) return;
+    setPendingBulk(null);
+    const count = pending.names.length;
+    const verb = pending.action === "stop" ? "Stopping" : "Deleting";
+    toast.info(
+      `${verb} ${count} line${count === 1 ? "" : "s"}…`
+    );
+    const calls =
+      pending.action === "stop"
+        ? pending.names.map((n) => api.stopInstance(n))
+        : pending.names.map((n) => api.deleteLine(n));
+    void Promise.allSettled(calls).then((results) => {
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      const fail = results.length - ok;
+      const pastTense = pending.action === "stop" ? "stopped" : "deleted";
+      if (fail === 0) {
+        toast.success(
+          `${pastTense.charAt(0).toUpperCase() + pastTense.slice(1)} ${ok} line${ok === 1 ? "" : "s"}`
+        );
+      } else {
+        toast.error(
+          `${pastTense} ${ok}, failed ${fail}`
+        );
+      }
+      // Drop any selected names that no longer exist after a successful delete.
+      setSelectedNames((prev) => {
+        if (pending.action !== "delete" || prev.size === 0) return prev;
+        const updated = new Set(prev);
+        for (let i = 0; i < results.length; i += 1) {
+          if (results[i].status === "fulfilled") {
+            updated.delete(pending.names[i]);
+          }
+        }
+        return updated;
+      });
+      void queryClient.invalidateQueries({ queryKey: ["lines"] });
+    });
+  }, [pendingBulk, queryClient, toast]);
 
   const drawerEl = (
     <FleetDrawer
@@ -800,6 +952,23 @@ const SoupKitchen: FC = () => {
             </Button>
           </Toolbar>
 
+          {/* Bulk action bar — sticky surface shown only when ≥1 row is
+              selected. Gated behind canManageLines so an operator without
+              the capability never sees the bar. The bar returns null when
+              count is 0 (see BulkActionBar.tsx) so the parent does not need
+              a render-gate. */}
+          {canManageLines && (
+            <div className="flex-shrink-0 px-[var(--sp-3)] pb-[var(--sp-2)]">
+              <BulkActionBar
+                count={selectedNames.size}
+                onRestart={handleBulkRestart}
+                onStop={requestBulkStop}
+                onDelete={requestBulkDelete}
+                onClear={clearSelection}
+              />
+            </div>
+          )}
+
           {/* DrawerLayout — squeeze: table is flex sibling of the drawer at ≥1080px */}
           <DrawerLayout
             className="flex-1 min-h-0 overflow-hidden"
@@ -811,7 +980,32 @@ const SoupKitchen: FC = () => {
                 <TableHeader>
 
                   <tr>
-                    {/* Col 0: Status+name — StatusCell (shape law) */}
+                    {/* Col 0: Bulk-select — "select all" Checkbox in the header,
+                        per-row Checkbox in the body. The header checkbox is
+                        checked when every visible line is selected, and
+                        indeterminate when some (but not all) are. The cell
+                        stops propagation so toggling never opens the drawer. */}
+                    {canManageLines && (
+                      <TableHeaderCell
+                        aria-label="Select all lines"
+                        className="soup-bulk-cell"
+                      >
+                        <span
+                          className="soup-bulk-cell__inner"
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          <Checkbox
+                            checked={allVisibleSelected}
+                            indeterminate={someVisibleSelected}
+                            onChange={toggleAllVisible}
+                            label="Select all lines"
+                            disabled={visibleNames.length === 0}
+                          />
+                        </span>
+                      </TableHeaderCell>
+                    )}
+                    {/* Col 1: Status+name — StatusCell (shape law) */}
                     <TableHeaderCell
                       sortKey="name"
                       sort={sortState}
@@ -965,7 +1159,30 @@ const SoupKitchen: FC = () => {
                           }
                           onActivate={() => openDrawer(line.name)}
                         >
-                          {/* Col 0: StatusCell shape + name label (C-1 resolution) */}
+                          {/* Col 0: per-row select Checkbox — gated behind
+                              canManageLines. The cell stops propagation
+                              (mirrors soup-menu-trigger-cell) so toggling
+                              selection never opens the row drawer. */}
+                          {canManageLines && (
+                            <TableCell
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <span
+                                className="soup-bulk-cell__inner"
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => e.stopPropagation()}
+                              >
+                                <Checkbox
+                                  checked={selectedNames.has(line.name)}
+                                  onChange={(next) =>
+                                    toggleSelected(line.name, next)
+                                  }
+                                  label={`Select ${displayInstanceName(line.name)}`}
+                                />
+                              </span>
+                            </TableCell>
+                          )}
+                          {/* Col 1: StatusCell shape + name label (C-1 resolution) */}
                           <TableCell>
                             <StatusCell
                               status={line.status}
@@ -975,7 +1192,7 @@ const SoupKitchen: FC = () => {
                               {formatPhone(line.phone)}
                             </span>
                           </TableCell>
-                          {/* Col 1: Mode badge kept as separate column */}
+                          {/* Col 2: Mode badge kept as separate column */}
                           <TableCell>
                             <ModeBadge mode={line.mode} />
                           </TableCell>
@@ -1100,6 +1317,54 @@ const SoupKitchen: FC = () => {
           />
         )}
       </Suspense>
+
+      {/* Bulk confirm — ONE shared ConfirmDialog for the destructive bulk
+          actions (Stop / Delete), naming the count. The per-row Menu's
+          internal confirm remains the single-line path. */}
+      <ConfirmDialog
+        open={pendingBulk !== null}
+        title={
+          pendingBulk?.action === "delete"
+            ? `Delete ${pendingBulk.names.length} line${
+                pendingBulk.names.length === 1 ? "" : "s"
+              }?`
+            : `Stop ${pendingBulk?.names.length ?? 0} line${
+                (pendingBulk?.names.length ?? 0) === 1 ? "" : "s"
+              }?`
+        }
+        confirmVariant="danger"
+        confirmLabel={
+          pendingBulk?.action === "delete"
+            ? "Delete permanently"
+            : "Stop lines"
+        }
+        onCancel={cancelBulk}
+        onConfirm={confirmBulk}
+      >
+        {pendingBulk?.action === "delete" ? (
+          <>
+            This will stop the process, remove all configuration, data, and
+            message history for{" "}
+            <strong>
+              {pendingBulk.names
+                .map((n) => displayInstanceName(n))
+                .join(", ")}
+            </strong>
+            . This cannot be undone.
+          </>
+        ) : (
+          <>
+            Stopping will disconnect the following lines from WhatsApp. The
+            lines will not reconnect until manually started:{" "}
+            <strong>
+              {pendingBulk?.names
+                .map((n) => displayInstanceName(n))
+                .join(", ")}
+            </strong>
+            .
+          </>
+        )}
+      </ConfirmDialog>
     </div>
   );
 };
