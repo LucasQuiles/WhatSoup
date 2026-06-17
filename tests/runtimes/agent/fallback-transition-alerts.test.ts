@@ -164,8 +164,7 @@ type Activation = {
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
   fallbackActiveUntil: number | null;
-  fallbackTurnsServed: number;
-  fallbackTurnsEmpty: number;
+  fallbackMetrics: { turnsServed: number; turnsEmpty: number };
   effectiveProvider: string;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
@@ -242,8 +241,8 @@ describe('AgentRuntime — fallback transition alerts', () => {
 
     v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
-    v.fallbackTurnsServed = 3;
-    v.fallbackTurnsEmpty = 1;
+    v.fallbackMetrics.turnsServed = 3;
+    v.fallbackMetrics.turnsEmpty = 1;
 
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
     expect(v.fallbackActiveUntil).toBeNull();
@@ -263,8 +262,8 @@ describe('AgentRuntime — fallback transition alerts', () => {
 
     // Window 1: 3 turns served (1 empty), then elapse.
     v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
-    v.fallbackTurnsServed = 3;
-    v.fallbackTurnsEmpty = 1;
+    v.fallbackMetrics.turnsServed = 3;
+    v.fallbackMetrics.turnsEmpty = 1;
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
     const first = alertsFor('provider_fallback_reverted');
     expect(first).toHaveLength(1);
@@ -275,8 +274,8 @@ describe('AgentRuntime — fallback transition alerts', () => {
     // counters keep accruing (5/2 — getFallbackState contract), but the
     // revert evidence must report only THIS window's delta (2/1).
     v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit');
-    v.fallbackTurnsServed = 5;
-    v.fallbackTurnsEmpty = 2;
+    v.fallbackMetrics.turnsServed = 5;
+    v.fallbackMetrics.turnsEmpty = 2;
     runtime.disableFallback();
 
     const reverted = alertsFor('provider_fallback_reverted');
@@ -580,8 +579,8 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
     // The restore arm snapshots the (fresh-process, zero) turn counters too,
     // so the restored window's revert reports the turns served since restart.
-    v.fallbackTurnsServed = 2;
-    v.fallbackTurnsEmpty = 1;
+    v.fallbackMetrics.turnsServed = 2;
+    v.fallbackMetrics.turnsEmpty = 1;
 
     // Restored window expires → reverts (and clears fallbackArmReason).
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);

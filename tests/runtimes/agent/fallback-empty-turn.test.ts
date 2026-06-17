@@ -159,9 +159,7 @@ function makeFakeQueue() {
 /** Bracket-access view exposing private fallback telemetry and handlers. */
 type RuntimeView = {
   fallbackActiveUntil: number | null;
-  fallbackTurnsServed: number;
-  fallbackTurnsEmpty: number;
-  lastFallbackTurnAt: number | null;
+  fallbackMetrics: { turnsServed: number; turnsEmpty: number; lastTurnAt: number | null };
   turnHadVisibleOutput: boolean;
   queue: unknown;
   // Private state used by isSilentCompact / isSystemResult in handleEvent.
