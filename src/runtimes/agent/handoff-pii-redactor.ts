@@ -52,6 +52,43 @@ function digitCount(s: string): number {
   return n;
 }
 
+// Lines whose ENTIRE content (after trimming) reads as a structural marker an
+// attacker could use to break out of the data region or spoof a trusted frame:
+//
+//  - A triple-angle delimiter line (`<<<…>>>`) — the shape of the handoff fence,
+//    so a forged open/close marker cannot land a payload outside the nonce fence.
+//  - A bracketed-header line (`[…]`) — the shape of HANDOFF_SUMMARY_HEADER /
+//    RECENT_CONTEXT_HEADER, so a forged header cannot reframe later text as
+//    trusted. Anchored to a whole line so inline brackets in prose are untouched.
+//  - A bare role/system marker line (`Assistant:`, `User:`, `[system]`, etc.)
+//    used to spoof a conversation turn or a system directive.
+//
+// Match the WHOLE line only (^…$ with the `m` flag): ordinary prose that merely
+// CONTAINS brackets or a colon is left intact — we neutralize lines that exist
+// solely to impersonate framing. Neutralization prefixes a visible marker rather
+// than deleting, so the underlying text survives (audit-friendly) but no longer
+// parses as a delimiter/header.
+const FORGERY_LINE_RE = new RegExp(
+  [
+    '^\\s*<<<.*>>>\\s*$', // triple-angle fence lookalike
+    '^\\s*\\[[^\\]\\n]*\\]\\s*$', // whole-line bracketed header lookalike
+    '^\\s*(?:assistant|user|system)\\s*:\\s*$', // bare role marker
+  ].join('|'),
+  'gim',
+);
+
+/**
+ * Neutralize lines in untrusted handoff text that impersonate the fence
+ * delimiters, the bracketed handoff headers, or role/system markers. This is a
+ * forgery defense layered alongside the nonce fence in the composer: even if an
+ * attacker guesses the fence shape, no line they author can still read as a
+ * delimiter/header after this pass. Inline brackets/colons inside normal prose
+ * are preserved — only whole-line lookalikes are defanged.
+ */
+export function neutralizeHandoffForgery(text: string): string {
+  return text.replace(FORGERY_LINE_RE, (line) => `[quoted] ${line.trim()}`);
+}
+
 /**
  * Redact PII from a handoff-corpus string: first the shared provider-preview
  * sanitizer (Bearer/secret/token/email), then phone numbers → `[REDACTED_PHONE]`.
