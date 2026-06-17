@@ -410,3 +410,22 @@ describe('DateTimePicker — minNow prop', () => {
     expect(min).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
   });
 });
+
+describe('DateTimePicker — calendar popover integration', () => {
+  it('opens the calendar on the trigger and a day pick updates the date, preserving the time', () => {
+    // value is Jan 1 2099 09:00 (future → all selectable); calendar opens on Jan 2099.
+    const { onChange } = renderControlled();
+    // Calendar is closed initially.
+    expect(screen.queryByRole('grid')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Open calendar/i }));
+    const grid = screen.getByRole('grid');
+    // Pick the 20th — an enabled, in-month future day.
+    const twentieth = within(grid)
+      .getAllByRole('gridcell')
+      .find((c) => c.textContent?.trim() === '20' && !(c as HTMLButtonElement).disabled);
+    expect(twentieth).toBeDefined();
+    fireEvent.click(twentieth!);
+    // Date portion swapped to the 20th; the 09:00 time is preserved.
+    expect(onChange).toHaveBeenCalledWith('2099-01-20T09:00');
+  });
+});

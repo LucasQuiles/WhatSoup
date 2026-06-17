@@ -316,6 +316,8 @@ promoted from v2 + the legacy census:
 | `--container-max` | 1280px | page shell |
 | `--landing-max-w` | 1080px | Landing splash container max inline size |
 | `--landing-hero-measure` / `--landing-prose-measure` | 16ch / 52ch | Landing hero headline + supporting-copy measures (§5 measure law) |
+| `--cal-cell` | `var(--sp-8)` (32px) | DateTimePicker Calendar — single day-cell box (on-grid via `--sp-8`) |
+| `--cal-gap` | `var(--sp-1)` (4px) | DateTimePicker Calendar — gap between day cells (on-grid via `--sp-1`) |
 
 Single-consumer dimensions from the legacy census (`--sk-col-*`, `--feed-*`, `--qr-size`, …) are
 **demoted** to this layer where the component survives, or rejected where it does not — full

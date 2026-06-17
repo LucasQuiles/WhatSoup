@@ -91,4 +91,12 @@
   --landing-max-w: 1080px;    /* splash container max inline size */
   --landing-hero-measure: 16ch;  /* hero headline measure (typography.md §5) */
   --landing-prose-measure: 52ch; /* hero supporting-copy measure (typography.md §5) */
+  /* === Calendar component tokens (datetimepicker.md § Phase B calendar popover) ===
+     --cal-cell: single day-cell box; --cal-gap: gap between cells. Both reference
+     existing on-grid --sp-* primitives (32px / 4px) so the grid stays on the 4px
+     rhythm; theme-agnostic geometry, so defined once in the shared :root rather
+     than mirrored per-theme. Colour states (today ring, selected fill, disabled
+     text) reuse existing --accent / --text-3 — no new colour tokens. */
+  --cal-cell: var(--sp-8);     /* day-cell box (32px, on-grid via --sp-8) */
+  --cal-gap:  var(--sp-1);     /* gap between day cells (4px, on-grid via --sp-1) */
 }
