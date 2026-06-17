@@ -20,6 +20,7 @@ import {
 import type { ScheduledMessage } from '../../types.js'
 import { formatFullTime } from '../../lib/format-time'
 import { Button } from '../primitives/Button'
+import { Card } from '../primitives'
 import { statusColor, statusLabel, contentTypeLabel, cronToHuman } from './scheduled-utils.js'
 
 interface ScheduledMessageRowProps {
@@ -66,8 +67,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
   const metaDividerStyle = { opacity: 'var(--opacity-faint)' }
 
   return (
-    <div
-      className="c-card overflow-hidden"
+    <Card
+      className="overflow-hidden"
     >
       {/* Main row */}
       <div className="flex items-start gap-3 py-[var(--sp-3)] px-[var(--sp-4)]">
@@ -209,6 +210,6 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           <span>Created: {formatFullTime(message.createdAt)}</span>
         </div>
       )}
-    </div>
+    </Card>
   )
 }

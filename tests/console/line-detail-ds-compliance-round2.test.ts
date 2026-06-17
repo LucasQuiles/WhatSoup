@@ -71,7 +71,8 @@ describe('design system compliance — round 2 shared search inputs', () => {
     expect(groupDetail).not.toContain('className="c-tab"')
     expect(groupDetail).toContain('<SearchInput')
     expect(groupCard).toContain('className="c-card')
-    expect(scheduledRow).toContain('className="c-card')
+    // ScheduledMessageRow migrated onto the <Card> primitive (DD-38).
+    expect(scheduledRow).toContain('<Card')
   })
 })
 

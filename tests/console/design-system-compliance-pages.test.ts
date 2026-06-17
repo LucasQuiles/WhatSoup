@@ -234,7 +234,11 @@ describe('design system compliance — Shannon slice', () => {
   it('migrates Inbox panels and interaction affordances to design-system classes', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
-    expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    // Inbox migrated off the raw `.c-card` recipe onto the <Card> primitive (DD-38):
+    // the three panes (chats, messages, contact) are each a <Card>. Assert the
+    // primitive is used and no raw recipe class remains.
+    expect((inbox.match(/<Card\b/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    expect(inbox).not.toMatch(/className="[^"]*\bc-card\b/)
     // Interaction affordances are on the Button/ActionButton primitives.
     expect(inbox).toContain('<Button')
     expect(inbox).toContain('<ActionButton')
