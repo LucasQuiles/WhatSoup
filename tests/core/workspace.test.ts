@@ -2,7 +2,14 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { existsSync, mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { chatJidToWorkspace, provisionWorkspace } from '../../src/core/workspace.ts';
+import {
+  chatJidToWorkspace,
+  provisionWorkspace,
+  buildMcpAllowlist,
+  writeSandboxArtifacts,
+  writePermissionsSettings,
+  ensurePermissionsSettings,
+} from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
 
@@ -413,5 +420,288 @@ describe('provisionWorkspace', () => {
     expect(opencode).not.toHaveProperty('model');
     // Managed MCP entries are present
     expect(opencode).toHaveProperty('mcp.whatsoup');
+  });
+});
+
+describe('workspace.ts uncovered-branch coverage', () => {
+  let tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of tmpDirs) {
+      rmSync(d, { recursive: true, force: true });
+    }
+    tmpDirs = [];
+  });
+
+  function makeTmp(): string {
+    const d = mkdtempSync(join(tmpdir(), 'ws-test-cov-'));
+    tmpDirs.push(d);
+    return d;
+  }
+
+  // --- chatJidToWorkspace fallback branch (lines 61-66) ---
+
+  it('chatJidToWorkspace falls back to dm/users for a non-personal, non-group JID', () => {
+    const result = chatJidToWorkspace(CWD, 'status@broadcast');
+    expect(result.kind).toBe('dm');
+    expect(result.workspaceKey).toBe('status_at_broadcast');
+    expect(result.workspacePath).toBe(join(CWD, 'users', 'status_at_broadcast'));
+  });
+
+  // --- buildMcpAllowlist (lines 95-101) ---
+
+  it('buildMcpAllowlist prefixes chat-scoped tool names with mcp__whatsoup__ (no media)', () => {
+    const list = buildMcpAllowlist(['send_message', 'ask_user'], false);
+    expect(list).toEqual([
+      'mcp__whatsoup__send_message',
+      'mcp__whatsoup__ask_user',
+    ]);
+    expect(list).not.toContain('mcp__send-media__send_media');
+  });
+
+  it('buildMcpAllowlist appends send-media tool when includeSendMedia is true', () => {
+    const list = buildMcpAllowlist(['send_message'], true);
+    expect(list).toEqual(['mcp__whatsoup__send_message', 'mcp__send-media__send_media']);
+  });
+
+  it('buildMcpAllowlist handles an empty chat-scoped list with media appended', () => {
+    const list = buildMcpAllowlist([], true);
+    expect(list).toEqual(['mcp__send-media__send_media']);
+  });
+
+  // --- writeSandboxArtifacts branches (lines 133-161) ---
+
+  it('writeSandboxArtifacts writes only PreToolUse when no optional hooks are given', () => {
+    const claudeDir = makeTmp();
+    const policy = { allowedPaths: ['/x'], allowedTools: ['Read'] };
+    writeSandboxArtifacts(claudeDir, policy, '/hooks/agent-sandbox.sh');
+
+    const policyFile = JSON.parse(readFileSync(join(claudeDir, 'sandbox-policy.json'), 'utf8'));
+    expect(policyFile).toEqual(policy);
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/hooks/agent-sandbox.sh');
+    expect(settings.hooks).not.toHaveProperty('PostToolUse');
+    expect(settings.hooks).not.toHaveProperty('PostToolUseFailure');
+  });
+
+  it('writeSandboxArtifacts wires PostToolUse when only pollLintHookPath is given', () => {
+    const claudeDir = makeTmp();
+    writeSandboxArtifacts(
+      claudeDir,
+      { allowedPaths: [] },
+      '/hooks/agent-sandbox.sh',
+      '/hooks/poll.mjs',
+    );
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PostToolUse[0].hooks).toEqual([
+      { type: 'command', command: '/hooks/poll.mjs' },
+    ]);
+    expect(settings.hooks).not.toHaveProperty('PostToolUseFailure');
+  });
+
+  it('writeSandboxArtifacts writes PostToolUseFailure only when postToolUseLogHookPath is given', () => {
+    const claudeDir = makeTmp();
+    writeSandboxArtifacts(
+      claudeDir,
+      { allowedPaths: [] },
+      '/hooks/agent-sandbox.sh',
+      undefined,
+      '/hooks/log.sh',
+    );
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PostToolUse[0].hooks).toEqual([
+      { type: 'command', command: '/hooks/log.sh' },
+    ]);
+    expect(settings.hooks.PostToolUseFailure[0].hooks[0].command).toBe('/hooks/log.sh');
+  });
+
+  it('writeSandboxArtifacts rethrows (logged) when claudeDir is missing', () => {
+    const missingParent = join(makeTmp(), 'does-not-exist');
+    expect(() =>
+      writeSandboxArtifacts(missingParent, { allowedPaths: [] }, '/hooks/x.sh'),
+    ).toThrow();
+    expect(existsSync(join(missingParent, 'settings.json'))).toBe(false);
+  });
+
+  // --- writePermissionsSettings branches (lines 170-202) ---
+
+  it('writePermissionsSettings creates a fresh settings.json with deny floor when none exists', () => {
+    const claudeDir = makeTmp();
+    writePermissionsSettings(claudeDir, {
+      permissions: {
+        allow: ['Read'],
+        deny: ['custom-deny'],
+        defaultMode: 'bypassPermissions',
+      },
+    });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.allow).toEqual(['Read']);
+    expect(out.permissions.deny).toContain('custom-deny');
+    // deny floor unioned
+    expect(out.permissions.deny).toContain('mcp__claude_ai_Gmail__create_draft');
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+    expect(out).not.toHaveProperty('enabledPlugins');
+  });
+
+  it('writePermissionsSettings merges into an existing settings.json preserving hooks', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: '', hooks: [] }] } }),
+    );
+
+    writePermissionsSettings(claudeDir, {
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+    });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.hooks.PreToolUse[0].matcher).toBe('');
+    expect(out.permissions.allow).toEqual(['Bash']);
+    expect(out.permissions.deny.length).toBeGreaterThan(0);
+  });
+
+  it('writePermissionsSettings overwrites a corrupt existing settings.json', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(join(claudeDir, 'settings.json'), 'not-valid-json{{{');
+
+    writePermissionsSettings(claudeDir, {
+      permissions: { allow: ['Read'], deny: [], defaultMode: 'bypassPermissions' },
+    });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.allow).toEqual(['Read']);
+  });
+
+  it('writePermissionsSettings writes enabledPlugins when provided', () => {
+    const claudeDir = makeTmp();
+    writePermissionsSettings(claudeDir, {
+      permissions: { allow: [], deny: [], defaultMode: 'bypassPermissions' },
+      enabledPlugins: { foo: true, bar: false },
+    });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.enabledPlugins).toEqual({ foo: true, bar: false });
+  });
+
+  it('writePermissionsSettings resets enabledPlugins to {} when null is passed', () => {
+    const claudeDir = makeTmp();
+    // The runtime accepts null to mean "reset to global inheritance" (line 195: `?? {}`),
+    // even though the TS type does not include null. Cast through unknown to exercise
+    // the runtime branch without weakening the assertion.
+    const settings = {
+      permissions: { allow: [], deny: [], defaultMode: 'bypassPermissions' as const },
+      enabledPlugins: null,
+    } as unknown as Parameters<typeof writePermissionsSettings>[1];
+    writePermissionsSettings(claudeDir, settings);
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.enabledPlugins).toEqual({});
+  });
+
+  // --- ensurePermissionsSettings branches (lines 215-266) ---
+
+  it('ensurePermissionsSettings is a no-op for non-agent types', () => {
+    const claudeDir = makeTmp();
+    ensurePermissionsSettings(claudeDir, 'chat');
+    expect(existsSync(join(claudeDir, 'settings.json'))).toBe(false);
+  });
+
+  it('ensurePermissionsSettings writes defaults when no settings.json exists', () => {
+    const claudeDir = makeTmp();
+    ensurePermissionsSettings(claudeDir, 'agent');
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+    expect(out.permissions.allow).toContain('Bash');
+    expect(out.permissions.deny).toContain('mcp__claude_ai_Gmail__create_draft');
+  });
+
+  it('ensurePermissionsSettings writes defaults + enabledPlugins when none exist and plugins provided', () => {
+    const claudeDir = makeTmp();
+    ensurePermissionsSettings(claudeDir, 'agent', { myPlugin: true });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.enabledPlugins).toEqual({ myPlugin: true });
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+  });
+
+  it('ensurePermissionsSettings leaves existing settings with permissions alone (no plugins)', () => {
+    const claudeDir = makeTmp();
+    const original = {
+      permissions: { allow: ['CustomTool'], deny: [], defaultMode: 'bypassPermissions' },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(original));
+
+    ensurePermissionsSettings(claudeDir, 'agent');
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.allow).toEqual(['CustomTool']);
+    expect(out).not.toHaveProperty('enabledPlugins');
+  });
+
+  it('ensurePermissionsSettings adds default permissions to existing settings lacking them', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [] } }),
+    );
+
+    ensurePermissionsSettings(claudeDir, 'agent');
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.hooks.PreToolUse).toEqual([]);
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+  });
+
+  it('ensurePermissionsSettings rewrites enabledPlugins + deny floor when plugins provided on existing perms', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        permissions: {
+          allow: ['X'],
+          deny: ['mcp__claude_ai_Gmail__create_draft'],
+          defaultMode: 'bypassPermissions',
+        },
+      }),
+    );
+
+    ensurePermissionsSettings(claudeDir, 'agent', { newPlugin: true });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.enabledPlugins).toEqual({ newPlugin: true });
+    expect(out.permissions.allow).toEqual(['X']);
+    // deny floor re-applied (unioned)
+    expect(out.permissions.deny).toContain('mcp__claude_ai_Gmail__create_draft');
+    expect(out.permissions.deny).toContain('mcp__plugin_microsoft_365_microsoft_365__send-mail');
+  });
+
+  it('ensurePermissionsSettings adds default permissions to existing settings lacking them when plugins provided', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [] } }),
+    );
+
+    ensurePermissionsSettings(claudeDir, 'agent', { newPlugin: true });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.enabledPlugins).toEqual({ newPlugin: true });
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+  });
+
+  it('ensurePermissionsSettings overwrites a corrupt existing settings.json with defaults', () => {
+    const claudeDir = makeTmp();
+    writeFileSync(join(claudeDir, 'settings.json'), 'corrupt{{{');
+
+    ensurePermissionsSettings(claudeDir, 'agent', { myPlugin: true });
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.defaultMode).toBe('bypassPermissions');
+    expect(out.enabledPlugins).toEqual({ myPlugin: true });
   });
 });
