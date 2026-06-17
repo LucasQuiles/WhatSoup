@@ -1,4 +1,4 @@
-import { type FC } from "react";
+import { type FC, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -29,6 +29,27 @@ interface NavProps {
   onLogout?: () => void;
 }
 
+/** A single stacked rail row: icon + label, with a left-edge accent bar when active. */
+function railItemClass(isActive: boolean): string {
+  return `text-data soup-rail__item c-nav-link font-sans font-medium ${
+    isActive ? "text-text-1 bg-btn-neutral-bg" : "text-text-2 hover:text-text-2"
+  }`;
+}
+
+/** Left-edge vertical accent bar — the active-item indicator (replaces the legacy bottom underline). */
+function ActiveBar() {
+  return (
+    <span
+      aria-hidden="true"
+      className="soup-rail__bar absolute w-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
+    />
+  );
+}
+
+function RailLabel({ children }: { children: ReactNode }) {
+  return <span className="soup-rail__label">{children}</span>;
+}
+
 const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick, onLogout }) => {
   const { connected } = useRealtime();
   const { theme, toggleTheme } = useTheme();
@@ -38,169 +59,147 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     <nav
       role="navigation"
       aria-label="Main navigation"
-      className="bg-surface-inset flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-3)] sm:px-[var(--sp-5)] c-border-b gap-[var(--sp-3)] sm:gap-[var(--sp-6)] min-w-0"
+      className="soup-rail bg-surface-inset c-border-r min-w-0"
     >
-      {/* Left cluster: logo + nav items */}
-      <div className="flex items-center gap-[var(--sp-2)] sm:gap-[var(--sp-6)] min-w-0">
-        {/* SOUP nameplate — engraved instrument label (brand.md §1.1–§1.3).
-            Lockup styled in primitives.css (.soup-nameplate*): teal heritage tick
-            (--mode-passive-solid, NOT the action accent), --sp-3 gap, wordmark in
-            --type-nameplate with tracking/optical-centering corrections. */}
+      {/* SOUP nameplate — engraved instrument label, docked at the top of the rail
+          (brand.md §1.1–§1.3). Lockup styled in primitives.css (.soup-nameplate*):
+          teal heritage tick (--mode-passive-solid, NOT the action accent), --sp-3 gap,
+          wordmark in --type-nameplate with tracking/optical-centering corrections. */}
+      <div className="soup-rail__head">
         <span className="soup-nameplate" aria-label="SOUP">
           <span aria-hidden="true" className="soup-nameplate__tick" />
-          <span className="soup-nameplate__wm">SOUP</span>
+          <span className="soup-nameplate__wm soup-rail__label">SOUP</span>
         </span>
-
-        <Link
-          to="/"
-          aria-current={isFleetActive ? 'page' : undefined}
-          className={`text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
-            isFleetActive
-              ? "text-text-1 bg-btn-neutral-bg"
-              : "text-text-2 hover:text-text-2"
-          }`}
-        >
-          <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
-          <span className="max-sm:sr-only">Fleet</span>
-          {isFleetActive && (
-            <span
-              className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
-              style={{
-                bottom: "-1px",
-              }}
-            />
-          )}
-        </Link>
-
-        <NavLink
-          to="/inbox"
-          className={({ isActive }) =>
-            `text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
-              isActive
-                ? "text-text-1 bg-btn-neutral-bg"
-                : "text-text-2 hover:text-text-2"
-            }`
-          }
-        >
-          {({ isActive }) => (
-            <>
-              <Inbox size={18} strokeWidth={1.75} aria-hidden="true" />
-              <span className="max-sm:sr-only">Inbox</span>
-              {unreadCount > 0 && (
-                <>
-                  <span
-                    aria-hidden="true"
-                    className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
-                  >
-                    {unreadCount > 99 ? "99+" : unreadCount}
-                  </span>
-                  <span className="sr-only">{unreadCount} unread</span>
-                </>
-              )}
-              {isActive && (
-                <span
-                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
-                  style={{
-                    bottom: "-1px",
-                  }}
-                />
-              )}
-            </>
-          )}
-        </NavLink>
-
-        <NavLink
-          to="/ops"
-          className={({ isActive }) =>
-            `text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
-              isActive
-                ? "text-text-1 bg-btn-neutral-bg"
-                : "text-text-2 hover:text-text-2"
-            }`
-          }
-        >
-          {({ isActive }) => (
-            <>
-              <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
-              <span className="max-sm:sr-only">Ops</span>
-              {isActive && (
-                <span
-                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
-                  style={{
-                    bottom: "-1px",
-                  }}
-                />
-              )}
-            </>
-          )}
-        </NavLink>
       </div>
 
-      {/* Right cluster: theme toggle + system status */}
-      <div className="text-xs flex items-center gap-2 font-mono flex-shrink-0">
-        <ActionButton
-          onClick={toggleTheme}
-          label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-          icon={theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
-          className="flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-text-2 hover:text-text-2"
-        />
-        {connected ? (
-          <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
-            <Wifi size={12} strokeWidth={1.75} />
-            <span className="hidden md:inline">Live</span>
-          </span>
-        ) : (
-          <span className="flex items-center gap-1 text-text-2" title="Polling (WebSocket disconnected)">
-            <WifiOff size={12} strokeWidth={1.75} />
-            <span className="hidden md:inline">Polling</span>
-          </span>
-        )}
-        <span className="text-text-3 hidden md:inline">|</span>
-        {alertCount === 0 ? (
-          <>
-            <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok" />
-            <span className="text-text-2 hidden md:inline">All systems operational</span>
-          </>
-        ) : (
-          <>
-            <AlertTriangle size={14} strokeWidth={1.75} className="text-s-crit" />
-            <span className="text-s-crit">
-              {alertCount} alert{alertCount !== 1 && "s"}
+      {/* Stacked primary nav items (Fleet / Inbox / Ops). Scroll-owner so a short
+          viewport keeps the nameplate pinned and the bottom dock reachable. */}
+      <div className="soup-rail__scroll">
+        <div className="soup-rail__nav">
+          <Link
+            to="/"
+            aria-current={isFleetActive ? 'page' : undefined}
+            className={railItemClass(isFleetActive)}
+          >
+            <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
+            <RailLabel>Fleet</RailLabel>
+            {isFleetActive && <ActiveBar />}
+          </Link>
+
+          <NavLink
+            to="/inbox"
+            className={({ isActive }) => railItemClass(isActive)}
+          >
+            {({ isActive }) => (
+              <>
+                <Inbox size={18} strokeWidth={1.75} aria-hidden="true" />
+                <RailLabel>Inbox</RailLabel>
+                {unreadCount > 0 && (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-auto bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
+                    >
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </span>
+                    <span className="sr-only">{unreadCount} unread</span>
+                  </>
+                )}
+                {isActive && <ActiveBar />}
+              </>
+            )}
+          </NavLink>
+
+          <NavLink
+            to="/ops"
+            className={({ isActive }) => railItemClass(isActive)}
+          >
+            {({ isActive }) => (
+              <>
+                <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
+                <RailLabel>Ops</RailLabel>
+                {isActive && <ActiveBar />}
+              </>
+            )}
+          </NavLink>
+        </div>
+      </div>
+
+      {/* Flex spacer — pushes the secondary controls to the bottom of the rail. */}
+      <div className="soup-rail__spacer" />
+
+      {/* Bottom dock: theme toggle + realtime status + version + logout. */}
+      <div className="soup-rail__dock text-xs font-mono">
+        <div className="soup-rail__dock-row">
+          <ActionButton
+            onClick={toggleTheme}
+            label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            icon={theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
+            className="flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] flex-shrink-0 rounded-sm c-hover text-text-2 hover:text-text-2"
+          />
+          {connected ? (
+            <span className="flex items-center gap-1 text-s-ok min-w-0" title="Realtime connected">
+              <Wifi size={12} strokeWidth={1.75} className="flex-shrink-0" />
+              <span className="soup-rail__label">Live</span>
             </span>
-          </>
-        )}
-        {version && version !== 'unknown' && (
-          updateAvailable && remoteSha ? (
-            <Button
-              variant="ghost"
-              onClick={onUpdateClick}
-              className="flex items-center gap-1 c-hover cursor-pointer text-m-cht rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)] bg-[var(--m-cht-soft)]"
-              title={`Update available: ${version} → ${remoteSha}`}
-              aria-label={`Update available: ${version} to ${remoteSha}`}
-              icon={<Download size={15} strokeWidth={1.75} />}
-            >
-              <span>{version} → {remoteSha}</span>
-            </Button>
           ) : (
-            <span className="text-text-3 hidden md:inline" title={`Version ${version}`}>
-              v{version}
+            <span className="flex items-center gap-1 text-text-2 min-w-0" title="Polling (WebSocket disconnected)">
+              <WifiOff size={12} strokeWidth={1.75} className="flex-shrink-0" />
+              <span className="soup-rail__label">Polling</span>
             </span>
-          )
+          )}
+        </div>
+
+        <div className="soup-rail__dock-row">
+          {alertCount === 0 ? (
+            <>
+              <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok flex-shrink-0" />
+              <span className="text-text-2 soup-rail__label">All systems operational</span>
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} strokeWidth={1.75} className="text-s-crit flex-shrink-0" />
+              <span className="text-s-crit soup-rail__label">
+                {alertCount} alert{alertCount !== 1 && "s"}
+              </span>
+            </>
+          )}
+        </div>
+
+        {version && version !== 'unknown' && (
+          <div className="soup-rail__dock-row">
+            {updateAvailable && remoteSha ? (
+              <Button
+                variant="ghost"
+                onClick={onUpdateClick}
+                className="flex items-center gap-1 c-hover cursor-pointer text-m-cht rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)] min-w-0 bg-[var(--m-cht-soft)]"
+                title={`Update available: ${version} → ${remoteSha}`}
+                aria-label={`Update available: ${version} to ${remoteSha}`}
+                icon={<Download size={15} strokeWidth={1.75} />}
+              >
+                <span className="soup-rail__label">{version} → {remoteSha}</span>
+              </Button>
+            ) : (
+              <span className="text-text-3 soup-rail__label" title={`Version ${version}`}>
+                v{version}
+              </span>
+            )}
+          </div>
         )}
+
         {onLogout && (
-          <>
-            <span className="text-text-3">|</span>
+          <div className="soup-rail__dock-row">
             <Button
               variant="ghost"
               onClick={onLogout}
-              className="flex items-center gap-1 c-hover cursor-pointer text-text-2 hover:text-text-2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)]"
+              className="flex items-center gap-1 c-hover cursor-pointer text-text-2 hover:text-text-2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)] min-w-0"
               title="Lock console (revoke session)"
               aria-label="Lock console"
               icon={<LogOut size={14} strokeWidth={1.75} />}
             >
-              <span>Lock</span>
+              <span className="soup-rail__label">Lock</span>
             </Button>
-          </>
+          </div>
         )}
       </div>
     </nav>

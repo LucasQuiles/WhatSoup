@@ -112,8 +112,15 @@ These rules are binding design law before they become hard lint:
 - Legacy half-steps and the 60+ globalized component dimensions: dispositions in tokens-v3 §6.11–12.
 - The legacy `--sk-col-*` fixed column widths are replaced by content-sized columns + the collapse
   priority list (drawer.md).
-- Route-level layout (4 pages + line-detail tabs) is unchanged — this program reskins, it does not
-  restructure IA.
+- Route-level layout (4 pages + line-detail tabs) is unchanged — this program reskins page-level IA, it
+  does not restructure it. **Exception (user-approved):** the app **chrome** is restructured from a
+  horizontal top bar to a vertical **left rail** (decision-log "top bar → left rail"). The rail is a
+  fixed-width column (`--rail-w` = 220px, tokens-v3 §4) docked left of `<main>` (shell flips
+  `flex-col` → `flex-row`); nameplate top, Fleet/Inbox/Ops stacked as icon+label rows, secondary
+  controls bottom-docked, the active item marked by a left-edge accent bar. At ≤760px it collapses to
+  an icon-only rail (`--rail-w-collapsed` = 64px, labels visually hidden) so `<main>` keeps its width;
+  reduced height is owned by an internal scroll region. Destinations are unchanged — the chrome moved,
+  the IA did not gain pages.
 
 ## 10. Enforcement hooks
 

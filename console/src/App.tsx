@@ -77,7 +77,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="flex flex-col h-dvh bg-surface-base overflow-hidden">
+      <div className="flex flex-row h-dvh bg-surface-base overflow-hidden">
         <Nav
           alertCount={alertCount}
           unreadCount={unreadCount}

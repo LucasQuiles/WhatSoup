@@ -144,18 +144,24 @@ describe('design system compliance — Shannon slice', () => {
   it('uses design tokens for Nav hardcoded pixel values', () => {
     const source = read('console/src/components/Nav.tsx')
 
-    expect(source).toContain('left-[var(--sp-3)]')
-    expect(source).toContain('right-[var(--sp-3)]')
-    expect(source).toContain('h-[var(--bw-accent)]')
+    // Left-rail restructure: the active-item indicator is a LEFT-EDGE vertical
+    // accent bar — a width-driven token span (replacing the legacy height-driven
+    // bottom underline). The unread badge still uses spacing tokens.
+    expect(source).toContain('w-[var(--bw-accent)]')
+    expect(source).toContain('bg-[var(--accent)]')
     expect(source).toContain('min-w-[var(--sp-4)]')
     expect(source).toContain('py-[var(--sp-0h)] px-[var(--sp-1)]')
-    expect(source).toContain('py-[var(--sp-1h)] px-[var(--sp-3)]')
+    // No raw px literals (inline styles) anywhere in the rail.
     expect(source).not.toContain('left: "12px"')
     expect(source).not.toContain('right: "12px"')
     expect(source).not.toContain('height: "2px"')
+    expect(source).not.toContain('width: "2px"')
     expect(source).not.toContain('minWidth: "16px"')
     expect(source).not.toContain('padding: "1px 5px"')
     expect(source).not.toContain("padding: '2px 6px'")
+    // The legacy bottom-underline geometry must be gone (re-entry guard).
+    expect(source).not.toContain('h-[var(--bw-accent)]')
+    expect(source).not.toContain('bottom: "-1px"')
   })
 
   it('replaces remaining hardcoded values with tokens in heatmap, tags, and quoted replies', () => {
