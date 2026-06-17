@@ -213,6 +213,34 @@ describe('POST /api/credentials/:service/verify', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('passes redirect:error in the fetch init to prevent cross-origin redirect following', async () => {
+    // Regression guard for the undici custom-header-forwarding asymmetry:
+    // undici does NOT strip arbitrary headers (e.g. x-api-key) on cross-origin
+    // redirects, so the fetch must never follow a 3xx. Verify the call site
+    // passes redirect:'error' unconditionally for all descriptors.
+    fetchMock.mockResolvedValue({ status: 200 });
+    const { res } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'anthropic' });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init.redirect).toBe('error');
+  });
+
+  it('treats a redirect (TypeError from redirect:error) as unreachable, not a success (x-api-key path)', async () => {
+    // With redirect:'error', undici throws a TypeError on any 3xx response.
+    // For providers using x-api-key auth (e.g. anthropic), a redirect must
+    // not be followed — it must produce a verify FAILURE (unreachable), not a
+    // success, and must not leak the key to the redirect target.
+    const redirectError = new TypeError('fetch failed');
+    fetchMock.mockRejectedValue(redirectError);
+    const { res, json } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'anthropic' });
+    expect(json().ok).toBe(false);
+    expect(json().status).toBe('unreachable');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init.redirect).toBe('error');
+  });
+
   it('arms the cooldown on the absent-key path so the presence oracle is throttled', async () => {
     // First call: no key stored → 404. The oracle leak is that a caller can
     // probe presence at unlimited rate. The cooldown must arm UNCONDITIONALLY,
