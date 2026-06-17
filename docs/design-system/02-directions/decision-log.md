@@ -283,3 +283,19 @@ Remaining DD-43 gaps: DateTimePicker (§25, in progress — replaces the bare `d
 free-text cron in ScheduleComposerModal with a date+time field, calendar popover, and a segmented
 recurrence row; the free-text cron is demoted behind a "Cron" segment, not removed, so existing
 cron-scheduled messages still edit) and Bottom-sheet (Drawer mobile placement, partially addressed).
+
+## Toolkit primitives — DateTimePicker §25 complete + Segmented (DD-32) — 2026-06-17
+
+DateTimePicker (§25) is COMPLETE: Phase A (recurrence) landed #1026 — a date+time Field + a
+segmented Once/Daily/Weekly/Cron recurrence row that demotes (not deletes) the free-text cron
+behind the Cron segment, backward-compatible with stored cron strings; Phase B (calendar) landed
+#1029 — a `role="grid"` month popover (today/selected/disabled-past, WAI-ARIA keyboard nav, new
+`--cal-*` 4px-grid tokens) reusing the Popover generic-content mode.
+
+Segmented (DD-32) RESOLVED #1035, ruling = EXTRACT: a generic `Segmented` primitive owns the
+`.soup-toolbar-seg` recipe; `ToolbarTimeRange` is now a thin alias (existing Toolbar consumers
+unchanged) and the DateTimePicker recurrence row reuses it, retiring the hand-rolled duplication.
+
+Cutover status: the showcase-fidelity cutover is feature-complete. The residual §17 forward-kit
+(command palette ⌘K, inline-edit, bulk-action bar) is explicitly "next iterations" — net-new
+features, not cutover gaps — and is deferred pending an explicit scope decision.
