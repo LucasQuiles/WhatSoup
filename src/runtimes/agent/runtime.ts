@@ -90,6 +90,7 @@ import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { CrashTracker } from './crash-tracker.ts';
+import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -175,7 +176,6 @@ const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
-const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
 const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
@@ -319,7 +319,8 @@ interface ProviderFallbackActivation {
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
 // timeouts that fed an unbounded-growth spiral. Must stay < SILENT_COMPACT_TTL_MS
-// so the silent-compact flag does not expire mid-compaction.
+// (defined in auto-compact-controller.ts) so the silent-compact flag does not
+// expire mid-compaction.
 const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
 // Cooldown after a timed-out /compact before another auto-compact may be tried.
 // Kept short so a session that times out retries soon (bounding how far it grows
@@ -327,18 +328,9 @@ const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
 // prevent a per-turn retry storm. A session that genuinely cannot compact is
 // ultimately recovered by the prompt-too-long kill+respawn path.
 const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * 60 * 1000;
-// Baseline cooldown after a successful auto-compact before another may start.
-// Keeps success and timeout paths from re-arming /compact on every turn.
-const AUTO_COMPACT_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
-// A scope eligible again inside this window after a successful compact is a
-// rapid re-arm: the compact completed but was operationally ineffective.
-const AUTO_COMPACT_RAPID_REARM_WINDOW_MS = 5 * 60 * 1000;
-const AUTO_COMPACT_BACKOFF_TIERS_MS = [
-  AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
-  15 * 60 * 1000,
-  30 * 60 * 1000,
-  60 * 60 * 1000,
-] as const;
+// The success-cooldown, rapid-rearm window, and backoff tiers now live in
+// auto-compact-controller.ts alongside the state machine that uses them;
+// AUTO_COMPACT_RAPID_REARM_WINDOW_MS is imported above for the trigger gate.
 // Default auto-compact threshold: trigger /compact after 150k input tokens since last compact.
 // Claude's context window is 200k tokens; compacting at 150k prevents "prompt too long" errors
 // while leaving headroom for tool results and system prompts. Override per-instance via
@@ -1663,21 +1655,11 @@ export class AgentRuntime implements Runtime {
   // Cumulative count of user-turn failures by class (process lifetime). Telemetry
   // for which provider-failure classes fire most; surfaced verbatim in /health.
   private readonly turnErrorCounts = new Map<TurnCapabilityErrorClass, number>();
-  private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
-  private compactBoundaryScopes = new Set<string>();
-  private autoCompactCooldownUntil = new Map<string, number>();
-  private autoCompactLastSuccessAt = new Map<string, number>();
-  private autoCompactRapidRearmRecordedForSuccessAt = new Map<string, number>();
-  private autoCompactConsecutiveRapidRearms = new Map<string, number>();
-  private autoCompactMeasureNextTurn = new Set<string>();
-  private autoCompactIneffective = 0;
-  private autoCompactConsecutiveRapidRearmsMax = 0;
-  private autoCompactNextTurnOverThreshold = 0;
-  private autoCompactWaiters = new Map<string, {
-    promise: Promise<void>;
-    resolve: () => void;
-    timer: ReturnType<typeof setTimeout>;
-  }>();
+  // Silent-compact + auto-compact rearm state machine (cooldown/last-success/
+  // rapid-rearm/measure/boundary maps, in-flight waiters, and cumulative health
+  // counters). Constructed in the constructor once autoCompactInputTokens is known.
+  // See src/runtimes/agent/auto-compact-controller.ts.
+  private readonly autoCompact: AutoCompactController;
 
   /**
    * Post-turn event gate — tracks mapKeys where a 'result' event has been
@@ -1865,68 +1847,37 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  // The auto-compact bookkeeping state machine lives in AutoCompactController
+  // (src/runtimes/agent/auto-compact-controller.ts). These privates stay as thin
+  // delegators so the turn-pipeline call sites (and their characterization tests)
+  // are unchanged; the TRIGGER decision maybeStartAutoCompact stays below because
+  // it depends on the db/session/pending-system tracking, not on this state.
   private beginSilentCompact(scopeKey: string): void {
-    this.clearSilentCompact(scopeKey);
-    const timer = setTimeout(() => {
-      this.silentCompactScopes.delete(scopeKey);
-    }, SILENT_COMPACT_TTL_MS);
-    timer.unref?.();
-    this.silentCompactScopes.set(scopeKey, timer);
+    this.autoCompact.beginSilentCompact(scopeKey);
   }
 
   private isSilentCompact(scopeKey?: string): boolean {
-    return scopeKey !== undefined && this.silentCompactScopes.has(scopeKey);
+    return this.autoCompact.isSilentCompact(scopeKey);
   }
 
   private clearSilentCompact(scopeKey?: string): void {
-    if (scopeKey === undefined) return;
-    const timer = this.silentCompactScopes.get(scopeKey);
-    if (timer) clearTimeout(timer);
-    this.silentCompactScopes.delete(scopeKey);
+    this.autoCompact.clearSilentCompact(scopeKey);
   }
 
   private finishAutoCompact(scopeKey: string): void {
-    const waiter = this.autoCompactWaiters.get(scopeKey);
-    if (!waiter) return;
-    clearTimeout(waiter.timer);
-    this.autoCompactWaiters.delete(scopeKey);
-    waiter.resolve();
+    this.autoCompact.finishAutoCompact(scopeKey);
   }
 
   private consumeCompactBoundary(scopeKey: string): boolean {
-    const hadBoundary = this.compactBoundaryScopes.has(scopeKey);
-    this.compactBoundaryScopes.delete(scopeKey);
-    return hadBoundary;
+    return this.autoCompact.consumeCompactBoundary(scopeKey);
   }
 
   private recordAutoCompactSuccess(scopeKey: string): void {
-    const now = Date.now();
-    this.autoCompactLastSuccessAt.set(scopeKey, now);
-    this.autoCompactRapidRearmRecordedForSuccessAt.delete(scopeKey);
-    this.autoCompactMeasureNextTurn.add(scopeKey);
-    this.autoCompactCooldownUntil.set(scopeKey, now + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
+    this.autoCompact.recordAutoCompactSuccess(scopeKey);
   }
 
   private recordAutoCompactRapidRearm(scopeKey: string, lastSuccessAt: number, now: number): void {
-    if (this.autoCompactRapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt) return;
-    const next = (this.autoCompactConsecutiveRapidRearms.get(scopeKey) ?? 0) + 1;
-    this.autoCompactRapidRearmRecordedForSuccessAt.set(scopeKey, lastSuccessAt);
-    this.autoCompactConsecutiveRapidRearms.set(scopeKey, next);
-    this.autoCompactIneffective += 1;
-    if (next > this.autoCompactConsecutiveRapidRearmsMax) {
-      this.autoCompactConsecutiveRapidRearmsMax = next;
-    }
-    const tier = Math.min(next, AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1);
-    this.autoCompactCooldownUntil.set(scopeKey, now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier]);
-    log.warn(
-      {
-        scopeKey,
-        consecutiveRapidRearms: next,
-        cooldownMs: AUTO_COMPACT_BACKOFF_TIERS_MS[tier],
-        rapidRearmWindowMs: AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
-      },
-      'auto compact rapid re-arm detected',
-    );
+    this.autoCompact.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
   }
 
   private recordAutoCompactNextTurnIfNeeded(
@@ -1934,24 +1885,7 @@ export class AgentRuntime implements Runtime {
     inputTokens: number | undefined,
     consumeWhenNotOverThreshold = true,
   ): void {
-    if (this.autoCompactInputTokens === undefined) return;
-    if (!this.autoCompactMeasureNextTurn.has(scopeKey)) return;
-    if (inputTokens === undefined || inputTokens <= this.autoCompactInputTokens) {
-      if (consumeWhenNotOverThreshold) this.autoCompactMeasureNextTurn.delete(scopeKey);
-      return;
-    }
-
-    this.autoCompactMeasureNextTurn.delete(scopeKey);
-    this.autoCompactNextTurnOverThreshold += 1;
-    const lastSuccessAt = this.autoCompactLastSuccessAt.get(scopeKey);
-    const now = Date.now();
-    if (lastSuccessAt !== undefined && now - lastSuccessAt < AUTO_COMPACT_RAPID_REARM_WINDOW_MS) {
-      this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
-    }
-    log.warn(
-      { scopeKey, inputTokens: inputTokens ?? 0, threshold: this.autoCompactInputTokens },
-      'auto compact next turn input exceeded threshold',
-    );
+    this.autoCompact.recordAutoCompactNextTurnIfNeeded(scopeKey, inputTokens, consumeWhenNotOverThreshold);
   }
 
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
@@ -1993,28 +1927,28 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    if (this.autoCompactWaiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
+    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
 
     const now = Date.now();
-    const lastSuccessAt = this.autoCompactLastSuccessAt.get(scopeKey);
+    const lastSuccessAt = this.autoCompact.lastSuccessAt.get(scopeKey);
     if (lastSuccessAt !== undefined) {
       const withinRapidRearmWindow = now - lastSuccessAt < AUTO_COMPACT_RAPID_REARM_WINDOW_MS;
       const alreadyRecordedForSuccess =
-        this.autoCompactRapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
+        this.autoCompact.rapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
       if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
         this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
         return;
       }
       if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
-        this.autoCompactConsecutiveRapidRearms.delete(scopeKey);
-        this.autoCompactLastSuccessAt.delete(scopeKey);
+        this.autoCompact.consecutiveRapidRearms.delete(scopeKey);
+        this.autoCompact.lastSuccessAt.delete(scopeKey);
       }
     }
 
-    const cooldownUntil = this.autoCompactCooldownUntil.get(scopeKey);
+    const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
     if (cooldownUntil !== undefined) {
       if (now < cooldownUntil) return;
-      this.autoCompactCooldownUntil.delete(scopeKey);
+      this.autoCompact.cooldownUntil.delete(scopeKey);
     }
 
     let resolveWaiter!: () => void;
@@ -2025,7 +1959,7 @@ export class AgentRuntime implements Runtime {
       );
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
-      this.autoCompactCooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
+      this.autoCompact.cooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
       // Note: the pending-system count is intentionally NOT decremented here.
       // The /compact result arrives FIFO before any later turn's result on the
       // same subprocess, so it decrements the count itself. If the result never
@@ -2037,7 +1971,7 @@ export class AgentRuntime implements Runtime {
     const promise = new Promise<void>((resolve) => {
       resolveWaiter = resolve;
     });
-    this.autoCompactWaiters.set(scopeKey, { promise, resolve: resolveWaiter, timer });
+    this.autoCompact.waiters.set(scopeKey, { promise, resolve: resolveWaiter, timer });
     this.beginSilentCompact(scopeKey);
 
     log.info({
@@ -2443,14 +2377,9 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnActorJid.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
-    this.compactBoundaryScopes.delete(mapKey);
-    this.autoCompactCooldownUntil.delete(mapKey);
-    this.autoCompactLastSuccessAt.delete(mapKey);
-    this.autoCompactRapidRearmRecordedForSuccessAt.delete(mapKey);
-    this.autoCompactConsecutiveRapidRearms.delete(mapKey);
-    this.autoCompactMeasureNextTurn.delete(mapKey);
-    this.finishAutoCompact(mapKey);
-    this.clearSilentCompact(mapKey);
+    // Drop all auto-compact bookkeeping for this scope (cooldown/last-success/
+    // rapid-rearm/measure/boundary + resolve any in-flight waiter + silent timer).
+    this.autoCompact.cleanupScope(mapKey);
     // Clean up pending poll question state
     this.deletePendingPollQuestions(mapKey);
     // Cancel any pending image coalesce buffer
@@ -2464,14 +2393,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private cleanupGlobalAutoCompactState(): void {
-    this.compactBoundaryScopes.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.autoCompactCooldownUntil.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.autoCompactLastSuccessAt.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.autoCompactRapidRearmRecordedForSuccessAt.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.autoCompactConsecutiveRapidRearms.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.autoCompactMeasureNextTurn.delete(GLOBAL_TOOL_SCOPE_KEY);
-    this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
-    this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompact.cleanupScope(GLOBAL_TOOL_SCOPE_KEY);
   }
 
   // ---------------------------------------------------------------------------
@@ -2647,6 +2569,7 @@ export class AgentRuntime implements Runtime {
       options.autoCompactInputTokens > 0
         ? Math.floor(options.autoCompactInputTokens)
         : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
+    this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
@@ -2833,30 +2756,10 @@ export class AgentRuntime implements Runtime {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
           }
-          const autoCompactCooldownUntil = this.autoCompactCooldownUntil.get(lidKey);
-          if (autoCompactCooldownUntil !== undefined) {
-            this.autoCompactCooldownUntil.delete(lidKey);
-            this.autoCompactCooldownUntil.set(canonical, autoCompactCooldownUntil);
-          }
-          const lastAutoCompactSuccessAt = this.autoCompactLastSuccessAt.get(lidKey);
-          if (lastAutoCompactSuccessAt !== undefined) {
-            this.autoCompactLastSuccessAt.delete(lidKey);
-            this.autoCompactLastSuccessAt.set(canonical, lastAutoCompactSuccessAt);
-          }
-          const rapidRearmRecordedAt = this.autoCompactRapidRearmRecordedForSuccessAt.get(lidKey);
-          if (rapidRearmRecordedAt !== undefined) {
-            this.autoCompactRapidRearmRecordedForSuccessAt.delete(lidKey);
-            this.autoCompactRapidRearmRecordedForSuccessAt.set(canonical, rapidRearmRecordedAt);
-          }
-          const consecutiveRapidRearms = this.autoCompactConsecutiveRapidRearms.get(lidKey);
-          if (consecutiveRapidRearms !== undefined) {
-            this.autoCompactConsecutiveRapidRearms.delete(lidKey);
-            this.autoCompactConsecutiveRapidRearms.set(canonical, consecutiveRapidRearms);
-          }
-          if (this.autoCompactMeasureNextTurn.has(lidKey)) {
-            this.autoCompactMeasureNextTurn.delete(lidKey);
-            this.autoCompactMeasureNextTurn.add(canonical);
-          }
+          // Migrate auto-compact cooldown/last-success/rapid-rearm/measure state
+          // from the LID key onto the canonical JID (silent timers, boundary set,
+          // and in-flight waiters are intentionally left untouched, as before).
+          this.autoCompact.rekey(lidKey, canonical);
           const pendingPoll = this.pendingPollQuestions.get(lidKey);
           if (pendingPoll) {
             this.pendingPollQuestions.delete(lidKey);
@@ -3933,8 +3836,8 @@ export class AgentRuntime implements Runtime {
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : undefined;
     const crashScopeKey = this.getCrashScopeKey(chatJid);
-    const autoCompact = this.autoCompactWaiters.get(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
-    if (autoCompact) await autoCompact.promise;
+    const autoCompactWaiter = this.autoCompact.waiters.get(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+    if (autoCompactWaiter) await autoCompactWaiter.promise;
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
@@ -5109,7 +5012,7 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         session?.tickWatchdog();
         tracker?.onAnyActivity();
-        this.compactBoundaryScopes.add(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+        this.autoCompact.compactBoundaryScopes.add(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
         if (this.isSilentCompact(mapKey)) {
           log.info({ chatJid: queue.targetChatJid }, 'silent agent compact boundary observed');
           break;
@@ -5619,9 +5522,9 @@ export class AgentRuntime implements Runtime {
           recentCrashes: recentCrashCount,
           lastCrashAt: this.crashes.lastCrashAt,
           pollPersistenceErrors: this.pollPersistenceErrors,
-          autoCompactIneffective: this.autoCompactIneffective,
-          autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
-          autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
+          autoCompactIneffective: this.autoCompact.ineffective,
+          autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
+          autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
           ...fallbackState,
         },
       };
@@ -5642,9 +5545,9 @@ export class AgentRuntime implements Runtime {
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
         pollPersistenceErrors: this.pollPersistenceErrors,
-        autoCompactIneffective: this.autoCompactIneffective,
-        autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
-        autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
+        autoCompactIneffective: this.autoCompact.ineffective,
+        autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
+        autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
         ...fallbackState,
       },
     };
@@ -5948,25 +5851,13 @@ export class AgentRuntime implements Runtime {
       clearTimeout(timer);
     }
     this.pendingRespawnTimers.clear();
-    for (const timer of this.silentCompactScopes.values()) {
-      clearTimeout(timer);
-    }
-    this.silentCompactScopes.clear();
     this.postTurnGate.clear();
     for (const mapKey of Array.from(this.pendingPollQuestions.keys())) {
       this.deletePendingPollQuestions(mapKey);
     }
-    for (const waiter of this.autoCompactWaiters.values()) {
-      clearTimeout(waiter.timer);
-      waiter.resolve();
-    }
-    this.autoCompactWaiters.clear();
-    this.compactBoundaryScopes.clear();
-    this.autoCompactCooldownUntil.clear();
-    this.autoCompactLastSuccessAt.clear();
-    this.autoCompactRapidRearmRecordedForSuccessAt.clear();
-    this.autoCompactConsecutiveRapidRearms.clear();
-    this.autoCompactMeasureNextTurn.clear();
+    // Clear silent-compact timers, resolve+clear in-flight waiters, and drop all
+    // per-scope auto-compact bookkeeping (cumulative health counters persist).
+    this.autoCompact.shutdown();
     this.replyGuarantee?.shutdown();
     this.replyGuarantee = null;
 
@@ -8374,7 +8265,7 @@ export class AgentRuntime implements Runtime {
    */
   private persistBaselineIfBoundaryObserved(scopeKey: string, rowId: number | null): void {
     if (rowId === null) return;
-    if (!this.compactBoundaryScopes.has(scopeKey)) return;
+    if (!this.autoCompact.compactBoundaryScopes.has(scopeKey)) return;
     markSessionCompacted(this.db, rowId);
     this.recordAutoCompactSuccess(scopeKey);
     log.info({ scopeKey, rowId }, 'auto compact baseline persisted on crash cleanup (compact_boundary observed pre-crash)');
@@ -8678,7 +8569,7 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
-        this.compactBoundaryScopes.add(GLOBAL_TOOL_SCOPE_KEY);
+        this.autoCompact.compactBoundaryScopes.add(GLOBAL_TOOL_SCOPE_KEY);
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) {
           log.info({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'silent agent compact boundary observed');
           break;
