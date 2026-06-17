@@ -260,3 +260,260 @@ describe('MessageScheduler — start/stop lifecycle', () => {
     expect(() => scheduler.stop()).not.toThrow();
   });
 });
+describe('MessageScheduler — recurring message scheduling', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+
+
+
+  it('does not pick up recurring rows when next_run_at is NULL even if scheduled_at has passed', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    const stmt = db.raw.prepare(`
+      INSERT INTO scheduled_messages
+        (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, media_blob)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      '15550600003@s.whatsapp.net',
+      'text',
+      JSON.stringify({ text: 'no next run' }),
+      Math.floor(Date.now() / 1000) - 120,
+      'pending',
+      0,
+      '* * * * *',
+      null,
+    );
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendRawCalls).toHaveLength(0);
+    const row = db.raw
+      .prepare('SELECT status FROM scheduled_messages')
+      .get() as { status: string };
+    expect(row.status).toBe('pending');
+  });
+});
+
+// ─── Additional tests: executeSend media fallback paths ───────────────────────
+
+describe('MessageScheduler — executeSend media fallback paths', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+
+
+  it('treats a media row with no buffer and no media_blob as a send failure and applies the retry path', async () => {
+    const { mock: conn2, sendMediaCalls } = makeMockConnection();
+    const id = insertScheduledMessage(db.raw, {
+      chatJid: '15550600006@s.whatsapp.net',
+      contentType: 'image',
+      payload: JSON.stringify({ type: 'image', caption: 'no buffer' }),
+      mediaBlob: null,
+      retryCount: 0,
+    });
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendMediaCalls).toHaveLength(0);
+    const row = db.raw
+      .prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; retry_count: number };
+    expect(row.status).toBe('pending');
+    expect(row.retry_count).toBe(1);
+  });
+
+  it('permanently fails a media row (no buffer, no media_blob) once retries are exhausted, embedding the row id in the error', async () => {
+    const { mock: conn2, sendMediaCalls } = makeMockConnection();
+    const id = insertScheduledMessage(db.raw, {
+      chatJid: '15550600007@s.whatsapp.net',
+      contentType: 'audio',
+      payload: JSON.stringify({ type: 'audio' }),
+      mediaBlob: null,
+      retryCount: 2,
+    });
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendMediaCalls).toHaveLength(0);
+    const row = db.raw
+      .prepare('SELECT status, error FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; error: string };
+    expect(row.status).toBe('failed');
+    expect(row.error).toContain('no media_blob and no buffer in payload');
+    expect(row.error).toContain(`id=${id}`);
+  });
+
+  it('routes every non-text content type (image, video, audio, document, sticker) through sendMedia and never sendRaw', async () => {
+    const { mock: conn2, sendMediaCalls, sendRawCalls } = makeMockConnection();
+    const types = ['image', 'video', 'audio', 'document', 'sticker'];
+    for (const t of types) {
+      insertScheduledMessage(db.raw, {
+        chatJid: '15550600008@s.whatsapp.net',
+        contentType: t,
+        payload: JSON.stringify({ type: t }),
+        mediaBlob: Buffer.from('payload-bytes'),
+      });
+    }
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendMediaCalls).toHaveLength(types.length);
+    expect(sendRawCalls).toHaveLength(0);
+  });
+
+});
+
+// ─── Additional tests: tick() edge cases ──────────────────────────────────────
+
+describe('MessageScheduler — tick() additional edge cases', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('processes multiple due messages in a single tick', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    insertScheduledMessage(db.raw, { chatJid: '15550700001@s.whatsapp.net' });
+    insertScheduledMessage(db.raw, { chatJid: '15550700002@s.whatsapp.net' });
+    insertScheduledMessage(db.raw, { chatJid: '15550700003@s.whatsapp.net' });
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendRawCalls).toHaveLength(3);
+    const statuses = db.raw
+      .prepare('SELECT status FROM scheduled_messages ORDER BY id')
+      .all() as Array<{ status: string }>;
+    expect(statuses.every((r) => r.status === 'sent')).toBe(true);
+  });
+
+  it('treats a malformed JSON payload as a send failure and applies the retry path', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    const id = insertScheduledMessage(db.raw, {
+      chatJid: '15550700004@s.whatsapp.net',
+      payload: '{not valid json',
+    });
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendRawCalls).toHaveLength(0);
+    const row = db.raw
+      .prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; retry_count: number };
+    expect(row.status).toBe('pending');
+    expect(row.retry_count).toBe(1);
+  });
+
+  it('serializes a non-Error rejection into the error column via String(err)', async () => {
+    const failConn: Partial<ConnectionManager> = {
+      sendRaw: vi.fn().mockRejectedValue('string-thrown-not-an-Error'),
+      sendMedia: vi.fn().mockRejectedValue('string-thrown-not-an-Error'),
+    };
+    const id = insertScheduledMessage(db.raw, {
+      chatJid: '15550700005@s.whatsapp.net',
+      retryCount: 2,
+    });
+
+    const scheduler = new MessageScheduler(db, failConn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    const row = db.raw
+      .prepare('SELECT status, error FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; error: string };
+    expect(row.status).toBe('failed');
+    expect(row.error).toBe('string-thrown-not-an-Error');
+  });
+
+  it('resolves without sending when there are no scheduled_messages rows at all (early-return path)', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await expect(scheduler.tick()).resolves.toBeUndefined();
+    expect(sendRawCalls).toHaveLength(0);
+  });
+
+  it('continues processing subsequent rows after one row fails mid-tick (per-row try/catch isolation)', async () => {
+    let firstCall = true;
+    const mixedConn: Partial<ConnectionManager> = {
+      sendRaw: vi.fn(async () => {
+        if (firstCall) {
+          firstCall = false;
+          throw new Error('first row fails');
+        }
+        return { waMessageId: 'ok' };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: 'ok' })),
+    };
+    const failingId = insertScheduledMessage(db.raw, { chatJid: '15550700006@s.whatsapp.net' });
+    const okId = insertScheduledMessage(db.raw, { chatJid: '15550700007@s.whatsapp.net' });
+
+    const scheduler = new MessageScheduler(db, mixedConn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    const rows = db.raw
+      .prepare('SELECT id, status, retry_count FROM scheduled_messages ORDER BY id')
+      .all() as Array<{ id: number; status: string; retry_count: number }>;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId[failingId].status).toBe('pending');
+    expect(byId[failingId].retry_count).toBe(1);
+    expect(byId[okId].status).toBe('sent');
+    expect(byId[okId].retry_count).toBe(0);
+  });
+});
+
+// ─── Additional tests: recoverStale() with multiple stale rows ────────────────
+
+describe('MessageScheduler — recoverStale() multi-row', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('recovers every processing row in one call while leaving others untouched', () => {
+    const { mock: conn } = makeMockConnection();
+    const stale1 = insertScheduledMessage(db.raw, { status: 'processing' });
+    const stale2 = insertScheduledMessage(db.raw, { status: 'processing' });
+    const pendingId = insertScheduledMessage(db.raw, { status: 'pending' });
+    const sentId = insertScheduledMessage(db.raw, { status: 'sent' });
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    scheduler.recoverStale();
+
+    const rows = db.raw
+      .prepare('SELECT id, status FROM scheduled_messages ORDER BY id')
+      .all() as Array<{ id: number; status: string }>;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.status]));
+    expect(byId[stale1]).toBe('pending');
+    expect(byId[stale2]).toBe('pending');
+    expect(byId[pendingId]).toBe('pending');
+    expect(byId[sentId]).toBe('sent');
+  });
+
+  it('is a no-op (and does not throw) when no rows are in processing status', () => {
+    const { mock: conn } = makeMockConnection();
+    insertScheduledMessage(db.raw, { status: 'pending' });
+    insertScheduledMessage(db.raw, { status: 'sent' });
+    insertScheduledMessage(db.raw, { status: 'failed' });
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    expect(() => scheduler.recoverStale()).not.toThrow();
+
+    const rows = db.raw
+      .prepare('SELECT status FROM scheduled_messages ORDER BY id')
+      .all() as Array<{ status: string }>;
+    expect(rows.map((r) => r.status)).toEqual(['pending', 'sent', 'failed']);
+  });
+});

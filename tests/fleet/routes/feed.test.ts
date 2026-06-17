@@ -1960,3 +1960,380 @@ describe('message preview enrichment via handleGetFeed', () => {
     fs.rmdirSync(tmpDir);
   });
 });
+describe('parsePinoLine — supplemental branch coverage', () => {
+  const CTX = { instanceName: 'test-line', instanceType: 'passive' as const };
+
+  function makeLine(fields: Record<string, unknown>): string {
+    return JSON.stringify({ level: 30, time: 1700000000000, ...fields });
+  }
+
+
+  it('carries provider from parse context onto the event', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'session start' }),
+      { instanceName: 'prov-line', instanceType: 'agent', provider: 'openai' },
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.provider).toBe('openai');
+      expect(result.instance).toBe('prov-line');
+      expect(result.mode).toBe('agent');
+    }
+  });
+
+  it('omits the provider property entirely when context supplies no provider', () => {
+    const result = parsePinoLine(makeLine({ msg: 'session start' }), CTX);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result).not.toHaveProperty('provider');
+    }
+  });
+
+  it('omits conversationKey for outbound messages whose chat JID cannot be converted', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'Sending message', chatJid: 'not-a-jid', messageId: 'bad-out-1' }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'message',
+        direction: 'outbound',
+        chatJid: 'not-a-jid',
+        messageId: 'bad-out-1',
+      });
+      expect((result.detail as any).conversationKey).toBeUndefined();
+    }
+  });
+
+  it('omits conversationKey for inbound messages whose chat JID cannot be converted', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'inbound message received', chatJid: 'not-a-jid', messageId: 'bad-in-1' }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'message',
+        direction: 'inbound',
+        chatJid: 'not-a-jid',
+        messageId: 'bad-in-1',
+      });
+      expect((result.detail as any).conversationKey).toBeUndefined();
+    }
+  });
+
+  it('normalizes a tool_error with every field absent to empty defaults', () => {
+    const result = parsePinoLine(makeLine({ msg: 'tool error reported' }), CTX);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'tool_error',
+        toolName: '',
+        error: '',
+      });
+      expect((result.detail as any).toolId).toBeUndefined();
+    }
+  });
+
+  it('returns a non-error generic event for business-matching info-level messages', () => {
+    const result = parsePinoLine(makeLine({ msg: 'queue processed 5 items', level: 30 }), CTX);
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({ type: 'generic' });
+      expect(result.level).toBe('info');
+      expect(result.isError).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// health-status pruning when an instance leaves discovery
+// ---------------------------------------------------------------------------
+
+describe('health transition pruning via handleGetFeed', () => {
+  function mockReq(url = '/'): any {
+    return { url, method: 'GET', headers: {} };
+  }
+  function mockRes(): any {
+    const res = {
+      _status: 0,
+      _body: undefined as unknown,
+      writeHead(status: number) { res._status = status; },
+      end(data?: string) { if (data) res._body = JSON.parse(data); },
+    };
+    return res;
+  }
+  function fakeInstance(overrides: Record<string, unknown> = {}): any {
+    return {
+      name: 'prune-alpha',
+      type: 'agent',
+      accessMode: 'self_only',
+      healthPort: 3010,
+      dbPath: '/data/prune/bot.db',
+      stateRoot: '/state/prune',
+      logDir: '/nonexistent/prune-logs',
+      healthToken: null,
+      configPath: '/config/prune/config.json',
+      socketPath: null,
+      ...overrides,
+    };
+  }
+  function makeDeps(overrides: Record<string, unknown> = {}): any {
+    return {
+      discovery: { getInstances: vi.fn(() => new Map()) },
+      healthPoller: { getStatus: vi.fn(() => undefined) },
+      dbReader: {
+        getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+        getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+      },
+      ...overrides,
+    };
+  }
+
+  it('does not emit a stale health transition for a re-introduced instance after pruning', () => {
+    const instA = fakeInstance({ name: 'prune-alpha', type: 'agent' });
+    const instB = fakeInstance({ name: 'prune-beta', type: 'agent' });
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn() } as any,
+      healthPoller: { getStatus: vi.fn() } as any,
+    });
+
+    // Call 1 — establish prune-alpha online baseline (first sighting → no transition)
+    (deps.discovery.getInstances as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Map([['prune-alpha', instA]]),
+    );
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'online',
+      error: null,
+    });
+    const res1 = mockRes();
+    handleGetFeed(mockReq(), res1, deps);
+    expect((res1._body as any[]).filter((e: any) => e.detail?.type === 'health')).toHaveLength(0);
+
+    // Call 2 — discovery no longer contains prune-alpha → its previousStatus entry is pruned
+    (deps.discovery.getInstances as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Map([['prune-beta', instB]]),
+    );
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'online',
+      error: null,
+    });
+    handleGetFeed(mockReq(), mockRes(), deps);
+
+    // Call 3 — prune-alpha returns as unreachable; prevStatus is undefined after pruning,
+    // so NO transition may be emitted (it would be emitted if the stale 'online' survived).
+    (deps.discovery.getInstances as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Map([['prune-alpha', instA]]),
+    );
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'unreachable',
+      error: 'ECONNREFUSED',
+    });
+    const res3 = mockRes();
+    handleGetFeed(mockReq(), res3, deps);
+    expect((res3._body as any[]).filter((e: any) => e.detail?.type === 'health')).toHaveLength(0);
+
+    // Call 4 — prune-alpha now degrades; baseline is the just-established 'unreachable'
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'degraded',
+      error: 'flaky signal',
+    });
+    const res4 = mockRes();
+    handleGetFeed(mockReq(), res4, deps);
+
+    const healthEvent = (res4._body as any[]).find((e: any) => e.detail?.type === 'health');
+    expect(healthEvent).toBeDefined();
+    expect(healthEvent.detail).toMatchObject({
+      type: 'health',
+      status: 'degraded',
+      previousStatus: 'unreachable',
+      error: 'flaky signal',
+    });
+    expect(healthEvent.level).toBe('warn');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// coalesce / collapse — supplemental branch coverage
+// ---------------------------------------------------------------------------
+
+describe('coalesce and collapse — supplemental branch coverage', () => {
+  let tmpDir: string;
+  let logDir: string;
+  let logFile: string;
+
+  function makeLine(fields: Record<string, unknown>): string {
+    return JSON.stringify({ level: 30, time: 1700000000000, ...fields });
+  }
+  function mockReq(url = '/'): any {
+    return { url, method: 'GET', headers: {} };
+  }
+  function mockRes(): any {
+    const res = {
+      _status: 0,
+      _body: undefined as unknown,
+      writeHead(status: number) { res._status = status; },
+      end(data?: string) { if (data) res._body = JSON.parse(data); },
+    };
+    return res;
+  }
+  function fakeInstance(overrides: Record<string, unknown> = {}): any {
+    return {
+      name: 'coalesce-line',
+      type: 'passive',
+      accessMode: 'self_only',
+      healthPort: 3010,
+      dbPath: '/data/coalesce/bot.db',
+      stateRoot: '/state/coalesce',
+      logDir,
+      healthToken: null,
+      configPath: '/config/coalesce/config.json',
+      socketPath: null,
+      ...overrides,
+    };
+  }
+  function makeDeps(overrides: Record<string, unknown> = {}): any {
+    return {
+      discovery: { getInstances: vi.fn(() => new Map()) },
+      healthPoller: { getStatus: vi.fn(() => undefined) },
+      dbReader: {
+        getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+        getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+      },
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-feed-supplement-'));
+    logDir = path.join(tmpDir, 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    logFile = path.join(logDir, 'app.log');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('collapses repeated outbound sends that share a messageId into one summary card', () => {
+    const lines = [
+      makeLine({ msg: 'Sending message', chatJid: '15550100002@s.whatsapp.net', messageId: 'msg-dup', time: 1700000000000 }),
+      makeLine({ msg: 'Sending message', chatJid: '15550100002@s.whatsapp.net', messageId: 'msg-dup', time: 1700000000500 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'omicron', type: 'agent' });
+    const instances = new Map([['omicron', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const messageEvents = (res._body as any[]).filter(
+      (e: any) => e.detail?.type === 'message' && e.detail?.direction === 'outbound',
+    );
+    expect(messageEvents).toHaveLength(1);
+    expect(messageEvents[0]).toMatchObject({
+      instance: 'omicron',
+      text: 'omicron: sent ×2 to 15550100002@s.whatsapp.net',
+      detail: {
+        type: 'message',
+        direction: 'outbound',
+        chatJid: '15550100002@s.whatsapp.net',
+      },
+    });
+    expect(messageEvents[0].detail.messageId).toBeUndefined();
+    expect(messageEvents[0].detail.direction).toBe('outbound');
+  });
+
+  it('coalesces repeated reconnect scheduling with no error into the first event', () => {
+    const lines = [
+      makeLine({ msg: 'Scheduling reconnect in 5s', time: 1700000000000 }),
+      makeLine({ msg: 'Scheduling reconnect in 10s', time: 1700000000000 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'reconnect-only', type: 'passive' });
+    const instances = new Map([['reconnect-only', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const connectionEvents = (res._body as any[]).filter(
+      (e: any) => e.detail?.type === 'connection',
+    );
+    expect(connectionEvents).toHaveLength(1);
+    expect(connectionEvents[0]).toMatchObject({
+      instance: 'reconnect-only',
+      text: 'reconnect-only: Scheduling reconnect in 5s',
+      detail: { type: 'connection', reconnecting: true },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preview enrichment — sanitizePreview truncation
+// ---------------------------------------------------------------------------
+
+describe('message preview enrichment — supplemental edge cases', () => {
+  function mockReq(url = '/'): any {
+    return { url, method: 'GET', headers: {} };
+  }
+  function mockRes(): any {
+    const res = {
+      _status: 0,
+      _body: undefined as unknown,
+      writeHead(status: number) { res._status = status; },
+      end(data?: string) { if (data) res._body = JSON.parse(data); },
+    };
+    return res;
+  }
+
+  it('truncates long preview content to 120 characters', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-truncate-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100003@s.whatsapp.net', messageId: 'msg-long-preview',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const longBody = 'a'.repeat(150);
+    const fakeInst = {
+      name: 'truncate-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['truncate-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-long-preview', content: longBody, sender_name: null, content_type: 'text' },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    try {
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+        discovery: { getInstances: () => instances } as any,
+        healthPoller: { getStatus: vi.fn(() => null) } as any,
+        dbReader,
+      });
+
+      const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.detail.preview).toBe('a'.repeat(120));
+      expect(msgEvent.detail.preview.length).toBe(120);
+    } finally {
+      fs.unlinkSync(logFile);
+      fs.rmdirSync(tmpDir);
+    }
+  });
+});
