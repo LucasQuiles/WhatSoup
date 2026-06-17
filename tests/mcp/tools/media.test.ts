@@ -785,16 +785,17 @@ describe('transcribe_audio', () => {
 
   function insertAudioMessage(
     messageId: string,
-    opts: { mediaPath?: string; content?: string } = {},
+    opts: { mediaPath?: string; content?: string; rawMessage?: string } = {},
   ): void {
     testDb.raw.prepare(`
       INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
-        content, is_from_me, timestamp, media_path)
-      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, 'audio', ?, 0, 1700000000, ?)
+        content, is_from_me, timestamp, media_path, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, 'audio', ?, 0, 1700000000, ?, ?)
     `).run(
       messageId,
       opts.content ?? JSON.stringify({ type: 'audio', duration: 10, ptt: true, transcription: null }),
       opts.mediaPath ?? null,
+      opts.rawMessage ?? null,
     );
   }
 
@@ -875,6 +876,73 @@ describe('transcribe_audio', () => {
 
     const body = JSON.parse(result.content[0].text);
     expect(body.error).toBe('no_audio_data');
+  });
+
+  function audioRawMessage(mimetype?: string): string {
+    return JSON.stringify({
+      message: {
+        audioMessage: {
+          url: 'https://mmg.whatsapp.net/fake-audio',
+          mimetype,
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 1024,
+          directPath: '/fake/audio-path',
+        },
+      },
+    });
+  }
+
+  it('downloads raw audio, saves media_path, and uses the downloaded MIME for transcription', async () => {
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('downloaded-audio'));
+    mockTranscribeAudio.mockResolvedValue('downloaded transcript');
+    insertAudioMessage('msg-download-audio', {
+      rawMessage: audioRawMessage('audio/mp4'),
+      content: 'not-json',
+    });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-download-audio' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({ transcription: 'downloaded transcript', duration: null, cached: false });
+    expect(mockDownloadMediaMessage).toHaveBeenCalledOnce();
+    const [buffer, mime] = mockTranscribeAudio.mock.calls[0];
+    expect((buffer as Buffer).toString()).toBe('downloaded-audio');
+    expect(mime).toBe('audio/mp4');
+
+    const row = testDb.raw.prepare('SELECT media_path, content, content_text FROM messages WHERE message_id = ?')
+      .get('msg-download-audio') as { media_path: string | null; content: string; content_text: string };
+    expect(row.media_path).toMatch(/\.m4a$/);
+    expect(existsSync(row.media_path!)).toBe(true);
+    expect(JSON.parse(row.content)).toEqual({ transcription: 'downloaded transcript' });
+    expect(row.content_text).toBe('downloaded transcript');
+  });
+
+  it('uses the default ogg MIME and extension when raw audio has no mimetype', async () => {
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('downloaded-audio'));
+    mockTranscribeAudio.mockClear();
+    mockTranscribeAudio.mockResolvedValue('fresh transcript');
+    insertAudioMessage('msg-download-ogg', {
+      rawMessage: audioRawMessage(),
+    });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-download-ogg' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('fresh transcript');
+    expect(mockTranscribeAudio.mock.calls[0][1]).toBe('audio/ogg');
+    const row = testDb.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get('msg-download-ogg') as { media_path: string | null };
+    expect(row.media_path).toMatch(/\.ogg$/);
   });
 });
 
