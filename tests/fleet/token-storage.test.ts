@@ -34,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = savedXdg;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -88,6 +89,15 @@ describe('loadOrCreateFleetTokens — fresh install', () => {
     expect(fs.existsSync(filePath)).toBe(false);
   });
 
+  it('refuses to use a token directory through a symlink', () => {
+    const dirPath = path.dirname(getFleetTokensPath());
+    const targetDir = path.join(tmpRoot, 'outside-token-dir');
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.symlinkSync(targetDir, dirPath);
+
+    expect(() => loadOrCreateFleetTokens()).toThrow(/directory through symlink/);
+  });
+
   it('returns the same active token on subsequent calls', () => {
     const first = loadOrCreateFleetTokens();
     const second = loadOrCreateFleetTokens();
@@ -132,6 +142,18 @@ describe('loadOrCreateFleetTokens — legacy migration', () => {
     const tokens = loadOrCreateFleetTokens();
     expect(tokens.active).toBe('b'.repeat(64));
   });
+
+  it('ignores an invalid legacy token and creates a fresh active token', () => {
+    const legacyPath = getLegacyFleetTokenPath();
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, 'not-a-valid-token');
+
+    const tokens = loadOrCreateFleetTokens();
+
+    expect(tokens.active).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens.active).not.toBe('not-a-valid-token');
+    expect(tokens.accept).toEqual([]);
+  });
 });
 
 describe('loadOrCreateFleetTokens — corrupt file', () => {
@@ -147,6 +169,51 @@ describe('loadOrCreateFleetTokens — corrupt file', () => {
     fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
     fs.writeFileSync(jsonPath, JSON.stringify({ active: 'short', accept: [] }));
     expect(() => loadOrCreateFleetTokens()).toThrow(/invalid shape/);
+  });
+
+  it.each([
+    ['null JSON', null],
+    ['array JSON', []],
+    ['string JSON', 'not-an-object'],
+    ['non-array accept', { active: 'f'.repeat(64), accept: 'not-array', rotatedAt: new Date().toISOString() }],
+    ['invalid accept token', { active: 'f'.repeat(64), accept: ['short'], rotatedAt: new Date().toISOString() }],
+    ['non-string rotatedAt', { active: 'f'.repeat(64), accept: [], rotatedAt: 123 }],
+  ])('throws on %s rather than overwriting', (_label, payload) => {
+    const jsonPath = getFleetTokensPath();
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    fs.writeFileSync(jsonPath, JSON.stringify(payload));
+
+    expect(() => loadOrCreateFleetTokens()).toThrow(/invalid shape/);
+  });
+
+  it('treats an unreadable current JSON file as absent and rewrites it', () => {
+    const jsonPath = getFleetTokensPath();
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    fs.writeFileSync(jsonPath, JSON.stringify({
+      active: 'a'.repeat(64),
+      accept: [],
+      rotatedAt: new Date().toISOString(),
+    }));
+    fs.chmodSync(jsonPath, 0o000);
+
+    const tokens = loadOrCreateFleetTokens();
+
+    expect(tokens.active).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens.active).not.toBe('a'.repeat(64));
+    expect(fs.statSync(jsonPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('treats an unreadable legacy token as absent during migration', () => {
+    const legacyPath = getLegacyFleetTokenPath();
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, `${'a'.repeat(64)}\n`);
+    fs.chmodSync(legacyPath, 0o000);
+
+    const tokens = loadOrCreateFleetTokens();
+
+    expect(tokens.active).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens.active).not.toBe('a'.repeat(64));
+    fs.chmodSync(legacyPath, 0o600);
   });
 
   it('refuses to read fleet-tokens.json through a symlink', () => {
