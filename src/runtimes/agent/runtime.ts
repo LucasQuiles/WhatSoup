@@ -89,6 +89,7 @@ import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
+import { CrashTracker } from './crash-tracker.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -1701,8 +1702,9 @@ export class AgentRuntime implements Runtime {
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
   // so health reporting can surface recent failures until a successful respawn decays them.
-  private perChatCrashCount = new Map<string, number>();
-  private lastCrashAt: string | null = null;
+  // The count map + lastCrashAt live in CrashTracker; scope-KEY derivation
+  // (getCrashScopeKey) stays here because it depends on runtime config.
+  private readonly crashes = new CrashTracker();
 
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
@@ -1732,31 +1734,19 @@ export class AgentRuntime implements Runtime {
   private pollPersistenceErrors = 0;
 
   private recordCrash(mapKey: string): number {
-    const count = (this.perChatCrashCount.get(mapKey) ?? 0) + 1;
-    this.perChatCrashCount.set(mapKey, count);
-    this.lastCrashAt = new Date().toISOString();
-    return count;
+    return this.crashes.record(mapKey);
   }
 
   private getCrashCount(mapKey: string): number {
-    return this.perChatCrashCount.get(mapKey) ?? 0;
+    return this.crashes.count(mapKey);
   }
 
   private getRecentCrashCount(): number {
-    let total = 0;
-    for (const count of this.perChatCrashCount.values()) {
-      total += count;
-    }
-    return total;
+    return this.crashes.recentTotal();
   }
 
   private decrementCrashCount(mapKey: string): void {
-    const count = this.perChatCrashCount.get(mapKey) ?? 0;
-    if (count <= 1) {
-      this.perChatCrashCount.delete(mapKey);
-      return;
-    }
-    this.perChatCrashCount.set(mapKey, count - 1);
+    this.crashes.decrement(mapKey);
   }
 
   private getCrashScopeKey(chatJid: string): string {
@@ -2118,7 +2108,7 @@ export class AgentRuntime implements Runtime {
         arrayBuffers: memoryUsage.arrayBuffers,
       },
       recentCrashCount: this.getRecentCrashCount(),
-      lastCrashAt: this.lastCrashAt,
+      lastCrashAt: this.crashes.lastCrashAt,
     }, 'agent runtime health stats');
   }
 
@@ -2443,7 +2433,7 @@ export class AgentRuntime implements Runtime {
    * Call this whenever a session is removed from chatSessions.
    */
   private cleanupPerChatState(mapKey: string): void {
-    this.perChatCrashCount.delete(mapKey);
+    this.crashes.forget(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
     this.perChatPendingSystemResults.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
@@ -2823,11 +2813,7 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
-          const crashCount = this.perChatCrashCount.get(lidKey);
-          if (crashCount !== undefined) {
-            this.perChatCrashCount.delete(lidKey);
-            this.perChatCrashCount.set(canonical, crashCount);
-          }
+          this.crashes.rekey(lidKey, canonical);
           const contentType = this.perChatTurnContentType.get(lidKey);
           if (contentType !== undefined) {
             this.perChatTurnContentType.delete(lidKey);
@@ -5631,7 +5617,7 @@ export class AgentRuntime implements Runtime {
           lastSessionStartedAt,
           sessionCount: sessions.length,
           recentCrashes: recentCrashCount,
-          lastCrashAt: this.lastCrashAt,
+          lastCrashAt: this.crashes.lastCrashAt,
           pollPersistenceErrors: this.pollPersistenceErrors,
           autoCompactIneffective: this.autoCompactIneffective,
           autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
@@ -6092,7 +6078,7 @@ export class AgentRuntime implements Runtime {
     this.outboundQueues.clear();
     this.chatSessions.clear();
     this.chatQueues.clear();
-    this.perChatCrashCount.clear();
+    this.crashes.clear();
     this.activeToolNames.clear();
     this.turnHadToolActivity.clear();
     this.perChatInboundSeqQueue.clear();

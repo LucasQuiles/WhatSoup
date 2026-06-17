@@ -41,7 +41,7 @@ describe('AgentRuntime structural policy', () => {
 
     const methodBody = match?.[1] ?? '';
     const expectedDeletes = [
-      'this.perChatCrashCount.delete(mapKey);',
+      'this.crashes.forget(mapKey);',
       'this.perChatInboundSeqQueue.delete(mapKey);',
       'this.perChatPendingSystemResults.delete(mapKey);',
       'this.perChatTurnContentType.delete(mapKey);',
@@ -65,7 +65,10 @@ describe('AgentRuntime structural policy', () => {
       expect(methodBody).toContain(expectedDelete);
     }
 
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 1);
+    // Two listed entries are not raw `.delete(mapKey)` calls: the crash count now
+    // routes through this.crashes.forget(mapKey) (extracted CrashTracker) and the
+    // pending-poll cleanup goes through this.deletePendingPollQuestions(mapKey).
+    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 2);
 
     const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
     expect(pendingHelper).toBeTruthy();
