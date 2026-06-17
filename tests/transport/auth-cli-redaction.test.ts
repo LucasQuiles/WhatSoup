@@ -28,6 +28,11 @@ describe('auth CLI redaction', () => {
     expect(redacted).not.toContain('user:pass');
   });
 
+  it('normalizes nullish values to an empty redacted string', () => {
+    expect(redactAuthCliText(null)).toBe('');
+    expect(redactAuthCliText(undefined)).toBe('');
+  });
+
   it('keeps auth.ts stderr identity and auth-dir logs behind the redactor', () => {
     const source = readFileSync(join(process.cwd(), 'src/transport/auth.ts'), 'utf8');
 

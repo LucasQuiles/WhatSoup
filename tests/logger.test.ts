@@ -17,8 +17,26 @@
  * test process starts with LOG_DIR set.
  */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 type LoggerModule = typeof import('../src/logger');
+
+interface MockTransport {
+  end: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+}
+
+interface MockLogger {
+  child: ReturnType<typeof vi.fn>;
+  debug: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+  fatal: ReturnType<typeof vi.fn>;
+  flush: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
+  level: string;
+  trace: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+}
 
 const originalLogDir = process.env.LOG_DIR;
 const originalLogLevel = process.env.LOG_LEVEL;
@@ -30,8 +48,61 @@ async function importLoggerWithoutFileTransport(): Promise<LoggerModule> {
   return import('../src/logger');
 }
 
-afterEach(() => {
+function createMockLogger(level = process.env.LOG_LEVEL ?? 'info'): MockLogger {
+  return {
+    child: vi.fn((bindings: Record<string, unknown>) => ({
+      ...createMockLogger(level),
+      bindings: () => bindings,
+    })),
+    debug: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    flush: vi.fn(),
+    info: vi.fn(),
+    level,
+    trace: vi.fn(),
+    warn: vi.fn(),
+  };
+}
+
+async function importLoggerWithMockedPino(options: {
+  logDir?: string;
+  logLevel?: string;
+  transport?: MockTransport;
+  transportThrows?: boolean;
+}): Promise<{
+  loggerModule: LoggerModule;
+  logger: MockLogger;
+  pinoFactory: ReturnType<typeof vi.fn>;
+  transportFactory: ReturnType<typeof vi.fn>;
+}> {
   vi.resetModules();
+  if (options.logDir === undefined) delete process.env.LOG_DIR;
+  else process.env.LOG_DIR = options.logDir;
+  if (options.logLevel === undefined) delete process.env.LOG_LEVEL;
+  else process.env.LOG_LEVEL = options.logLevel;
+
+  const logger = createMockLogger(options.logLevel ?? 'info');
+  const transportFactory = vi.fn(() => {
+    if (options.transportThrows) throw new Error('transport unavailable');
+    return options.transport;
+  });
+  const pinoFactory = vi.fn(() => logger);
+  Object.assign(pinoFactory, { transport: transportFactory });
+  vi.doMock('pino', () => ({ default: pinoFactory }));
+
+  return {
+    loggerModule: await import('../src/logger'),
+    logger,
+    pinoFactory,
+    transportFactory,
+  };
+}
+
+afterEach(() => {
+  vi.doUnmock('pino');
+  vi.resetModules();
+  vi.useRealTimers();
 });
 
 afterAll(() => {
@@ -140,5 +211,95 @@ describe('flushLogger', () => {
     const start = Date.now();
     await Promise.all([p1, p2, p3]);
     expect(Date.now() - start).toBeLessThan(100);
+  });
+});
+
+describe('file transport configuration', () => {
+  it('creates stdout and rolling-file targets when LOG_DIR is set', async () => {
+    const logDir = '/tmp/whatsoup-logs';
+    const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
+    const { loggerModule, pinoFactory, transportFactory } = await importLoggerWithMockedPino({
+      logDir,
+      logLevel: 'debug',
+      transport,
+    });
+
+    expect(transportFactory).toHaveBeenCalledWith({
+      targets: [
+        { target: 'pino/file', options: { destination: 1 }, level: 'debug' },
+        {
+          target: 'pino-roll',
+          options: {
+            file: join(logDir, 'whatsoup.log'),
+            frequency: 'daily',
+            mkdir: true,
+            limit: { count: 10 },
+          },
+          level: 'debug',
+        },
+      ],
+    });
+    expect(pinoFactory).toHaveBeenCalledWith({ level: 'debug' }, transport);
+    expect(loggerModule.default.level).toBe('debug');
+  });
+
+  it('falls back to stdout-only logging if transport setup fails', async () => {
+    const { loggerModule, logger, pinoFactory, transportFactory } = await importLoggerWithMockedPino({
+      logDir: '/tmp/invalid-log-dir',
+      logLevel: 'warn',
+      transportThrows: true,
+    });
+
+    await loggerModule.flushLogger();
+
+    expect(transportFactory).toHaveBeenCalledOnce();
+    expect(pinoFactory).toHaveBeenCalledWith({ level: 'warn' });
+    expect(logger.flush).not.toHaveBeenCalled();
+    expect(loggerModule.default.level).toBe('warn');
+  });
+});
+
+describe('flushLogger with file transport', () => {
+  it('flushes the logger, ends the transport, and resolves on close', async () => {
+    let onClose: (() => void) | undefined;
+    const transport: MockTransport = {
+      end: vi.fn(),
+      on: vi.fn((event: string, listener: () => void) => {
+        if (event === 'close') onClose = listener;
+        return transport;
+      }),
+    };
+    const { loggerModule, logger } = await importLoggerWithMockedPino({
+      logDir: '/tmp/whatsoup-logs',
+      transport,
+    });
+
+    const result = loggerModule.flushLogger();
+
+    expect(transport.on).toHaveBeenCalledWith('close', expect.any(Function));
+    expect(logger.flush).toHaveBeenCalledOnce();
+    expect(transport.end).toHaveBeenCalledOnce();
+    expect(onClose).toBeDefined();
+    onClose?.();
+    await expect(result).resolves.toBeUndefined();
+  });
+
+  it('resolves via the safety timeout if the transport never closes', async () => {
+    vi.useFakeTimers();
+    const transport: MockTransport = {
+      end: vi.fn(),
+      on: vi.fn(() => transport),
+    };
+    const { loggerModule, logger } = await importLoggerWithMockedPino({
+      logDir: '/tmp/whatsoup-logs',
+      transport,
+    });
+
+    const result = loggerModule.flushLogger();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(logger.flush).toHaveBeenCalledOnce();
+    expect(transport.end).toHaveBeenCalledOnce();
+    await expect(result).resolves.toBeUndefined();
   });
 });

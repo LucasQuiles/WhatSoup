@@ -3,6 +3,7 @@ import {
   installThirdPartyConsoleRedaction,
   redactThirdPartyConsoleArgs,
   redactThirdPartyConsoleString,
+  redactThirdPartyConsoleValue,
 } from '../../src/transport/third-party-console-redaction.ts';
 
 describe('third-party console redaction', () => {
@@ -106,5 +107,67 @@ describe('third-party console redaction', () => {
     expect(redactThirdPartyConsoleString('Failed to check/upload pre-keys during initialization')).toBe(
       'Failed to check/upload pre-keys during initialization',
     );
+  });
+
+  it('redacts primitive, typed, error, and sensitive-key values', () => {
+    const errorWithStack = new Error('failed token=visible-value');
+    errorWithStack.stack = 'Error: failed authorization=visible-value\n    at fixture';
+    const errorWithoutStack = new Error('plain failure');
+    errorWithoutStack.stack = undefined;
+
+    const redacted = redactThirdPartyConsoleValue({
+      count: 1,
+      empty: null,
+      big: 10n,
+      bytes: Buffer.from('buffer-material'),
+      typed: new Uint8Array([1, 2, 3]),
+      at: new Date('2026-06-13T00:00:00.000Z'),
+      errorWithStack,
+      errorWithoutStack,
+    }) as Record<string, unknown>;
+
+    expect(redacted.count).toBe(1);
+    expect(redacted.empty).toBeNull();
+    expect(redacted.big).toBe('10');
+    expect(redacted.bytes).toBe('<Buffer redacted length=15>');
+    expect(redacted.typed).toBe('<Uint8Array redacted length=3>');
+    expect(redacted.at).toBe('2026-06-13T00:00:00.000Z');
+    expect(redacted.errorWithStack).toMatchObject({
+      type: 'Error',
+      message: 'failed token=<redacted>',
+      stack: 'Error: failed authorization=<redacted>\n    at fixture',
+    });
+    expect(redacted.errorWithoutStack).toMatchObject({
+      type: 'Error',
+      message: 'plain failure',
+      stack: undefined,
+    });
+    expect(redactThirdPartyConsoleValue('visible-value', 'accessToken')).toBe('<redacted>');
+  });
+
+  it('bounds recursive traversal and reports truncation without leaking sensitive data', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    const deep = { a: { b: { c: { d: { e: { f: 'too deep' } } } } } };
+    const shortArray = [1, 'safe'];
+    const longArray = Array.from({ length: 31 }, (_item, index) => index);
+    const longObject = Object.fromEntries(Array.from({ length: 41 }, (_item, index) => [`k${index}`, index]));
+    const objectNamedObject = Object.create({});
+
+    const redactedCircular = redactThirdPartyConsoleValue(circular) as Record<string, unknown>;
+    const redactedDeep = redactThirdPartyConsoleValue(deep) as { a: { b: { c: { d: { e: unknown } } } } };
+    const redactedShortArray = redactThirdPartyConsoleValue(shortArray) as unknown[];
+    const redactedArray = redactThirdPartyConsoleValue(longArray) as unknown[];
+    const redactedLongObject = redactThirdPartyConsoleValue(longObject) as Record<string, unknown>;
+
+    expect(redactedCircular.self).toBe('<circular>');
+    expect(redactedDeep.a.b.c.d.e).toBe('<max-depth>');
+    expect(redactedShortArray).toEqual([1, 'safe']);
+    expect(redactedArray).toHaveLength(31);
+    expect(redactedArray.at(-1)).toBe('<truncated:1>');
+    expect(Object.keys(redactedLongObject).filter(key => key.startsWith('k'))).toHaveLength(40);
+    expect(redactedLongObject['<truncated_keys>']).toBe(1);
+    expect(redactThirdPartyConsoleValue(objectNamedObject)).toEqual({ type: 'Object', redacted: true });
   });
 });

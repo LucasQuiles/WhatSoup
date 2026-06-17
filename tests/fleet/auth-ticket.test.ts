@@ -10,7 +10,7 @@
 //  - rotation continuity: ticket signed with prior `active` still validates
 //    if the key remains in the caller-supplied validKeys list
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   createTicketStore,
@@ -25,6 +25,7 @@ let store: TicketStore | null = null;
 afterEach(() => {
   store?.stop();
   store = null;
+  vi.useRealTimers();
 });
 
 function freshStore(): TicketStore {
@@ -50,6 +51,20 @@ describe('auth-ticket -- audience constants', () => {
 });
 
 describe('auth-ticket -- issue/redeem per audience', () => {
+  it('issues and redeems with default store options', () => {
+    const s = createTicketStore();
+    store = s;
+
+    const { ticket, expiresIn } = s.issue(KEY, 'api');
+
+    expect(expiresIn).toBe(Math.floor(TICKET_TTL_MS / 1000));
+    expect(s.redeem(ticket, 'api', [KEY])).toBe(true);
+    expect(s.redeemedCount).toBe(1);
+    s.stop();
+    s.stop();
+    store = null;
+  });
+
   for (const audience of TICKET_AUDIENCES) {
     it(`issues and redeems a '${audience}'-audience ticket`, () => {
       const s = freshStore();
@@ -152,19 +167,69 @@ describe('auth-ticket -- HMAC integrity', () => {
     const { ticket } = s.issue(oldKey, 'api');
     expect(s.redeem(ticket, 'api', [newKey, oldKey])).toBe(true);
   });
+
+  it('skips invalid validKeys entries while still accepting a later valid key', () => {
+    const s = freshStore();
+    const { ticket } = s.issue(KEY, 'api');
+
+    expect(s.redeem(ticket, 'api', [undefined as unknown as string, '', KEY])).toBe(true);
+  });
 });
 
 describe('auth-ticket -- malformed input', () => {
   it('returns false (does not throw) for malformed strings', () => {
     const s = freshStore();
+    expect(s.redeem(null as unknown as string, 'api', [KEY])).toBe(false);
     expect(s.redeem('', 'api', [KEY])).toBe(false);
     expect(s.redeem('not.a.ticket', 'api', [KEY])).toBe(false);
     expect(s.redeem('only-one-part', 'api', [KEY])).toBe(false);
     expect(s.redeem('a.b.c.d.e', 'api', [KEY])).toBe(false);
+    expect(s.redeem('.api.123.hmac', 'api', [KEY])).toBe(false);
+    expect(s.redeem('nonce..123.hmac', 'api', [KEY])).toBe(false);
+    expect(s.redeem('nonce.api..hmac', 'api', [KEY])).toBe(false);
+    expect(s.redeem('nonce.api.123.', 'api', [KEY])).toBe(false);
+    expect(s.redeem(`${'n'.repeat(65)}.api.123.hmac`, 'api', [KEY])).toBe(false);
+    expect(s.redeem(`nonce.${'a'.repeat(9)}.123.hmac`, 'api', [KEY])).toBe(false);
+    expect(s.redeem(`nonce.api.${'1'.repeat(17)}.hmac`, 'api', [KEY])).toBe(false);
+    expect(s.redeem(`nonce.api.123.${'h'.repeat(65)}`, 'api', [KEY])).toBe(false);
     // bogus expiry segment
     expect(s.redeem('nonce.api.notanumber.hmac', 'api', [KEY])).toBe(false);
+    expect(s.redeem('nonce.api.123e-1.hmac', 'api', [KEY])).toBe(false);
+    expect(s.redeem('nonce.api.0.hmac', 'api', [KEY])).toBe(false);
     // unknown audience segment
     expect(s.redeem('nonce.admin.123.hmac', 'api' as TicketAudience, [KEY])).toBe(false);
+  });
+});
+
+describe('auth-ticket -- redeemed nonce eviction', () => {
+  it('evicts expired redeemed nonces on the scheduled timer', () => {
+    vi.useFakeTimers();
+    let clock = 1_000;
+    store = createTicketStore({ ttlMs: 10, evictionIntervalMs: 100, now: () => clock });
+    const { ticket } = store.issue(KEY, 'api');
+    expect(store.redeem(ticket, 'api', [KEY])).toBe(true);
+
+    clock += TICKET_TTL_MS + 10_000;
+    vi.advanceTimersByTime(100);
+
+    expect(store.redeemedCount).toBe(0);
+  });
+
+  it('evicts expired redeemed nonces during the opportunistic sweep', () => {
+    let clock = 1_000;
+    store = createTicketStore({ ttlMs: 10, evictionIntervalMs: 0, now: () => clock });
+
+    for (let i = 0; i < 1025; i += 1) {
+      const { ticket } = store.issue(KEY, 'api');
+      expect(store.redeem(ticket, 'api', [KEY])).toBe(true);
+    }
+    expect(store.redeemedCount).toBe(1025);
+
+    clock += TICKET_TTL_MS + 10_000;
+    const { ticket } = store.issue(KEY, 'api');
+
+    expect(store.redeem(ticket, 'api', [KEY])).toBe(true);
+    expect(store.redeemedCount).toBe(1);
   });
 });
 
@@ -174,10 +239,11 @@ describe('auth-ticket -- constant-time compare SSOT', () => {
   // reachable through the public API because computeHmac only ever emits
   // well-formed base64url, so a behavioral test cannot pin the SSOT.
   //
-  // src/fleet/safe-compare.ts is the compatibility import path for the
-  // hardened src/lib/safe-compare.ts SSOT. The HMAC verification path must use
-  // it rather than keep a weaker local copy (same anti-duplication pattern as
-  // parser-utils/no-duplicates).
+  // safe-compare.ts is the hardened canonical (well-formed-UTF-16 gate,
+  // byteLength check, never throws, empty strings never verify) and its own
+  // header cites auth-ticket's compare as the precedent it superseded. The
+  // HMAC verification path must use it rather than keep a weaker local copy
+  // (same anti-duplication pattern as parser-utils/no-duplicates).
   it('uses safeStringEqual from safe-compare.ts, not a local naive compare', () => {
     const src = readFileSync(
       new URL('../../src/fleet/auth-ticket.ts', import.meta.url),
