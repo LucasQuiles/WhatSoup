@@ -168,6 +168,27 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_item"
 
 
+def test_simple_anchor_empty_text_is_malformed_spec():
+    # A simple/negation anchor needs NON-EMPTY text (guard `not isinstance(text, str) or not text`).
+    # An and-weakening would accept an empty-string anchor (isinstance is True, so the conjunction is
+    # False), silently admitting a vacuous anchor that "matches" everywhere and proves nothing.
+    assert _err(ag.gate, "some original text", "compressed",
+                [{"kind": "simple", "text": ""}]) == "malformed_spec"
+
+
+def test_paired_max_gap_negative_rejected_zero_accepted():
+    # paired max_gap must be a NON-NEGATIVE int (guard `not isinstance(gap, int) or gap < 0`).
+    # Two boundaries: a negative gap is REJECTED (the bool disjunct); max_gap == 0 (entity
+    # immediately adjacent to qualifier) is a VALID spec and must be ACCEPTED (the strict `< 0`).
+    # An and-weakening would admit a negative gap; a <= weakening would reject the legitimate zero.
+    neg = [{"kind": "paired", "entity": "alpha", "qualifier": "beta", "max_gap": -1}]
+    assert _err(ag.gate, "alpha beta", "alpha beta", neg) == "malformed_spec"
+    # max_gap == 0: "alphabeta" places entity end exactly at qualifier start (gap 0) -> valid spec,
+    # so the gate evaluates preservation rather than rejecting the spec.
+    zero = [{"kind": "paired", "entity": "alpha", "qualifier": "beta", "max_gap": 0}]
+    assert _err(ag.gate, "alphabeta", "alphabeta", zero) != "malformed_spec"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

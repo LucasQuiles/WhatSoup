@@ -229,6 +229,46 @@ def test_main_pass_fail_calibration_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_item"
 
 
+def test_density_exactly_at_threshold_classifies_dense_not_prose():
+    # detect_content_class uses `density >= DENSITY_THRESHOLD` (INCLUSIVE): a text whose
+    # numeric+date density EXACTLY equals the threshold (0.12) must take the strict dense tier,
+    # not the looser prose tier. 3 numeric tokens / 25 tokens == 0.12 exactly (a real boundary,
+    # not a measure-zero float artifact). A > weakening would drop an at-threshold-dense text to
+    # the prose cap — a quality risk on borderline-dense content.
+    text = " ".join(["word"] * 22 + ["11", "22", "33"])
+    assert len(text.split()) == 25
+    assert cg.detect_content_class(text) == "numeric"
+
+
+def test_compressor_id_with_no_calibration_uses_research_seed_no_crash():
+    # _resolve_cap returns the seed default when there is NO calibration OR no compressor_id
+    # (guard `not calibration or compressor_id is None`). With a compressor_id present but
+    # calibration=None, the `not calibration` disjunct must short-circuit BEFORE calibration.get(...)
+    # — an and-weakening would dereference None.get and crash on a reachable call (compressor named,
+    # no calibration map supplied).
+    r = cg.govern(_chars(200), _chars(80), content_class="numeric", compressor_id="llmlingua2")
+    assert r["cap_provenance"] == "research_seed"
+    assert r["cap"] == 1.67
+
+
+def test_local_measured_zero_cap_is_rejected():
+    # A local_measured cap must be a POSITIVE number; exactly 0 is invalid (guard `measured <= 0`).
+    # A < weakening would accept a zero cap, after which every nonzero compression exceeds it —
+    # a nonsensical always-reject gate that the fail-closed validation must refuse up front.
+    cal = {"x": {"provenance": "local_measured", "max_ratio": 0}}
+    assert _err(cg.govern, _chars(200), _chars(80), content_class="numeric",
+                compressor_id="x", calibration=cal) == "bad_calibration"
+
+
+def test_equal_token_count_is_flagged_expanded():
+    # expanded = `comp_tok >= orig_tok` (INCLUSIVE): equal token counts (a no-op "compression"
+    # that saved nothing) must be flagged expanded. A > weakening would report expanded=False for
+    # a zero-savings result. Same char length -> same heuristic token count.
+    r = cg.govern(_chars(80), _chars(80), content_class="prose")
+    assert r["expanded"] is True
+    assert r["observed_ratio"] == 1.0
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
