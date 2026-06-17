@@ -60,6 +60,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         hosts_path=hosts_path,
         oracle_path=kwargs.get("oracle_path"),
         action_outbox_dir=kwargs.get("action_outbox_dir", tmp_path / "state" / "actions"),
+        action_outbox_retention=kwargs.get("action_outbox_retention", 500),
         heartbeat_max_age_seconds=kwargs.get("heartbeat_max_age_seconds", 60),
         hysteresis_cycles=kwargs.get("hysteresis_cycles", 2),
         connectivity_hysteresis_cycles=kwargs.get("connectivity_hysteresis_cycles", 3),
@@ -1860,3 +1861,99 @@ def test_instance_lock_released_after_normal_run(tmp_path: Path, monkeypatch):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# --- SENT-B2: unbounded action outbox ---------------------------------------
+# The action outbox accumulates one file per emitted action with no consumer or
+# pruner, so inode/disk usage grows without bound. A cycle-end retention sweep
+# must keep only the newest N files by mtime and report the current depth.
+
+
+def test_prune_action_outbox_keeps_newest_n_by_mtime(tmp_path: Path):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts, action_outbox_retention=3)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True)
+    # 10 action files, oldest -> newest by mtime.
+    for index in range(10):
+        path = outbox / f"{1000 + index}-host-host-a-escalate-{index:04d}.json"
+        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        os.utime(path, (1000 + index, 1000 + index))
+
+    depth = _mod.prune_action_outbox(config)
+
+    remaining = sorted(p.name for p in outbox.glob("*.json"))
+    assert len(remaining) == 3, remaining
+    assert depth == 3
+    # The three newest (highest mtime) survive.
+    assert remaining == [
+        "1007-host-host-a-escalate-0007.json",
+        "1008-host-host-a-escalate-0008.json",
+        "1009-host-host-a-escalate-0009.json",
+    ]
+
+
+def test_prune_action_outbox_missing_dir_returns_zero(tmp_path: Path):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    # Outbox directory never created -> depth 0, no error.
+    assert not _mod.action_outbox_dir(config).exists()
+    assert _mod.prune_action_outbox(config) == 0
+
+
+def test_prune_action_outbox_survives_stat_and_unlink_errors(tmp_path: Path, monkeypatch):
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts, action_outbox_retention=1)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index in range(3):
+        path = outbox / f"{1000 + index}-host-host-a-escalate-{index:04d}.json"
+        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        os.utime(path, (1000 + index, 1000 + index))
+        paths.append(path)
+
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        # Break st_mtime lookup only inside the sort key (full filename),
+        # exercising the mtime=0.0 fallback while leaving is_file() intact.
+        if self.name == paths[0].name:
+            raise OSError("stat blocked")
+        return real_stat(self, *args, **kwargs)
+
+    def blocked_unlink(self, *args, **kwargs):
+        raise OSError("unlink blocked")
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "unlink", blocked_unlink)
+
+    # stat failure on one entry falls back to mtime 0.0; unlink failures are
+    # swallowed. The call must not raise and reports the capped depth.
+    depth = _mod.prune_action_outbox(config)
+    assert depth == 1
+    # All files remain because unlink was blocked, but the call did not raise.
+    monkeypatch.undo()
+    assert len(list(outbox.glob("*.json"))) == 3
+
+
+def test_run_once_prunes_outbox_and_reports_depth(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=999.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, action_outbox_retention=2)
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True)
+    # Pre-seed the outbox above the retention cap with stale action files.
+    for index in range(6):
+        path = outbox / f"{500 + index}-host-host-a-escalate-{index:04d}.json"
+        _mod.atomic_write_json(path, {"schemaVersion": 1, "seq": index})
+        os.utime(path, (500 + index, 500 + index))
+
+    result = _mod.run_once(
+        config,
+        _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}),
+    )
+
+    surviving = list(outbox.glob("*.json"))
+    assert len(surviving) == 2, [p.name for p in surviving]
+    assert result["actionOutboxDepth"] == 2
