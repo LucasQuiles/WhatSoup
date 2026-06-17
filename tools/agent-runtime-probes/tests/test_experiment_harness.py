@@ -76,6 +76,13 @@ def test_malformed_prediction_is_typed():
 
 # --- write_result interlock + verdicts ----------------------------------------
 
+def test_register_fails_closed_on_unwritable_store():
+    with tempfile.TemporaryDirectory() as d:
+        bogus = Path(d) / "iam_a_file"
+        bogus.write_text("x", encoding="utf-8")  # store-dir path is a FILE -> mkdir fails
+        assert _err(eh.register_prediction, _pred(), str(bogus)) == "store_unwritable"
+
+
 def test_result_without_prediction_fails_closed():
     with tempfile.TemporaryDirectory() as d:
         rep = eh.write_result("E2", {"b3_reject_rate": 0.95}, d)  # never registered

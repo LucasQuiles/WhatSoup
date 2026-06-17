@@ -115,8 +115,11 @@ def register_prediction(prediction, store_dir) -> dict:
     body = _validate_prediction(prediction)
     record = _record(body)
     store = Path(store_dir)
-    store.mkdir(parents=True, exist_ok=True)
-    os.chmod(store, 0o700)
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        os.chmod(store, 0o700)
+    except OSError as exc:
+        raise PredictionError("store_unwritable", f"prediction store dir unwritable: {type(exc).__name__}")
     path = _pred_path(body["experiment_id"], store)
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
