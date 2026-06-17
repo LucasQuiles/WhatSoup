@@ -7,7 +7,7 @@
  *   - the "Run your agents like a fleet." hero with the electric-blue accent on "fleet.";
  *   - the three value-prop cards — Spin up a Line / Watch it breathe / Heal before it hurts —
  *     each with its index overline, supporting copy, and a shape-driven glyph;
- *   - a primary CTA into the console ("Enter console" → navigate to /).
+ *   - a primary CTA into the console ("Open the Fleet" → navigate to /).
  *
  * Layout follows layout-density.md composition: a Container caps the measure; every gap is
  * owned by the parent (no margins between siblings). Type stays inside the v3 closed ramp —
@@ -150,7 +150,7 @@ const Landing: FC = () => {
                 onClick={() => navigate('/')}
                 iconEnd={<span aria-hidden="true">&rarr;</span>}
               >
-                Enter console
+                Open the Fleet
               </Button>
             </div>
           </motion.section>

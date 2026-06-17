@@ -117,7 +117,7 @@ describe('Landing — nameplate', () => {
 describe('Landing — CTA', () => {
   it('navigates to the console root when the primary CTA is clicked', () => {
     renderLanding()
-    const cta = screen.getByRole('button', { name: /enter console/i })
+    const cta = screen.getByRole('button', { name: /open the fleet/i })
     fireEvent.click(cta)
     expect(navigateMock).toHaveBeenCalledTimes(1)
     expect(navigateMock).toHaveBeenCalledWith('/')
@@ -125,7 +125,7 @@ describe('Landing — CTA', () => {
 
   it('keeps the CTA keyboard-focusable as a real button', () => {
     renderLanding()
-    const cta = screen.getByRole('button', { name: /enter console/i })
+    const cta = screen.getByRole('button', { name: /open the fleet/i })
     expect(cta.tagName).toBe('BUTTON')
     cta.focus()
     expect(cta).toHaveFocus()
