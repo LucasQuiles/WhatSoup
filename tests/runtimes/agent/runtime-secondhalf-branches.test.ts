@@ -244,7 +244,6 @@ type PollRuntimeState = {
   handlePendingPollSoftExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePendingPollHardExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePerChatCrash: (mapKey: string, chatJid?: string, info?: CrashInfo) => void;
-  perChatCrashCount: Map<string, number>;
 };
 
 const groupJid = '12036355555555NNNN@g.us';

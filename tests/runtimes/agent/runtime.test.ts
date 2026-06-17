@@ -526,7 +526,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
 
 type PerChatCleanupRuntimeState = {
   cleanupPerChatState: (mapKey: string) => void;
-  perChatCrashCount: Map<string, number>;
+  crashes: { record(k: string): number; count(k: string): number; size: number };
   perChatInboundSeqQueue: Map<string, number[]>;
   perChatTurnContentType: Map<string, string>;
   perChatTurnText: Map<string, string>;
@@ -1998,7 +1998,7 @@ describe('AgentRuntime', () => {
       state.perChatTurnText.set(lidKey, 'reply');
       state.perChatAssistantItemText.set(lidKey, new Map([['item-1', 'chunk']]));
       state.pendingTurnText.set(lidKey, 'pending');
-      state.perChatCrashCount.set(lidKey, 2);
+      state.crashes.record(lidKey); state.crashes.record(lidKey);
       state.resumeFailedHandling.add(lidKey);
       state.autoCompactCooldownUntil.set(lidKey, 1_700_000_900_000);
       state.autoCompactLastSuccessAt.set(lidKey, 1_700_000_000_000);
@@ -2049,7 +2049,7 @@ describe('AgentRuntime', () => {
       expect(state.perChatTurnText.get(canonicalJid)).toBe('reply');
       expect(state.perChatAssistantItemText.get(canonicalJid)?.get('item-1')).toBe('chunk');
       expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
-      expect(state.perChatCrashCount.get(canonicalJid)).toBe(2);
+      expect(state.crashes.count(canonicalJid)).toBe(2);
       expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
       expect(state.autoCompactCooldownUntil.get(canonicalJid)).toBe(1_700_000_900_000);
       expect(state.autoCompactLastSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
@@ -2072,7 +2072,7 @@ describe('AgentRuntime', () => {
 
       expect(state.chatSessions.has(lidKey)).toBe(false);
       expect(state.chatQueues.has(lidKey)).toBe(false);
-      expect(state.perChatCrashCount.has(lidKey)).toBe(false);
+      expect(state.crashes.count(lidKey)).toBe(0);
       expect(state.perChatInboundSeqQueue.has(lidKey)).toBe(false);
       expect(state.perChatTurnContentType.has(lidKey)).toBe(false);
       expect(state.perChatTurnText.has(lidKey)).toBe(false);
@@ -3613,8 +3613,8 @@ describe('AgentRuntime', () => {
 
     const targetKey = 'target@s.whatsapp.net';
     const otherKey = 'other@s.whatsapp.net';
-    state.perChatCrashCount.set(targetKey, 2);
-    state.perChatCrashCount.set(otherKey, 1);
+    state.crashes.record(targetKey); state.crashes.record(targetKey);
+    state.crashes.record(otherKey);
     state.perChatInboundSeqQueue.set(targetKey, [1, 2]);
     state.perChatInboundSeqQueue.set(otherKey, [3]);
     state.perChatTurnContentType.set(targetKey, 'audio');
@@ -3630,7 +3630,7 @@ describe('AgentRuntime', () => {
 
     state.cleanupPerChatState(targetKey);
 
-    expect(state.perChatCrashCount.has(targetKey)).toBe(false);
+    expect(state.crashes.count(targetKey)).toBe(0);
     expect(state.perChatInboundSeqQueue.has(targetKey)).toBe(false);
     expect(state.perChatTurnContentType.has(targetKey)).toBe(false);
     expect(state.perChatTurnText.has(targetKey)).toBe(false);
@@ -3638,7 +3638,7 @@ describe('AgentRuntime', () => {
     expect(state.pendingTurnText.has(targetKey)).toBe(false);
     expect(state.resumeFailedHandling.has(targetKey)).toBe(false);
 
-    expect(state.perChatCrashCount.get(otherKey)).toBe(1);
+    expect(state.crashes.count(otherKey)).toBe(1);
     expect(state.perChatInboundSeqQueue.get(otherKey)).toEqual([3]);
     expect(state.perChatTurnContentType.get(otherKey)).toBe('text');
     expect(state.perChatTurnText.get(otherKey)).toBe('other text');
@@ -3654,7 +3654,7 @@ describe('AgentRuntime', () => {
     const state = getPerChatCleanupState(runtime);
 
     const survivorKey = 'survivor@s.whatsapp.net';
-    state.perChatCrashCount.set(survivorKey, 2);
+    state.crashes.record(survivorKey); state.crashes.record(survivorKey);
     state.perChatInboundSeqQueue.set(survivorKey, [7]);
     state.perChatTurnContentType.set(survivorKey, 'text');
     state.perChatTurnText.set(survivorKey, 'still here');
@@ -3664,7 +3664,7 @@ describe('AgentRuntime', () => {
 
     expect(() => state.cleanupPerChatState('missing@s.whatsapp.net')).not.toThrow();
 
-    expect(state.perChatCrashCount.get(survivorKey)).toBe(2);
+    expect(state.crashes.count(survivorKey)).toBe(2);
     expect(state.perChatInboundSeqQueue.get(survivorKey)).toEqual([7]);
     expect(state.perChatTurnContentType.get(survivorKey)).toBe('text');
     expect(state.perChatTurnText.get(survivorKey)).toBe('still here');
@@ -3728,8 +3728,8 @@ describe('AgentRuntime', () => {
     state.chatSessions.set('chat-b', { shutdown: vi.fn(async () => {}) });
     state.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
     state.chatQueues.set('chat-b', makeQueueMock('chat-b@s.whatsapp.net'));
-    state.perChatCrashCount.set('chat-a', 1);
-    state.perChatCrashCount.set('chat-b', 2);
+    state.crashes.record('chat-a');
+    state.crashes.record('chat-b'); state.crashes.record('chat-b');
     state.perChatInboundSeqQueue.set('chat-a', [1]);
     state.perChatInboundSeqQueue.set('chat-b', [2]);
     state.perChatTurnContentType.set('chat-a', 'text');
@@ -3753,7 +3753,7 @@ describe('AgentRuntime', () => {
     await runtime.shutdown();
 
     expect(cleanupCalls).toEqual(['chat-a', 'chat-b']);
-    expect(state.perChatCrashCount.size).toBe(0);
+    expect(state.crashes.size).toBe(0);
     expect(state.perChatInboundSeqQueue.size).toBe(0);
     expect(state.perChatTurnContentType.size).toBe(0);
     expect(state.perChatTurnText.size).toBe(0);
