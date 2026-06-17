@@ -2560,3 +2560,73 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
     transition: none;
   }
 }
+
+/* --------------------------------------------------------------------------
+   INLINE EDIT PRIMITIVE — soup-inline-edit* (showcase §17)
+   Edit-in-place control: a dashed-underline button (display mode) that swaps
+   to a TextInput on activation. Enter commits, Esc/blur cancels.
+   Map of showcase .inline-edit: body face, --text-1 ink, dashed
+   --border-hairline underline, 4px-grid padding, canonical focus recipe.
+   Born-clean: v3 tokens only (no legacy bg-d, text-t, or raw off-grid px).
+   -------------------------------------------------------------------------- */
+
+.soup-inline-edit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--text-data);
+  font-family: var(--font-sans);
+  color: var(--text-1);
+  background: transparent;
+  border: none;
+  border-bottom: var(--bw) dashed var(--border-hairline);
+  border-radius: 0;
+  padding: var(--sp-1);
+  cursor: text;
+  transition: border-color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-inline-edit:not([disabled]):hover {
+  border-bottom-color: var(--border-strong);
+}
+
+.soup-inline-edit:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.soup-inline-edit[disabled] {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+.soup-inline-edit__value {
+  /* inherits font + color from the button */
+}
+
+.soup-inline-edit__pen {
+  color: var(--text-3);
+  flex: none;
+  align-self: center;
+}
+
+/* Edit-mode field wrapper — anchors the input + error stack. The descendant
+   input selector overrides the TextInput's .font-mono with the body face so
+   the input matches the display button (specificity 0,1,1 > .font-mono 0,1,0). */
+.soup-inline-edit-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.soup-inline-edit-field input {
+  font-size: var(--text-data);
+  font-family: var(--font-sans);
+}
+
+.soup-inline-edit__error {
+  font-size: var(--text-xs);
+  font-family: var(--font-sans);
+  color: var(--status-crit-fg);
+}

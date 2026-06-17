@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { RotateCw, SlidersHorizontal, GitBranch, Power } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
@@ -9,9 +10,16 @@ import { getProvider, getProviderColor, DEFAULT_PROVIDER_ID } from '../../lib/pr
 import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { Button } from '../primitives/Button'
+import { InlineEdit } from '../primitives'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
-import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
+import {
+  buildConfigEntries,
+  TYPE_COLOR,
+  getValueAtPath,
+  setValueAtPath,
+  FIELD_VALIDATORS,
+} from './config-helpers'
 import { getModeColor } from './types'
 import { resolveConnection } from '../../lib/status-map'
 import type { LineInstance } from './types'
@@ -26,6 +34,7 @@ export function SummaryTab({
   onChangeMode: () => void
 }) {
   const toast = useToast()
+  const queryClient = useQueryClient()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = getModeColor(line.mode)
   const connectionState = line.health?.connection?.state ?? 'unknown'
@@ -115,6 +124,25 @@ export function SummaryTab({
 
   const config = line.mode !== 'passive' ? buildConfigEntries(rawConfig) : null
 
+  // InlineEdit commit for agentOptions.fallbackModel — additive inline-editable
+  // field (showcase §17). Saves via the canonical api.updateConfig + invalidate
+  // path (mirrors ConfigEditDialog); rethrows so the primitive stays in edit
+  // mode on failure (the toast surfaces the error).
+  const commitFallbackModel = async (next: string) => {
+    const patch: Record<string, unknown> = {}
+    setValueAtPath(patch, 'agentOptions.fallbackModel', next)
+    try {
+      await api.updateConfig(line.name, patch)
+      toast.success('Configuration updated')
+      await queryClient.invalidateQueries({ queryKey: ['lines', line.name] })
+    } catch (e) {
+      toast.error(`Update failed: ${(e as Error).message}`)
+      throw e
+    }
+  }
+
+  const fallbackModelRaw = String(getValueAtPath(rawConfig, 'agentOptions.fallbackModel') ?? '')
+
   return (
     <div className="flex flex-col gap-[var(--sp-3)]">
       {/* Row 1: KPI cards — 6-wide single row */}
@@ -201,7 +229,16 @@ export function SummaryTab({
               {config.map((entry, i) => (
                 <div key={entry.key} className={`flex items-center justify-between py-[var(--sp-1h)] px-0${i < config.length - 1 ? ' c-border-b' : ''}`}>
                   <span className="c-label">{entry.key}</span>
-                  <span className="font-mono text-data" style={{ color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
+                  {entry.key === 'agentOptions.fallbackModel' ? (
+                    <InlineEdit
+                      label="Fallback model"
+                      value={fallbackModelRaw}
+                      validate={FIELD_VALIDATORS['agentOptions.fallbackModel']}
+                      onCommit={commitFallbackModel}
+                    />
+                  ) : (
+                    <span className="font-mono text-data" style={{ color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
+                  )}
                 </div>
               ))}
             </div>

@@ -154,6 +154,9 @@ export type { SwitchProps } from './Switch';
 export { Checkbox } from './Checkbox';
 export type { CheckboxProps } from './Checkbox';
 
+export { InlineEdit } from './InlineEdit';
+export type { InlineEditProps } from './InlineEdit';
+
 export { Tooltip } from './Tooltip';
 export type { TooltipProps } from './Tooltip';
 
