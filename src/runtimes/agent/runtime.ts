@@ -178,7 +178,7 @@ const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
-const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
+// (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
 // upper-bound estimate for when the primary provider becomes available again.
@@ -578,11 +578,23 @@ import {
 } from './poll-resolution.ts';
 
 
-// Tool_use → ToolUpdate formatting + error humanization extracted to ./tool-update.ts
-// (module-level FILE-reduction slice). buildToolUpdate is re-exported to preserve the
-// public surface; both are imported here for AgentRuntime and classifyToolError.
-export { buildToolUpdate } from './tool-update.ts';
-import { buildToolUpdate, humanizeError } from './tool-update.ts';
+// Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
+// gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
+// to preserve the public surface; imported here for AgentRuntime's use.
+export {
+  buildToolUpdate,
+  classifyToolError,
+  isOperatorActionableToolError,
+  shouldEmitToolFailureAlert,
+} from './tool-update.ts';
+import {
+  buildToolUpdate,
+  classifyToolError,
+  shouldEmitToolFailureAlert,
+  safeAlertSegment,
+  alertEvidenceValue,
+  alertExcerpt,
+} from './tool-update.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -716,122 +728,7 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
-/**
- * Classify a tool_result error as either a blocked tool (permission/hook denial),
- * cancelled, or a genuine execution error. Returns an appropriate ToolUpdate with
- * user-friendly messaging.
- */
-export function classifyToolError(toolName: string, content: string): ToolUpdate {
-  // Strip internal XML-like tags from Claude error content
-  const cleaned = content
-    .replace(/<\/?tool_use_error>/g, '')
-    .replace(/<\/?error>/g, '')
-    .trim();
 
-  const lower = cleaned.toLowerCase();
-
-  const isCancelled =
-    lower.startsWith('cancelled') ||
-    lower.includes('tool call cancelled') ||
-    lower.includes('was cancelled');
-
-  const isBlocked =
-    lower.includes('not allowed') ||
-    lower.includes('permission denied') ||
-    lower.includes('blocked by') ||
-    lower.includes('hook blocked') ||
-    lower.includes('denied by') ||
-    lower.includes('not permitted') ||
-    lower.includes('is not in the allow') ||
-    lower.includes('disallowed');
-
-  const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
-
-  // Try human-friendly rewrite first (only for errors, not blocked/cancelled)
-  if (category === 'error' && toolName !== 'unknown') {
-    const humanized = humanizeError(toolName, cleaned);
-    if (humanized) return { category, detail: humanized };
-  }
-
-  // Fallback: technical detail
-  const firstLine = cleaned.split('\n')[0] ?? cleaned;
-  const simplified = firstLine
-    .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
-    .replace(/^Exit code (\d+)$/, 'exit code $1');
-  const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
-
-  const humanName = toolName === 'unknown' ? '' : toolName;
-  const detail = humanName ? `${humanName} — ${reason}` : reason;
-
-  return { category, detail };
-}
-
-/**
- * Does a tool_result error carry a signature that an OPERATOR (not the agent)
- * may need to act on — free disk, restart a host, restore connectivity, or wait
- * out a provider throttle? These reflect host/runtime/provider health.
- *
- * Everything else in the `error` category — a search that found nothing, a
- * failed conditional, a missing path, a bad glob — is a normal agent-loop result
- * the agent recovers from inline (e.g. claude-cli marks any non-zero Bash exit
- * `is_error`). Those are NOT operator-actionable and must not page BOT ERRORS.
- */
-export function isOperatorActionableToolError(content: string): boolean {
-  const lower = content.toLowerCase();
-  return (
-    // Disk exhaustion
-    lower.includes('enospc') ||
-    lower.includes('no space left') ||
-    // Memory exhaustion
-    lower.includes('enomem') ||
-    lower.includes('out of memory') ||
-    // Connectivity / integration down
-    lower.includes('econnrefused') ||
-    lower.includes('econnreset') ||
-    lower.includes('etimedout') ||
-    lower.includes('fetch failed') ||
-    // Provider throttle / capacity
-    lower.includes('rate limit') ||
-    lower.includes('overloaded') ||
-    // Context / token budget exhaustion
-    lower.includes('context window') ||
-    lower.includes('context length') ||
-    lower.includes('max_tokens')
-  );
-}
-
-/**
- * Gate for `runtime-tool-error` BOT ERRORS alert emission.
- *
- * `blocked` (permission/hook denial) and `cancelled` keep their existing alert
- * behavior. A plain execution `error` only pages when it carries an
- * operator-actionable infra/provider signature — otherwise it is benign,
- * agent-recoverable noise (the dominant false-positive class on this channel).
- */
-export function shouldEmitToolFailureAlert(
-  category: ToolUpdate['category'],
-  content: string,
-): boolean {
-  if (category !== 'error') return true;
-  return isOperatorActionableToolError(content);
-}
-
-function safeAlertSegment(value: string): string {
-  const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
-  return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
-}
-
-function alertEvidenceValue(value: string | null | undefined): string {
-  const text = value == null || value.trim() === '' ? 'unknown' : value.trim();
-  return text.replace(/@/g, ' at ');
-}
-
-function alertExcerpt(value: string): string {
-  const cleaned = value.replace(/\s+/g, ' ').trim();
-  return cleaned.length > TOOL_FAILURE_ALERT_EXCERPT_CHARS
-    ? `${cleaned.slice(0, TOOL_FAILURE_ALERT_EXCERPT_CHARS - 1)}…`
-    : cleaned;
-}
 
 /**
  * Per-call context for {@link AgentRuntime.handleProviderFailureResult}. Captures
