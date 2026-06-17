@@ -147,6 +147,18 @@ def test_record_mutation_emits_no_raw_text_only_hashes():
     assert rec["reversible"] is False
 
 
+def test_record_mutation_class_is_redacted_like_other_free_text_fields():
+    # I3: mutation_class is caller-controlled free text; a secret-shaped value must be scrubbed by
+    # redact() (consistent with step/claim), and a clean class label must pass through unchanged.
+    leaky = pt.record_mutation(
+        step="mask", plane="enricher",
+        mutation_class="ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", before_text="x", after_text="y")
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in json.dumps(leaky)
+    clean = pt.record_mutation(step="mask", plane="enricher", mutation_class="compression",
+                               before_text="x", after_text="y")
+    assert clean["mutation_class"] == "compression"
+
+
 def test_record_mutation_reversible_handle_sets_reversible():
     rec = pt.record_mutation(
         step="mask",

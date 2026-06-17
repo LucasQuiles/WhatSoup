@@ -308,6 +308,10 @@ def record_mutation(
             "evidence_ref": evidence_ref,
             "reversible_handle": reversible_handle,
             "mutation_summary": summary,
+            # I3: mutation_class is ALSO caller-controlled free text (not enum-validated like `plane`);
+            # route it through redact() too, for consistency with the other free-text fields, so a stray
+            # secret-shaped value cannot leak.
+            "mutation_class": mutation_class,
         }
     )
 
@@ -317,7 +321,7 @@ def record_mutation(
         "redaction": "metadata-only; hashes/byte+token counts/validated summary only; no raw before/after text",
         "step": redacted_inputs["step"],
         "plane": safe_plane,
-        "mutation_class": mutation_class,
+        "mutation_class": redacted_inputs["mutation_class"],
         "tokens_before": accounting["tokens_before"],
         "tokens_after": accounting["tokens_after"],
         "token_delta": accounting["token_delta"],
