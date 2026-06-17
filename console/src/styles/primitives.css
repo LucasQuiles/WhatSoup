@@ -2401,3 +2401,87 @@ button.soup-pill[aria-disabled="true"] {
   min-height: 0;
   overflow-y: auto;
 }
+
+/* --------------------------------------------------------------------------
+   ACCORDION PRIMITIVE — soup-accordion* (showcase §21; DD-43)
+   Built on native <details>/<summary> — the native element carries the
+   disclosure semantics (open state, keyboard activation, focus on summary) for
+   free. This block only paints: a hairline-divided stack, the one focus recipe
+   on the summary, a chevron that rotates 90° on [open], and a body region.
+   Reduced-motion law (motion.md §9): the chevron rotation is REMOVED
+   (off-and-instant), not shortened, under prefers-reduced-motion.
+   -------------------------------------------------------------------------- */
+
+/* Group container — surface-raised card with hairline-divided rows */
+.soup-accordion {
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  overflow: hidden;
+}
+
+/* Single disclosure row — native <details>; row dividers come from the
+   summary's top border (except the first row, which inherits the wrapper's
+   top edge so we don't double up). */
+.soup-accordion__item + .soup-accordion__item .soup-accordion__summary {
+  border-top: var(--bw) solid var(--border-hairline);
+}
+
+/* Summary — flex row carrying the label + the chevron. Native triangle is
+   killed (list-style:none + ::-webkit-details-marker:none) so the chevron is
+   the sole affordance. The ONE focus recipe (verbatim from Card.tsx) is
+   applied via Tailwind utility classes on the <summary>; CSS carries the
+   cursor + the click target (the row spans full width). */
+.soup-accordion__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-1);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  user-select: none;
+}
+
+.soup-accordion__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Label — flexes to fill the row so the chevron stays pinned right. */
+.soup-accordion__label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Chevron — rotates 90° when its <details> is open. The transition is removed
+   (not shortened) under prefers-reduced-motion per motion.md §9. */
+.soup-accordion__chev {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--text-2);
+  transform: rotate(0deg);
+  transition: transform var(--dur-fast) var(--ease-enter);
+}
+
+details[open] > .soup-accordion__summary .soup-accordion__chev {
+  transform: rotate(90deg);
+}
+
+/* Body — padded content region under the summary. Token-driven padding;
+   text tier from --text-1. */
+.soup-accordion__body {
+  padding: 0 var(--sp-4) var(--sp-4);
+  color: var(--text-1);
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+}
+
+/* Reduced motion — REMOVE the chevron rotation (off-and-instant, motion.md §9). */
+@media (prefers-reduced-motion: reduce) {
+  .soup-accordion__chev {
+    transition: none;
+  }
+}
