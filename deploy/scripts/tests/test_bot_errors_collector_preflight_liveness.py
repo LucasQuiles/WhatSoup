@@ -57,6 +57,15 @@ def _load():
 
 _OFFLINE = {"status": "found", "online": False, "hostName": "host-a"}
 _ONLINE = {"status": "found", "online": True, "hostName": "host-a"}
+# A peer summary as it appears in production: keyed by ssh alias, carrying the
+# Tailscale IPs that ``tailscale ping`` can actually resolve.
+_OFFLINE_WITH_IPS = {
+    "status": "found",
+    "online": False,
+    "matched": "100.64.0.1",
+    "hostName": "relay-host",
+    "tailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+}
 
 
 def _pong(rc=0, out="pong from host-a (100.64.0.1) via 192.168.1.5:41641 in 1ms"):
@@ -73,6 +82,31 @@ def test_offline_flag_but_probe_pongs_is_reachable():
          patch.object(mod.subprocess, "run", return_value=_pong()) as run:
         assert mod.preflight_remote_unreachable("host-a") is None
     run.assert_called_once()  # probe was actually attempted
+
+
+def test_probe_pings_tailscale_ip_not_ssh_alias():
+    """Regression: the probe must target the Tailscale IP, never the ssh alias.
+
+    ``tailscale ping <alias>`` errors with ``looking up IP of "<alias>"``
+    because the ssh alias is not Tailscale-resolvable — that fail-closed every
+    probe and let the false-positive ``relay_host_down`` storm fire for days.
+    The probe must hand ``tailscale ping`` the peer's Tailscale IPv4.
+    """
+    mod = _load()
+    with patch.object(mod, "tailscale_peer_summary", return_value=dict(_OFFLINE_WITH_IPS)), \
+         patch.object(mod.subprocess, "run", return_value=_pong()) as run:
+        assert mod.preflight_remote_unreachable("relay-alias") is None
+    cmd = run.call_args.args[0]
+    assert "100.64.0.1" in cmd       # pinged the Tailscale IPv4
+    assert "relay-alias" not in cmd  # never the unresolvable ssh alias
+
+
+def test_probe_target_prefers_ipv4():
+    mod = _load()
+    assert mod.probe_target_for("relay-alias", _OFFLINE_WITH_IPS) == "100.64.0.1"
+    # No IPs -> falls back to matched token, then host.
+    assert mod.probe_target_for("host-a", {"matched": "host-a"}) == "host-a"
+    assert mod.probe_target_for("host-a", {}) == "host-a"
 
 
 def test_offline_flag_and_probe_miss_is_unreachable():

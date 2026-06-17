@@ -930,7 +930,36 @@ def liveness_probe_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def remote_liveness_probe_ok(host: str) -> bool:
+def probe_target_for(host: str, tailscale: dict[str, Any] | None = None) -> str:
+    """Pick the address ``tailscale ping`` can actually resolve.
+
+    ``tailscale ping`` resolves only Tailscale IPs and MagicDNS names — NOT
+    arbitrary ssh host aliases. The collector keys remotes by their ssh alias,
+    which ``tailscale ping`` cannot look up (``error looking up IP of
+    "<alias>"``), so probing the bare alias always
+    errored → fail-closed → the liveness probe could never clear a stale
+    ``Online: false`` and the false-positive storm it was meant to suppress
+    fired anyway.
+
+    Prefer the peer's Tailscale IPv4, then any Tailscale IP, then the matched
+    token, then the alias itself as a last resort.
+    """
+    summary = tailscale if tailscale is not None else tailscale_peer_summary(host)
+    ips = summary.get("tailscaleIPs") if isinstance(summary, dict) else None
+    if isinstance(ips, list):
+        for ip in ips:
+            if isinstance(ip, str) and "." in ip and ":" not in ip:
+                return ip  # IPv4 — most universally pingable
+        for ip in ips:
+            if isinstance(ip, str) and ip:
+                return ip  # IPv6 fallback
+    matched = summary.get("matched") if isinstance(summary, dict) else None
+    if isinstance(matched, str) and matched:
+        return matched
+    return host
+
+
+def remote_liveness_probe_ok(host: str, probe_target: str | None = None) -> bool:
     """Confirm a peer is actually reachable via a direct probe.
 
     The Tailscale control-plane ``Online`` flag goes stale for idle peers that
@@ -939,13 +968,18 @@ def remote_liveness_probe_ok(host: str) -> bool:
     alone produced correlated false-positive ``relay_host_down`` storms (the
     whole relay fleet flagged offline while every node answered ssh in <10ms).
 
+    ``probe_target`` is the address actually handed to ``tailscale ping`` — it
+    MUST be a Tailscale-resolvable IP/MagicDNS name, not the ssh host alias.
+    Callers pass the peer's Tailscale IP via :func:`probe_target_for`. When
+    omitted (unit tests) it falls back to ``host``.
+
     Returns True only on a positive pong. Fail-closed: a disabled, timed-out, or
     erroring probe returns False so the caller preserves the conservative
     skip-on-offline behaviour rather than hanging on a genuinely dead host.
     """
     if not liveness_probe_enabled():
         return False
-    cmd = tailscale_ping_command(host)
+    cmd = tailscale_ping_command(probe_target or host)
     if cmd is None:
         return False
     try:
@@ -968,7 +1002,9 @@ def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
         # The Online flag is a stale-prone control-plane heartbeat; confirm with
         # a real liveness probe before skipping ssh. A node that answers a direct
         # ping is reachable regardless of the flag — do not suppress its claim.
-        if remote_liveness_probe_ok(host):
+        # Probe the peer's Tailscale IP, never the bare ssh alias (which
+        # ``tailscale ping`` cannot resolve).
+        if remote_liveness_probe_ok(host, probe_target_for(host, tailscale)):
             return None
         return tailscale
     return None
