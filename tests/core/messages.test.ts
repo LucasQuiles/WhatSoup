@@ -16,6 +16,10 @@ import {
   updateMediaPath,
   updateTranscription,
   rowToMessage,
+  getMessagesSince,
+  getUnprocessedCount,
+  incrementEnrichmentRetries,
+  resetEnrichmentErrors,
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
@@ -469,4 +473,377 @@ describe('messages', () => {
     expect(ftsResults.length).toBeGreaterThan(0);
   });
 
+});
+
+// === Additional edge-case coverage (cheap-fleet drafted, wave-3) ===
+describe('messages — additional edge cases', () => {
+  const GROUP_JID = '111111100000000001@g.us';
+  const GROUP_KEY = '111111100000000001_at_g.us';
+  const SENDER_JID = '15550000001@s.whatsapp.net';
+  const BASE_TS = 1_700_000_000;
+
+  beforeEach(() => {
+    db.raw.prepare('DELETE FROM messages').run();
+  });
+
+  function makeMsg(overrides: Partial<StoreMessageInput> = {}): StoreMessageInput {
+    return {
+      chatJid: GROUP_JID,
+      conversationKey: GROUP_KEY,
+      senderJid: SENDER_JID,
+      senderName: 'Alice',
+      messageId: `msg-${randomBytes(4).toString('hex')}`,
+      content: 'hello',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: BASE_TS,
+      ...overrides,
+    };
+  }
+
+  // --- getMessagesSince ---
+
+  it('getMessagesSince returns messages strictly after since, ordered ASC', () => {
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 0, content: 'at' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 1, content: 'after' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 2, content: 'later' }));
+
+    const results = getMessagesSince(db, GROUP_KEY, BASE_TS, 10);
+    expect(results.map((m) => m.content)).toEqual(['after', 'later']);
+  });
+
+  it('getMessagesSince excludes messages whose timestamp equals since (strict >)', () => {
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS, content: 'exactly-at-since' }));
+
+    const results = getMessagesSince(db, GROUP_KEY, BASE_TS, 10);
+    expect(results).toHaveLength(0);
+  });
+
+  it('getMessagesSince applies a default limit of 30 when omitted', () => {
+    const COUNT = 35;
+    for (let i = 0; i < COUNT; i++) {
+      storeMessageIfNew(db, makeMsg({
+        messageId: `since-default-limit-${i}`,
+        timestamp: BASE_TS + 1 + i,
+      }));
+    }
+    const results = getMessagesSince(db, GROUP_KEY, BASE_TS);
+    expect(results).toHaveLength(30);
+  });
+
+  it('getMessagesSince respects an explicit limit smaller than available rows', () => {
+    for (let i = 0; i < 5; i++) {
+      storeMessageIfNew(db, makeMsg({
+        messageId: `since-lim-${i}`,
+        timestamp: BASE_TS + 1 + i,
+        content: `m${i}`,
+      }));
+    }
+    const results = getMessagesSince(db, GROUP_KEY, BASE_TS, 2);
+    expect(results).toHaveLength(2);
+    expect(results.map((m) => m.content)).toEqual(['m0', 'm1']);
+  });
+
+  it('getMessagesSince is scoped to conversationKey and empty when no matches', () => {
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 1, content: 'in-group' }));
+    storeMessageIfNew(db, makeMsg({
+      chatJid: '111111100000000099@g.us',
+      conversationKey: '111111100000000099_at_g.us',
+      timestamp: BASE_TS + 1,
+      content: 'other-group',
+    }));
+
+    const own = getMessagesSince(db, GROUP_KEY, BASE_TS, 10);
+    expect(own.map((m) => m.content)).toEqual(['in-group']);
+
+    const empty = getMessagesSince(db, 'nonexistent_at_g.us', BASE_TS, 10);
+    expect(empty).toEqual([]);
+  });
+
+  // --- getUnprocessedCount / getUnprocessedMessages ordering ---
+
+  it('getUnprocessedCount counts only unprocessed inbound (is_from_me=0) messages', () => {
+    expect(getUnprocessedCount(db)).toBe(0);
+    storeMessageIfNew(db, makeMsg({ content: 'inbound-1' }));
+    storeMessageIfNew(db, makeMsg({ content: 'inbound-2' }));
+    storeMessageIfNew(db, makeMsg({ isFromMe: true, content: 'bot' }));
+    expect(getUnprocessedCount(db)).toBe(2);
+
+    const all = getRecentMessages(db, GROUP_KEY, 10);
+    const target = all.find((m) => m.content === 'inbound-1')!;
+    markMessagesProcessed(db, [target.pk]);
+    expect(getUnprocessedCount(db)).toBe(1);
+  });
+
+  it('getUnprocessedMessages orders inbound messages by timestamp ASC then pk ASC', () => {
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 5, content: 'late', messageId: 'uo-late' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 1, content: 'early', messageId: 'uo-early' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 1, content: 'tied', messageId: 'uo-tied' }));
+
+    const results = getUnprocessedMessages(db, 100);
+    expect(results.map((m) => m.content)).toEqual(['early', 'tied', 'late']);
+  });
+
+  // --- incrementEnrichmentRetries ---
+
+  it('incrementEnrichmentRetries increments enrichment_retries and accumulates across calls', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'retry-me' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+    expect(msg.enrichmentRetries).toBe(0);
+
+    incrementEnrichmentRetries(db, [msg.pk]);
+    incrementEnrichmentRetries(db, [msg.pk]);
+    incrementEnrichmentRetries(db, [msg.pk]);
+
+    const [updated] = getRecentMessages(db, GROUP_KEY, 10);
+    expect(updated.enrichmentRetries).toBe(3);
+  });
+
+  it('incrementEnrichmentRetries with an empty array is a no-op', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'untouched' }));
+    expect(() => incrementEnrichmentRetries(db, [])).not.toThrow();
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+    expect(msg.enrichmentRetries).toBe(0);
+  });
+
+  it('incrementEnrichmentRetries ignores unknown primary keys without error', () => {
+    expect(() => incrementEnrichmentRetries(db, [999999, 999998])).not.toThrow();
+  });
+
+  it('incrementEnrichmentRetries batches multiple primary keys in one call', () => {
+    storeMessageIfNew(db, makeMsg({ messageId: 'batch-a', content: 'a' }));
+    storeMessageIfNew(db, makeMsg({ messageId: 'batch-b', content: 'b' }));
+    storeMessageIfNew(db, makeMsg({ messageId: 'batch-c', content: 'c' }));
+
+    const all = getRecentMessages(db, GROUP_KEY, 10);
+    const pks = all.map((m) => m.pk);
+    incrementEnrichmentRetries(db, pks);
+
+    const after = getRecentMessages(db, GROUP_KEY, 10);
+    expect(after.every((m) => m.enrichmentRetries === 1)).toBe(true);
+  });
+
+  // --- markMessagesWithError edge ---
+
+  it('markMessagesWithError with an empty array is a no-op without error', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'clean' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+
+    expect(() => markMessagesWithError(db, [], 'oops')).not.toThrow();
+
+    const row = db.raw
+      .prepare('SELECT enrichment_error, enrichment_processed_at FROM messages WHERE pk = ?')
+      .get(msg.pk) as { enrichment_error: string | null; enrichment_processed_at: string | null };
+    expect(row.enrichment_error).toBeNull();
+    expect(row.enrichment_processed_at).toBeNull();
+    expect(getMessageCount(db)).toBe(1);
+  });
+
+  // --- resetEnrichmentErrors ---
+
+  it('resetEnrichmentErrors returns 0 and resets nothing for an empty pk array', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'errored' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+    markMessagesWithError(db, [msg.pk], 'fail');
+
+    const result = resetEnrichmentErrors(db, []);
+    expect(result).toBe(0);
+
+    const row = db.raw
+      .prepare('SELECT enrichment_error FROM messages WHERE pk = ?')
+      .get(msg.pk) as { enrichment_error: string };
+    expect(row.enrichment_error).toBe('fail');
+  });
+
+  it('resetEnrichmentErrors resets only the specified errored messages and returns the count', () => {
+    storeMessageIfNew(db, makeMsg({ messageId: 'r-a', content: 'a' }));
+    storeMessageIfNew(db, makeMsg({ messageId: 'r-b', content: 'b' }));
+    const all = getRecentMessages(db, GROUP_KEY, 10);
+    const a = all.find((m) => m.content === 'a')!;
+    const b = all.find((m) => m.content === 'b')!;
+    markMessagesWithError(db, [a.pk, b.pk], 'timeout');
+    incrementEnrichmentRetries(db, [a.pk, b.pk]);
+
+    const reset = resetEnrichmentErrors(db, [a.pk]);
+    expect(reset).toBe(1);
+
+    const aRow = db.raw
+      .prepare('SELECT enrichment_error, enrichment_processed_at, enrichment_retries FROM messages WHERE pk = ?')
+      .get(a.pk) as { enrichment_error: string | null; enrichment_processed_at: string | null; enrichment_retries: number };
+    expect(aRow.enrichment_error).toBeNull();
+    expect(aRow.enrichment_processed_at).toBeNull();
+    expect(aRow.enrichment_retries).toBe(0);
+
+    const bRow = db.raw
+      .prepare('SELECT enrichment_error, enrichment_processed_at, enrichment_retries FROM messages WHERE pk = ?')
+      .get(b.pk) as { enrichment_error: string | null; enrichment_processed_at: string | null; enrichment_retries: number };
+    expect(bRow.enrichment_error).toBe('timeout');
+    expect(bRow.enrichment_processed_at).not.toBeNull();
+    expect(bRow.enrichment_retries).toBe(1);
+  });
+
+  it('resetEnrichmentErrors by pk returns 0 when the target has no enrichment_error', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'never-errored' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+
+    const reset = resetEnrichmentErrors(db, [msg.pk]);
+    expect(reset).toBe(0);
+  });
+
+  it('resetEnrichmentErrors without pks resets all messages that have an enrichment_error', () => {
+    storeMessageIfNew(db, makeMsg({ messageId: 'all-a', content: 'a' }));
+    storeMessageIfNew(db, makeMsg({ messageId: 'all-b', content: 'b' }));
+    const all = getRecentMessages(db, GROUP_KEY, 10);
+    const a = all.find((m) => m.content === 'a')!;
+    const b = all.find((m) => m.content === 'b')!;
+    markMessagesWithError(db, [a.pk, b.pk], 'boom');
+    incrementEnrichmentRetries(db, [a.pk, b.pk]);
+
+    const reset = resetEnrichmentErrors(db);
+    expect(reset).toBe(2);
+
+    for (const pk of [a.pk, b.pk]) {
+      const row = db.raw
+        .prepare('SELECT enrichment_error, enrichment_processed_at, enrichment_retries FROM messages WHERE pk = ?')
+        .get(pk) as { enrichment_error: string | null; enrichment_processed_at: string | null; enrichment_retries: number };
+      expect(row.enrichment_error).toBeNull();
+      expect(row.enrichment_processed_at).toBeNull();
+      expect(row.enrichment_retries).toBe(0);
+    }
+  });
+
+  it('resetEnrichmentErrors clears enrichment_processed_at so messages re-enter the unprocessed queue', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'will-fail-then-reset' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+    markMessagesWithError(db, [msg.pk], 'transient');
+    expect(getUnprocessedMessages(db, 100)).toHaveLength(0);
+
+    resetEnrichmentErrors(db);
+
+    const unprocessed = getUnprocessedMessages(db, 100);
+    expect(unprocessed).toHaveLength(1);
+    expect(unprocessed[0].enrichmentProcessedAt).toBeNull();
+    expect(unprocessed[0].enrichmentRetries).toBe(0);
+  });
+
+  // --- storeMessageIfNew defaults ---
+
+  it('storeMessageIfNew writes NULL/defaults for omitted optional fields (content_type defaults to text)', () => {
+    const minimal: StoreMessageInput = {
+      chatJid: GROUP_JID,
+      conversationKey: GROUP_KEY,
+      senderJid: SENDER_JID,
+      messageId: `min-${randomBytes(4).toString('hex')}`,
+      isFromMe: false,
+      timestamp: BASE_TS,
+    };
+    expect(storeMessageIfNew(db, minimal)).toBe(true);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE message_id = ?')
+      .all(minimal.messageId) as unknown as MessageRow[];
+    const mapped = rowToMessage(rows[0]);
+
+    expect(mapped.senderName).toBeNull();
+    expect(mapped.content).toBeNull();
+    expect(mapped.contentType).toBe('text');
+    expect(mapped.quotedMessageId).toBeNull();
+    expect(mapped.mediaPath).toBeNull();
+    expect(mapped.contentText).toBeNull();
+    expect(mapped.timestamp).toBe(BASE_TS);
+  });
+
+  it('rowToMessage maps NULL nullable columns to null and coerces is_from_me to a boolean', () => {
+    storeMessageIfNew(db, makeMsg({ isFromMe: true, content: 'x' }));
+    const [inserted] = getRecentMessages(db, GROUP_KEY, 10);
+    db.raw.prepare(
+      `UPDATE messages
+         SET sender_name = NULL, content = NULL, quoted_message_id = NULL, media_path = NULL
+       WHERE pk = ?`,
+    ).run(inserted.pk);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE pk = ?')
+      .all(inserted.pk) as unknown as MessageRow[];
+    const mapped = rowToMessage(rows[0]);
+
+    expect(mapped.pk).toBe(inserted.pk);
+    expect(mapped.isFromMe).toBe(true);
+    expect(mapped.senderName).toBeNull();
+    expect(mapped.content).toBeNull();
+    expect(mapped.quotedMessageId).toBeNull();
+    expect(mapped.mediaPath).toBeNull();
+    expect(mapped.contentText).toBeNull();
+    expect(mapped.timestamp).toBe(BASE_TS);
+  });
+
+  it('getRecentMessages maps contentText to content when content_text is NULL (rowToStoredMessage fallback)', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'fallback body', contentText: undefined }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+    expect(msg.content).toBe('fallback body');
+    expect(msg.contentText).toBe('fallback body');
+  });
+
+  // --- getMessagesBySender edge ---
+
+  it('getMessagesBySender excludes is_from_me=1 messages for the same sender JID', () => {
+    const jid = '15550000002@s.whatsapp.net';
+    storeMessageIfNew(db, makeMsg({ senderJid: jid, content: 'in' }));
+    storeMessageIfNew(db, makeMsg({ senderJid: jid, isFromMe: true, content: 'out' }));
+
+    const results = getMessagesBySender(db, jid);
+    expect(results.map((m) => m.content)).toEqual(['in']);
+  });
+
+  it('getMessagesBySender applies the default limit of 50 when omitted', () => {
+    const jid = '15550000003@s.whatsapp.net';
+    for (let i = 0; i < 60; i++) {
+      storeMessageIfNew(db, makeMsg({
+        senderJid: jid,
+        messageId: `sender-limit-${i}`,
+        timestamp: BASE_TS + i,
+      }));
+    }
+    const results = getMessagesBySender(db, jid);
+    expect(results).toHaveLength(50);
+  });
+
+  // --- updateTranscription edge ---
+
+  it('updateTranscription is a no-op without error for an unknown message_id', () => {
+    expect(() => updateTranscription(db, 'does-not-exist', 'nope')).not.toThrow();
+    const row = db.raw
+      .prepare('SELECT COUNT(*) AS cnt FROM messages WHERE message_id = ?')
+      .get('does-not-exist') as { cnt: number };
+    expect(row.cnt).toBe(0);
+  });
+
+  it('updateTranscription replaces malformed (non-JSON) content with a fresh transcription object', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'definitely not json {{', contentType: 'audio' }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+
+    updateTranscription(db, msg.messageId, 'recovered text');
+
+    const row = db.raw
+      .prepare('SELECT content, content_text FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string; content_text: string };
+    const parsed = JSON.parse(row.content);
+    expect(parsed).toEqual({ transcription: 'recovered text' });
+    expect(row.content_text).toBe('recovered text');
+  });
+
+  it('updateTranscription preserves existing JSON keys when adding transcription', () => {
+    storeMessageIfNew(db, makeMsg({
+      content: JSON.stringify({ type: 'audio', duration: 7 }),
+      contentType: 'audio',
+    }));
+    const [msg] = getRecentMessages(db, GROUP_KEY, 10);
+
+    updateTranscription(db, msg.messageId, 'preserved');
+
+    const row = db.raw
+      .prepare('SELECT content FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string };
+    expect(JSON.parse(row.content)).toEqual({ type: 'audio', duration: 7, transcription: 'preserved' });
+  });
 });
