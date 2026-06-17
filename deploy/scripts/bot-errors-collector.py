@@ -969,12 +969,26 @@ def reachability_diagnosis(diagnostics: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+_TRANSIENT_UNREACHABLE_DIAGNOSES: frozenset[str] = frozenset({
+    "tailscale_offline",
+    "tailscale_online_ssh_timeout",
+    "tailscale_online_ssh_failed",
+})
+
+
+def is_transient_unreachable(diagnostics: dict[str, Any]) -> bool:
+    """Return True when the reachability diagnosis indicates a known-transient
+    unreachable state (laptop sleep, Tailscale blip, SSH transport timeout).
+
+    These are expected remote states that must NOT generate critical pages
+    before the backoff threshold is crossed.  Genuine failures — e.g.
+    tailscale_online_ssh_remote_error — return False and keep critical severity.
+    """
+    return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
+
+
 def skip_writefail_after_outbox_failure(diagnostics: dict[str, Any]) -> bool:
-    return reachability_diagnosis(diagnostics) in {
-        "tailscale_offline",
-        "tailscale_online_ssh_timeout",
-        "tailscale_online_ssh_failed",
-    }
+    return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
 
 
 def legacy_open_record(state: dict[str, Any], key: str, remote: str, source: str) -> dict[str, Any] | None:
@@ -1017,6 +1031,7 @@ def enqueue_meta_alert(
     state: dict[str, Any],
     cooldown: int,
     extra_diagnostics: dict[str, Any] | None = None,
+    severity: str = "critical",
 ) -> None:
     current = int(time.time())
     alerts = state.setdefault("alerts", {})
@@ -1061,7 +1076,7 @@ def enqueue_meta_alert(
                 "schemaVersion": 1,
                 "id": event_id,
                 "eventType": "alert",
-                "severity": "critical",
+                "severity": severity,
                 "createdAt": created_at,
                 "machine": socket.gethostname(),
                 "platform": sys.platform,
@@ -1121,7 +1136,7 @@ def enqueue_meta_alert(
         "schemaVersion": 1,
         "id": event_id,
         "eventType": "alert",
-        "severity": "critical",
+        "severity": severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
@@ -1901,6 +1916,7 @@ def run_once(
                     state,
                     alert_cooldown,
                     reachability_diagnostics,
+                    severity="warning" if is_transient_unreachable(reachability_diagnostics or {}) else "critical",
                 )
             records = []
 
@@ -2014,6 +2030,7 @@ def run_once(
                         state,
                         alert_cooldown,
                         reachability_diagnostics,
+                        severity="warning" if is_transient_unreachable(reachability_diagnostics or {}) else "critical",
                     )
         if outbox_claim_succeeded and not writefail_claim_failed:
             remotes_succeeded += 1

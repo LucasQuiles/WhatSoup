@@ -75,6 +75,53 @@ def watchdog_recovery_confirmations() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", 2)
 
 
+# Incident key for q-loop usage-window capacity events. Kept distinct from the
+# genuine-failure key ("q_loop:supervisor") so capacity is never paged critical.
+Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
+
+# q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
+# capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
+# The only remediation is to wait for the usage window to reset, so paging them
+# as critical supervisor failures is the broken-alert anti-pattern. Substring
+# match keeps this robust to reason variants (e.g. "session_limit_5h").
+_Q_LOOP_CAPACITY_REASON_TOKENS = (
+    "session_limit",
+    "rate_limit",
+    "usage_limit",
+    "usage_window",
+    "quota",
+)
+
+
+def is_capacity_supervisor_reason(reason: str) -> bool:
+    """True when a q-loop unavailable reason is a self-recovering capacity cap.
+
+    Capacity caps recover on their own when the usage window resets; they are
+    not supervisor failures and must not escalate to a paging critical alert.
+    """
+    candidate = (reason or "").lower()
+    if not candidate:
+        return False
+    return any(token in candidate for token in _Q_LOOP_CAPACITY_REASON_TOKENS)
+
+
+def is_capacity_incident_key(key: str) -> bool:
+    """True for incident keys that represent self-recovering capacity events."""
+    return key == Q_LOOP_CAPACITY_KEY
+
+
+def incident_severity(key: str, escalated: bool) -> str:
+    """Severity for an incident, capping capacity events at ``warning``.
+
+    Genuine failures escalate to ``critical`` when ``escalated`` is set, but a
+    self-recovering capacity event must never page critical regardless of age
+    or suppression count -- the only response is to wait for the window reset.
+    """
+    if is_capacity_incident_key(key):
+        return "warning"
+    return "critical" if escalated else "warning"
+
+
 def validate_thresholds() -> None:
     watchdog_renotify_seconds()
     watchdog_escalate_seconds()
@@ -1002,11 +1049,23 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
                 unavailable_at = finite_epoch(last_unavailable)
                 unavailable_age = max(0, now_epoch() - unavailable_at) if unavailable_at is not None else "unknown"
                 reason = str(state.get("last_q_unavailable_reason") or phase.removeprefix("q_unavailable_") or "unknown")
-                problems["q_loop:supervisor"] = (
-                    f"q-loop supervisor unavailable: phase={phase} reason={reason} "
-                    f"age_seconds={unavailable_age} last_q_unavailable_at={unavailable_at if unavailable_at is not None else 'unknown'} "
-                    f"detail={detail}"
-                )
+                last_seen = unavailable_at if unavailable_at is not None else "unknown"
+                if is_capacity_supervisor_reason(reason) or is_capacity_supervisor_reason(phase):
+                    # Self-recovering usage-window capacity cap: NOT a supervisor
+                    # failure. Report as a distinct, non-paging capacity incident
+                    # whose only remediation is to wait for the window to reset.
+                    problems[Q_LOOP_CAPACITY_KEY] = (
+                        f"q-loop at usage-window capacity; self-recovers when window resets: "
+                        f"phase={phase} reason={reason} "
+                        f"age_seconds={unavailable_age} last_q_unavailable_at={last_seen} "
+                        f"detail={detail}"
+                    )
+                else:
+                    problems["q_loop:supervisor"] = (
+                        f"q-loop supervisor unavailable: phase={phase} reason={reason} "
+                        f"age_seconds={unavailable_age} last_q_unavailable_at={last_seen} "
+                        f"detail={detail}"
+                    )
     if "dispatcher" in checks:
         age, detail = file_age(state_root() / "dispatcher-state.json")
         if age is None or age > args.max_dispatcher_age:
@@ -1097,11 +1156,15 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             incident["ageSeconds"] = age_seconds
             since_notify = max(0, current - last_notified)
             escalated = age_seconds >= watchdog_escalate_seconds() or suppressed >= watchdog_escalate_suppressed()
+            # Capacity events never escalate to a paging critical alert; they
+            # self-recover when the usage window resets.
+            if is_capacity_incident_key(key):
+                escalated = False
             should_renotify = since_notify >= watchdog_renotify_seconds()
             if should_renotify:
                 incident["lastNotifiedAt"] = now_iso(current)
                 incident["lastNotificationSuppressed"] = suppressed
-                severity = "critical" if escalated else "warning"
+                severity = incident_severity(key, escalated)
                 label = "escalated" if escalated else "still open"
                 append_log(
                     "renotify_open",
@@ -1113,6 +1176,12 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                         "escalated": escalated,
                         "evidence": evidence,
                     },
+                )
+                capacity = is_capacity_incident_key(key)
+                requested_action = (
+                    "requested_action=No action required; Q is at usage-window capacity and self-recovers when the window resets."
+                    if capacity
+                    else "requested_action=Q investigate persistent monitor failure; this alert bypasses duplicate suppression by design."
                 )
                 written.append(outbox_event(
                     f"BOT ERRORS heartbeat watchdog {label}: {key}",
@@ -1126,11 +1195,11 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
                         evidence,
                         f"watchdog_state={watchdog_state_path()}",
                         f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
-                        "requested_action=Q investigate persistent monitor failure; this alert bypasses duplicate suppression by design.",
+                        requested_action,
                     ]),
                     severity,
                     key,
-                    force_notify=True,
+                    force_notify=not capacity,
                 ))
                 continue
             append_log("suppressed_open", {"source": key, "suppressed": suppressed, "evidence": evidence})
@@ -1142,16 +1211,27 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
             "lastEvidence": redacted_evidence,
             "suppressed": 0,
         }
+        capacity = is_capacity_incident_key(key)
+        new_summary = (
+            f"BOT ERRORS heartbeat watchdog capacity: {key}"
+            if capacity
+            else f"BOT ERRORS heartbeat watchdog stale: {key}"
+        )
+        new_action = (
+            "requested_action=No action required; Q is at usage-window capacity and self-recovers when the window resets."
+            if capacity
+            else "requested_action=Q investigate the silent monitor and restore cadence."
+        )
         written.append(outbox_event(
-            f"BOT ERRORS heartbeat watchdog stale: {key}",
+            new_summary,
             "\n".join([
                 f"source={key}",
                 evidence,
                 f"watchdog_state={watchdog_state_path()}",
                 f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
-                "requested_action=Q investigate the silent monitor and restore cadence.",
+                new_action,
             ]),
-            "critical",
+            incident_severity(key, escalated=True),
             key,
         ))
     for key in sorted(set(open_incidents) - set(problems)):

@@ -349,7 +349,10 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.evidence).toContain('mode=755');
   });
 
-  it('alerts when q-loop is fresh but Q is unavailable due to session limit', () => {
+  it('warns (non-paging capacity) when q-loop is fresh but Q is unavailable due to session limit', () => {
+    // A session-limit / usage-window cap is self-recovering: it must surface as
+    // a WARNING capacity incident (q_loop:supervisor:capacity), never a CRITICAL
+    // supervisor-failure page. Paging on it is the broken-alert anti-pattern.
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
     const qLoopState = join(tmpRoot, 'q-loop-state.json');
     writePrivateJson(qLoopState, {
@@ -369,12 +372,46 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
 
     const events = readOutboxEvents();
     expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('warning');
+    expect(events[0]!.alertSource).toBe('q_loop:supervisor:capacity');
+    expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog capacity: q_loop:supervisor:capacity');
+    expect(events[0]!.evidence).toContain('q-loop at usage-window capacity');
+    expect(events[0]!.evidence).toContain('phase=q_unavailable_session_limit');
+    expect(events[0]!.evidence).toContain('reason=session_limit');
+    expect(events[0]!.evidence).toContain(
+      'No action required; Q is at usage-window capacity and self-recovers when the window resets.',
+    );
+  });
+
+  it('pages critical when q-loop is unavailable for a genuine (non-capacity) reason', () => {
+    // Regression guard: capping capacity reasons at warning must NOT swallow a
+    // real supervisor failure. A non-capacity reason (e.g. a crash) still routes
+    // to q_loop:supervisor and pages critical.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const qLoopState = join(tmpRoot, 'q-loop-state.json');
+    writePrivateJson(qLoopState, {
+      updated_at: 995,
+      phase: 'q_unavailable_crash',
+      last_q_unavailable_at: 990,
+      last_q_unavailable_reason: 'crash',
+    });
+
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_Q_LOOP_STATE: qLoopState,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'q_loop',
+      BOT_ERRORS_DRY_NOW: '1000',
+      BOT_ERRORS_MAX_Q_LOOP_AGE: '60',
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
     expect(events[0]!.severity).toBe('critical');
     expect(events[0]!.alertSource).toBe('q_loop:supervisor');
     expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog stale: q_loop:supervisor');
     expect(events[0]!.evidence).toContain('q-loop supervisor unavailable');
-    expect(events[0]!.evidence).toContain('phase=q_unavailable_session_limit');
-    expect(events[0]!.evidence).toContain('reason=session_limit');
+    expect(events[0]!.evidence).toContain('phase=q_unavailable_crash');
+    expect(events[0]!.evidence).toContain('reason=crash');
   });
 
   it('emits when daily health cadence is missing or stale', () => {
