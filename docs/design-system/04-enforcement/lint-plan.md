@@ -71,7 +71,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-raw-form-control | scoped-error (non-primitives) | scoped-error per dir | P2 | zero outside `components/primitives/**`; generated raw-form inventory remains the mechanical count authority |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
-| soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
+| soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap. Hex-in-string selector tightened to CSS-color-valid lengths only (6/8 hex digits, or 3 hex digits containing an a–f letter); pure-decimal `#NNNN` runs (order/build numbers in copy, e.g. `#4921`) no longer false-flag — proof fixtures in `tests/console/design-lints.test.ts`. |
 | soup/no-untokenized-values | scoped-error (already live) | global-error | P1 | exists `console/eslint.config.js:157-191,227-229`; close 3 evasion shapes (DUP-08) |
 | soup/no-transition-all | global-error (already live) | keep | P5 | `console/eslint.config.js:126-128` |
 | soup/no-infinite-animation | shadow | global-error | P5 | 4 current infinite animations to disposition |
