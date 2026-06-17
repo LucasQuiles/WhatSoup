@@ -907,9 +907,69 @@ def remote_failure_context(host: str, error: str = "") -> tuple[list[str], dict[
     return lines, diagnostics
 
 
+def tailscale_ping_command(host: str) -> list[str] | None:
+    raw = os.environ.get("BOT_ERRORS_TAILSCALE_PING_COMMAND")
+    if raw is not None and not raw.strip():
+        return None  # explicitly disabled
+    if raw:
+        return [*shlex.split(raw), host]
+    return ["tailscale", "ping", "--c", "1", "--timeout", "3s", host]
+
+
+def tailscale_ping_timeout() -> float:
+    raw = os.environ.get("BOT_ERRORS_TAILSCALE_PING_TIMEOUT_SECONDS", "4")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        timeout = 4
+    return max(timeout, 0.5)
+
+
+def liveness_probe_enabled() -> bool:
+    raw = os.environ.get("BOT_ERRORS_PREFLIGHT_LIVENESS_PROBE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def remote_liveness_probe_ok(host: str) -> bool:
+    """Confirm a peer is actually reachable via a direct probe.
+
+    The Tailscale control-plane ``Online`` flag goes stale for idle peers that
+    hold a direct (LAN) path — they stop refreshing the coordination-server
+    heartbeat while remaining fully reachable over WireGuard. Trusting that flag
+    alone produced correlated false-positive ``relay_host_down`` storms (the
+    whole relay fleet flagged offline while every node answered ssh in <10ms).
+
+    Returns True only on a positive pong. Fail-closed: a disabled, timed-out, or
+    erroring probe returns False so the caller preserves the conservative
+    skip-on-offline behaviour rather than hanging on a genuinely dead host.
+    """
+    if not liveness_probe_enabled():
+        return False
+    cmd = tailscale_ping_command(host)
+    if cmd is None:
+        return False
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=tailscale_ping_timeout(),
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return proc.returncode == 0 and "pong" in proc.stdout.lower()
+
+
 def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
     tailscale = tailscale_peer_summary(host)
     if tailscale.get("status") == "found" and tailscale.get("online") is False:
+        # The Online flag is a stale-prone control-plane heartbeat; confirm with
+        # a real liveness probe before skipping ssh. A node that answers a direct
+        # ping is reachable regardless of the flag — do not suppress its claim.
+        if remote_liveness_probe_ok(host):
+            return None
         return tailscale
     return None
 
