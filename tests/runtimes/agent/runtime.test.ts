@@ -5898,6 +5898,120 @@ describe('AgentRuntime', () => {
     expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
   });
 
+  // Regression guard: under WHATSOUP_RESPONSE_REGISTRY_DISPATCH=1, server-error
+  // and transient-network terminal-result texts bridge to registry workflows
+  // (provider_server_error / provider_network_error) whose providerKind is null.
+  // The registry dispatcher must NOT swallow these — handleProviderFailureResult
+  // returns immediately on a null providerKind, so dispatch must fall through to
+  // the legacy ladders (which emit the user notice, the ops alert, and record the
+  // turn failure). Before the fix, dispatch returned true and the caller `break`d
+  // BEFORE the legacy handling, producing a silent no-op (lost notice/alert/turn-
+  // failure accounting). These tests must FAIL on the pre-fix code.
+  describe('registry dispatch — null-providerKind classes fall through to legacy (not silent no-op)', () => {
+    const SOCKET_TEXT = 'API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()';
+    const SERVER_TEXT = 'API Error 503: Service temporarily unavailable. overloaded_error';
+
+    afterEach(() => {
+      delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
+    });
+
+    function makePerChatDispatchHarness() {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const queue = makeQueueMock('111@s.whatsapp.net');
+      const session = {
+        clearTurnWatchdog: vi.fn(),
+        shutdown: vi.fn(),
+        getDbRowId: vi.fn(() => 41),
+        getStatus: vi.fn(() => ({ active: true })),
+      };
+      (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+      (runtime as unknown as { durability: { completeTurn: ReturnType<typeof vi.fn> } }).durability = { completeTurn: vi.fn() };
+      const handleEventWithContext = (
+        runtime as unknown as {
+          handleEventWithContext: (
+            event: AgentEvent,
+            queue: IOutboundQueue,
+            session: unknown,
+            conversationKey?: string,
+            inboundSeq?: number,
+            mapKey?: string,
+            toolScopeKey?: string,
+          ) => void;
+        }
+      ).handleEventWithContext.bind(runtime);
+      return { runtime, queue, session, handleEventWithContext };
+    }
+
+    it('transient-network result with dispatch enabled still emits WARNING alert + notice + records turn failure', () => {
+      process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+      const { runtime, queue, session, handleEventWithContext } = makePerChatDispatchHarness();
+      mockEmitAlert.mockClear();
+
+      handleEventWithContext(
+        { type: 'result', text: SOCKET_TEXT, isError: true },
+        queue,
+        session,
+        'conv-111',
+        17,
+        '111',
+        '111#session',
+      );
+
+      // Observable outcome: WARNING transient-network alert (NOT a silent no-op).
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        expect.any(String),
+        'provider_transient_network',
+        'Transient provider connection drop (recoverable)',
+        expect.stringContaining('socket connection was closed unexpectedly'),
+        'warning',
+      );
+      // Generic notice reaches the user.
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+      // Raw provider text is not forwarded.
+      const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+      expect(forwardedRaw).not.toContain(SOCKET_TEXT);
+      // Turn-capability accounting records the transient-network failure.
+      const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
+      expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
+    });
+
+    it('server-error result with dispatch enabled still emits ops alert + notice + records turn failure', () => {
+      process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+      const { runtime, queue, session, handleEventWithContext } = makePerChatDispatchHarness();
+      mockEmitAlert.mockClear();
+
+      handleEventWithContext(
+        { type: 'result', text: SERVER_TEXT, isError: true },
+        queue,
+        session,
+        'conv-111',
+        17,
+        '111',
+        '111#session',
+      );
+
+      // Observable outcome: an ops alert is emitted (NOT a silent no-op). The
+      // server-error text has no dedicated legacy branch, so it routes through the
+      // is_error default-deny path which pages provider_unknown_terminal.
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        expect.any(String),
+        'provider_unknown_terminal',
+        expect.any(String),
+        expect.stringContaining('Service temporarily unavailable'),
+      );
+      // Generic notice reaches the user.
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+      // Raw provider text is not forwarded.
+      const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+      expect(forwardedRaw).not.toContain(SERVER_TEXT);
+      // Turn-capability accounting records the failure (unknown-terminal on this path).
+      const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
+      expect(turnCapability.lastTurnErrorClass).toBe('unknown-terminal');
+    });
+  });
+
   it('per_chat system-turn result does not terminate the user inbound seq or disarm its reply guarantee', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

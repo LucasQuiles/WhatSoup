@@ -7351,7 +7351,14 @@ export class AgentRuntime implements Runtime {
    */
   private dispatchProviderFailureResult(ctx: ProviderFailureResultContext): boolean {
     const wf = workflowForProviderText(ctx.providerText);
-    if (!wf) return false;
+    // Not a provider failure, OR a class-only failure whose providerKind is null
+    // (server-error → provider_server_error, transient-network →
+    // provider_network_error). handleProviderFailureResult only acts on a
+    // non-null providerKind, so a null-kind workflow here would otherwise be a
+    // silent no-op (lost user notice, lost ops alert, lost recordTurnFailure).
+    // Return false so the caller falls through to the legacy ladders, which own
+    // the notice/alert/turn-failure handling for these two kinds.
+    if (!wf || wf.providerKind === null) return false;
     this.handleProviderFailureResult(wf, ctx);
     return true;
   }
@@ -7365,7 +7372,11 @@ export class AgentRuntime implements Runtime {
   private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
     const { queue, session, providerText, turnHadToolWork, logChatJid } = ctx;
     const kind = wf.providerKind;
-    if (kind === null) return; // unreachable on the text path; defensive.
+    // Defensive: dispatchProviderFailureResult already filters null-providerKind
+    // (class-only) workflows out of the text path and routes them to the legacy
+    // ladders, so this is unreachable via dispatch. Kept as a guard against a
+    // future direct caller — never silently no-op a null kind here.
+    if (kind === null) return;
     ctx.recordTurnFailure(kind);
     const textPreview = providerText.slice(0, 300);
 

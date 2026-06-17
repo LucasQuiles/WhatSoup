@@ -135,6 +135,45 @@ describe('response-registry provider-text bridge', () => {
       }
     }
   });
+
+  // Masking-gap guard: ALL_PROVIDER_KINDS above deliberately omits 'server-error'
+  // and 'transient-network' because their workflow classes (provider_server_error
+  // / provider_network_error) carry providerKind=null, so they do NOT satisfy the
+  // round-trip identity workflowFor(class).providerKind === kind. That null is the
+  // exact signal the runtime dispatcher (dispatchProviderFailureResult) must key
+  // on to fall through to the legacy handling — a non-null wf with a null
+  // providerKind otherwise produced a silent no-op. These assertions lock the
+  // null mapping (and the class identity) so the gap cannot silently reopen.
+  it('server-error and transient-network map to null-providerKind classes (dispatch fall-through signal)', () => {
+    const NULL_KIND_TEXT_KINDS: ProviderFailureKind[] = ['server-error', 'transient-network'];
+    for (const kind of NULL_KIND_TEXT_KINDS) {
+      const cls = providerKindToClass(kind);
+      const wf = workflowFor(cls);
+      expect(wf.errorClass).toBe(cls);
+      // The class-only workflow does NOT echo the provider-text kind: this null is
+      // what handleProviderFailureResult / dispatchProviderFailureResult must treat
+      // as "fall through to legacy", not "handled".
+      expect(wf.providerKind).toBeNull();
+    }
+    expect(providerKindToClass('server-error')).toBe('provider_server_error');
+    expect(providerKindToClass('transient-network')).toBe('provider_network_error');
+  });
+
+  it('workflowForProviderText resolves server-error and transient-network texts to non-null class-only workflows', () => {
+    const cases: Array<{ text: string; cls: AgentFailureClass; kind: ProviderFailureKind }> = [
+      { text: 'API Error 503: Service temporarily unavailable. overloaded_error', cls: 'provider_server_error', kind: 'server-error' },
+      { text: 'API Error: The socket connection was closed unexpectedly.', cls: 'provider_network_error', kind: 'transient-network' },
+    ];
+    for (const { text, cls, kind } of cases) {
+      expect(classifyProviderFailure(text)).toBe(kind);
+      const wf = workflowForProviderText(text);
+      expect(wf).not.toBeNull();
+      expect(wf!.errorClass).toBe(cls);
+      // Non-null workflow + null providerKind is precisely the combination that
+      // tripped the silent no-op in dispatchProviderFailureResult.
+      expect(wf!.providerKind).toBeNull();
+    }
+  });
 });
 
 describe('response-registry behavior-preserving seed values', () => {
