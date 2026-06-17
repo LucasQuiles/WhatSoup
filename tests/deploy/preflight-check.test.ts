@@ -109,6 +109,9 @@ function runPreflight(
   };
 }
 
+// @skip-env requires an in-pin Node interpreter (NODE_IN_PIN: major 24–25); the
+// fixture trees are generated against the running Node, so off-pin hosts cannot
+// exercise the gate's module-link behavior. Environment-dependent, not flaky.
 describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate', () => {
   it('exists and is executable shell', () => {
     expect(existsSync(PREFLIGHT)).toBe(true);
@@ -189,6 +192,9 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
   });
 });
 
+// @skip-env requires an in-pin Node interpreter (NODE_IN_PIN: major 24–25); the
+// wrapper exercises real module-link behavior under the pinned Node, so off-pin
+// hosts cannot run it. Environment-dependent, not flaky.
 describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight wiring', () => {
   it('refuses to launch when preflight fails (phantom export), not exec node', () => {
     const root = makeFixtureTree(
