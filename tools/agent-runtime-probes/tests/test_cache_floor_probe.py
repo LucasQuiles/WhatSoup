@@ -229,7 +229,9 @@ def test_unknown_model_returns_unknown_floor_tokens_not_4096():
     assert report["floor_status"] == "unknown"
     assert report["risk"] == "unknown_model_conservative"
     assert report["sub_floor"] == "unknown"
-    assert report["cache_eligible"] == "unknown"
+    # I4: cache_eligible uses the SINGLE non-verified sentinel "unverified" (never a second "unknown"),
+    # so a downstream consumer keying on it cannot be tripped by a dual-sentinel split.
+    assert report["cache_eligible"] == "unverified"
     # H2: unknown model is also unverified — never a confident bool
     assert report["cache_eligible_verified"] is False
 
@@ -853,6 +855,24 @@ def test_h4_all_error_markers_avoid_raw_paths():
     # The temp path lives under the system tmp dir, not /Users, but assert the raw
     # absolute path string of the bad file is absent regardless.
     assert str(bad_path) not in json.dumps(malformed), malformed
+
+
+def test_i4_cache_eligible_uses_a_single_non_verified_sentinel():
+    """I4 (dual-sentinel trap closed): across unknown-model, research_seed, and local_measured cases,
+    cache_eligible is NEVER the string 'unknown' — it is a real bool ONLY for a verified floor, else the
+    SINGLE sentinel 'unverified'. A downstream consumer keying on it cannot be tripped by a split."""
+    reg = _write_registry(_REGISTRY_SEED)
+    try:
+        unknown_model = probe.build_report("no-such-model", 1000, reg)
+        research_seed = probe.build_report("test-model-low-floor", 1000, reg)  # research_seed floor
+        measured = probe.build_report("test-model-measured", 5000, reg)        # local_measured floor
+    finally:
+        reg.unlink(missing_ok=True)
+    for report in (unknown_model, research_seed, measured):
+        assert report["cache_eligible"] != "unknown"  # the second sentinel is gone
+    assert unknown_model["cache_eligible"] == "unverified"
+    assert research_seed["cache_eligible"] == "unverified"
+    assert isinstance(measured["cache_eligible"], bool)  # verified floor -> a confident bool
 
 
 # ---------------------------------------------------------------------------

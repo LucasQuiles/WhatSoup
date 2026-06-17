@@ -9,9 +9,10 @@ Unknown model → floor_tokens="unknown", risk="unknown_model_conservative". NEV
 defaults to 4096 or any other constant for an unlisted model.
 Research-seed floor → risk notes unverified status; floor_status!="local_measured"
 is not adoption-sufficient. The adoption-grade `cache_eligible` verdict is gated: it is
-a real bool ONLY for a verified (local_measured) floor; for any unverified floor it is
-the string "unverified" and `cache_eligible_verified` is False, so a downstream consumer
-keying on `cache_eligible` cannot read a confident bool off a provider-unverified floor.
+a real bool ONLY for a verified (local_measured) floor; for ANY non-verified case (unverified floor OR
+unknown model) it is the SINGLE string sentinel "unverified" (never a second "unknown" sentinel — I4) and
+`cache_eligible_verified` is False, so a downstream consumer keying on `cache_eligible` cannot read a
+confident bool off a provider-unverified floor and cannot be tripped by a dual-sentinel split.
 
 CLI: python3 cache_floor_probe.py --model <id> --prefix-tokens <int>
          [--registry cache_floor_registry.json] [--pretty]
@@ -129,9 +130,12 @@ def build_report(
             "floor_status": "unknown",
             "prefix_tokens": prefix_tokens,
             "sub_floor": "unknown",
-            "cache_eligible": "unknown",
-            # H2: an unknown model is unverified by definition — the verdict is not
-            # adoption-grade; a downstream consumer must not read a confident bool.
+            # I4: `cache_eligible`'s non-verified sentinel is UNIFORMLY "unverified" (an unknown model is
+            # unverified by definition), so it uses ONE sentinel, never an "unknown" vs "unverified" split a
+            # consumer could trip on. The model-unknown-ness lives in floor_status / risk, not in a second
+            # cache_eligible sentinel.
+            "cache_eligible": "unverified",
+            # H2: the verdict is not adoption-grade; a downstream consumer must not read a confident bool.
             "cache_eligible_verified": False,
             "risk": "unknown_model_conservative",
         }
