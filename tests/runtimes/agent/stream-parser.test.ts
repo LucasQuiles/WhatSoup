@@ -123,6 +123,16 @@ describe('parseEvent', () => {
       );
       expect(result).toEqual({ type: 'assistant_text', text: '' });
     });
+
+    it('skips invalid blocks before text and defaults missing text to empty string', () => {
+      const result = parseEvent(
+        line({
+          type: 'assistant',
+          message: { content: [null, 'ignored', { type: 'text' }] },
+        }),
+      );
+      expect(result).toEqual({ type: 'assistant_text', text: '' });
+    });
   });
 
   describe('assistant tool_use events', () => {
@@ -161,6 +171,54 @@ describe('parseEvent', () => {
         type: 'unknown',
         raw: { type: 'assistant', message: { content: null } },
       });
+    });
+
+    it('skips unrelated content and preserves object tool input with missing defaults', () => {
+      const result = parseEvent(
+        line({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'image', source: 'redacted' },
+              { type: 'tool_use', input: { command: 'npm test' } },
+            ],
+          },
+        }),
+      );
+      expect(result).toEqual({
+        type: 'tool_use',
+        toolName: '',
+        toolId: '',
+        toolInput: { command: 'npm test' },
+      });
+    });
+
+    it('defaults array tool input to an empty object', () => {
+      const result = parseEvent(
+        line({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'toolu_array', name: 'Bash', input: [] },
+            ],
+          },
+        }),
+      );
+      expect(result).toEqual({
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolId: 'toolu_array',
+        toolInput: {},
+      });
+    });
+
+    it('returns unknown when assistant content has no recognizable blocks', () => {
+      const raw = {
+        type: 'assistant',
+        message: { content: [null, { type: 'image', source: 'redacted' }] },
+      };
+      const result = parseEvent(line(raw));
+      expect(result).toEqual({ type: 'unknown', raw });
     });
   });
 
@@ -216,6 +274,61 @@ describe('parseEvent', () => {
       );
       expect(result).toEqual({ type: 'tool_result', isError: false, toolId: 'toolu_99', content: '' });
     });
+
+    it('returns unknown for ordinary direct user text without a message object', () => {
+      const raw = { type: 'user', content: 'ordinary user text' };
+      const result = parseEvent(line(raw));
+      expect(result).toEqual({ type: 'unknown', raw });
+    });
+
+    it('skips invalid user blocks and maps string tool_result content', () => {
+      const result = parseEvent(
+        line({
+          type: 'user',
+          message: {
+            content: [
+              null,
+              { type: 'text', text: 'ignored' },
+              { type: 'tool_result', is_error: true, content: 'tool failed' },
+            ],
+          },
+        }),
+      );
+      expect(result).toEqual({
+        type: 'tool_result',
+        isError: true,
+        toolId: '',
+        content: 'tool failed',
+      });
+    });
+
+    it('joins text blocks from array tool_result content', () => {
+      const result = parseEvent(
+        line({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'toolu_array_content',
+                content: [
+                  null,
+                  { type: 'image', source: 'redacted' },
+                  { type: 'text', text: 'first line' },
+                  { type: 'text' },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      expect(result).toEqual({
+        type: 'tool_result',
+        isError: false,
+        toolId: 'toolu_array_content',
+        content: 'first line\n',
+      });
+    });
   });
 
   describe('result events', () => {
@@ -265,6 +378,29 @@ describe('parseEvent', () => {
         line({ type: 'result', content: [{ type: 'text', text: 'Error details.' }], is_error: true }),
       );
       expect(result).toEqual({ type: 'result', text: 'Error details.', isError: true });
+    });
+
+    it('returns text: null for an empty string content error result', () => {
+      const result = parseEvent(
+        line({ type: 'result', content: '', is_error: true }),
+      );
+      expect(result).toEqual({ type: 'result', text: null, isError: true });
+    });
+
+    it('skips invalid error content blocks and returns null for empty text', () => {
+      const result = parseEvent(
+        line({
+          type: 'result',
+          content: [null, { type: 'image' }, { type: 'text' }],
+          is_error: true,
+        }),
+      );
+      expect(result).toEqual({ type: 'result', text: null, isError: true });
+    });
+
+    it('returns text: null for an empty result field error result', () => {
+      const result = parseEvent(line({ type: 'result', result: '', is_error: true }));
+      expect(result).toEqual({ type: 'result', text: null, isError: true });
     });
 
     it('returns text: null for error result with no content', () => {

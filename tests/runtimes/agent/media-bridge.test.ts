@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createConnection, type Socket } from 'node:net';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -126,6 +127,11 @@ function waitForClientClose(client: Socket, timeoutMs = 500): Promise<void> {
   });
 }
 
+class SyntheticSocket extends EventEmitter {
+  destroy = vi.fn();
+  write = vi.fn();
+}
+
 // ─── Test state ───────────────────────────────────────────────────────────────
 
 let socketPath: string;
@@ -163,6 +169,12 @@ describe('startMediaBridge', () => {
       serverListening: true,
       currentChatJid: null,
     });
+  });
+
+  it('handles server error events without throwing', () => {
+    expect(() => {
+      bridge._server.emit('error', new Error('synthetic server error'));
+    }).not.toThrow();
   });
 });
 
@@ -237,6 +249,49 @@ describe('bridge request handling', () => {
     expect(messenger.sendMedia).toHaveBeenCalledWith(
       'chat@g.us',
       expect.objectContaining({ type: 'document', mimetype: 'application/pdf' }),
+    );
+  });
+
+  it('infers audio and video media types from extensions', async () => {
+    const audioPath = join(allowedRoot, 'voice.mp3');
+    const videoPath = join(allowedRoot, 'clip.mp4');
+    writeFileSync(audioPath, Buffer.alloc(4));
+    writeFileSync(videoPath, Buffer.alloc(4));
+
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const audioRes = await sendRequest(socketPath, { path: audioPath });
+    const videoRes = await sendRequest(socketPath, { path: videoPath, caption: 'clip caption' });
+
+    expect(audioRes.ok).toBe(true);
+    expect(videoRes.ok).toBe(true);
+    expect(messenger.sendMedia).toHaveBeenNthCalledWith(
+      1,
+      'chat@g.us',
+      expect.objectContaining({ type: 'audio', mimetype: 'audio/mpeg' }),
+    );
+    expect(messenger.sendMedia).toHaveBeenNthCalledWith(
+      2,
+      'chat@g.us',
+      expect.objectContaining({ type: 'video', mimetype: 'video/mp4', caption: 'clip caption' }),
+    );
+  });
+
+  it('falls back to document/octet-stream for unknown extensions', async () => {
+    const filePath = join(allowedRoot, 'artifact.custombin');
+    writeFileSync(filePath, Buffer.alloc(4));
+
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const res = await sendRequest(socketPath, { path: filePath, caption: 123, filename: 456 });
+
+    expect(res.ok).toBe(true);
+    expect(messenger.sendMedia).toHaveBeenCalledWith(
+      'chat@g.us',
+      expect.objectContaining({
+        type: 'document',
+        filename: 'artifact.custombin',
+        mimetype: 'application/octet-stream',
+        caption: undefined,
+      }),
     );
   });
 
@@ -343,6 +398,25 @@ describe('bridge validation', () => {
     expect(res.error).toMatch(/file not found/);
   });
 
+  it('falls back to resolved path when neither file nor parent canonicalize', async () => {
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const missingPath = join(realpathSync(allowedRoot), 'missing-parent', 'nonexistent.png');
+
+    const res = await sendRequest(socketPath, { path: missingPath });
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe(`file not found: ${resolve(missingPath)}`);
+  });
+
+  it('returns failed read when stat throws a non-ENOENT error', async () => {
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const invalidPath = join(allowedRoot, 'bad\0name.png');
+
+    const res = await sendRequest(socketPath, { path: invalidPath });
+
+    expect(res).toEqual({ ok: false, error: 'failed to read file' });
+  });
+
   it('returns ok:false when no current chat is set', async () => {
     // bridge._currentChatJid is null; request-level chatJid is intentionally ignored.
     const filePath = join(allowedRoot, 'test.png');
@@ -360,9 +434,71 @@ describe('bridge validation', () => {
     expect(response.ok).toBe(false);
     expect(response.error).toMatch(/invalid JSON/);
   });
+
+  it('skips empty request lines before handling a valid request', async () => {
+    const filePath = join(allowedRoot, 'empty-line.png');
+    writeFileSync(filePath, Buffer.from([137, 80, 78, 71]));
+
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const response = await sendRawRequest(socketPath, `\n  \n${JSON.stringify({ path: filePath })}\n`);
+
+    expect(response.ok).toBe(true);
+    expect(messenger.sendMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the client socket when request buffering exceeds the limit', async () => {
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+
+    client.write('x'.repeat(1_024 * 1_024 + 1));
+
+    try {
+      await waitForClientClose(client);
+    } finally {
+      client.destroy();
+    }
+
+    expect(messenger.sendMedia).not.toHaveBeenCalled();
+  });
+
+  it('handles socket error events and write failures on accepted sockets', async () => {
+    const filePath = join(allowedRoot, 'synthetic.png');
+    writeFileSync(filePath, Buffer.from([137, 80, 78, 71]));
+    const syntheticSocket = new SyntheticSocket();
+    syntheticSocket.write.mockImplementation(() => {
+      throw new Error('write failed');
+    });
+
+    bridge._server.emit('connection', syntheticSocket as unknown as Socket);
+    syntheticSocket.emit('error', new Error('synthetic socket error'));
+
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    syntheticSocket.emit('data', Buffer.from(`${JSON.stringify({ path: filePath })}\n`));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(messenger.sendMedia).toHaveBeenCalledTimes(1);
+    expect(syntheticSocket.write).toHaveBeenCalled();
+  });
 });
 
 describe('handler rejection safety', () => {
+  it('returns a retryable error when sendMedia fails after opening a stream', async () => {
+    const imgPath = join(allowedRoot, 'send-fails.png');
+    writeFileSync(imgPath, Buffer.from([137, 80, 78, 71]));
+    messenger = makeMessenger(async () => {
+      throw new Error('transport down');
+    });
+    bridge();
+    bridge = startMediaBridge(socketPath, messenger, allowedRoot);
+    await waitListening(bridge);
+
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const res = await sendRequest(socketPath, { path: imgPath });
+
+    expect(res).toEqual({ ok: false, error: 'failed to send media — try again' });
+    expect(messenger.sendMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('responds ok:false instead of leaving the client hanging when the handler rejects', async () => {
     const imgPath = join(allowedRoot, 'photo.png');
     writeFileSync(imgPath, Buffer.from([137, 80, 78, 71]));
