@@ -207,14 +207,14 @@ def _synthetic_sessions() -> list[dict]:
     # Bucket 201+: 250 turns, 80000 tokens
     for _ in range(2):
         sessions.append({"turn_count": 250, "input_tokens": 80000})
-    # Override proof class to synthetic for fixture sessions
+    # Re-key each fixture session to a `replay_tokens` count (so its proof_class is "synthetic", not
+    # "local_measured"). I1: the per-bucket count is a literal keyed on turn_count — correct by
+    # CONSTRUCTION (one literal per bucket, mirroring the input_tokens above), not the prior
+    # self-referential `sessions[0].get("replay_tokens", 2000)` which only happened to yield 2000.
+    _REPLAY_BY_TURNS = {5: 2000, 25: 8000, 100: 30000, 250: 80000}
     for s in sessions:
         del s["input_tokens"]
-        s["replay_tokens"] = sessions[0].get("replay_tokens", 2000) if s["turn_count"] == 5 else (
-            8000 if s["turn_count"] == 25 else (
-                30000 if s["turn_count"] == 100 else 80000
-            )
-        )
+        s["replay_tokens"] = _REPLAY_BY_TURNS[s["turn_count"]]
     return sessions
 
 

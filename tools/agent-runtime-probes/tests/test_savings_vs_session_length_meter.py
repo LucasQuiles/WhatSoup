@@ -166,6 +166,16 @@ def test_happy_all_four_buckets_present():
     assert "201+" in labels
 
 
+def test_i1_synthetic_replay_tokens_are_correct_by_construction():
+    """I1: each synthetic session's replay_tokens is a literal keyed on turn_count (not the prior
+    self-referential sessions[0].get(...)). Every session must carry replay_tokens and no input_tokens,
+    with the bucket-matching value."""
+    expected = {5: 2000, 25: 8000, 100: 30000, 250: 80000}
+    for s in probe._synthetic_sessions():
+        assert "input_tokens" not in s
+        assert s["replay_tokens"] == expected[s["turn_count"]]
+
+
 def test_happy_schema_fields_present():
     """Report always contains schema, schema_version, redaction top-level fields."""
     rc, report = _run_main(["--synthetic"])
