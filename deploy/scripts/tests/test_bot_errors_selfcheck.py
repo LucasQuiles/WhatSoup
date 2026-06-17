@@ -40,7 +40,14 @@ def _write(path: Path, data: bytes) -> str:
     return _sha(data)
 
 
-def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: bytes = b"redact\n", central_ack_path=None):
+def _fixture(
+    tmp_path: Path,
+    *,
+    root_data: bytes = b"redact\n",
+    bundle_data: bytes = b"redact\n",
+    central_ack_path=None,
+    approved_heads=None,
+):
     head = "a" * 40
     root = tmp_path / "runtime"
     state = tmp_path / "state" / "sentinel"
@@ -63,7 +70,7 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
         ),
         encoding="utf-8",
     )
-    ledger.write_text(json.dumps({"approved_f10": [f10]}), encoding="utf-8")
+    ledger.write_text(json.dumps({"approved_f10": [f10], "approved_heads": approved_heads or []}), encoding="utf-8")
     state.mkdir(parents=True, exist_ok=True)
     fleet_state.mkdir(parents=True, exist_ok=True)
     os.symlink(bundle, current)
@@ -562,6 +569,25 @@ def test_untrusted_pin_records_problem_and_does_not_heal(tmp_path: Path):
     status = _mod.run_selfcheck(config, deps)
     assert status["class"] == "pin_untrusted"
     assert "not on origin/main" in status["problems"][0]
+    assert calls == []
+
+
+def test_deploy_approved_head_allows_non_git_runtime_root(tmp_path: Path):
+    config, deps, calls, head = _fixture(tmp_path, approved_heads=["a" * 40])
+    deps = _mod.SelfcheckDeps(
+        commit_exists=lambda _sha: False,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "healthy"
+    assert status["pin"]["headSha"] == head
+    assert status["pin"]["headApproved"] == "true"
+    assert status["pin"]["trust"] == "ok: approved head ledger"
     assert calls == []
 
 

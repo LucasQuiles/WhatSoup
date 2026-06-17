@@ -394,6 +394,17 @@ for index, value in enumerate(approved):
 if f10 not in approved:
     approved.append(f10)
 ledger["approved_f10"] = approved
+approved_heads = ledger.get("approved_heads")
+if approved_heads is None:
+    approved_heads = []
+elif not isinstance(approved_heads, list):
+    fatal("ledger approved_heads must be a list")
+for index, value in enumerate(approved_heads):
+    if not is_lower_hex(value, 40):
+        fatal(f"ledger approved_heads[{index}] must be lowercase git sha")
+if head not in approved_heads:
+    approved_heads.append(head)
+ledger["approved_heads"] = approved_heads
 manifest["expected_head_sha"] = head
 atomic_write_json(led_p, ledger)
 atomic_write_json(man_p, manifest)
