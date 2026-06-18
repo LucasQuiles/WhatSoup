@@ -44,6 +44,38 @@ def test_safe_metadata_keys_with_sensitive_words_preserved():
     assert redact(cfg, "") == cfg
 
 
+def test_boolean_under_sensitive_key_preserved_not_clobbered():
+    # Regression (M1c): a boolean under a sensitive-named key that is NOT allowlisted must be
+    # preserved, not clobbered to the truthy string "<redacted>". A bool is never a credential,
+    # and clobbering False -> "<redacted>" silently flips falsy telemetry/attestation to truthy.
+    out = redact({"token_present": False, "auth_ok": True, "has_secret": False}, "")
+    assert out["token_present"] is False, out
+    assert out["auth_ok"] is True, out
+    assert out["has_secret"] is False, out
+
+
+def test_password_hash_value_still_redacted_after_allowlist_port():
+    # Security trim (M1b port-forward): the allowlist must NOT let a *_hash suffix pass a
+    # credential hash through. A password/secret hash value does not match SECRET_VALUE, so it
+    # would leak if the key were allowlisted by bare suffix. It must stay redacted by key name.
+    out = redact({"password_hash": "a94a8fe5ccb19ba61c4c0873d391e987"}, "")
+    assert out["password_hash"] == "<redacted>", out
+
+
+def test_token_reasoning_proxy_opaque_value_redacted():
+    # Security trim (M1b port-forward): token_reasoning_proxy is ambiguous; an opaque string
+    # value must remain redacted (we do NOT allowlist it).
+    out = redact({"token_reasoning_proxy": "opaque-proxy-string-xyz"}, "")
+    assert out["token_reasoning_proxy"] == "<redacted>", out
+
+
+def test_benign_token_counts_preserved_after_allowlist_port():
+    # Port-forward benign telemetry: integer count fields under token-named keys are preserved.
+    cfg = {"input_tokens": 1280, "output_tokens": 42, "cache_read_input_tokens": 9,
+           "content_hash": "deadbeefcafebabe", "no_secrets_attested": True}
+    assert redact(cfg, "") == cfg
+
+
 def test_jwt_and_email_redacted_plain_kept():
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY.SflKxwRJSMeKKF2QT4fwpMeJ"
     out = redact([jwt, "user@example.com", "plain-value"], "")

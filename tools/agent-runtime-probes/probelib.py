@@ -70,6 +70,13 @@ def _is_safe_key(lowered: str) -> bool:
 def redact(value: Any, key: str = "") -> Any:
     """Fail-closed redaction. Redact when the key name is sensitive OR the value looks
     like a secret. Structure (dict/list containers, key names) is preserved."""
+    # A bool is categorically never a credential, and the value-shape scan only inspects
+    # strings, so preserving it weakens nothing. Guard before the key-name check so a falsy
+    # attestation/telemetry flag under a sensitive-named key is not clobbered into the truthy
+    # string "<redacted>" (M1c boolean-clobber fix). Note: isinstance(True, int) is True, so
+    # this must precede any int handling; non-bool ints still fall through to fail-closed redaction.
+    if isinstance(value, bool):
+        return value
     lowered = key.lower()
     if any(part in lowered for part in SENSITIVE_PARTS) and not _is_safe_key(lowered):
         return value if value in (None, "", [], {}) else "<redacted>"
