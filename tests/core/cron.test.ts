@@ -88,6 +88,43 @@ describe('cron parser', () => {
       const next = nextCronRun('0 0 * * 5', from);
       expect(new Date(next * 1000).toISOString()).toBe('2026-01-02T00:00:00.000Z');
     });
+
+    it('defaults to UTC when no timezone is given (#1067 regression)', () => {
+      const from = Math.floor(new Date('2026-04-05T08:00:00Z').getTime() / 1000);
+      expect(nextCronRun('0 9 * * *', from)).toBe(nextCronRun('0 9 * * *', from, 'UTC'));
+      const date = new Date(nextCronRun('0 9 * * *', from, 'UTC') * 1000);
+      expect(date.getUTCHours()).toBe(9);
+    });
+
+    it('evaluates daily cron in the row timezone, DST-aware — summer EDT (#1067)', () => {
+      // July: America/New_York is EDT (UTC-4); 9am local => 13:00 UTC.
+      const from = Math.floor(new Date('2026-07-01T00:00:00Z').getTime() / 1000);
+      const next = nextCronRun('0 9 * * *', from, 'America/New_York');
+      const date = new Date(next * 1000);
+      expect(date.getUTCHours()).toBe(13);
+      expect(date.getUTCMinutes()).toBe(0);
+    });
+
+    it('evaluates daily cron in the row timezone, DST-aware — winter EST (#1067)', () => {
+      // January: America/New_York is EST (UTC-5); 9am local => 14:00 UTC.
+      const from = Math.floor(new Date('2026-01-05T00:00:00Z').getTime() / 1000);
+      const next = nextCronRun('0 9 * * *', from, 'America/New_York');
+      const date = new Date(next * 1000);
+      expect(date.getUTCHours()).toBe(14);
+      expect(date.getUTCMinutes()).toBe(0);
+    });
+
+    it('evaluates weekly cron day-of-week in the row timezone (#1067)', () => {
+      // 23:30 UTC Sun 2026-07-05 is still Sun 19:30 in New_York. A "Monday 00:30
+      // New_York" cron must resolve to a Monday-in-NY instant, not Monday-in-UTC.
+      const from = Math.floor(new Date('2026-07-05T12:00:00Z').getTime() / 1000);
+      const next = nextCronRun('30 0 * * 1', from, 'America/New_York');
+      // 00:30 EDT Monday = 04:30 UTC Monday.
+      const date = new Date(next * 1000);
+      expect(date.getUTCHours()).toBe(4);
+      expect(date.getUTCMinutes()).toBe(30);
+      expect(date.getUTCDay()).toBe(1); // Monday in UTC too at 04:30
+    });
   });
 
   describe('cronToHuman', () => {

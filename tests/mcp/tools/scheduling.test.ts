@@ -92,6 +92,44 @@ describe('scheduling tools', () => {
     expect(result.content[0].text).toMatch(/requires chatJid/i);
   });
 
+  it('schedule_message stores an IANA timezone for a recurring message (#1067)', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const result = await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt,
+        text: 'daily standup',
+        recurrence: '0 9 * * *',
+        timezone: 'America/New_York',
+      },
+      globalSession(scratchDir),
+    );
+    expect(result.isError).toBeUndefined();
+    const row = db.raw
+      .prepare('SELECT timezone, recurrence FROM scheduled_messages WHERE id = 1')
+      .get() as { timezone: string | null; recurrence: string | null };
+    expect(row.timezone).toBe('America/New_York');
+    expect(row.recurrence).toBe('0 9 * * *');
+  });
+
+  it('schedule_message rejects an invalid timezone (#1067)', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const result = await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt,
+        text: 'bad tz',
+        recurrence: '0 9 * * *',
+        timezone: 'Not/AZone',
+      },
+      globalSession(scratchDir),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/timezone/i);
+  });
+
   it('schedule_message can schedule image media from a local file', async () => {
     const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
     const filePath = join(scratchDir, 'poster.jpg');
@@ -378,6 +416,7 @@ describe('scheduling tools', () => {
         payload: { text: 'failed alpha' },
         scheduledAt: 1700000100,
         recurrence: null,
+        timezone: null,
         nextRunAt: null,
         runCount: 0,
         status: 'failed',

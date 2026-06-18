@@ -73,7 +73,19 @@ export function parseCron(expression: string): CronFields {
 }
 
 /** Calculate the next run time after `afterUnix` (UTC unix seconds). Returns UTC unix seconds. */
-export function nextCronRun(expression: string, afterUnix: number): number {
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+};
+
+/**
+ * Find the next unix time (seconds) matching a cron expression after `afterUnix`.
+ *
+ * `timeZone` is an IANA zone (e.g. 'America/New_York'); the cron fields are matched
+ * against the wall-clock time in that zone, so a "daily 9am" cron fires at the
+ * user's local 9am and stays correct across DST transitions. The default 'UTC'
+ * preserves the original UTC behavior for every non-timezone-aware caller.
+ */
+export function nextCronRun(expression: string, afterUnix: number, timeZone: string = 'UTC'): number {
   const fields = parseCron(expression);
   // Start from the next minute after `afterUnix`
   const start = new Date((afterUnix + 60) * 1000);
@@ -83,12 +95,44 @@ export function nextCronRun(expression: string, afterUnix: number): number {
   const maxIterations = 366 * 24 * 60;
   const cursor = new Date(start);
 
+  // For a non-UTC zone, extract wall-clock parts via a single reused Intl formatter
+  // (formatToParts maps the UTC instant -> local time, which is inherently DST-aware).
+  const fmt = timeZone !== 'UTC'
+    ? new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        hourCycle: 'h23',
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric',
+        weekday: 'short',
+      })
+    : null;
+
   for (let i = 0; i < maxIterations; i++) {
-    const minute = cursor.getUTCMinutes();
-    const hour = cursor.getUTCHours();
-    const dayOfMonth = cursor.getUTCDate();
-    const month = cursor.getUTCMonth() + 1; // JS months are 0-based
-    const dayOfWeek = cursor.getUTCDay();
+    let minute: number;
+    let hour: number;
+    let dayOfMonth: number;
+    let month: number;
+    let dayOfWeek: number;
+
+    if (fmt) {
+      const parts = fmt.formatToParts(cursor);
+      const part = (type: Intl.DateTimeFormatPartTypes): string =>
+        parts.find((p) => p.type === type)?.value ?? '';
+      minute = Number(part('minute'));
+      hour = Number(part('hour')) % 24; // h23 yields 00-23; guard a stray 24 -> 0
+      dayOfMonth = Number(part('day'));
+      month = Number(part('month'));
+      dayOfWeek = WEEKDAY_INDEX[part('weekday')] ?? cursor.getUTCDay();
+    } else {
+      minute = cursor.getUTCMinutes();
+      hour = cursor.getUTCHours();
+      dayOfMonth = cursor.getUTCDate();
+      month = cursor.getUTCMonth() + 1; // JS months are 0-based
+      dayOfWeek = cursor.getUTCDay();
+    }
 
     const matchMinute = fields.minute === null || fields.minute.includes(minute);
     const matchHour = fields.hour === null || fields.hour.includes(hour);

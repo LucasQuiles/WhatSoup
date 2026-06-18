@@ -18,6 +18,7 @@ interface ScheduledRow {
   media_blob: Uint8Array | null;
   recurrence: string | null;
   run_count: number;
+  timezone: string | null;
 }
 
 export class MessageScheduler {
@@ -73,7 +74,7 @@ export class MessageScheduler {
     // are left alone.
     const candidates = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count, timezone
          FROM scheduled_messages
          WHERE status = 'pending'
            AND (
@@ -98,7 +99,7 @@ export class MessageScheduler {
     // Only process the rows we just claimed (re-fetch to confirm claimed status)
     const rows = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count, timezone
          FROM scheduled_messages
          WHERE id IN (${placeholders}) AND status = 'processing'`,
       )
@@ -114,7 +115,7 @@ export class MessageScheduler {
           // mark it permanently failed rather than entering a send-retry loop.
           let nextRun: number;
           try {
-            nextRun = nextCronRun(row.recurrence, sentAt);
+            nextRun = nextCronRun(row.recurrence, sentAt, row.timezone ?? 'UTC');
           } catch (cronErr) {
             this.db.raw
               .prepare(
@@ -156,7 +157,7 @@ export class MessageScheduler {
             // across occurrences. Only mark 'failed' if the next slot is uncomputable.
             let nextRun: number | null = null;
             try {
-              nextRun = nextCronRun(row.recurrence, Date.now());
+              nextRun = nextCronRun(row.recurrence, Date.now(), row.timezone ?? 'UTC');
             } catch {
               nextRun = null;
             }
