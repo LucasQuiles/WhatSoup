@@ -88,6 +88,18 @@ def test_classify_delta_all_geometric_types():
     assert mpc.classify_delta("aXc", "aYc") == "full_rewrite"
 
 
+def test_classify_delta_suffix_loop_does_not_overlap_matched_prefix():
+    # The common-suffix loop bound `s < (len(prev) - p)` is STRICT so the suffix region never
+    # overlaps the already-matched prefix. A '<'->'<=' mutation lets s absorb one extra char
+    # when the APPENDED content repeats the prefix tail, misclassifying a pure append as a
+    # length change. `abc->abcXX` does NOT catch it (the appended chars differ from the prefix
+    # tail); an append whose first char equals the prefix's last char does:
+    assert mpc.classify_delta("a", "aa") == "suffix_appended"    # mutant -> "length_expansion"
+    assert mpc.classify_delta("ab", "abb") == "suffix_appended"  # mutant -> "length_expansion"
+    # empty prev must CLASSIFY (not IndexError) when the suffix bound is mutated to <=
+    assert mpc.classify_delta("", "a") == "prefix_changed"
+
+
 def test_is_subsequence_and_deletion():
     assert mpc._is_subsequence("ace", "abcde") is True
     assert mpc._is_subsequence("aec", "abcde") is False  # order matters
