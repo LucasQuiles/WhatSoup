@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "WhatSoup — consolidated WhatsApp platform with embedded MCP tools",
   "type": "module",
+  "packageManager": "npm@11.12.1",
   "engines": {
     "node": ">=24.0.0 <26"
   },
