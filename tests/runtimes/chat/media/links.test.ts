@@ -10,7 +10,7 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
-import { extractUrls, extractLinkContent, isPrivateHost, isPrivateIP } from '../../../../src/runtimes/chat/media/links.ts';
+import { extractUrls, extractLinkContent, isPrivateHost, isPrivateIP, ssrfSafeLookup, readBodyCapped } from '../../../../src/runtimes/chat/media/links.ts';
 
 // ---------------------------------------------------------------------------
 // extractUrls — positive
@@ -395,5 +395,98 @@ describe('extractLinkContent — HTML extraction fallback levels', () => {
     expect(result.fallbackLevel).toBe('raw');
     expect(result.title).toBe('https://empty.example.com/');
     expect(result.content).toBe("[couldn't fetch content]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ssrfSafeLookup — connection-time IP validation (redirect + DNS-rebind guard)
+// ---------------------------------------------------------------------------
+
+describe('ssrfSafeLookup', () => {
+  // Fake resolver injected as the 4th arg (undici uses the default dns.lookup at runtime).
+  const fakeResolver = (result: unknown, family?: number) =>
+    ((_host: string, _opts: unknown, cb: (e: unknown, a: unknown, f?: unknown) => void) => {
+      cb(null, result, family);
+    }) as unknown as typeof nodeDns.lookup;
+
+  it('passes a public IP through to the callback', () => {
+    const cb = vi.fn();
+    ssrfSafeLookup('example.com', {} as never, cb, fakeResolver('93.184.216.34', 4));
+    expect(cb).toHaveBeenCalledWith(null, '93.184.216.34', 4);
+  });
+
+  it('rejects when the hostname resolves to a private/metadata IP (rebind/redirect guard)', () => {
+    const cb = vi.fn();
+    ssrfSafeLookup('rebind.evil.test', {} as never, cb, fakeResolver('169.254.169.254', 4));
+    const err = cb.mock.calls[0][0] as Error | null;
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toContain('169.254.169.254');
+  });
+
+  it('rejects when any address in an all:true result is private', () => {
+    const cb = vi.fn();
+    ssrfSafeLookup(
+      'mixed.evil.test',
+      { all: true } as never,
+      cb,
+      fakeResolver([
+        { address: '93.184.216.34', family: 4 },
+        { address: '10.0.0.5', family: 4 },
+      ]),
+    );
+    expect(cb.mock.calls[0][0] as Error | null).toBeInstanceOf(Error);
+  });
+
+  it('propagates a DNS resolution error unchanged', () => {
+    const dnsErr = Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' });
+    const errResolver = ((_host: string, _opts: unknown, cb: (e: unknown, a: unknown, f?: unknown) => void) => {
+      cb(dnsErr, undefined, undefined);
+    }) as unknown as typeof nodeDns.lookup;
+    const cb = vi.fn();
+    ssrfSafeLookup('nx.example.com', {} as never, cb, errResolver);
+    expect(cb.mock.calls[0][0]).toBe(dnsErr);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readBodyCapped — bounded body read (memory-DoS guard)
+// ---------------------------------------------------------------------------
+
+describe('readBodyCapped', () => {
+  it('falls back to text() and truncates when there is no body stream', async () => {
+    const big = 'y'.repeat(50);
+    const out = await readBodyCapped({ text: () => Promise.resolve(big) }, 10);
+    expect(out).toBe('y'.repeat(10));
+  });
+
+  it('returns full text() output when under the cap', async () => {
+    const out = await readBodyCapped({ text: () => Promise.resolve('short') }, 1000);
+    expect(out).toBe('short');
+  });
+
+  it('caps an oversized streamed body at maxBytes and cancels the stream', async () => {
+    const enc = new TextEncoder();
+    let cancelled = false;
+    const chunks = [enc.encode('a'.repeat(8)), enc.encode('b'.repeat(8)), enc.encode('c'.repeat(8))];
+    let i = 0;
+    const body = {
+      getReader() {
+        return {
+          read() {
+            if (i < chunks.length) return Promise.resolve({ done: false, value: chunks[i++] });
+            return Promise.resolve({ done: true, value: undefined });
+          },
+          cancel() {
+            cancelled = true;
+            return Promise.resolve();
+          },
+          releaseLock() {},
+        };
+      },
+    };
+    const out = await readBodyCapped({ body, text: () => Promise.resolve('UNUSED') } as never, 10);
+    expect(out.length).toBe(10);
+    expect(out).not.toContain('UNUSED');
+    expect(cancelled).toBe(true);
   });
 });
