@@ -199,4 +199,115 @@ describe('TurnQueue', () => {
       'chat-a@s.whatsapp.net:msg3',
     ]);
   });
+
+  describe('turn-queue.ts uncovered-branch coverage', () => {
+    it('rejects enqueues once maxDepth cap is reached and invokes onReject', () => {
+      const rejected: string[] = [];
+      const queue = new TurnQueue({
+        maxDepth: 2,
+        onReject: (turn) => rejected.push(turn.text),
+      });
+
+      const first = queue.enqueue(makeTurn({ text: 'keep-a' }));
+      const second = queue.enqueue(makeTurn({ text: 'keep-b' }));
+      // No processor set, so items stay queued and the cap stays full.
+      const third = queue.enqueue(makeTurn({ text: 'overflow' }));
+
+      expect(first).toBe(true);
+      expect(second).toBe(true);
+      expect(third).toBe(false);
+      expect(queue.pending).toBe(2);
+      expect(rejected).toEqual(['overflow']);
+    });
+
+    it('pendingForChat counts only turns for the matching chat', async () => {
+      const queue = new TurnQueue();
+
+      // No processor → items remain queued for deterministic counting.
+      queue.enqueue(makeTurn({ chatJid: '1555XXXXXXX@s.whatsapp.net', text: 'a' }));
+      queue.enqueue(makeTurn({ chatJid: '1555YYYYYYY@s.whatsapp.net', text: 'b' }));
+      queue.enqueue(makeTurn({ chatJid: '1555XXXXXXX@s.whatsapp.net', text: 'c' }));
+
+      expect(queue.pendingForChat('1555XXXXXXX@s.whatsapp.net')).toBe(2);
+      expect(queue.pendingForChat('1555YYYYYYY@s.whatsapp.net')).toBe(1);
+      expect(queue.pendingForChat('1555ZZZZZZZ@s.whatsapp.net')).toBe(0);
+    });
+
+    it('idle resolves immediately when already empty and not processing', async () => {
+      const queue = new TurnQueue();
+      let resolved = false;
+
+      // Fresh queue with no work — idle() returns on the early-exit branch
+      // (line 72) without scheduling any timer. Resolve synchronously-ish to
+      // prove the early exit was taken.
+      await queue.idle().then(() => {
+        resolved = true;
+      });
+
+      expect(resolved).toBe(true);
+      expect(queue.isProcessing).toBe(false);
+      expect(queue.pending).toBe(0);
+    });
+
+    it('idle polls via setTimeout while a turn is still processing', async () => {
+      vi.useFakeTimers();
+      try {
+        const queue = new TurnQueue();
+        const release = deferred();
+        const seen: string[] = [];
+
+        queue.setProcessor(async (turn) => {
+          seen.push(turn.text);
+          // Stay busy until released: idle()'s internal check() must take the
+          // else-branch (line 78) and reschedule via setTimeout.
+          await release.promise;
+        });
+
+        queue.enqueue(makeTurn({ text: 'held' }));
+        expect(queue.isProcessing).toBe(true);
+
+        let idleResolved = false;
+        void queue.idle().then(() => {
+          idleResolved = true;
+        });
+
+        // Advance fake time so the SUT's poller fires while the turn is still
+        // held — this exercises the else-branch (line 78).
+        await vi.advanceTimersByTimeAsync(5);
+        expect(idleResolved).toBe(false);
+        expect(queue.isProcessing).toBe(true);
+
+        release.resolve();
+        // Let the released microtasks and any pending poll timers drain.
+        await vi.advanceTimersByTimeAsync(5);
+        await vi.runAllTimersAsync();
+
+        expect(seen).toEqual(['held']);
+        expect(idleResolved).toBe(true);
+        expect(queue.pending).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('drain runs immediately when setProcessor is called after items are queued', async () => {
+      const queue = new TurnQueue();
+      const processed: string[] = [];
+
+      // Enqueue before any processor exists — drain() must bail (line 86).
+      const enqueued = queue.enqueue(makeTurn({ text: 'pre' }));
+      expect(enqueued).toBe(true);
+      expect(queue.pending).toBe(1);
+
+      queue.setProcessor(async (turn) => {
+        processed.push(turn.text);
+      });
+
+      // setProcessor triggers a drain of the already-queued turn.
+      await queue.idle();
+
+      expect(processed).toEqual(['pre']);
+      expect(queue.pending).toBe(0);
+    });
+  });
 });
