@@ -467,6 +467,21 @@ Optional when `type` is `agent`. Fleet create/update APIs fill a default
 `sessionScope` (the runtime defaults it to `single`) but should keep it
 explicit for readability.
 
+#### Agent runtime control-plane boundary
+
+WhatSoup owns per-instance agent runtime configuration: `agentOptions`,
+generated workspace files, plugin scoping, provider fallback behavior, sandbox
+settings, and MCP tool scope. It does not own host-global agent doctrine or Q-host
+runtime proof.
+
+On operator workstations, WhatSoup should consume the tracked cross-runtime control
+surface and local runtime standard as operator policy through compact instructions or
+project pointers, not by copying the full doctrine into `config.json`.
+
+Claims about live WhatSoup behavior still require WhatSoup-specific source, tests,
+health output, logs, or probes. Q-host current-state rows are not production-fleet
+proof unless a WhatSoup-specific proof artifact says so.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
