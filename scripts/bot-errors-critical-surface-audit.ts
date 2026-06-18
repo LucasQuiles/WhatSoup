@@ -157,7 +157,7 @@ const sensitiveContentPatterns: Array<{ kind: string; pattern: RegExp }> = [
   { kind: 'private-key', pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/ },
   {
     kind: 'credential-path',
-    pattern: /(?:~|\/[^\s"',;}]+)*(?:\.config\/(?:secrets|whatsoup)\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]+\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b/i,
+    pattern: /(?:\.config\/(?:secrets|whatsoup)\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]+\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b/i,
   },
 ];
 
