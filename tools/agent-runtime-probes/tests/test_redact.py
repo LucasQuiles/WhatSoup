@@ -76,6 +76,15 @@ def test_benign_token_counts_preserved_after_allowlist_port():
     assert redact(cfg, "") == cfg
 
 
+def test_embedded_secret_caught_and_benign_word_kept():
+    # Digit-lookahead on sk-: catch a real key abutting an alphanumeric prefix (xsk-...digit),
+    # while skipping English words like "risk-classification"/"task-completion" (no digit after sk-).
+    assert redact({"v": "xsk-ABCDEFGH1234"}, "")["v"] == "<redacted:value>"
+    assert redact(["prefixAKIAABCD1234EFGH"], "")[0] == "<redacted:value>"
+    assert redact({"schema": "agent-runtime-risk-classification"}, "")["schema"] == "agent-runtime-risk-classification"
+    assert redact({"t": "task-completion-handler"}, "")["t"] == "task-completion-handler"
+
+
 def test_jwt_and_email_redacted_plain_kept():
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY.SflKxwRJSMeKKF2QT4fwpMeJ"
     out = redact([jwt, "user@example.com", "plain-value"], "")
