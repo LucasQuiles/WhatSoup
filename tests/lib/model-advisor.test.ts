@@ -22,6 +22,7 @@ import {
   getModelAdvisories,
   fetchLiveModelIds,
   fetchLiveModelIdsWithStatus,
+  startModelCurrencyMonitor,
   __resetModelAdvisorForTest,
 } from '../../src/lib/model-advisor.ts';
 
@@ -264,5 +265,131 @@ describe('notifyModelAdvisories', () => {
       advisories: [],
       liveScan: { mode: 'degraded' },
     });
+  });
+});
+
+describe('model-advisor.ts uncovered-branch coverage', () => {
+  // Flush the unhandled microtask chain kicked off by startModelCurrencyMonitor's
+  // `void run()` without resorting to wall-clock delays. fetches are mocked, so a
+  // bounded number of microtask drains resolves the immediate run().
+  async function flushImmediateRun(rounds = 20): Promise<void> {
+    for (let i = 0; i < rounds; i += 1) {
+      await Promise.resolve();
+    }
+  }
+
+  // startModelCurrencyMonitor calls `.unref()` on the setInterval handle — return
+  // a fake handle that satisfies that contract so the mock does not throw.
+  function fakeIntervalHandle(): NodeJS.Timeout {
+    return { unref: () => {} } as unknown as NodeJS.Timeout;
+  }
+
+  it('fetches model ids from the OpenAI vendor when only OPENAI_API_KEY is set', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: 'gpt-5.4' }, { id: 'gpt-5.5-mini' }] }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus();
+    expect(result.ids).toEqual(['gpt-5.4', 'gpt-5.5-mini']);
+    expect(result.liveScan).toMatchObject({
+      mode: 'live',
+      attemptedVendors: ['openai'],
+      degradedVendors: [],
+      fetchedCount: 2,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://api.openai.com/v1/models');
+    expect(fetchSpy.mock.calls[0][1]).toMatchObject({
+      headers: { Authorization: 'Bearer fake-openai-key' },
+    });
+  });
+
+  it('records both vendors as attempted and fetches in parallel when both keys are set', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'fake-anthropic-key');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      json: async () => ({
+        data: new URL(url).hostname === 'api.openai.com'
+          ? [{ id: 'gpt-5.4' }]
+          : [{ id: 'claude-opus-4-8' }],
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.liveScan).toMatchObject({
+      mode: 'live',
+      attemptedVendors: ['anthropic', 'openai'],
+      fetchedCount: 2,
+    });
+    expect(result.ids).toEqual(['claude-opus-4-8', 'gpt-5.4']);
+  });
+
+  it('startModelCurrencyMonitor runs once at startup and records advisories + live scan', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockReturnValue(fakeIntervalHandle());
+    startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
+    await flushImmediateRun();
+    expect(getModelAdvisories()).toMatchObject({
+      checkedAt: expect.any(String),
+      advisories: [
+        expect.objectContaining({ role: 'conversation', model: 'claude-opus-4-6' }),
+      ],
+      liveScan: { mode: 'static-only' },
+    });
+    expect(setIntervalSpy).toHaveBeenCalled();
+    setIntervalSpy.mockRestore();
+  });
+
+  it('startModelCurrencyMonitor keeps running and records advisories when the live fetch errors (caught upstream)', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'fake-anthropic-key');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    // fetchModelIds catches this internally and returns a degraded-vendor result;
+    // startModelCurrencyMonitor's own catch block therefore must NOT fire — the
+    // monitor records the static-catalog advisory and the degraded live scan.
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('boom from fetch'));
+    vi.stubGlobal('fetch', fetchSpy);
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockReturnValue(fakeIntervalHandle());
+    startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
+    await flushImmediateRun();
+    const snapshot = getModelAdvisories();
+    expect(snapshot).toMatchObject({
+      checkedAt: expect.any(String),
+      advisories: [
+        expect.objectContaining({ role: 'conversation', model: 'claude-opus-4-6' }),
+      ],
+      liveScan: { mode: 'degraded' },
+    });
+    expect(setIntervalSpy).toHaveBeenCalled();
+    setIntervalSpy.mockRestore();
+  });
+
+  it('startModelCurrencyMonitor swallows a thrown check without crashing the process', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    // Force notifyModelAdvisories (called inside run()) to throw by stubbing
+    // Date.prototype.toISOString — `lastCheckedAt = new Date().toISOString()` is
+    // the first statement of notifyModelAdvisories, so the throw propagates
+    // synchronously out of notifyModelCurrencyResult into run()'s try/catch.
+    const toIso = vi.spyOn(Date.prototype, 'toISOString').mockImplementation(() => {
+      throw new Error('intentional model-currency failure');
+    });
+    const setIntervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation(() => fakeIntervalHandle());
+    startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
+    await flushImmediateRun();
+    // run()'s catch block fired: no throw escaped the void run(), and the throw
+    // landed on the toISOString line so lastCheckedAt stayed null. The daily
+    // re-check was still scheduled exactly once.
+    expect(getModelAdvisories().checkedAt).toBe(null);
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    setIntervalSpy.mockRestore();
+    toIso.mockRestore();
   });
 });
