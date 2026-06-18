@@ -12,7 +12,7 @@ import { Button } from "./primitives/Button";
 // ---------------------------------------------------------------------------
 
 const reasonLabel: Record<string, string> = {
-  unavailableService: "WhatsApp unavailable",
+  unavailableService: "channel unavailable",
   connectionClosed: "connection closed",
   connectionLost: "connection lost",
   connectionReplaced: "replaced by another session",

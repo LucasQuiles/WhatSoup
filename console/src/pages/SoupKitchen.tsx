@@ -1354,7 +1354,7 @@ const SoupKitchen: FC = () => {
           </>
         ) : (
           <>
-            Stopping will disconnect the following lines from WhatsApp. The
+            Stopping will disconnect the following lines from their channels. The
             lines will not reconnect until manually started:{" "}
             <strong>
               {pendingBulk?.names
