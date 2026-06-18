@@ -12,8 +12,15 @@ import {
   resolveProviderKeyService,
   SERVICE_ENV_MAP,
   _resetBackendCache,
+  _setFileStoreDirForTests,
+  writeCredential,
+  deleteCredential,
+  KeyringWriteError,
 } from '../../src/lib/keyring.ts';
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
 
@@ -196,6 +203,282 @@ describe('keyring', () => {
       expect(resolveProviderKeyService('opencode-cli', '   ')).toBeNull();
       expect(resolveProviderKeyService('opencode-cli', 42)).toBeNull();
       expect(resolveProviderKeyService(null, 'minimax/x')).toBeNull();
+    });
+  });
+});
+
+describe('keyring.ts uncovered-branch coverage', () => {
+  const originalPlatform = process.platform;
+  const originalEnv = { ...process.env };
+  let tmpDir: string;
+
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.clearAllMocks();
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    delete process.env.REQUIRE_OS_KEYRING;
+    delete process.env.XDG_CONFIG_HOME;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'keyring-cov-'));
+    _setFileStoreDirForTests(tmpDir);
+  });
+
+  afterEach(() => {
+    _setFileStoreDirForTests(null);
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+    process.env = { ...originalEnv };
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  describe('detectKeyringBackend — probe-error branches', () => {
+    it('warns on benign ENOENT (genuinely absent keyring) and falls back to env-only', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(detectKeyringBackend()).toBe('env-only');
+    });
+
+    it('throws when probe errored (non-ENOENT) and REQUIRE_OS_KEYRING is set', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      process.env.REQUIRE_OS_KEYRING = '1';
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('probe timed out'); });
+      expect(() => detectKeyringBackend()).toThrow(/REQUIRE_OS_KEYRING/);
+    });
+
+    it('downgrades to env-only on errored probe (non-ENOENT) without REQUIRE_OS_KEYRING', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('EACCES boom'); });
+      expect(detectKeyringBackend()).toBe('env-only');
+    });
+
+    it('treats non-Error probe rejections as env-only downgrade', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw 'string-error-not-error-instance'; });
+      expect(detectKeyringBackend()).toBe('env-only');
+    });
+  });
+
+  describe('lookupCredential — file store, migration, and user-scope branches', () => {
+    it('reads from file store on env-only backend when env var is absent', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      fs.mkdirSync(tmpDir, { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'anthropic.key'), 'fake-secret-value\n', { mode: 0o600 });
+      expect(lookupCredential('anthropic', { skipEnv: true })).toBe('fake-secret-value');
+    });
+
+    it('returns null when env-only backend has no file and no env var', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(lookupCredential('anthropic', { skipEnv: true })).toBeNull();
+    });
+
+    it('skips migration fallbacks when skipMigrationFallbacks is set', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('not found'); });
+      expect(lookupCredential('whatsoup-health-token', { skipMigrationFallbacks: true })).toBeNull();
+      // Only one lookup call should have happened (no migration candidate).
+      const lookupCalls = mockedExecFileSync.mock.calls.filter(
+        (c) => c[0] === 'secret-tool' && (c[1] as string[])[0] === 'lookup',
+      );
+      expect(lookupCalls).toHaveLength(1);
+    });
+
+    it('tries migration fallback service when primary misses on secret-tool', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('not found'); }); // primary
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('migrated-token-xyz\n')); // fallback
+      // Set the env var so it would short-circuit if envFirst; use user scope to force keyring first.
+      process.env.WHATSOUP_HEALTH_TOKEN = 'env-would-win';
+      expect(lookupCredential('whatsoup-health-token', { user: 'bot' })).toBe('migrated-token-xyz');
+    });
+
+    it('user-scoped lookup consults env after keyring miss (lookupEnvAfterKeyringMiss)', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      process.env.ANTHROPIC_API_KEY = 'env-after-miss-val';
+      expect(lookupCredential('anthropic', { user: 'operator' })).toBe('env-after-miss-val');
+    });
+
+    it('user-scoped lookup with skipEnv returns null when keyring has nothing', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(lookupCredential('anthropic', { user: 'operator', skipEnv: true })).toBeNull();
+    });
+
+    it('reads from macOS keychain with explicit user account, then file-store fallback', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('keychain miss'); });
+      fs.mkdirSync(tmpDir, { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'anthropic.key'), 'mac-fallback-val', { mode: 0o600 });
+      expect(lookupCredential('anthropic', { user: 'bot', skipEnv: true })).toBe('mac-fallback-val');
+    });
+
+    it('secret-tool lookup with user passes user on primary candidate', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('user-scoped-key\n'));
+      expect(lookupCredential('anthropic', { user: 'alice', skipEnv: true })).toBe('user-scoped-key');
+      expect(mockedExecFileSync).toHaveBeenCalledWith(
+        'secret-tool',
+        ['lookup', 'service', 'anthropic', 'user', 'alice'],
+        expect.any(Object),
+      );
+    });
+  });
+
+  describe('writeCredential — all backends and error classifications', () => {
+    it('writes to macOS keychain and reports the backend', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
+      expect(writeCredential('anthropic', 'fake-secret-value')).toEqual({ backend: 'macos-keychain' });
+    });
+
+    it('classifies macOS keychain lock (status 36) as KEYRING_LOCKED', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      const err = Object.assign(new Error('locked'), { status: 36, stderr: 'interaction is not allowed' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw err; });
+      expect(() => writeCredential('anthropic', 'fake-secret-value')).toThrow(KeyringWriteError);
+      try {
+        writeCredential('anthropic', 'fake-secret-value');
+      } catch (e) {
+        expect((e as KeyringWriteError).code).toBe('KEYRING_LOCKED');
+      }
+    });
+
+    it('classifies macOS status 45 / errSecAuthFailed as KEYRING_ACCESS_DENIED', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      const err = Object.assign(new Error('denied'), { status: 45, stderr: 'errSecAuthFailed' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw err; });
+      try {
+        writeCredential('anthropic', 'fake-secret-value');
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(KeyringWriteError);
+        expect((e as KeyringWriteError).code).toBe('KEYRING_ACCESS_DENIED');
+      }
+    });
+
+    it('classifies unknown macOS failure as KEYRING_WRITE_FAILED', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      const err = Object.assign(new Error('boom'), { status: 99, stderr: 'something else' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw err; });
+      try {
+        writeCredential('anthropic', 'fake-secret-value');
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect((e as KeyringWriteError).code).toBe('KEYRING_WRITE_FAILED');
+      }
+    });
+
+    it('writes to secret-tool and reports secret-tool backend', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
+      expect(writeCredential('anthropic', 'fake-secret-value')).toEqual({ backend: 'secret-tool' });
+    });
+
+    it('throws KEYRING_WRITE_FAILED when secret-tool store fails', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('store failed'); });
+      expect(() => writeCredential('anthropic', 'fake-secret-value')).toThrow(/secret-tool store failed/);
+    });
+
+    it('writes to 0600 file store on env-only backend', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(writeCredential('anthropic', 'fake-secret-value')).toEqual({ backend: 'env-only' });
+      const stored = fs.readFileSync(path.join(tmpDir, 'anthropic.key'), 'utf-8');
+      expect(stored).toBe('fake-secret-value');
+    });
+
+    it('throws KEYRING_WRITE_FAILED when file-store write fails', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      // Point file store at a path whose parent cannot be created (a file blocks mkdir).
+      const blocker = path.join(tmpDir, 'blocker-file');
+      fs.writeFileSync(blocker, 'x', { mode: 0o600 });
+      _setFileStoreDirForTests(path.join(blocker, 'credentials'));
+      expect(() => writeCredential('anthropic', 'fake-secret-value')).toThrow(/file-store write failed/);
+    });
+  });
+
+  describe('deleteCredential — all backends', () => {
+    it('deletes from macOS keychain and reports deleted=true', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'macos-keychain' });
+    });
+
+    it('returns deleted=false when macOS keychain delete throws', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('not found'); });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'macos-keychain' });
+    });
+
+    it('deletes from secret-tool and reports deleted=true', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'secret-tool' });
+    });
+
+    it('returns deleted=false when secret-tool clear throws', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('')); // probe
+      mockedExecFileSync.mockImplementationOnce(() => { throw new Error('clear failed'); });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'secret-tool' });
+    });
+
+    it('deletes the file-store entry on env-only backend', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const file = path.join(tmpDir, 'anthropic.key');
+      fs.writeFileSync(file, 'fake-secret-value', { mode: 0o600 });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: true, backend: 'env-only' });
+      expect(fs.existsSync(file)).toBe(false);
+    });
+
+    it('returns deleted=false on env-only when the file is absent', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(deleteCredential('anthropic')).toEqual({ deleted: false, backend: 'env-only' });
+    });
+
+    it('honors explicit user option in macOS keychain delete', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
+      deleteCredential('anthropic', { user: 'bot' });
+      expect(mockedExecFileSync).toHaveBeenCalledWith(
+        'security',
+        ['delete-generic-password', '-s', 'anthropic', '-a', 'bot'],
+        expect.any(Object),
+      );
+    });
+  });
+
+  describe('file-store write/read round-trip via _setFileStoreDirForTests', () => {
+    it('round-trips a value through the file store on env-only backend', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const enoent = Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      writeCredential('elevenlabs', 'stub-token-xyz');
+      // Subsequent lookup on env-only reads from the file store.
+      mockedExecFileSync.mockImplementationOnce(() => { throw enoent; });
+      expect(lookupCredential('elevenlabs', { skipEnv: true })).toBe('stub-token-xyz');
     });
   });
 });
