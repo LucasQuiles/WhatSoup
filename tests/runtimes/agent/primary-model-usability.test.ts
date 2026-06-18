@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  primaryModelUsabilityRequiresAlert,
   probePrimaryModelUsability,
   type ApiModelAccessProbeResult,
   type BinaryModelProbeResult,
   type PrimaryModelProbeAdapters,
+  type PrimaryModelUsabilityResult,
 } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 
 describe('probePrimaryModelUsability', () => {
@@ -164,5 +166,432 @@ describe('probePrimaryModelUsability', () => {
     ).resolves.toMatchObject({ status: 'unknown', reason: 'model-not-configured' });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
     expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('primary-model-usability.ts uncovered-branch coverage', () => {
+  it('returns unknown with api-model-probe-unavailable when an openai-api target has no api adapter', async () => {
+    const adapters: PrimaryModelProbeAdapters = {};
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'openai-api', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'openai-api',
+      model: 'primary-model-a',
+      reason: 'api-model-probe-unavailable',
+    });
+  });
+
+  it('returns unknown with api-model-probe-unavailable for anthropic-api when no api adapter is provided', async () => {
+    const adapters: PrimaryModelProbeAdapters = {};
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'anthropic-api', model: 'claude-sonnet-test' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'anthropic-api',
+      model: 'claude-sonnet-test',
+      reason: 'api-model-probe-unavailable',
+    });
+  });
+
+  it('returns unknown with binary-model-probe-unavailable when a claude-cli target has no binary adapter', async () => {
+    const adapters: PrimaryModelProbeAdapters = {};
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+      reason: 'binary-model-probe-unavailable',
+    });
+  });
+
+  it('returns unknown with binary-model-probe-unavailable for opencode-cli when no binary adapter is provided', async () => {
+    const adapters: PrimaryModelProbeAdapters = {};
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'opencode-cli', model: 'vendor/model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'opencode-cli',
+      model: 'vendor/model-a',
+      reason: 'binary-model-probe-unavailable',
+    });
+  });
+
+  it('returns unknown with probe-threw when a binary adapter throws asynchronously', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => {
+        throw new Error('binary probe exploded');
+      }),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+      reason: 'probe-threw',
+    });
+  });
+
+  it('maps binary provider_unavailable to provider-unavailable', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({
+        status: 'provider_unavailable',
+      })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'provider-unavailable',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+    });
+  });
+
+  it('maps binary timeout status to timeout', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({
+        status: 'timeout',
+      })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'opencode-cli', model: 'vendor/model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'timeout',
+      provider: 'opencode-cli',
+      model: 'vendor/model-a',
+    });
+  });
+
+  it('maps binary unknown status with reason to unknown carrying that reason', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({
+        status: 'unknown',
+        reason: 'binary-probe-failed-detail',
+      })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+      reason: 'binary-probe-failed-detail',
+    });
+  });
+
+  it('maps api timeout status to timeout', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => ({
+        status: 'timeout',
+      })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'openai-api', model: 'primary-model-a' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'timeout',
+      provider: 'openai-api',
+      model: 'primary-model-a',
+    });
+  });
+
+  it('maps api unknown status with reason to unknown carrying that reason', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => ({
+        status: 'unknown',
+        reason: 'api-probe-failed-detail',
+      })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'anthropic-api', model: 'claude-sonnet-test' },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'anthropic-api',
+      model: 'claude-sonnet-test',
+      reason: 'api-probe-failed-detail',
+    });
+  });
+
+  it('treats an undefined model as not-configured for binary providers', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: undefined },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: null,
+      reason: 'model-not-configured',
+    });
+    expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
+  });
+
+  it('treats an explicit null model as not-configured for api providers', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => ({ status: 'found' })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'openai-api', model: null },
+      adapters,
+    );
+    expect(result).toEqual({
+      status: 'unknown',
+      provider: 'openai-api',
+      model: null,
+      reason: 'model-not-configured',
+    });
+    expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
+  });
+
+  it('returns timeout immediately when timeoutMs is zero', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: 'primary-model-a' },
+      adapters,
+      { timeoutMs: 0 },
+    );
+    expect(result).toEqual({
+      status: 'timeout',
+      provider: 'claude-cli',
+      model: 'primary-model-a',
+    });
+    expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
+  });
+
+  it('returns timeout immediately when timeoutMs is negative', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => ({ status: 'found' })),
+    };
+
+    const result = await probePrimaryModelUsability(
+      { provider: 'openai-api', model: 'primary-model-a' },
+      adapters,
+      { timeoutMs: -5 },
+    );
+    expect(result).toEqual({
+      status: 'timeout',
+      provider: 'openai-api',
+      model: 'primary-model-a',
+    });
+    expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
+  });
+
+  it('drops the timer callback after the probe promise resolves first', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapters: PrimaryModelProbeAdapters = {
+        probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
+      };
+
+      const probePromise = probePrimaryModelUsability(
+        { provider: 'claude-cli', model: 'primary-model-a' },
+        adapters,
+        { timeoutMs: 100 },
+      );
+
+      // Drain microtasks: the adapter returns a synchronously-resolved promise,
+      // so after a microtask flush the .then handler has marked the internal
+      // state as settled before the 100ms timer fires.
+      await vi.advanceTimersByTimeAsync(0);
+      const settled = await probePromise;
+      expect(settled).toMatchObject({ status: 'usable' });
+
+      // Now advance past the 100ms deadline. The timer callback should fire
+      // and observe that the probe already settled, exercising the early-return.
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the probe resolve callback after the deadline fires first', async () => {
+    vi.useFakeTimers();
+    try {
+      let lateResolve!: (r: BinaryModelProbeResult) => void;
+      const adapters: PrimaryModelProbeAdapters = {
+        probeBinaryModel: vi.fn(
+          async (): Promise<BinaryModelProbeResult> =>
+            new Promise((resolve) => {
+              lateResolve = resolve;
+            }),
+        ),
+      };
+
+      const probePromise = probePrimaryModelUsability(
+        { provider: 'claude-cli', model: 'primary-model-a' },
+        adapters,
+        { timeoutMs: 100 },
+      );
+
+      // Advance past the 100ms deadline — the internal state is settled as TIMEOUT.
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
+
+      // Fire the adapter's late resolve AFTER the deadline — its .then resolve
+      // callback should observe the internal state is already settled and return early.
+      lateResolve({ status: 'ok' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(adapters.probeBinaryModel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the probe reject callback after the deadline fires first', async () => {
+    vi.useFakeTimers();
+    try {
+      let lateReject!: (e: Error) => void;
+      const adapters: PrimaryModelProbeAdapters = {
+        probeBinaryModel: vi.fn(
+          async (): Promise<BinaryModelProbeResult> =>
+            new Promise((_resolve, reject) => {
+              lateReject = reject;
+            }),
+        ),
+      };
+
+      const probePromise = probePrimaryModelUsability(
+        { provider: 'claude-cli', model: 'primary-model-a' },
+        adapters,
+        { timeoutMs: 100 },
+      );
+
+      // Advance past the 100ms deadline — the internal state is settled as TIMEOUT.
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
+
+      // Fire the adapter's late reject AFTER the deadline — its .catch reject
+      // callback should observe the internal state is already settled and return early.
+      lateReject(new Error('late binary failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(adapters.probeBinaryModel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe('primaryModelUsabilityRequiresAlert', () => {
+    it('does not require an alert when the model is unconfigured', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'unknown',
+        provider: 'claude-cli',
+        model: null,
+        reason: 'model-not-configured',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
+    });
+
+    it('does not require an alert for an unknown status caused by an unsupported provider', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'unknown',
+        provider: 'mystery-provider',
+        model: 'primary-model-a',
+        reason: 'unsupported-provider',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
+    });
+
+    it('requires an alert for an unknown status carrying a non-suppressed reason', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'unknown',
+        provider: 'claude-cli',
+        model: 'primary-model-a',
+        reason: 'probe-threw',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
+
+    it('requires an alert for an unknown status that has no reason at all', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'unknown',
+        provider: 'openai-api',
+        model: 'primary-model-a',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
+
+    it('does not require an alert when the result is usable', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'usable',
+        provider: 'claude-cli',
+        model: 'primary-model-a',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(false);
+    });
+
+    it('requires an alert for a model-unavailable status', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'model-unavailable',
+        provider: 'openai-api',
+        model: 'primary-model-a',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
+
+    it('requires an alert for a credential-unavailable status', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'credential-unavailable',
+        provider: 'anthropic-api',
+        model: 'claude-sonnet-test',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
+
+    it('requires an alert for a provider-unavailable status', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'provider-unavailable',
+        provider: 'claude-cli',
+        model: 'primary-model-a',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
+
+    it('requires an alert for a timeout status', () => {
+      const result: PrimaryModelUsabilityResult = {
+        status: 'timeout',
+        provider: 'openai-api',
+        model: 'primary-model-a',
+      };
+      expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    });
   });
 });
