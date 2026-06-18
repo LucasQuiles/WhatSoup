@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync, writeFileSync } from 'node:fs';
-import { FleetDbReader } from '../../src/fleet/db-reader.ts';
+import { FleetDbReader, buildSafeFtsMatchQuery } from '../../src/fleet/db-reader.ts';
 import type { MessageRow, AccessEntry } from '../../src/fleet/db-reader.ts';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -475,6 +475,414 @@ describe('FleetDbReader', () => {
         return db.prepare('SELECT 1').all();
       });
       expect(result.ok).toBe(false);
+    });
+  });
+});
+
+// ─── Uncovered-branch coverage ──────────────────────────────────────────────
+
+describe('db-reader.ts uncovered-branch coverage', () => {
+  let selfDb: DatabaseSync;
+  let reader: FleetDbReader;
+
+  beforeEach(() => {
+    selfDb = new DatabaseSync(':memory:');
+    seedDb(selfDb);
+    reader = new FleetDbReader('self', selfDb);
+  });
+
+  afterEach(() => {
+    try { selfDb.close(); } catch { /* ok */ }
+  });
+
+  // ── buildSafeFtsMatchQuery: empty-query throw branch ───────────────────
+
+  describe('buildSafeFtsMatchQuery empty query', () => {
+    it('throws when the query is only whitespace (empty token branch)', () => {
+      expect(() => buildSafeFtsMatchQuery('   ')).toThrow(/must not be empty/);
+      // And verify via searchMessages that it surfaces as ok:false with the
+      // empty-query message (drives the same branch through the reader path).
+      const r = reader.searchMessages('self', '', { query: '   ', limit: 5 });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error).toMatch(/must not be empty/);
+    });
+  });
+
+  // ── queryWrite: self-instance path ─────────────────────────────────────
+
+  describe('queryWrite', () => {
+    it('writes through selfDb for the self instance', () => {
+      const res = reader.queryWrite('self', '', (db) => {
+        db.prepare('CREATE TABLE IF NOT EXISTS w_test (v INTEGER)').run();
+        db.prepare('INSERT INTO w_test (v) VALUES (?)').run(42);
+        return db.prepare('SELECT v FROM w_test').get() as { v: number };
+      });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.v).toBe(42);
+    });
+
+    it('returns ok:false and surfaces error when self-instance write fails', () => {
+      const res = reader.queryWrite('self', '', (db) => {
+        // Reference a non-existent table to force a SQL error.
+        return db.prepare('SELECT * FROM definitely_not_here').all();
+      });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.error).toMatch(/definitely_not_here|no such table/i);
+    });
+
+    it('opens a writable remote connection, writes, and closes', () => {
+      const remotePath = tmpFile();
+      try {
+        const seed = new DatabaseSync(remotePath);
+        seedDb(seed);
+        seed.close();
+
+        const res = reader.queryWrite('remote', remotePath, (db) => {
+          db.prepare('CREATE TABLE IF NOT EXISTS w_remote (v INTEGER)').run();
+          db.prepare('INSERT INTO w_remote (v) VALUES (?)').run(7);
+          return db.prepare('SELECT COUNT(*) AS c FROM w_remote').get() as { c: number };
+        });
+        expect(res.ok).toBe(true);
+        if (!res.ok) return;
+        expect(res.data.c).toBe(1);
+      } finally {
+        cleanup(remotePath);
+      }
+    });
+
+    it('returns ok:false when the remote write target cannot be opened', () => {
+      // A path whose parent directory does not exist cannot be created/opened.
+      const res = reader.queryWrite('remote', '/dev/null/impossible-write-path.db', (db) => {
+        return db.prepare('SELECT 1').all();
+      });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      // node:sqlite surfaces this as an open failure.
+      expect(typeof res.error).toBe('string');
+      expect(res.error.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── searchMessages: conversation-scoped branch + valid MATCH success ──
+
+  describe('searchMessages conversation-scoped + hits', () => {
+    let ftsPath: string;
+    let ftsDb: DatabaseSync;
+    let ftsReader: FleetDbReader;
+
+    beforeEach(() => {
+      ftsPath = tmpFile();
+      ftsDb = new DatabaseSync(ftsPath);
+      ftsDb.exec(MINIMAL_SCHEMA);
+      const ins = ftsDb.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name,
+                              message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      ins.run('15550000001@s.whatsapp.net', '15550000001', '15550000001@s.whatsapp.net', 'Alice', 'm1', 'hello world', 'text', 0, 1700000000);
+      ins.run('15550000002@s.whatsapp.net', '15550000002', '15550000002@s.whatsapp.net', 'Bob', 'm2', 'hello bob', 'text', 0, 1700000010);
+      // Sync FTS index after inserts.
+      ftsDb.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
+      ftsReader = new FleetDbReader('self', ftsDb);
+    });
+
+    afterEach(() => {
+      ftsDb.close();
+      cleanup(ftsPath);
+    });
+
+    it('returns hits scoped to a conversationKey', () => {
+      const res = ftsReader.searchMessages('self', ftsPath, {
+        query: 'hello',
+        conversationKey: '15550000001',
+        limit: 10,
+      });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.every((m) => m.conversation_key === '15550000001')).toBe(true);
+      expect(res.data.map((m) => m.message_id)).toContain('m1');
+    });
+
+    it('returns hits across all conversations when conversationKey is omitted', () => {
+      const res = ftsReader.searchMessages('self', ftsPath, {
+        query: 'hello',
+        limit: 10,
+      });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  // ── getMetrics: all three ranges + densification + provider splits ────
+
+  describe('getMetrics', () => {
+    let metricsPath: string;
+    let metricsDb: DatabaseSync;
+    let metricsReader: FleetDbReader;
+
+    beforeEach(() => {
+      metricsPath = tmpFile();
+      metricsDb = new DatabaseSync(metricsPath);
+      metricsDb.exec(MINIMAL_SCHEMA);
+      metricsDb.exec(`
+        CREATE TABLE IF NOT EXISTS metrics_hourly (
+          bucket TEXT NOT NULL,
+          metric TEXT NOT NULL,
+          value REAL NOT NULL,
+          PRIMARY KEY (bucket, metric)
+        );
+      `);
+      metricsReader = new FleetDbReader('self', metricsDb);
+    });
+
+    afterEach(() => {
+      metricsDb.close();
+      cleanup(metricsPath);
+    });
+
+    it('returns a 24h densified report with provider splits and heatmap (range !== 30d)', () => {
+      const nowHour = new Date();
+      nowHour.setUTCMinutes(0, 0, 0);
+      const recentBucket = new Date(nowHour.getTime() - 1 * 60 * 60 * 1000).toISOString();
+
+      const ins = metricsDb.prepare(`INSERT OR REPLACE INTO metrics_hourly (bucket, metric, value) VALUES (?, ?, ?)`);
+      ins.run(recentBucket, 'messages_in', 5);
+      ins.run(recentBucket, 'messages_out', 2);
+      ins.run(recentBucket, 'messages_media', 1);
+      ins.run(recentBucket, 'agent_tokens_in', 100);
+      ins.run(recentBucket, 'agent_tokens_out', 50);
+      ins.run(recentBucket, 'chat_tokens_in', 30);
+      ins.run(recentBucket, 'chat_tokens_out', 20);
+      ins.run(recentBucket, 'sessions_started', 1);
+      ins.run(recentBucket, 'sessions_active', 2);
+      // Per-provider suffixed metrics
+      ins.run(recentBucket, 'agent_tokens_in:claude-cli', 100);
+      ins.run(recentBucket, 'agent_tokens_out:claude-cli', 50);
+      ins.run(recentBucket, 'sessions_started:claude-cli', 1);
+      ins.run(recentBucket, 'sessions_active:claude-cli', 2);
+      // A metric with a colon that is NOT a known base (exercises the else-skip branch + colon split)
+      ins.run(recentBucket, 'unknown_metric:someprov', 9);
+
+      const res = metricsReader.getMetrics('self', metricsPath, { range: '24h' });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+
+      expect(res.data.hasMessageData).toBe(true);
+      expect(res.data.hasTokenData).toBe(true);
+      expect(res.data.hasSessionData).toBe(true);
+      expect(res.data.messageVolume).toHaveLength(24);
+      expect(res.data.tokenUsage).toHaveLength(24);
+      expect(res.data.sessionActivity).toHaveLength(24);
+      expect(res.data.activeHours).toHaveLength(7);
+      expect(res.data.activeHours[0]).toHaveLength(24);
+      expect(res.data.activeHoursByDate).toEqual([]);
+      // The reader adds a provider to the set as soon as it sees a colon in
+      // the metric name, before checking the base type, so unknown base
+      // metrics still surface as a provider entry.
+      expect(res.data.providers).toEqual(['claude-cli', 'someprov']);
+      const recentBucketEntry = res.data.tokenUsageByProvider['claude-cli'].find((b) => b.bucket === recentBucket);
+      expect(recentBucketEntry?.input).toBe(100);
+      expect(recentBucketEntry?.output).toBe(50);
+      const sessEntry = res.data.sessionActivityByProvider['claude-cli'].find((b) => b.bucket === recentBucket);
+      expect(sessEntry?.started).toBe(1);
+      expect(sessEntry?.active).toBe(2);
+    });
+
+    it('returns a 7d report (range !== 30d, still uses dow heatmap)', () => {
+      const res = metricsReader.getMetrics('self', metricsPath, { range: '7d' });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.tokenUsage).toHaveLength(168);
+      expect(res.data.activeHoursByDate).toEqual([]);
+      expect(res.data.hasMessageData).toBe(false);
+      expect(res.data.providers).toEqual([]);
+    });
+
+    it('returns a 30d report with per-date heatmap (range === 30d)', () => {
+      // Seed one raw message well inside the 30d cutoff to populate activeHoursByDate.
+      const cutoffSec = Math.floor((Date.now() - 720 * 60 * 60 * 1000) / 1000);
+      const msgIns = metricsDb.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name,
+                              message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      msgIns.run(
+        '15550000003@s.whatsapp.net', '15550000003', '15550000003@s.whatsapp.net',
+        'Carol', 'm-30d', 'recent body', 'text', 0, cutoffSec + 60,
+      );
+      // Second message on the SAME date but a DIFFERENT hour, to exercise the
+      // `if (!hours)` false-branch (existing hours array gets reused).
+      msgIns.run(
+        '15550000003@s.whatsapp.net', '15550000003', '15550000003@s.whatsapp.net',
+        'Carol', 'm-30d-2', 'second body', 'text', 0, cutoffSec + 60 + 3600,
+      );
+
+      const res = metricsReader.getMetrics('self', metricsPath, { range: '30d' });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.tokenUsage).toHaveLength(720);
+      // 30d range skips the dow heatmap query (still a 7x24 zero grid).
+      expect(res.data.activeHours).toHaveLength(7);
+      expect(res.data.activeHours.every((row) => row.every((v) => v === 0))).toBe(true);
+      // Per-date heatmap should have at least one entry from the seeded messages.
+      expect(res.data.activeHoursByDate.length).toBeGreaterThan(0);
+      const totalHours = res.data.activeHoursByDate.reduce(
+        (sum, e) => sum + e.hours.reduce((a, b) => a + b, 0), 0,
+      );
+      expect(totalHours).toBe(2);
+    });
+
+    it('reuses a bucket map entry when multiple metrics target the same provider/bucket', () => {
+      const nowHour = new Date();
+      nowHour.setUTCMinutes(0, 0, 0);
+      const recentBucket = new Date(nowHour.getTime() - 1 * 60 * 60 * 1000).toISOString();
+      const ins = metricsDb.prepare(`INSERT OR REPLACE INTO metrics_hourly (bucket, metric, value) VALUES (?, ?, ?)`);
+      // Same provider+bucket: both tokens and sessions, exercising the
+      // existing-entry merge path in the provider maps.
+      ins.run(recentBucket, 'agent_tokens_in:provX', 10);
+      ins.run(recentBucket, 'agent_tokens_out:provX', 4);
+      ins.run(recentBucket, 'sessions_started:provX', 1);
+      ins.run(recentBucket, 'sessions_active:provX', 1);
+
+      const res = metricsReader.getMetrics('self', metricsPath, { range: '24h' });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.providers).toEqual(['provX']);
+      const tok = res.data.tokenUsageByProvider['provX'].find((b) => b.bucket === recentBucket);
+      expect(tok).toMatchObject({ input: 10, output: 4 });
+      const sess = res.data.sessionActivityByProvider['provX'].find((b) => b.bucket === recentBucket);
+      expect(sess).toMatchObject({ started: 1, active: 1 });
+    });
+  });
+
+  // ── getLatestMarkers: empty-messages branch (msgRow null) ─────────────
+
+  describe('getLatestMarkers empty DB', () => {
+    it('returns null markers when there are no messages and no access rows', () => {
+      const emptyDb = new DatabaseSync(':memory:');
+      emptyDb.exec(MINIMAL_SCHEMA);
+      // No messages, no access_list rows.
+      const emptyReader = new FleetDbReader('self', emptyDb);
+      const res = emptyReader.getLatestMarkers('self', '');
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.latestMessagePk).toBeNull();
+      expect(res.data.latestMessageMarker).toBeNull();
+      expect(res.data.latestAccessMarker).toBeNull();
+      emptyDb.close();
+    });
+
+    it('uses updated_at branch when the messages table has that column', () => {
+      // selfDb from beforeEach already has updated_at in MINIMAL_SCHEMA;
+      // exercising the path again with a set value proves the true-branch
+      // produces a non-null marker containing the updated_at.
+      selfDb.prepare("UPDATE messages SET updated_at = '2026-06-01T00:00:00.000Z' WHERE pk = (SELECT MIN(pk) FROM messages)").run();
+      const res = reader.getLatestMarkers('self', '');
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.latestMessagePk).not.toBeNull();
+      expect(res.data.latestMessageMarker).toContain('2026-06-01T00:00:00.000Z');
+    });
+
+    it('falls back to the no-updated_at branch when the column is absent', () => {
+      const noUpdatedDb = new DatabaseSync(':memory:');
+      noUpdatedDb.exec(`
+        CREATE TABLE messages (
+          pk INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_jid TEXT NOT NULL,
+          conversation_key TEXT NOT NULL,
+          sender_jid TEXT NOT NULL,
+          sender_name TEXT,
+          message_id TEXT,
+          content TEXT,
+          content_type TEXT NOT NULL DEFAULT 'text',
+          is_from_me INTEGER NOT NULL DEFAULT 0,
+          timestamp INTEGER NOT NULL,
+          deleted_at TEXT
+        );
+        CREATE TABLE access_list (
+          subject_type TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          display_name TEXT,
+          requested_at TEXT,
+          decided_at TEXT,
+          PRIMARY KEY (subject_type, subject_id)
+        );
+      `);
+      noUpdatedDb.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550000004@s.whatsapp.net', '15550000004', '15550000004@s.whatsapp.net', 'Dan', 'hi', 'text', 0, 1700000100);
+      noUpdatedDb.prepare(`
+        INSERT INTO access_list (subject_type, subject_id, status, requested_at)
+        VALUES (?, ?, ?, ?)
+      `).run('phone', '15550000004', 'pending', '2026-06-01T00:00:00');
+
+      const noUpdatedReader = new FleetDbReader('self', noUpdatedDb);
+      const res = noUpdatedReader.getLatestMarkers('self', '');
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data.latestMessagePk).toBe(1);
+      // updated_at fallback appends an empty string segment.
+      expect(res.data.latestMessageMarker).toBe('1:');
+      expect(res.data.latestAccessMarker).toBe('2026-06-01T00:00:00');
+      noUpdatedDb.close();
+    });
+  });
+
+  // ── getRecentMessagesByChat: default-arg limit + ordering ─────────────
+
+  describe('getRecentMessagesByChat default limit', () => {
+    it('applies the default limit of 3 when none is passed', () => {
+      const recPath = tmpFile();
+      const recDb = new DatabaseSync(recPath);
+      try {
+        recDb.exec(MINIMAL_SCHEMA);
+        const ins = recDb.prepare(`
+          INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name,
+                                message_id, content, content_type, is_from_me, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        // 5 inbound messages clustered tightly around t=1000.
+        ins.run('15550000005@s.whatsapp.net', '15550000005', '15550000005@s.whatsapp.net', 'Eve', 'msg-a', 'a', 'text', 0,  998);
+        ins.run('15550000005@s.whatsapp.net', '15550000005', '15550000005@s.whatsapp.net', 'Eve', 'msg-b', 'b', 'text', 0,  999);
+        ins.run('15550000005@s.whatsapp.net', '15550000005', '15550000005@s.whatsapp.net', 'Eve', 'msg-c', 'c', 'text', 0, 1000);
+        ins.run('15550000005@s.whatsapp.net', '15550000005', '15550000005@s.whatsapp.net', 'Eve', 'msg-d', 'd', 'text', 0, 1001);
+        ins.run('15550000005@s.whatsapp.net', '15550000005', '15550000005@s.whatsapp.net', 'Eve', 'msg-e', 'e', 'text', 0, 1002);
+
+        const recReader = new FleetDbReader('self', recDb);
+        const res = recReader.getRecentMessagesByChat('self', recPath, '15550000005', 'inbound', 1000);
+        expect(res.ok).toBe(true);
+        if (!res.ok) return;
+        // Default limit=3 caps the result even though 5 are within the window.
+        expect(res.data).toHaveLength(3);
+        expect(res.data.every((m) => m.is_from_me === 0)).toBe(true);
+        // Nearest-by-ABS(t-1000) ordering: the closest message content first.
+        expect(res.data[0].content).toBe('c');
+      } finally {
+        recDb.close();
+        cleanup(recPath);
+      }
+    });
+  });
+
+  // ── getSummaryStats: ?? 0 fallback when COUNT returns nullish ─────────
+
+  describe('getSummaryStats nullish fallbacks', () => {
+    it('returns 0 counts when the messages table is empty', () => {
+      const emptyDb = new DatabaseSync(':memory:');
+      emptyDb.exec(MINIMAL_SCHEMA);
+      const emptyReader = new FleetDbReader('self', emptyDb);
+      const res = emptyReader.getSummaryStats('self', '');
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.data).toEqual({ messageCount: 0, chatCount: 0, pendingAccess: 0 });
+      emptyDb.close();
     });
   });
 });
