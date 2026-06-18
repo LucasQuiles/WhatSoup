@@ -192,6 +192,30 @@ def test_main_register_then_result_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_prediction"
 
 
+def test_evaluate_inclusive_comparators_at_exact_threshold():
+    # "lte"/"gte" are INCLUSIVE: a prediction whose observed value sits EXACTLY at the threshold must
+    # PASS. A strict-boundary weakening (<= -> <, >= -> >) would FAIL a prediction that exactly meets
+    # its registered success criterion — corrupting the pre-registered falsifiability discipline at
+    # the boundary. The strict comparators are False at the boundary; eq is True (anchors the contrast).
+    assert eh._evaluate("lte", 5.0, 5.0) is True
+    assert eh._evaluate("gte", 5.0, 5.0) is True
+    assert eh._evaluate("lt", 5.0, 5.0) is False
+    assert eh._evaluate("gt", 5.0, 5.0) is False
+    assert eh._evaluate("eq", 5.0, 5.0) is True
+
+
+def test_non_string_experiment_id_and_empty_hypothesis_rejected():
+    # experiment_id guard is `not isinstance(eid, str) OR not RE.match(eid)`. The load-bearing disjunct
+    # is the isinstance TYPE check: a non-string id (e.g. an int) must be rejected as malformed_prediction
+    # WITHOUT reaching RE.match (which would TypeError on a non-string). An and->or weakening evaluates
+    # RE.match(123) and crashes instead of returning the typed error. (A bad-FORMAT string is NOT a
+    # discriminator here — _pred_path re-applies the same regex, so that case is double-guarded.)
+    # hypothesis must be non-empty via the same or->and shape (not double-guarded).
+    with tempfile.TemporaryDirectory() as d:
+        assert _err(eh.register_prediction, _pred(eid=123), d) == "malformed_prediction"
+        assert _err(eh.register_prediction, _pred(hypothesis=""), d) == "malformed_prediction"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
