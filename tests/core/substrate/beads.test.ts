@@ -162,4 +162,116 @@ describe('beads core', () => {
     expect(Buffer.byteLength(stored.body, 'utf8')).toBeLessThanOrEqual(64 * 1024);
     expect(stored.body).toMatch(/\.\.\.\[truncated\]$/);
   });
+
+  it('getBead returns null for unknown id', () => {
+    expect(getBead(db.raw, 999999)).toBeNull();
+  });
+
+  it('getBead for a known id returns bead and its events array', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
+    const r = getBead(db.raw, bead.id)!;
+    expect(r.bead.id).toBe(bead.id);
+    expect(r.events.map(e => e.event_type)).toEqual(['status_change']);
+  });
+
+  it('updateBead throws and rolls back when the post-UPDATE event write fails (covers line 169)', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 'orig', ownerJid: 'mw', actor: 'user' });
+    // Drop the bead_events table so writeBeadEvent throws inside the transaction,
+    // exercising the catch/ROLLBACK/rethrow path in updateBead.
+    db.raw.exec('DROP TABLE bead_events');
+    expect(() => updateBead(db.raw, bead.id, { fields: { title: 'new' }, actor: 'agent' })).toThrow();
+    // ROLLBACK must have restored the pre-transaction title (no 'updated_at'-only commit leaked).
+    const row = db.raw.prepare('SELECT title FROM beads WHERE id = ?').get(bead.id) as { title: string };
+    expect(row.title).toBe('orig');
+  });
+
+  it('updateBead on a missing bead throws not-found', () => {
+    expect(() => updateBead(db.raw, 888888, { fields: { title: 'x' }, actor: 'a' })).toThrow(/not found/);
+  });
+
+  it('updateBead with no-op fields (only updated_at) short-circuits without an event', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 'same', ownerJid: 'mw', actor: 'user', priority: 2 });
+    const eventsBefore = (db.raw.prepare('SELECT COUNT(*) AS c FROM bead_events WHERE bead_id = ?').get(bead.id) as { c: number }).c;
+    // Same values → no diff → sets.length stays 1 → early return, no field_update event.
+    updateBead(db.raw, bead.id, { fields: { title: 'same', priority: 2 }, actor: 'agent' });
+    const eventsAfter = (db.raw.prepare('SELECT COUNT(*) AS c FROM bead_events WHERE bead_id = ?').get(bead.id) as { c: number }).c;
+    expect(eventsAfter).toBe(eventsBefore);
+  });
+
+  it('cancelBead transitions active -> cancelled with cancelled_at (covers line 213)', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
+    const now = Math.floor(Date.now() / 1000);
+    cancelBead(db.raw, bead.id, { note: 'dropped', actor: 'user', at: now });
+    const r = getBead(db.raw, bead.id)!;
+    expect(r.bead.status).toBe('cancelled');
+    expect(r.bead.cancelled_at).toBe(now);
+    const sc = r.events.filter(e => e.event_type === 'status_change').pop()!;
+    expect(JSON.parse(sc.payload_json)).toMatchObject({ from: 'active', to: 'cancelled', note: 'dropped' });
+  });
+
+  it('cancelBead on an already-terminal bead throws terminal', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 't', ownerJid: 'mw', actor: 'user' });
+    cancelBead(db.raw, bead.id, { actor: 'user' });
+    expect(() => cancelBead(db.raw, bead.id, { actor: 'user' })).toThrow(/terminal/i);
+  });
+
+  it('transition (via completeBead) rolls back when the event write fails (covers line 206)', () => {
+    const bead = createBead(db.raw, { kind: 'task', title: 'orig', ownerJid: 'mw', actor: 'user' });
+    db.raw.exec('DROP TABLE bead_events');
+    expect(() => completeBead(db.raw, bead.id, { actor: 'user' })).toThrow();
+    // ROLLBACK must have left the bead in its original non-terminal status.
+    const row = db.raw.prepare('SELECT status, completed_at FROM beads WHERE id = ?').get(bead.id) as { status: string; completed_at: number | null };
+    expect(row).toEqual({ status: 'active', completed_at: null });
+  });
+
+  it('approveProposal / rejectProposal throw not-found for unknown bead id', () => {
+    expect(() => approveProposal(db.raw, 777777, { actor: 'user' })).toThrow(/not found/);
+    expect(() => rejectProposal(db.raw, 777777, { actor: 'user' })).toThrow(/not found/);
+  });
+
+  it('rejectProposal without a reason still cancels a proposed bead', () => {
+    const bead = createBead(db.raw, {
+      kind: 'task', title: 'p', ownerJid: 'mw', actor: 'sweep',
+      status: 'proposed', confidence: 0.5, proposalReason: 'soft',
+    });
+    rejectProposal(db.raw, bead.id, { actor: 'user' });
+    const r = getBead(db.raw, bead.id)!;
+    expect(r.bead.status).toBe('cancelled');
+    const sc = r.events.filter(e => e.event_type === 'status_change').pop()!;
+    expect(JSON.parse(sc.payload_json)).toMatchObject({ from: 'proposed', to: 'cancelled' });
+    expect(JSON.parse(sc.payload_json)).not.toHaveProperty('rejection_reason');
+  });
+
+  it('listBeads applies dueBefore, since, chatJid, and limit filters', () => {
+    createBead(db.raw, { kind: 'task', title: 'with-due', ownerJid: 'mw', chatJid: '1555XXXX0001@s.whatsapp.net', dueAt: 1000, actor: 'user' });
+    createBead(db.raw, { kind: 'task', title: 'no-due', ownerJid: 'mw', chatJid: '1555XXXX0002@s.whatsapp.net', actor: 'user' });
+    const dueHits = listBeads(db.raw, { dueBefore: 2000 }).map(b => b.title);
+    expect(dueHits).toContain('with-due');
+    expect(dueHits).not.toContain('no-due');
+    const chatHits = listBeads(db.raw, { chatJid: '1555XXXX0002@s.whatsapp.net' }).map(b => b.title);
+    expect(chatHits).toEqual(['no-due']);
+    const limited = listBeads(db.raw, { limit: 1 });
+    expect(limited).toHaveLength(1);
+    // since filter: a far-future timestamp matches nothing.
+    expect(listBeads(db.raw, { since: 9_999_999_999 })).toHaveLength(0);
+  });
+
+  it('activityFeed with no owner filter returns bead events across owners', () => {
+    const a = createBead(db.raw, { kind: 'task', title: 'a', ownerJid: 'mw', actor: 'user' });
+    const b = createBead(db.raw, { kind: 'task', title: 'b', ownerJid: 'other', actor: 'user' });
+    const feed = activityFeed(db.raw, { limit: 50 });
+    const ids = feed.filter(r => r.source === 'bead_event').map(r => r.bead_id);
+    expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
+  });
+
+  it('activityFeed respects the since cutoff and default limit', () => {
+    const before = Math.floor(Date.now() / 1000) + 1;
+    createBead(db.raw, { kind: 'task', title: 'future', ownerJid: 'mw', actor: 'user' });
+    // since=before-future-event → no rows.
+    expect(activityFeed(db.raw, { since: before, limit: 50 }).filter(r => r.source === 'bead_event')).toHaveLength(0);
+    // default limit (100) path runs without explicit limit.
+    const feed = activityFeed(db.raw, {});
+    expect(Array.isArray(feed)).toBe(true);
+  });
 });
