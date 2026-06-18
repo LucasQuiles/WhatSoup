@@ -783,6 +783,25 @@ def test_main_success_returns_zero():
     assert report["schema"] == "agent-runtime-usage-truth"
 
 
+def test_classify_cache_state_negative_counts_are_unknown_not_silently_bucketed():
+    # A negative token count is a malformed measurement (providers never emit one). The
+    # classifier fails closed to "unknown" rather than silently bucketing it. Without the
+    # `read_n < 0 or creation_n < 0` guard, the `read_n > 0 and creation_n > 0` partial check
+    # (L128) misclassifies a mixed-sign input: an 'and'->'or' mutation on it reads
+    # (read=1, creation=-2) as "partial". This pins the guard AND keeps the valid present-zero
+    # states (0/0 -> none, 1/0 -> warm, 0/1 -> cold) intact so the guard's own `< 0` boundaries
+    # cannot be loosened to `<= 0` without a red test.
+    assert probe._classify_cache_state(1, -2) == "unknown"   # only creation negative
+    assert probe._classify_cache_state(-1, 0) == "unknown"   # only read negative
+    assert probe._classify_cache_state(-1, -1) == "unknown"  # both negative
+    # valid non-negative states must be unaffected by the guard (the `< 0` must be STRICT —
+    # a '<'->'<=' would wrongly flag a present-zero datum as unknown):
+    assert probe._classify_cache_state(0, 0) == "none"
+    assert probe._classify_cache_state(1, 0) == "warm"
+    assert probe._classify_cache_state(0, 1) == "cold"
+    assert probe._classify_cache_state(2, 3) == "partial"
+
+
 # ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------

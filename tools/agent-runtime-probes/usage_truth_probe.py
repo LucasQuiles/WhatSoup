@@ -121,6 +121,10 @@ def _classify_cache_state(
         creation_n = int(cache_creation)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return "unknown"
+    if read_n < 0 or creation_n < 0:
+        # A negative token count is not a valid measurement (providers never emit one);
+        # fail closed to "unknown" rather than silently bucketing a malformed value.
+        return "unknown"
     if read_n > 0 and creation_n == 0:
         return "warm"
     if read_n == 0 and creation_n > 0:
