@@ -3443,11 +3443,14 @@ describe('AgentRuntime', () => {
     });
 
     expect(mockEmitAlert).toHaveBeenCalledOnce();
+    // Tool-result failures emit at WARNING, not critical — a self-corrected
+    // agent tool call is a point-in-time auto-recovered event, not an outage.
     expect(mockEmitAlert).toHaveBeenCalledWith(
       'ana-bot',
       'runtime-tool-error:claude-cli:Bash',
       'Agent tool failure: Bash',
       expect.stringContaining('runtime_source=src/runtimes/agent/runtime.ts:tool_result'),
+      'warning',
     );
     const evidence = mockEmitAlert.mock.calls[0]?.[3] as string;
     expect(evidence).toContain('provider=claude-cli');

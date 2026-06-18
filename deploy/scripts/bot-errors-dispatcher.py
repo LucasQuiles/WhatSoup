@@ -107,7 +107,14 @@ STALE_RENOTIFY_SUPPRESS_SOURCES = {
 }
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
 STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
-STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
+# runtime-tool-error:* — an agent's own tool call failed and was self-corrected
+# inline. These are point-in-time, auto-recovered events, NOT a persistent open
+# condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
+# events (which renotify normally and trip flap-storm). Once a runtime-tool-error
+# incident goes stale (no fresh occurrence), it is definitionally non-actionable
+# → Pattern A suppresses the renotify and auto-closes it. flap_storm stays exempt
+# (handled above), so a truly stuck agent still escalates on intensity.
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
 # Pattern F — flap-storm detection (consolidate AND escalate). Default-on;
 # fail-open (any flap error falls through to normal per-event handling).
 FLAP_DETECTION = env_flag("BOT_ERRORS_FLAP_DETECTION", True)

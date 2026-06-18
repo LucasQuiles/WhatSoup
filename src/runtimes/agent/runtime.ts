@@ -1812,11 +1812,24 @@ export class AgentRuntime implements Runtime {
     ].join('\n');
 
     try {
+      // Tier: WARNING, never critical. A tool-result error is the agent's OWN
+      // tool call failing — observed inline by the agent and self-corrected on
+      // the next turn. It is a point-in-time, auto-recovered event, NOT a
+      // human-pageable outage (provider-down / bot-crash / disk-full surface
+      // through their own dedicated detectors, not a tool result). Emitting
+      // these as critical (the emitAlertChecked default) collapsed every
+      // unrelated agent command failure into one never-closing critical
+      // incident that re-escalated every ~24h. WARNING keeps the first
+      // occurrence visible (BOT WARNING) so a genuine new tool_handler bug is
+      // still surfaced once; the dispatcher auto-closes it once stale, and
+      // flap-storm (Pattern F) still escalates on intensity if the agent is
+      // genuinely stuck repeating the same failing call.
       emitAlertChecked(
         this.instanceName,
         source,
         `Agent tool failure: ${args.toolName}`,
         evidence,
+        'warning',
       );
     } catch (err) {
       log.warn({
