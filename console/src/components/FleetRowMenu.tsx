@@ -128,7 +128,7 @@ export const FleetRowMenu: FC<FleetRowMenuProps> = ({ name, canAct }) => {
             confirmTitle={`Stop ${label}?`}
             confirmBody={
               <>
-                Stopping will disconnect <strong>{label}</strong> from WhatsApp.
+                Stopping will disconnect <strong>{label}</strong> from its channel.
                 The line will not reconnect until manually started.
               </>
             }

@@ -319,7 +319,7 @@ export function SummaryTab({
         }}
         onCancel={() => setConfirmAction(null)}
       >
-        <p>Restarting will briefly disconnect <strong>{line.name}</strong> from WhatsApp.</p>
+        <p>Restarting will briefly disconnect <strong>{line.name}</strong> from its channel.</p>
         <ul className="mt-[var(--sp-2)] pl-[var(--sp-5)]">
           <li>Active chat sessions will be interrupted</li>
           <li>Agent sessions will be terminated and must restart</li>
@@ -343,7 +343,7 @@ export function SummaryTab({
         }}
         onCancel={() => setConfirmAction(null)}
       >
-        <p>Stopping will disconnect <strong>{line.name}</strong> from WhatsApp.</p>
+        <p>Stopping will disconnect <strong>{line.name}</strong> from its channel.</p>
         <ul className="mt-[var(--sp-2)] pl-[var(--sp-5)]">
           <li>All active chat and agent sessions will be terminated</li>
           <li>The instance will not reconnect until manually started</li>

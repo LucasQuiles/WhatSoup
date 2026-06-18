@@ -243,7 +243,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
         onConfirm={confirmStop}
         onCancel={() => setStopTarget(null)}
       >
-        Stopping will disconnect <strong>{stopTarget}</strong> from WhatsApp. The instance will not reconnect until manually started.
+        Stopping will disconnect <strong>{stopTarget}</strong> from its channel. The instance will not reconnect until manually started.
       </ConfirmDialog>
     </div>
   );

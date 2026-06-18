@@ -190,7 +190,7 @@ describe('SummaryTab — stop confirm dialog', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Stop Instance/i }))
 
-    // "Stopping will disconnect <name> from WhatsApp." — the name is rendered in
+    // "Stopping will disconnect <name> from its channel." — the name is rendered in
     // a nested <strong>, so query that element directly to avoid the ambiguous
     // multi-match on /test-line/ (the name also appears in the dialog title).
     const disconnectLine = screen.getByText(/Stopping will disconnect/)
