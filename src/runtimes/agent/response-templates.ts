@@ -83,3 +83,12 @@ export function renderUserMessage(id: UserTemplateId, ctx: RenderContext): strin
       return '';
   }
 }
+
+/**
+ * Terminal notice enqueued when a turn could not be completed and an operator
+ * has been alerted. Pure string template relocated from AgentRuntime
+ * (god-class decomposition slice BEAD-PURE-3).
+ */
+export function providerUnknownTerminalNotice(): string {
+  return '_I hit a problem completing that — an operator has been notified. Please try again, or send /new to start fresh._';
+}

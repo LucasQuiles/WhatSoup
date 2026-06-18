@@ -15,7 +15,7 @@ import {
   type ResponseWorkflow,
   type UserTemplateId,
 } from './response-registry.ts';
-import { renderUserMessage } from './response-templates.ts';
+import { renderUserMessage, providerUnknownTerminalNotice } from './response-templates.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
@@ -118,6 +118,7 @@ import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
 import {
   probePrimaryModelUsability,
+  primaryModelUsabilityRequiresAlert,
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
@@ -4059,7 +4060,7 @@ export class AgentRuntime implements Runtime {
               event.text.slice(0, 400),
               'warning',
             );
-            queue.enqueueText(this.providerUnknownTerminalNotice());
+            queue.enqueueText(providerUnknownTerminalNotice());
             break;
           }
           if (!wasSilentCompact) {
@@ -4075,7 +4076,7 @@ export class AgentRuntime implements Runtime {
                 'Unclassified terminal provider error suppressed from user',
                 event.text.slice(0, 400),
               );
-              queue.enqueueText(this.providerUnknownTerminalNotice());
+              queue.enqueueText(providerUnknownTerminalNotice());
             } else {
               queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               // Accumulate result text for voice reply (SP4)
@@ -5043,7 +5044,7 @@ export class AgentRuntime implements Runtime {
     // in-flight.  A resolved-unusable probe (probeInFlight:false) still arms
     // normally; the threshold path is entirely unaffected.
     const probeFlagsUnusable = this.primaryModelUsability && !this.primaryModelUsability.probeInFlight
-      ? this.primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
+      ? primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
       : false;
     const reachedThreshold =
       this.consecutivePrimaryEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD;
@@ -5199,7 +5200,7 @@ export class AgentRuntime implements Runtime {
     if (usability && !usability.probeInFlight) {
       if (usability.status === 'usable') {
         modelUsable = true;
-      } else if (this.primaryModelUsabilityRequiresAlert(usability)) {
+      } else if (primaryModelUsabilityRequiresAlert(usability)) {
         modelUsable = false;
       }
     }
@@ -5353,15 +5354,6 @@ export class AgentRuntime implements Runtime {
       : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
   }
 
-  /**
-   * User-facing notice for an unclassified terminal provider error. The raw
-   * provider/CLI text is never shown to the user (it can contain internal detail and
-   * is captured in a `provider_unknown_terminal` ops alert instead); this generic copy
-   * is the single source of user-facing wording for that path.
-   */
-  private providerUnknownTerminalNotice(): string {
-    return '_I hit a problem completing that — an operator has been notified. Please try again, or send /new to start fresh._';
-  }
 
   /**
    * Count a completed turn during an active fallback window; alert and enqueue
@@ -5992,7 +5984,7 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    if (!this.primaryModelUsabilityRequiresAlert(result)) return;
+    if (!primaryModelUsabilityRequiresAlert(result)) return;
 
     this.primaryModelUsabilityAlertActive = true;
     emitAlertChecked(
@@ -6004,13 +5996,6 @@ export class AgentRuntime implements Runtime {
     );
   }
 
-  private primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
-    if (result.model === null) return false;
-    if (result.status === 'unknown') {
-      return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
-    }
-    return result.status !== 'usable';
-  }
 
   private primaryModelUsabilityEvidence(
     result: PrimaryModelUsabilityResult,
@@ -7631,7 +7616,7 @@ export class AgentRuntime implements Runtime {
               event.text.slice(0, 400),
               'warning',
             );
-            queue.enqueueText(this.providerUnknownTerminalNotice());
+            queue.enqueueText(providerUnknownTerminalNotice());
             this.singleTurnHadToolActivity = false;
             break;
           }
@@ -7647,7 +7632,7 @@ export class AgentRuntime implements Runtime {
                 'Unclassified terminal provider error suppressed from user',
                 event.text.slice(0, 400),
               );
-              queue.enqueueText(this.providerUnknownTerminalNotice());
+              queue.enqueueText(providerUnknownTerminalNotice());
             } else {
               queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               this.turnHadVisibleOutput = true;
