@@ -517,3 +517,164 @@ describe('MessageScheduler — recoverStale() multi-row', () => {
     expect(rows.map((r) => r.status)).toEqual(['pending', 'sent', 'failed']);
   });
 });
+
+// ─── scheduler.ts uncovered-branch coverage ──────────────────────────────────
+
+describe('scheduler.ts uncovered-branch coverage', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  // Cover line 136: recurring message happy path — send succeeds, nextCronRun
+  // succeeds, row is re-armed with status='pending', updated next_run_at and
+  // an incremented run_count.
+  it('re-arms a recurring row (valid cron, due next_run_at) by keeping it pending, bumping run_count, and advancing next_run_at', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    const now = Math.floor(Date.now() / 1000);
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550800001@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'recurring tick' }),
+        now - 120,
+        'pending',
+        0,
+        '* * * * *', // every minute — valid cron, always due
+        now - 60, // next_run_at in the past → eligible
+        0,
+      );
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendRawCalls).toHaveLength(1);
+    expect(sendRawCalls[0][0]).toBe('15550800001@s.whatsapp.net');
+    const row = db.raw
+      .prepare('SELECT status, run_count, next_run_at, sent_at FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string; run_count: number; next_run_at: number; sent_at: number };
+    expect(row.status).toBe('pending');
+    expect(row.run_count).toBe(1);
+    expect(row.sent_at).toBeGreaterThanOrEqual(now);
+    expect(row.next_run_at).toBeGreaterThan(now);
+  });
+
+  // Cover the cronErr catch block (lines 118-128): a recurring row whose
+  // recurrence cannot be parsed is marked permanently 'failed' after the send
+  // itself succeeds, with the cron error embedded in the error column.
+  it('marks a recurring row as failed when nextCronRun throws after a successful send (invalid recurrence)', async () => {
+    const { mock: conn2, sendRawCalls } = makeMockConnection();
+    const now = Math.floor(Date.now() / 1000);
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550800002@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'bad cron' }),
+        now - 120,
+        'pending',
+        0,
+        '99 99 99 99 99', // syntactically out-of-range cron → nextCronRun throws
+        now - 60,
+        0,
+      );
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    // The send itself happened, but the row was marked failed by the cron-error branch.
+    expect(sendRawCalls).toHaveLength(1);
+    const row = db.raw
+      .prepare('SELECT status, error FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string; error: string };
+    expect(row.status).toBe('failed');
+    expect(row.error).toContain('Invalid recurrence after send:');
+  });
+
+  // Cover line 194: legacy fallback that deserialises a Buffer encoded in JSON
+  // as { type: 'Buffer', data: number[] } when there is no media_blob.
+  it('exercises the legacy { type: "Buffer", data: [] } media fallback (no media_blob) and marks the row sent', async () => {
+    const { mock: conn2, sendMediaCalls } = makeMockConnection();
+    const bytes = [104, 105, 33]; // 'hi!'
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, media_blob)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        '15550800003@s.whatsapp.net',
+        'image',
+        JSON.stringify({ type: 'image', caption: 'legacy-typed', buffer: { type: 'Buffer', data: bytes } }),
+        Math.floor(Date.now() / 1000) - 10,
+        'pending',
+        0,
+      );
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    // sendMedia is invoked (proving the typed-Buffer fallback branch ran
+    // rather than the no-buffer throw path).
+    expect(sendMediaCalls).toHaveLength(1);
+    const [chatJid, media] = sendMediaCalls[0] as [string, { type: string; caption: string; buffer: unknown }];
+    expect(chatJid).toBe('15550800003@s.whatsapp.net');
+    expect(media.type).toBe('image');
+    // Line 200: non-buffer legacy fields are merged back into the send payload.
+    expect(media.caption).toBe('legacy-typed');
+    const row = db.raw
+      .prepare('SELECT status FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string };
+    expect(row.status).toBe('sent');
+  });
+
+  // Cover line 196: legacy fallback where bufferData is a bare number[] (not
+  // the { type: 'Buffer', data: [] } shape) and there is no media_blob.
+  it('exercises the legacy bare-number[] media fallback (no media_blob) and marks the row sent', async () => {
+    const { mock: conn2, sendMediaCalls } = makeMockConnection();
+    const bytes = [65, 66, 67]; // 'ABC'
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, media_blob)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        '15550800004@s.whatsapp.net',
+        'document',
+        JSON.stringify({ type: 'document', filename: 'doc.bin', buffer: bytes }),
+        Math.floor(Date.now() / 1000) - 10,
+        'pending',
+        0,
+      );
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendMediaCalls).toHaveLength(1);
+    const [chatJid, media] = sendMediaCalls[0] as [string, { type: string; filename: string; buffer: unknown }];
+    expect(chatJid).toBe('15550800004@s.whatsapp.net');
+    expect(media.type).toBe('document');
+    // Line 200: non-buffer legacy fields are merged back into the send payload.
+    expect(media.filename).toBe('doc.bin');
+    const row = db.raw
+      .prepare('SELECT status FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string };
+    expect(row.status).toBe('sent');
+  });
+
+  // NOTE: The `cronErr instanceof Error ? ... : String(cronErr)` ternary's
+  // String(cronErr) branch is unreachable from this test surface without
+  // mocking nextCronRun, because cron.ts only ever throws `new Error(...)`.
+  // See the FINAL REPORT for the unreachable-branches rationale.
+});
