@@ -1805,6 +1805,28 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* ═══ Toast entrance — showcase soupToastIn (§10 overlays / §19 intentional motion) ═══
+ *
+ * The toast fades in and slides up on mount. Token-based throughout (translateY
+ * --sp-2 = 8px so no raw dimension lands; --dur-slow, --ease-enter), and `both`
+ * holds the from-state before first paint so there is no flash. Entrance only —
+ * dismissal is immediate, matching the showcase and keeping the aria-live region
+ * free of exit-presence wiring. Removed (not shortened) under reduced-motion. */
+@keyframes soup-toast-in {
+  from { opacity: 0; transform: translateY(var(--sp-2)); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.soup-toast {
+  animation: soup-toast-in var(--dur-slow) var(--ease-enter) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-toast {
+    animation: none;
+  }
+}
+
 .soup-menu__section + .soup-menu__section { margin-top: var(--sp-1); }
 
 .soup-menu__label {

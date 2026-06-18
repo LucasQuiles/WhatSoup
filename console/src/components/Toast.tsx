@@ -29,7 +29,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     <div
       role="alert"
       aria-live="polite"
-      className="flex items-center gap-2.5 font-medium rounded-md bg-surface-raised shadow-[var(--shadow-md)] max-w-[var(--toast-max-w)] py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
+      className="soup-toast flex items-center gap-2.5 font-medium rounded-md bg-surface-raised shadow-[var(--shadow-md)] max-w-[var(--toast-max-w)] py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
       style={{
         borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: TOAST_BORDER_COLOR[variant],
       }}

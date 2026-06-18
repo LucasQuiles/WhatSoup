@@ -44,6 +44,20 @@ describe('Toast — accessibility', () => {
   });
 });
 
+describe('Toast — entrance motion (showcase soupToastIn, §19)', () => {
+  it('root carries the soup-toast class that drives the fade/slide-up entrance', () => {
+    // The .soup-toast recipe (primitives.css) animates `soup-toast-in` on mount
+    // and removes it under prefers-reduced-motion. Asserting the hook is present
+    // proves the entrance is wired; the keyframe/reduced-motion CSS is verified by
+    // the compiled-stylesheet build + design guards.
+    const { container } = render(
+      createElement(Toast, { variant: 'info', message: 'hi', onClose: () => {} }),
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.classList.contains('soup-toast')).toBe(true);
+  });
+});
+
 describe('Toast — message rendering', () => {
   it('renders the message text inline', () => {
     const { getByText } = render(
