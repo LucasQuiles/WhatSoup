@@ -20,11 +20,22 @@ function filesUnder(dir: string, matchesFile: (name: string) => boolean): string
   return files
 }
 
-function stripComments(text: string): string {
-  return text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+function commentSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = []
+  const block = /<!--[\s\S]*?-->|\/\*[\s\S]*?\*\//g
+  for (const match of text.matchAll(block)) {
+    spans.push([match.index, match.index + match[0].length])
+  }
+  const line = /(^|[^\S\r\n])(\/\/.*)$/gm
+  for (const match of text.matchAll(line)) {
+    const start = match.index + match[1].length
+    spans.push([start, start + match[2].length])
+  }
+  return spans
+}
+
+function isIndexInSpans(index: number, spans: Array<[number, number]>): boolean {
+  return spans.some(([start, end]) => index >= start && index < end)
 }
 
 function normalizeAssetReference(sourceFile: string, value: string): string | null {
@@ -48,8 +59,10 @@ function normalizeAssetReference(sourceFile: string, value: string): string | nu
 }
 
 function collectAssetReferences(sourceFile: string, text: string): Set<string> {
+  // Exclude references inside comments by position rather than rewriting the
+  // source via replace() (regex comment-stripping is provably incomplete).
   const references = new Set<string>()
-  const cleaned = stripComments(text)
+  const spans = commentSpans(text)
   const patterns = [
     /(?:import\s+[^'"]+\s+from\s+|from\s+|import\(\s*)["']([^"']+\.(?:avif|gif|jpe?g|png|svg|webp)(?:[?#][^"']*)?)["']/gi,
     /url\(\s*["']?([^"')\s]+\.(?:avif|gif|jpe?g|png|svg|webp)(?:[?#][^"')\s]*)?)["']?\s*\)/gi,
@@ -57,7 +70,8 @@ function collectAssetReferences(sourceFile: string, text: string): Set<string> {
   ]
 
   for (const pattern of patterns) {
-    for (const match of cleaned.matchAll(pattern)) {
+    for (const match of text.matchAll(pattern)) {
+      if (match.index !== undefined && isIndexInSpans(match.index, spans)) continue
       const reference = normalizeAssetReference(sourceFile, match[1])
       if (reference) references.add(reference)
     }

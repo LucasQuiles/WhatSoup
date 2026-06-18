@@ -336,4 +336,35 @@ describe('check-brand-assets.mjs', () => {
     expect(output.verdict).toBe('PASS');
     expect(output.failure_count).toBe(0);
   });
+
+  it('does not count a matchable SVG reference that appears inside a comment', () => {
+    // A real, regex-matchable reference (quoted path) commented out in source must
+    // not keep the asset reachable — characterizes comment exclusion across the
+    // span-based scan (line, block, and HTML comment forms).
+    const fixture = makeFixture({
+      extraConsoleFiles: {
+        'src/CommentedRefs.tsx': [
+          '// const retired = "/icons/commented.svg";',
+          '/* export const old = "/icons/commented.svg" */',
+          'export const x = 1;',
+          '',
+        ].join('\n'),
+        'index.partial.html': '<!-- <img src="/icons/commented.svg" /> -->\n',
+      },
+      extraPublicFiles: {
+        'icons/commented.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ORPHAN_PUBLIC_SVG',
+        target: join(fixture.root, 'console/public/icons/commented.svg'),
+      }),
+    ]));
+  });
 });

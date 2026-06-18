@@ -143,11 +143,39 @@ function purposeTokens(value) {
   return typeof value === 'string' ? value.trim().split(/\s+/).filter(Boolean) : [];
 }
 
+// Returns [start, end) index ranges of HTML/block/line comments in `text`.
+// Used to exclude references that appear inside comments without rewriting the
+// source string (avoids regex comment-stripping, which is provably incomplete).
+function commentSpans(text) {
+  const spans = [];
+  const block = /<!--[\s\S]*?-->|\/\*[\s\S]*?\*\//g;
+  for (const match of text.matchAll(block)) {
+    spans.push([match.index, match.index + match[0].length]);
+  }
+  const line = /(^|[^\S\r\n])(\/\/.*)$/gm;
+  for (const match of text.matchAll(line)) {
+    const start = match.index + match[1].length;
+    spans.push([start, start + match[2].length]);
+  }
+  return spans;
+}
+
+function isIndexInSpans(index, spans) {
+  for (const [start, end] of spans) {
+    if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
 function collectSvgReferences(text) {
-  const cleaned = text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1');
+  // Skip references that fall inside comments by computing comment spans and
+  // filtering matches by position, rather than producing a "cleaned" string via
+  // replace(). Comment removal by regex replacement is inherently incomplete
+  // (CodeQL js/incomplete-multi-character-sanitization); since the scanned input
+  // is repo-controlled build/source text and the output is only a set of asset
+  // paths (never rendered as HTML), position-filtering is both correct and avoids
+  // the incomplete-sanitization pattern.
+  const spans = commentSpans(text);
   const references = new Set();
   const patterns = [
     /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
@@ -158,7 +186,8 @@ function collectSvgReferences(text) {
   ];
 
   for (const pattern of patterns) {
-    for (const match of cleaned.matchAll(pattern)) {
+    for (const match of text.matchAll(pattern)) {
+      if (match.index !== undefined && isIndexInSpans(match.index, spans)) continue;
       const reference = normalizeSvgReference(match[1]);
       if (reference) references.add(reference);
     }
