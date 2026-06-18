@@ -108,6 +108,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
+import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import {
   createProviderMcpBridge,
   writeProviderMcpConfig,
@@ -594,8 +595,6 @@ function armingFailureLogMessage(reason: ProviderFallbackReason): string {
 }
 
 export class AgentRuntime implements Runtime {
-  private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
-  private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
   private readonly db: Database;
   private readonly messenger: Messenger;
@@ -637,13 +636,7 @@ export class AgentRuntime implements Runtime {
   // Parallels session storage — single/shared uses operationTracker, per_chat uses operationTrackers map.
   private operationTracker: OperationTracker | null = null;
   private operationTrackers: Map<string, OperationTracker> = new Map();
-  private workspaceResources: Map<string, {
-    socketPath: string;
-    workspacePath: string;
-    socketServer: WhatSoupSocketServer | null;
-    mediaBridge: MediaBridge | null;
-    lastActivity: number;
-  }> = new Map();
+  private workspaceResources: Map<string, WorkspaceResource> = new Map();
   private globalMcpSocketPath: string | null = null;
   private replyGuarantee: ReplyGuaranteeManager | null = null;
   private turnQueue: TurnQueue;
@@ -655,7 +648,7 @@ export class AgentRuntime implements Runtime {
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
-  private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
@@ -1135,15 +1128,6 @@ export class AgentRuntime implements Runtime {
     this.queueSweepTimer.unref?.();
   }
 
-  private startWorkspaceSweepTimer(): void {
-    if (!this.sandboxPerChat || this.workspaceSweepTimer) return;
-    this.workspaceSweepTimer = setInterval(
-      () => this.sweepIdleWorkspaces(),
-      AgentRuntime.WORKSPACE_SWEEP_INTERVAL_MS,
-    );
-    this.workspaceSweepTimer.unref?.();
-  }
-
   private sweepIdleQueues(): void {
     if (!this.shared) return;
 
@@ -1160,49 +1144,6 @@ export class AgentRuntime implements Runtime {
         log.warn({ err, chatJid }, 'idle outbound queue shutdown failed');
       });
       this.outboundQueues.delete(chatJid);
-    }
-  }
-
-  private sweepIdleWorkspaces(): void {
-    if (!this.sandboxPerChat) return;
-
-    const now = Date.now();
-    for (const [workspaceKey, res] of this.workspaceResources) {
-      const session = this.chatSessions.get(workspaceKey);
-      if (session?.getStatus().active) {
-        res.lastActivity = now;
-        continue;
-      }
-
-      const idleMs = now - res.lastActivity;
-      if (idleMs <= AgentRuntime.WORKSPACE_IDLE_MS) continue;
-
-      log.info({ workspaceKey, idleMs }, 'evicting idle workspace resources');
-
-      if (res.socketServer) {
-        try {
-          res.socketServer.stop();
-        } catch (err) {
-          log.warn({ err, workspaceKey, socketPath: res.socketPath }, 'idle workspace socket server stop failed');
-        }
-      }
-      if (res.mediaBridge) {
-        try {
-          res.mediaBridge();
-        } catch (err) {
-          log.warn({ err, workspaceKey, workspacePath: res.workspacePath }, 'idle workspace media bridge stop failed');
-        }
-      }
-
-      this.workspaceResources.delete(workspaceKey);
-    }
-  }
-
-  private touchWorkspaceActivity(mapKey: string | undefined): void {
-    if (mapKey === undefined) return;
-    const res = this.workspaceResources.get(mapKey);
-    if (res) {
-      res.lastActivity = Date.now();
     }
   }
 
@@ -1480,6 +1421,11 @@ export class AgentRuntime implements Runtime {
     this.sandbox = options?.sandbox;
     this.model = options?.model;
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
+    this.workspaceSweeper = new WorkspaceSweeper(
+      this.sandboxPerChat,
+      this.workspaceResources,
+      (workspaceKey) => this.chatSessions.get(workspaceKey)?.getStatus().active === true,
+    );
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
@@ -2246,7 +2192,7 @@ export class AgentRuntime implements Runtime {
 
     this.schedulePrimaryModelUsabilityProbe('startup');
     this.startHealthStatsTimer();
-    this.startWorkspaceSweepTimer();
+    this.workspaceSweeper.start();
     this.startQueueSweepTimer();
     this.handoffDistill.start();
 
@@ -4089,7 +4035,7 @@ export class AgentRuntime implements Runtime {
         if (mapKey !== undefined) {
           this.perChatAssistantItemText.delete(mapKey);
         }
-        this.touchWorkspaceActivity(mapKey);
+        this.workspaceSweeper.touch(mapKey);
         const rowId = session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
         if (this.durability) {
@@ -4603,10 +4549,7 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.healthStatsTimer);
       this.healthStatsTimer = null;
     }
-    if (this.workspaceSweepTimer) {
-      clearInterval(this.workspaceSweepTimer);
-      this.workspaceSweepTimer = null;
-    }
+    this.workspaceSweeper.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;

@@ -4174,7 +4174,7 @@ describe('AgentRuntime', () => {
         mediaBridge: (() => void) | null;
         lastActivity: number;
       }>;
-      sweepIdleWorkspaces: () => void;
+      workspaceSweeper: { sweep: () => void };
     };
 
     runtimeState.workspaceResources.set('chat-a', {
@@ -4185,7 +4185,7 @@ describe('AgentRuntime', () => {
       lastActivity: Date.now() - (31 * 60_000),
     });
 
-    runtimeState.sweepIdleWorkspaces();
+    runtimeState.workspaceSweeper.sweep();
 
     expect(socketStop).toHaveBeenCalledTimes(1);
     expect(mediaBridgeStop).toHaveBeenCalledTimes(1);
@@ -4218,7 +4218,7 @@ describe('AgentRuntime', () => {
           mediaBridge: (() => void) | null;
           lastActivity: number;
         }>;
-        sweepIdleWorkspaces: () => void;
+        workspaceSweeper: { sweep: () => void };
       };
 
       runtimeState.chatSessions.set('chat-a', {
@@ -4232,7 +4232,7 @@ describe('AgentRuntime', () => {
         lastActivity: Date.now() - (60 * 60_000),
       });
 
-      runtimeState.sweepIdleWorkspaces();
+      runtimeState.workspaceSweeper.sweep();
 
       const entry = runtimeState.workspaceResources.get('chat-a');
       expect(entry).toBeDefined();
@@ -4351,14 +4351,14 @@ describe('AgentRuntime', () => {
         cwd: tmpdir(),
       });
       const runtimeState = runtime as unknown as {
-        workspaceSweepTimer: ReturnType<typeof setInterval> | null;
+        workspaceSweeper: { timer: ReturnType<typeof setInterval> | null };
       };
 
       await runtime.start();
-      expect(runtimeState.workspaceSweepTimer).not.toBeNull();
+      expect(runtimeState.workspaceSweeper.timer).not.toBeNull();
 
       await runtime.shutdown();
-      expect(runtimeState.workspaceSweepTimer).toBeNull();
+      expect(runtimeState.workspaceSweeper.timer).toBeNull();
     } finally {
       vi.useRealTimers();
     }
