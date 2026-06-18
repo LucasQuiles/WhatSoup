@@ -3652,3 +3652,382 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// ops.ts uncovered-branch coverage (leaf — ops.ts branch-coverage gap fill)
+// ---------------------------------------------------------------------------
+// Targets the specific source lines in src/fleet/routes/ops.ts flagged as
+// uncovered branches by the istanbul report. Each it() asserts status AND body.
+describe('ops.ts uncovered-branch coverage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    vi.mocked(lookupCredential).mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    vi.mocked(lookupCredential).mockReturnValue(null);
+  });
+
+  // ---- Lines 317, 319: handleSaveContact validateInstanceName + requireInstance guards ----
+  it('handleSaveContact rejects an invalid instance name with 400 (line 317)', async () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    await handleSaveContact(mockReq('{}'), res, deps, { name: 'INVALID' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/invalid instance name/);
+  });
+
+  it('handleSaveContact returns 404 when instance is unknown (line 319)', async () => {
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => undefined) } as any,
+    });
+    const res = mockRes();
+    await handleSaveContact(mockReq('{}'), res, deps, { name: 'nope' });
+    expect(res._status).toBe(404);
+    expect(JSON.parse(res._body).error).toMatch(/not found/);
+  });
+
+  // ---- Lines 1251, 1253: handleAuth validateInstanceName + requireInstance guards ----
+  it('handleAuth rejects an invalid instance name with 400 (line 1251)', async () => {
+    const deps = makeDeps();
+    const res = mockSseRes();
+    await handleAuth(mockReq(), res, deps, { name: 'INVALID' });
+    expect(res._status).toBe(400);
+    expect(res._ended).toBe(true);
+  });
+
+  it('handleAuth returns 404 when instance is unknown (line 1253)', async () => {
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => undefined) } as any,
+    });
+    const res = mockRes();
+    await handleAuth(mockReq(), res, deps, { name: 'nope' });
+    expect(res._status).toBe(404);
+    expect(JSON.parse(res._body).error).toMatch(/not found/);
+  });
+
+  // ---- Lines 1315, 1355: handleAuth post-auth startFire error logging ----
+  it('handleAuth logs post-auth start failure when startFire invokes its error callback (line 1315)', async () => {
+    vi.useFakeTimers();
+    try {
+      const inst = fakeInstance({ name: 'test-line' });
+      const child = fakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(child as any);
+      const svc = mockServiceManager();
+      // Make startFire invoke its callback with a non-null Error so the
+      // `if (err) log.error(...)` branch fires inside restoreStoppedInstance.
+      svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
+        cb(new Error('post-auth restart failed'));
+      });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      await handleAuth(req, res, deps, { name: 'test-line' });
+
+      // Advance fake clock past the AUTH_TIMEOUT_MS to trigger restoreStoppedInstance.
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+      expect(res._ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('handleAuth logs connected-branch start failure when startFire invokes its error callback (line 1355)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    // First call (connected branch) returns an error via callback.
+    svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
+      cb(new Error('post-connect restart failed'));
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    // Emit a connected event so the post-connect startFire branch runs.
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    // The setTimeout(endOnce, 1000) inside the connected branch fires; flush it.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(res._ended).toBe(true);
+  });
+
+  // ---- Lines 540, 558, 560: handleConfigUpdate settingsJson + enabledPlugins paths on existing cwd ----
+  it('handleConfigUpdate writes settings.json when patched with a fresh permissions allowlist (line 540)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-setj-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-setj-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      // settingsJson with a fresh allowlist should normalize and be written to settings.json.
+      // mergeSettingsJson requires defaultMode === 'bypassPermissions' to merge the custom payload.
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          settingsJson: {
+            permissions: {
+              allow: ['Bash(npm:*)'],
+              deny: [],
+              defaultMode: 'bypassPermissions',
+            },
+          },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
+      expect(fs.existsSync(settingsPath)).toBe(true);
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.permissions.allow).toContain('Bash(npm:*)');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('handleConfigUpdate merges a new enabledPlugins object onto an existing settings.json (lines 558-560)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-ep-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-ep-'));
+    try {
+      // Pre-existing settings.json with a non-empty deny list (forces the read branch).
+      const claudeDir = path.join(agentCwd, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      const settingsPath = path.join(claudeDir, 'settings.json');
+      fs.writeFileSync(settingsPath, JSON.stringify({
+        permissions: {
+          allow: [],
+          deny: ['Bash(rm:*)', 'Bash(sudo:*)'],
+          defaultMode: 'acceptEdits',
+        },
+      }));
+      fs.chmodSync(settingsPath, 0o600);
+
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          agentOptions: {
+            enabledPlugins: { 'whatsoup/leaf-a': true, 'whatsoup/leaf-b': false },
+          },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.enabledPlugins).toEqual({
+        'whatsoup/leaf-a': true,
+        'whatsoup/leaf-b': false,
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 573: handleConfigUpdate enabledPlugins read branch (existing.permissions present, deny array) ----
+  it('handleConfigUpdate preserves a non-empty deny array from existing settings.json (line 573)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-deny-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-deny-'));
+    try {
+      const claudeDir = path.join(agentCwd, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      const settingsPath = path.join(claudeDir, 'settings.json');
+      // Multi-entry deny forces Array.isArray(permissions.deny) === true and the spread of deny.
+      fs.writeFileSync(settingsPath, JSON.stringify({
+        permissions: {
+          allow: [],
+          deny: ['Bash(rm:*)', 'Bash(sudo:*)', 'Bash(chmod:*)'],
+          defaultMode: 'acceptEdits',
+        },
+      }));
+      fs.chmodSync(settingsPath, 0o600);
+
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          agentOptions: { enabledPlugins: { 'whatsoup/x': true } },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      // applyRequiredDeny must retain the original deny entries (the merge keeps them).
+      expect(Array.isArray(written.permissions.deny)).toBe(true);
+      expect(written.permissions.deny).toEqual(expect.arrayContaining(['Bash(rm:*)', 'Bash(sudo:*)', 'Bash(chmod:*)']));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 525: handleConfigUpdate claudeMd patch on an existing agent cwd ----
+  it('handleConfigUpdate writes a fresh CLAUDE.md when patched on an existing agent cwd (line 525)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-cm-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-cm-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ claudeMd: '# fresh\nleaf coverage body\n' })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const claudeMdPath = path.join(agentCwd, '.claude', 'CLAUDE.md');
+      expect(fs.existsSync(claudeMdPath)).toBe(true);
+      expect(fs.readFileSync(claudeMdPath, 'utf-8')).toContain('leaf coverage body');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 1130: handleCreateLine validationError.status nullish (defaults to 400) ----
+  // Skipped: validationError.status is always populated by err() (default 400), so the
+  // `?? 400` fallback is structurally unreachable from natural validation paths.
+
+  // ---- Line 1142: handleCreateLine mkdir configDir EEXIST (raced create) ----
+  it('handleCreateLine returns 409 when configDir mkdir races into EEXIST (line 1142)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-eexist-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      const deps = makeDeps({
+        discovery: {
+          // First call (uniqueness check) returns undefined; the racing mkdir hits EEXIST.
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      // Pre-create the config directory so mkdirSync(configDir, ...) raises EEXIST.
+      const name = 'race-line';
+      fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', name), { recursive: true });
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name, type: 'chat',
+          adminPhones: ['15550000001'],
+        })),
+        res, deps);
+      expect(res._status).toBe(409);
+      expect(JSON.parse(res._body).error).toMatch(/already exists/);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 1190: handleCreateLine settingsJson merge path with agent + agentOptions ----
+  it('handleCreateLine writes settings.json from merged settingsJson for an agent (line 1190)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-crset-'));
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-crset-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'crset-line', type: 'agent',
+          adminPhones: ['15550000001'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          settingsJson: {
+            permissions: {
+              allow: ['Bash(npm:*)'],
+              deny: [],
+              defaultMode: 'bypassPermissions',
+            },
+          },
+        })),
+        res, deps);
+      expect(res._status).toBe(201);
+      const settingsPath = path.join(agentCwd, '.claude', 'settings.json');
+      expect(fs.existsSync(settingsPath)).toBe(true);
+      const written = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(written.permissions.allow).toContain('Bash(npm:*)');
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 1215: handleCreateLine post-enable rollback (service disable succeeds) ----
+  // Already covered by the existing "disables the service when creation fails after enabling it"
+  // describe block at line 1186 (which makes deps.discovery.scan throw post-enable).
+});
