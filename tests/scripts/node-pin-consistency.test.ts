@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -220,5 +220,19 @@ describe('node-pin consistency check', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       'WHATSOUP_SKIP_NODE_PIN_CHECK=1 ignored: CI/GITHUB_ACTIONS detected; node-pin consistency check will run (this skip is for local dev only)',
     );
+  });
+});
+
+describe('sub-package engines align with root (#1082)', () => {
+  function enginesNode(rel: string): string | undefined {
+    const pkg = JSON.parse(readFileSync(path.join(repoRoot, rel), 'utf8')) as { engines?: { node?: string } };
+    return pkg.engines?.node;
+  }
+
+  it('console and whatsoup_guard declare the same engines.node as root', () => {
+    const root = enginesNode('package.json');
+    expect(root).toBeTruthy();
+    expect(enginesNode('console/package.json')).toBe(root);
+    expect(enginesNode('tools/whatsoup_guard/package.json')).toBe(root);
   });
 });
