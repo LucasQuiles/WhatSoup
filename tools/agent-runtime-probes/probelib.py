@@ -50,13 +50,14 @@ SAFE_KEY_NAMES = {
 
 # Secret VALUE shapes — matched regardless of key name (defense against the fail-open hole).
 # Un-anchored for recall (catch secrets abutting an alphanumeric char, e.g. xsk-..., data1AKIA...).
-# The sk- alternative additionally requires >=1 digit via (?=[A-Za-z0-9]*[0-9]) so it skips English
-# words like "ri{sk-c}lassification"/"ta{sk-c}ompletion" (no digit) while still catching real keys
-# (which always contain digits). The other prefixes (pcsk_/gh*/AKIA/xox*/AIza/eyJ) are distinctive
-# enough not to collide with prose. Precision on benign keys is handled by the key-name allowlist,
-# never by narrowing this value regex. Kept byte-identical with the live estate copy.
+# The sk- alternative additionally requires a digit OR uppercase via (?=[A-Za-z0-9]*[0-9A-Z]) so it
+# skips lowercase English words like "ri{sk-c}lassification"/"ta{sk-c}ompletion" while still catching
+# real keys (mixed-case/digit base62 — e.g. sk-ABCDEFGHIJKLMNOPQRST or sk-abcd1234...). A "has a digit"
+# test alone missed all-uppercase keys. The other prefixes (pcsk_/gh*/AKIA/xox*/AIza/eyJ) are
+# distinctive enough not to collide with prose. Precision on benign keys is handled by the key-name
+# allowlist, never by narrowing this value regex. Kept byte-identical with the live estate copy.
 SECRET_VALUE = re.compile(
-    r"sk-(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,}"  # OpenAI-style (>=1 digit: skip English words)
+    r"sk-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{8,}"  # OpenAI-style (digit-or-uppercase: skip lowercase words)
     r"|pcsk_[A-Za-z0-9_]{8,}"                   # Pinecone
     r"|gh[pousr]_[A-Za-z0-9]{20,}"              # GitHub PAT/OAuth
     r"|AKIA[0-9A-Z]{12,}"                       # AWS access key id

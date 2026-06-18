@@ -77,9 +77,10 @@ def test_benign_token_counts_preserved_after_allowlist_port():
 
 
 def test_embedded_secret_caught_and_benign_word_kept():
-    # Digit-lookahead on sk-: catch a real key abutting an alphanumeric prefix (xsk-...digit),
-    # while skipping English words like "risk-classification"/"task-completion" (no digit after sk-).
+    # sk- lookahead requires a digit OR uppercase: catch real keys (mixed-case/digit, incl. embedded
+    # and all-uppercase) while skipping lowercase English words ("risk-classification"/"task-completion").
     assert redact({"v": "xsk-ABCDEFGH1234"}, "")["v"] == "<redacted:value>"
+    assert redact({"v2": "sk-ABCDEFGHIJKLMNOPQRST"}, "")["v2"] == "<redacted:value>"  # uppercase-only, no digit
     assert redact(["prefixAKIAABCD1234EFGH"], "")[0] == "<redacted:value>"
     assert redact({"schema": "agent-runtime-risk-classification"}, "")["schema"] == "agent-runtime-risk-classification"
     assert redact({"t": "task-completion-handler"}, "")["t"] == "task-completion-handler"
