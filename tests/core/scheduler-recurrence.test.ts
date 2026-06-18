@@ -88,4 +88,57 @@ describe('scheduler recurrence', () => {
     expect(row.status).toBe('pending');
     expect(row.retry_count).toBe(1);
   });
+
+  it('recurring message is NOT permanently failed at maxRetries — skips to next slot and resets retry_count', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // retry_count=2 with maxRetries=3: one more failure hits the limit.
+    db.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, recurrence, next_run_at, status, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('123@s.whatsapp.net', 'text', '{"text":"daily"}', now - 120, '0 9 * * *', now - 60, 'pending', 2);
+
+    (conn.sendRaw as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('transient outage'));
+    await scheduler.tick();
+
+    const row = db.raw.prepare('SELECT status, retry_count, next_run_at FROM scheduled_messages WHERE id = 1').get() as {
+      status: string; retry_count: number; next_run_at: number;
+    };
+    // The recurring schedule survives: not 'failed', counter reset, advanced to the next slot.
+    expect(row.status).toBe('pending');
+    expect(row.retry_count).toBe(0);
+    expect(row.next_run_at).toBeGreaterThan(now);
+  });
+
+  it('successful recurring send resets accumulated retry_count to 0', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    db.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, recurrence, next_run_at, status, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('123@s.whatsapp.net', 'text', '{"text":"daily"}', now - 120, '0 9 * * *', now - 60, 'pending', 2);
+
+    await scheduler.tick(); // default mock resolves
+
+    const row = db.raw.prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = 1').get() as {
+      status: string; retry_count: number;
+    };
+    expect(row.status).toBe('pending');
+    expect(row.retry_count).toBe(0);
+  });
+
+  it('one-shot message is still marked failed at maxRetries (regression guard)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    db.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('123@s.whatsapp.net', 'text', '{"text":"once"}', now - 60, 'pending', 2);
+
+    (conn.sendRaw as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('permanent failure'));
+    await scheduler.tick();
+
+    const row = db.raw.prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = 1').get() as {
+      status: string; retry_count: number;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.retry_count).toBe(3);
+  });
 });
