@@ -229,10 +229,40 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ hashFiles('package-lock.json') }}
+          # Key on runner OS + Node major so the 24.x/25.x matrix lanes don't
+          # thrash a single shared entry; restore-keys allows a partial hit.
+          key: playwright-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-node${{ matrix.node }}-
+            playwright-${{ runner.os }}-
+
+      # System (apt) deps are installed ONCE, separately from the browser
+      # download. Bundling them (`install --with-deps`) meant a timeout-kill of
+      # the download left apt/dpkg mid-transaction, so retries fast-failed and
+      # never recovered. apt deps rarely hang; the browser download is the flaky
+      # part, so only that is wrapped in a bounded-timeout retry below.
+      - name: Install Playwright system deps
+        run: npx playwright install-deps chromium
 
       - name: Install Playwright chromium
-        run: npx playwright install chromium --with-deps
+        # The chromium download intermittently hangs on the hosted ubuntu runners
+        # (observed repeatedly on the 24.x lane). Bound each attempt with a timeout
+        # so a hung attempt is killed and retried, rather than stalling the whole
+        # job until the 6h cap. Fails only after 3 genuine failures.
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::Playwright chromium download attempt ${attempt}/3"
+            if timeout 300 npx playwright install chromium; then
+              echo "::endgroup::"
+              echo "Playwright chromium download succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "Playwright chromium download attempt ${attempt} failed or timed out; retrying after backoff"
+            sleep $((attempt * 15))
+          done
+          echo "Playwright chromium download failed after 3 attempts"
+          exit 1
 
       - name: Browser test suite
         run: npm run test:browser
