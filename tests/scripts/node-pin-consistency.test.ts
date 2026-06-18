@@ -94,6 +94,18 @@ describe('node-pin consistency check', () => {
     expect(drift.missing).toEqual([]);
   });
 
+  it('pins the package manager to a concrete npm version (supply-chain drift guard)', () => {
+    // #1111: packageManager must be present and pin npm (not yarn/pnpm) to a
+    // concrete version — the npm bundled with the volta-pinned Node, so no
+    // Corepack network fetch is required. Guards against removal, typos, or an
+    // accidental package-manager swap.
+    const pkg = JSON.parse(
+      readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+    ) as { packageManager?: string };
+    expect(pkg.packageManager).toBeDefined();
+    expect(pkg.packageManager).toMatch(/^npm@\d+\.\d+\.\d+$/);
+  });
+
   it('passes on a happy-path fixture where wrappers read .nvmrc', () => {
     const dir = makeFixture({});
     const drift = findNodePinDrift({ cwd: dir });
