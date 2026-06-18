@@ -259,6 +259,20 @@ describe('MessageScheduler — start/stop lifecycle', () => {
     expect(() => scheduler.start()).not.toThrow();
     expect(() => scheduler.stop()).not.toThrow();
   });
+
+  it('start() is idempotent — a second call does not arm a second interval', () => {
+    const db = makeDb();
+    const { mock: conn } = makeMockConnection();
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 10_000, maxRetries: 3 });
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    scheduler.start();
+    scheduler.start(); // double-start must be a no-op, not an orphaned second interval
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    scheduler.stop();
+    setIntervalSpy.mockRestore();
+  });
 });
 describe('MessageScheduler — recurring message scheduling', () => {
   let db: Database;

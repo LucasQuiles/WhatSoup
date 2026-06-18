@@ -45,6 +45,8 @@ function ruleEntriesFor(id) {
       return { 'fitness/fail-closed-scanner': 'warn' };
     case 'invariant.outbox-env-gated':
       return { 'fitness/outbox-direct-write': 'warn' };
+    case 'invariant.timer-rearm-without-clear':
+      return { 'fitness/timer-rearm-without-clear': 'warn' };
     case 'test.skip-categorization':
       return { 'fitness/categorized-skips': 'warn' };
     case 'arch.approved-api-client':

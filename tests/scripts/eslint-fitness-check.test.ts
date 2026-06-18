@@ -18,7 +18,7 @@ describe('eslint fitness config — registry drift', () => {
     expect(eslintRingRuleIds).toEqual(expected);
   });
 
-  it('covers the eight known eslint-ring rules', () => {
+  it('covers the nine known eslint-ring rules', () => {
     expect(eslintRingRuleIds).toEqual([
       'arch.approved-api-client',
       'arch.file-size',
@@ -27,6 +27,7 @@ describe('eslint fitness config — registry drift', () => {
       'invariant.fail-closed-scanner',
       'invariant.no-unsafe-type-escapes',
       'invariant.outbox-env-gated',
+      'invariant.timer-rearm-without-clear',
       'test.skip-categorization',
     ]);
   });

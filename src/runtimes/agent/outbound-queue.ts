@@ -74,6 +74,8 @@ export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
  * after real continued silence — still reaches the user.
  */
 export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
+/** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
+export const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
 interface TerminalTextDedupeEntry {
   lastSeenAt: number;
@@ -333,6 +335,11 @@ export class OutboundQueue implements IOutboundQueue {
         lastSeenAt: now,
         suppressedCount: 0,
       });
+      while (this.recentTerminalTextKeys.size > MAX_TERMINAL_TEXT_DEDUPE_KEYS) {
+        const oldest = this.recentTerminalTextKeys.keys().next().value;
+        if (oldest === undefined) break;
+        this.recentTerminalTextKeys.delete(oldest);
+      }
     }
     this.lastSubmittedTextDedupeKey = undefined;
     this.clearLastOpId();

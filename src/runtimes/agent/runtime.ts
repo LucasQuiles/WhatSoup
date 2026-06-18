@@ -831,6 +831,36 @@ export class AgentRuntime implements Runtime {
     // it for the empty-turn check and clears it explicitly after the check.
   }
 
+  /**
+   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
+   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
+   * distinct chat that never recurs within the window).
+   */
+  private capDedupeMap(map: Map<string, number>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
+    while (map.size > max) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+
+  /**
+   * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
+   * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
+   * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
+   * concurrent chats' in-flight tool state (mislabeled tool errors, mis-fired
+   * empty-turn notices for bystander chats).
+   */
+  private clearToolScopeFor(mapKey: string): void {
+    const prefix = `${mapKey}#`;
+    for (const key of this.activeToolNames.keys()) {
+      if (key === mapKey || key.startsWith(prefix)) this.activeToolNames.delete(key);
+    }
+    for (const key of this.turnHadToolActivity) {
+      if (key === mapKey || key.startsWith(prefix)) this.turnHadToolActivity.delete(key);
+    }
+  }
+
   private maybeEmitToolFailureAlert(args: {
     chatJid: string | null | undefined;
     toolId: string;
@@ -5343,6 +5373,7 @@ export class AgentRuntime implements Runtime {
     }
     if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
       this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+      this.capDedupeMap(this.recentFallbackEmptyTurnAlerts);
       emitAlertChecked(
         this.instanceName,
         'fallback_empty_turn',
@@ -6162,6 +6193,7 @@ export class AgentRuntime implements Runtime {
     ].join(':');
     if (this.recentProviderFallbackNotices.has(noticeKey)) return;
     this.recentProviderFallbackNotices.set(noticeKey, now);
+    this.capDedupeMap(this.recentProviderFallbackNotices);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const credentialsMissing = activation.keyPresent === false;
@@ -6965,8 +6997,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
-    this.activeToolNames.clear();
-    this.turnHadToolActivity.clear();
+    this.clearToolScopeFor(mapKey);
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
@@ -7751,8 +7782,15 @@ export class AgentRuntime implements Runtime {
   ): void {
     const { inboundSeq, conversationKey, mapKey, clearCurrentInboundSeq = false } = opts
 
-    this.activeToolNames.clear()
-    this.turnHadToolActivity.clear()
+    // Per_chat: scope tool-state cleanup to this chat so a usage-limit turn in one
+    // chat does not wipe another concurrent chat's in-flight tool state. Shared/single
+    // scope has one logical session, so the blanket clear is correct there.
+    if (mapKey !== undefined) {
+      this.clearToolScopeFor(mapKey)
+    } else {
+      this.activeToolNames.clear()
+      this.turnHadToolActivity.clear()
+    }
     this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
