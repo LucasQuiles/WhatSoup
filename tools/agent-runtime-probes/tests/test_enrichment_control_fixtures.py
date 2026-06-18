@@ -298,6 +298,44 @@ def test_cli_malformed_fixtures_exit_nonzero():
     assert report["parse_status"] == "invalid"
 
 
+def test_empty_required_field_is_malformed():
+    # A required field must be a NON-EMPTY string (guard `not isinstance(value, str) or not value`).
+    # An empty string is malformed; an and->or weakening would accept it (isinstance is True, so the
+    # conjunction is False). The existing tests use MISSING fields, not empty ones.
+    bad = Path(tempfile.mktemp(prefix="cape_empty_", suffix=".json"))
+    bad.write_text(json.dumps([{"query_id": "x", "query": "", "gold": "g"}]))
+    try:
+        r = _report(query_fixtures_path=bad)
+    finally:
+        bad.unlink(missing_ok=True)
+    assert r["parse_status"] == "invalid"
+    assert "missing_field:query" in r["_error"]
+
+
+def test_near_miss_without_checkable_correct_value_is_invalid():
+    # A near-miss needs a checkable claim: BOTH asserted_value and correct_value must be strings
+    # (guard `not isinstance(asserted, str) or not isinstance(correct, str)`). If correct_value is
+    # absent/non-str the claim is unverifiable. An and->or weakening would fall through to the
+    # equality check (asserted == None -> False) and wrongly PROMOTE it to a valid value_mismatch
+    # control — a soft (unfalsifiable) near-miss masquerading as a hard one.
+    verified, label = probe._verify_near_miss({"asserted_value": "Paris", "correct_value": None})
+    assert verified is False
+    assert label == "no_checkable_claim"
+
+
+def test_irrelevant_facts_filtered_and_used_for_random_arm():
+    # The irrelevant pool is built from `fixture.get("irrelevant", []) or []` (default to empty) and
+    # filtered by `isinstance(fact, str) and fact`. A non-string fact must be EXCLUDED (an and->or
+    # weakening appends the int -> the pool .sort() raises TypeError), and a present pool must be USED
+    # for the random arm (an and->[] weakening empties the pool -> the random arm falls back to the
+    # default filler). One fixture with a mixed irrelevant list exercises both.
+    import random
+    fixtures = [{"query_id": "q1", "query": "what is the capital", "gold": "the gold answer",
+                 "irrelevant": [123, "DISTINCTIVE_NOISE_FACT"]}]
+    arm_items, _invalid = probe._build_arm_items(fixtures, random.Random(0))
+    assert arm_items["random"][0]["content"] == "DISTINCTIVE_NOISE_FACT"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
