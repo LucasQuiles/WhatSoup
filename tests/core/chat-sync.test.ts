@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
   handleReaction,
@@ -344,6 +344,194 @@ describe('chat-sync', () => {
       const count = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number })
         .cnt;
       expect(count).toBe(0);
+    });
+  });
+
+  // ─── Uncovered-branch coverage ────────────────────────────────────────────
+
+  describe('chat-sync.ts uncovered-branch coverage', () => {
+    describe('handleChatsUpsert — optional field branches', () => {
+      it('persists archived, pinned, muteEndTime, and ephemeralExpiration when set', () => {
+        handleChatsUpsert(db, [
+          {
+            id: '15550000001@s.whatsapp.net',
+            name: 'Flagged',
+            unreadCount: 3,
+            archived: true,
+            pinned: 2,
+            muteEndTime: 1700000000,
+            ephemeralExpiration: 86400,
+          },
+        ]);
+
+        const row = db.raw
+          .prepare('SELECT * FROM chats WHERE jid = ?')
+          .get('15550000001@s.whatsapp.net') as any;
+        expect(row.is_archived).toBe(1);
+        expect(row.is_pinned).toBe(1);
+        expect(row.mute_until).toBe(new Date(1700000000 * 1000).toISOString());
+        expect(row.ephemeral_duration).toBe(86400);
+        expect(row.unread_count).toBe(3);
+      });
+
+      it('writes null mute_until and null ephemeral_duration when absent', () => {
+        handleChatsUpsert(db, [{ id: '15550000002@s.whatsapp.net', name: 'Plain' }]);
+
+        const row = db.raw
+          .prepare('SELECT mute_until, ephemeral_duration, is_archived, is_pinned FROM chats WHERE jid = ?')
+          .get('15550000002@s.whatsapp.net') as any;
+        expect(row.mute_until).toBeNull();
+        expect(row.ephemeral_duration).toBeNull();
+        expect(row.is_archived).toBe(0);
+        expect(row.is_pinned).toBe(0);
+      });
+
+      it('falls back to default-domain mapping for unknown domain', () => {
+        // Domain that is NOT s.whatsapp.net, lid, or g.us exercises the default case.
+        handleChatsUpsert(db, [{ id: '15550000003@broadcast', name: 'Mystery' }]);
+
+        const row = db.raw
+          .prepare('SELECT conversation_key FROM chats WHERE jid = ?')
+          .get('15550000003@broadcast') as any;
+        expect(row.conversation_key).toBe('15550000003_at_broadcast');
+      });
+    });
+
+    describe('handleChatsUpdate — per-field SET branches', () => {
+      const baseId = '15550000010@s.whatsapp.net';
+      beforeEach(() => {
+        handleChatsUpsert(db, [{ id: baseId, name: 'Seed' }]);
+      });
+
+      it('flips archived false→0 and pinned false→0', () => {
+        handleChatsUpdate(db, [
+          { id: baseId, archived: false, pinned: 0 },
+        ]);
+
+        const row = db.raw
+          .prepare('SELECT is_archived, is_pinned FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row.is_archived).toBe(0);
+        expect(row.is_pinned).toBe(0);
+      });
+
+      it('sets mute_until from muteEndTime and clears when 0', () => {
+        // First: a real timestamp populates mute_until
+        handleChatsUpdate(db, [{ id: baseId, muteEndTime: 1700000000 }]);
+        let row = db.raw
+          .prepare('SELECT mute_until FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row.mute_until).toBe(new Date(1700000000 * 1000).toISOString());
+
+        // Then: muteEndTime === 0 → falsy branch writes null
+        handleChatsUpdate(db, [{ id: baseId, muteEndTime: 0 }]);
+        row = db.raw
+          .prepare('SELECT mute_until FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row).toEqual({ mute_until: null });
+      });
+
+      it('sets ephemeral_duration via update', () => {
+        handleChatsUpdate(db, [{ id: baseId, ephemeralExpiration: 604800 }]);
+
+        const row = db.raw
+          .prepare('SELECT ephemeral_duration FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row.ephemeral_duration).toBe(604800);
+      });
+
+      it('applies multiple field updates in a single item', () => {
+        handleChatsUpdate(db, [
+          {
+            id: baseId,
+            name: 'Multi',
+            unreadCount: 9,
+            archived: true,
+            pinned: 1,
+            muteEndTime: 1234567890,
+            ephemeralExpiration: 3600,
+          },
+        ]);
+
+        const row = db.raw
+          .prepare(
+            'SELECT name, unread_count, is_archived, is_pinned, mute_until, ephemeral_duration FROM chats WHERE jid = ?',
+          )
+          .get(baseId) as any;
+        expect(row).toMatchObject({
+          name: 'Multi',
+          unread_count: 9,
+          is_archived: 1,
+          is_pinned: 1,
+          mute_until: new Date(1234567890 * 1000).toISOString(),
+          ephemeral_duration: 3600,
+        });
+      });
+
+      it('returns early for null-like input — no crash, no rows touched', () => {
+        expect(() =>
+          handleChatsUpdate(db, null as unknown as Array<{ id: string }>),
+        ).not.toThrow();
+        const row = db.raw
+          .prepare('SELECT name FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row.name).toBe('Seed');
+      });
+
+      it('catches per-item error from db.raw.prepare and continues', () => {
+        // Force db.raw.prepare to throw on the UPDATE path, then restore.
+        const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(() => {
+          throw new Error('synthetic prepare failure');
+        });
+        try {
+          expect(() =>
+            handleChatsUpdate(db, [
+              { id: baseId, name: 'Should Be Skipped' },
+              { id: '15550000011@s.whatsapp.net', name: 'Also Skipped' },
+            ]),
+          ).not.toThrow();
+        } finally {
+          spy.mockRestore();
+        }
+        // Seed row untouched because the prepared-statement threw before UPDATE ran
+        const row = db.raw
+          .prepare('SELECT name FROM chats WHERE jid = ?')
+          .get(baseId) as any;
+        expect(row.name).toBe('Seed');
+      });
+    });
+
+    describe('handleChatsDelete — error isolation branch', () => {
+      it('catches per-item error from stmt.run and continues', () => {
+        const baseId = '15550000020@s.whatsapp.net';
+        handleChatsUpsert(db, [{ id: baseId, name: 'ToDelete' }]);
+
+        // handleChatsDelete prepares the statement once outside the loop,
+        // then calls stmt.run(jid) inside try/catch. Force .run to throw.
+        const spy = vi
+          .spyOn(db.raw, 'prepare')
+          .mockReturnValue({ run: () => { throw new Error('synthetic delete failure'); } } as any);
+        try {
+          expect(() => handleChatsDelete(db, [baseId, '15550000021@s.whatsapp.net'])).not.toThrow();
+        } finally {
+          spy.mockRestore();
+        }
+        // Row still present because DELETE threw at run-time
+        const rows = db.raw
+          .prepare('SELECT jid FROM chats WHERE jid = ?')
+          .all(baseId) as any[];
+        expect(rows).toHaveLength(1);
+      });
+
+      it('returns early for null-like input — no crash', () => {
+        expect(() =>
+          handleChatsDelete(db, null as unknown as string[]),
+        ).not.toThrow();
+        const count = (
+          db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number }
+        ).cnt;
+        expect(count).toBe(0);
+      });
     });
   });
 });
