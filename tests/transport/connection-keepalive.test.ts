@@ -142,6 +142,55 @@ describe('ConnectionManager — keepalive', () => {
 
     expect(mockSock.query).not.toHaveBeenCalled();
   });
+
+  it('emits exhausted when keepalive keeps failing past the 30-minute window', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.query.mockRejectedValue(new Error('ping timeout'));
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    const exhausted = vi.fn();
+    manager.on('exhausted', exhausted);
+    await manager.connect();
+    emit(openEvent());
+
+    // First keepalive failure starts the keepalive-failure clock + triggers gracefulReconnect.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(exhausted).not.toHaveBeenCalled();
+
+    // Reconnected; jump the wall clock past the window without firing timers, then let the
+    // next keepalive fail — elapsed since the first failure now exceeds 30 minutes.
+    emit(openEvent());
+    vi.setSystemTime(Date.now() + 30 * 60 * 1000 + 1_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(exhausted).toHaveBeenCalled();
+  });
+
+  it('does not emit exhausted when a successful pong resets the keepalive-failure clock', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    // Fail, then a healthy pong, then fail again.
+    mockSock.query
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce({})
+      .mockRejectedValue(new Error('later blip'));
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    const exhausted = vi.fn();
+    manager.on('exhausted', exhausted);
+    await manager.connect();
+    emit(openEvent());
+
+    await vi.advanceTimersByTimeAsync(30_000); // KA#1 fails → clock starts → gracefulReconnect
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(30_000); // KA#2 pongs → clock reset
+    // Even after jumping well past the window, the next failure starts a fresh clock.
+    vi.setSystemTime(Date.now() + 30 * 60 * 1000 + 1_000);
+    await vi.advanceTimersByTimeAsync(30_000); // KA#3 fails but elapsed ≈ 0
+
+    expect(exhausted).not.toHaveBeenCalled();
+  });
 });
 
 describe('ConnectionManager — self-mention stripping', () => {

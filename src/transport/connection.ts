@@ -501,6 +501,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private shuttingDown = false;
   private reconnectPhase: 'backoff' | 'cooldown' | 'retry' = 'backoff';
   private firstFailureAt: number | null = null;
+  // Tracks the first of a run of consecutive keepalive failures. Unlike firstFailureAt
+  // (the disconnect-driven exhaustion clock, reset on every open), this is cleared ONLY by
+  // a successful pong — so a connect→open→keepalive-fail loop, which bypasses
+  // scheduleReconnect via gracefulReconnect, still trips the exhaustion path.
+  private keepaliveFailureFirstAt: number | null = null;
   private cooldownTimer: ReturnType<typeof setTimeout> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private keepaliveInFlight = false;
@@ -2607,10 +2612,28 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (this.shuttingDown || this.sock !== sock) return;
       this.lastPongAt = Date.now();
+      // A successful pong proves the link is healthy — clear the keepalive-failure clock.
+      this.keepaliveFailureFirstAt = null;
     } catch (err) {
       if (this.shuttingDown || this.sock !== sock) return;
-      this.log.warn({ err }, 'keepalive failed — forcing reconnect');
-      await this.gracefulReconnect(sock, 'keepalive_failed');
+      if (this.keepaliveFailureFirstAt === null) {
+        this.keepaliveFailureFirstAt = Date.now();
+      }
+      const keepaliveFailingMs = Date.now() - this.keepaliveFailureFirstAt;
+      if (keepaliveFailingMs > ConnectionManager.MAX_FAILURE_DURATION_MS) {
+        // Sustained keepalive failure (no successful pong for >30min). gracefulReconnect
+        // alone never reaches the exhaustion path, so route through it now to get the
+        // alert + bounded process.exit/systemd restart instead of looping forever.
+        this.log.fatal(
+          { keepaliveFailingMs, err },
+          'keepalive failing for over 30 minutes — emitting exhausted',
+        );
+        this.keepaliveFailureFirstAt = null;
+        this.emit('exhausted');
+      } else {
+        this.log.warn({ err }, 'keepalive failed — forcing reconnect');
+        await this.gracefulReconnect(sock, 'keepalive_failed');
+      }
     } finally {
       this.keepaliveInFlight = false;
     }
