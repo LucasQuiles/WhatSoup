@@ -965,6 +965,38 @@ def test_added_tokens_exactly_at_budget_is_within_budget():
     assert "added_tokens_over_budget" not in rep["failed_predicates"]
 
 
+def test_bootstrap_ci_requires_both_bounds_strictly_positive():
+    # The bootstrap predicate is `not (ci_lower_percentile > 0 AND ci_lower_bca > 0)` (L679):
+    # BOTH the percentile and the BCa lower bound must be STRICTLY positive to prove lift. A
+    # deterministic 32/50-win corpus yields percentile = +0.02 but BCa = 0.0 EXACTLY (the BCa
+    # lower bound only TOUCHES zero). The predicate must FAIL. An 'and'->'or' mutation would
+    # pass on the percentile alone; the bca '>'->'>= ' mutation would pass at the zero-touch.
+    # (The percentile '>'->'>= ' flip is documented EQUIVALENT: when the 5th-percentile bound
+    # hits 0 the BCa bound is also ~0 (prop~0.5 -> z0~0 -> bca_q~0.05), so its distinguishing
+    # case (percentile==0 AND bca>0) is unreachable.)
+    baseline, enriched = make_paired(50, lambda i: i < 32)
+    judge = make_judge(50)
+    arm = make_arm(50, lambda i: 0)
+    rep = gate.evaluate(baseline, enriched, judge, arm, arm, arm, make_usage(), tau=3.0)
+    assert rep["ci_lower_percentile"] > 0 and rep["ci_lower_bca"] == 0.0
+    assert "bootstrap_ci_lower" in rep["failed_predicates"]
+
+
+def test_lift_efficiency_exactly_at_tau_is_sufficient():
+    # The lift predicate is `efficiency is not None and efficiency >= tau` (L683, INCLUSIVE): an
+    # efficiency EXACTLY equal to tau clears it (tau is the MINIMUM). A '>='->'>' mutation would
+    # reject an at-threshold lift. Construct an exact float: win_rate 0.75 (delta_pp 25.0) over
+    # 10000 added tokens -> efficiency 25.0 / 10.0 = 2.5 exactly; run at tau=2.5 so the boundary
+    # is hit precisely (the default-tau boundary is float-fragile and not cleanly reachable).
+    baseline, enriched = make_paired(64, lambda i: i < 48)
+    judge = make_judge(64)
+    arm = make_arm(64, lambda i: 0)
+    usage = make_usage(enr=11000, budget=20000)  # added = 11000 - 1000 = 10000
+    rep = gate.evaluate(baseline, enriched, judge, arm, arm, arm, usage, tau=2.5)
+    assert rep["lift_efficiency"] == 2.5
+    assert "lift_efficiency" not in rep["failed_predicates"]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
