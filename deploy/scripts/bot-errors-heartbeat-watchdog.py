@@ -754,6 +754,31 @@ def local_health_timeout() -> float:
     return max(0.1, value) if math.isfinite(value) else 3
 
 
+def local_health_retries() -> int:
+    """Extra confirm-attempts after a transport-level probe failure (status 0).
+
+    A single transient timeout — a busy event loop, a GC pause, a momentary
+    socket stall — must NOT escalate to a critical ``local_health`` alert. The
+    default of 2 retries (3 attempts total) lets a blip clear while a genuine
+    outage still fails every attempt.
+    """
+    raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_RETRIES", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return max(0, value)
+
+
+def local_health_retry_backoff() -> float:
+    raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_RETRY_BACKOFF_SECONDS", "0.75")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.75
+    return max(0.0, value) if math.isfinite(value) else 0.75
+
+
 def dry_local_health_responses() -> dict[str, Any]:
     raw = os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES", "").strip()
     if not raw:
@@ -791,17 +816,27 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
             status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
             return status, status_error or entry, url
     req = Request(url, method="GET")
-    try:
-        with urlopen(req, timeout=local_health_timeout()) as response:
-            body = response.read(64 * 1024).decode("utf-8", errors="replace")
-            return int(response.status), body, url
-    except HTTPError as exc:
-        body = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return int(exc.code), body, url
-    except URLError as exc:
-        return 0, str(exc.reason), url
-    except Exception as exc:  # noqa: BLE001 - watchdog should report probe failures.
-        return 0, str(exc), url
+    # A single transient timeout must NOT escalate to a critical local_health
+    # alert. Retry transport-level failures (status 0) before giving up: a real
+    # outage fails every attempt, a momentary blip clears on the next try. An
+    # HTTPError means the server answered — a real signal — so return at once.
+    attempts = local_health_retries() + 1
+    last_failure: tuple[int, str, str] = (0, "no attempts", url)
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=local_health_timeout()) as response:
+                body = response.read(64 * 1024).decode("utf-8", errors="replace")
+                return int(response.status), body, url
+        except HTTPError as exc:
+            body = exc.read(64 * 1024).decode("utf-8", errors="replace")
+            return int(exc.code), body, url
+        except URLError as exc:
+            last_failure = (0, str(exc.reason), url)
+        except Exception as exc:  # noqa: BLE001 - watchdog should report probe failures.
+            last_failure = (0, str(exc), url)
+        if attempt + 1 < attempts:
+            time.sleep(local_health_retry_backoff())
+    return last_failure
 
 
 def compact_health_field(value: Any) -> str:

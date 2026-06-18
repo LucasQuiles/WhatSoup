@@ -354,3 +354,193 @@ heartbeat-watchdog ─▶ [B] systemd intent (planned vs crash) ─────�
   per-`incident_key` dedup of storm members, terminal resolve after stable window,
   `*_reverted`/`*_restored` self-close on emit.
 - Fail-open: flap detector / enrichment raising → falls back to current send.
+
+---
+
+## 10. Review-wave synthesis (2026-06-17) — folded corrections
+
+Four independent reviewers (gap, adversarial-false-negative, hardening-against-live-code,
+cross-model MiniMax-M2.7) reviewed §1–9. They converged on one design-invalidating
+finding and a set of high-value corrections. All are folded below; they are binding on
+the implementation plan.
+
+### C0 — BLOCKER: flap state (Pattern F) must be disk-persisted
+
+**Unanimous across all four reviewers.** The dispatcher runs **run-once** under a systemd
+timer — each invocation is a fresh process that loads state, processes, saves, and exits.
+An in-memory sliding-window trip counter is therefore impossible: it resets every run, so
+the 263× burst (which the design exists to catch) could never accumulate. **Pattern F is
+invalid as written until flap state is persisted.**
+
+**Fix:** persist flap state in the existing `incident-state.json` under a `flapState` key,
+keyed by `incident_key`: `{tripTimestamps:[epoch…], cumulativeCount, stormAt, promoteAt,
+stableAt}`. Trip timestamps are recorded at **dispatcher-local wall-clock** (`time.time()`),
+never author-supplied `createdAt` (collector clock skew). Prune timestamps older than
+`FLAP_WINDOW_SECONDS` on each read. Same corrupt/missing → empty fallback as incident-state.
+
+### C1 — Pattern F ordering and key semantics (must be specified, not implied)
+
+- Define `source`, `incident_key`, `fingerprint` as explicit schema fields. Working
+  definition: `incident_key = machine|instance|source`; `fingerprint` = the SHA-256(16)
+  dedup key used by storm-collapse.
+- **F counts trips BEFORE storm-collapse consumes them** — otherwise collapsed members are
+  invisible to the flap counter. F dedups its *output* by `incident_key`; it counts its
+  *input* per raw trip.
+- Specify F's interaction with C (inhibition must not hide symptom-level flaps from F) and
+  D (transient auto-clear must not reset F's accumulation).
+
+### C2 — Liveness probe: source-specific, and it must gate F's resolve too
+
+- The probe is **per source class**, not a generic host ping: `network`(ssh/tailscale),
+  `systemd`(unit state), `app`(health endpoint), `whatsapp_bond`(session-token/last-seen),
+  `none`(suppress only if action=none). A WhatsApp-bond incident must probe the bond, not
+  TCP reachability (a host can be SSH-green while the bond is revoked).
+- The probe must gate **Pattern F's stabilize→resolved transition**, not only Pattern A.
+  Collector silence ≠ recovery; resolve only on positive liveness, else hold `flap_active`.
+- Probe raises → **catch-and-send** (log `liveness_probe_failed`, fall through). Never
+  catch-and-drop.
+
+### C3 — Chronic low-level instability (slow-flapper false-negative)
+
+A source failing just under threshold every window forever never fires F, and D auto-clears
+each event. Add a secondary **N-of-M-windows** counter: tripped in ≥3 of the last 5 windows
+→ escalate as `chronic_instability` regardless of per-window burst count. Mirror with a
+cross-incident `transient_recurrence_count` / `transient_total_downtime` that survives
+individual close/reopen so oscillating transients promote.
+
+### C4 — requested_action SSOT ordering + flap_storm exemption
+
+- Pattern A's "action is none" check must read the **incident-level SSOT field** (Pattern E),
+  written **before** the stale sweep evaluates it. Explicit ordering constraint.
+- `flap_storm` incidents are classified `requested_action: investigate` (never `none`) and
+  are **exempt from Pattern A suppression**; their renotify cadence is separate
+  (≈ once per `FLAP_PROMOTE_SECONDS` while active).
+- One-line fix landable now: remove the inner `requested_action=…` baked into the evidence
+  string in `stale_incident_event` (≈`dispatcher.py:1648`); let `format_event` be the sole
+  source. Kills the live dual-field contradiction immediately.
+
+### C5 — Live-code hardening (verified against current dispatcher)
+
+- **`openIncidents` is unbounded** — live state holds 161 incidents, 79 `stale`, never
+  pruned. `resolved_stale` must be a **terminal removal** from `openIncidents` + `lastSentAt`,
+  not a status tag. Add a prune pass in `run_once()`.
+- Invariant: all state mutations in one `run_once()` happen sequentially under the existing
+  `LOCK_EX` lock — never parallelize `process_one`. Pass the loaded state into
+  `sweep_stale_incidents` instead of re-reading from disk.
+- `append_private_jsonl` lacks fsync (audit-log gap on crash) — low priority.
+
+### C6 — Intent classification false-negatives (Pattern B)
+
+- **OOM/cgroup cross-check:** `Result=success` on a unit whose child was OOM-killed in a
+  parent cgroup reads as clean stop. Cross-check kernel journal (`journalctl -k -p3`) for OOM
+  on the instance's cgroup within the grace window → override to crash.
+- **Non-renewable grace window:** re-entering `activating` must not reset the grace timer
+  (else a crash-loop hides as "restart in flight" forever).
+- **Consecutive ssh-timeout reclassify:** N consecutive `online_ssh_timeout` with no success
+  → `offline_unconfirmed`, promote to outage (guards a real outage misread as transient).
+- **Pattern B must cover launchd (darwin), not only systemd.** The collector/deadman hosts
+  are darwin (launchd), and that is where most observed noise originates. Add a launchd
+  intent classifier mirroring the systemd one: `launchctl print` / last-exit-status +
+  signal. **A clean `SIGTERM` (signal 15) — especially when the job is currently running
+  again — is a planned stop/restart, not a failure** and must not page. Live evidence
+  (2026-06-17): a `launchd-deadman` critical (open since 06-12, 15 dups) was dominated by
+  `com.q.dreammachine-ingest` "killed by signal 15, currently running pid=83006" — an
+  intentional restart misreported as a failing surface. The deadman sweep itself needs the
+  same intent gate: signal-15 + live pid → healthy; nonzero-exit on a periodic job →
+  route through Pattern G benign-exit classification before escalating.
+
+### C7 — Inhibition precision + maintenance integrity
+
+- Inhibition must match root **and symptom sub-cause** — suppress `local_health` only for
+  bond-downstream sub-causes (conn-refused/auth), never for disjoint causes (disk/OOM/mem),
+  which are independent real incidents. Requires a `sub_cause` field on symptom events.
+- Maintenance windows: max-duration cap (`BOT_ERRORS_MAINTENANCE_MAX_DURATION_SECONDS`),
+  append-only open/close audit log, auto-expiry prune on every read, and a
+  `requires_post_maintenance_review` tag so an incident that began *during* a window is
+  re-surfaced at close instead of being swallowed by Pattern A.
+
+### C8 — False-negative observability
+
+`stale_suppressed_total` counts suppressions but not *correctness*. Add a retrospective
+`was_suppressed_before_escalation` tag: when a previously-suppressed source later emits
+`critical`, flag it on the new alert — operators can audit missed signals from
+`dispatch.jsonl` without external correlation.
+
+### C9 — NEW pattern needed: runtime-tool-error over-paging (live critical, this session)
+
+A `runtime-tool-error:claude-cli:Bash` incident has been **open since 2026-06-13 with 49
+suppressed duplicates, escalated to critical** — fed by *benign* non-zero exits (a
+`git add` of a gitignored path, `grep` no-match, test probes). The agent runtime emits
+`severity=critical` for **any** tool non-zero exit. This is a first-class false-positive
+source A–F do not cover.
+
+**Fix (Pattern G — runtime-tool-error classification):** classify expected/benign exits as
+non-actionable before emit — `git`(ignored-path/nothing-to-commit), `grep`/`rg`(exit 1 =
+no match), exit codes from probing commands → `warning`/suppressed, never `critical`.
+Only genuine runtime faults (uncaught exceptions, OOM, transport deadlock, repeated
+identical failures) page. Env: `BOT_ERRORS_TOOLERROR_BENIGN_CLASSIFICATION` (default `1`).
+
+### Cross-model note
+
+Of three panelists, only MiniMax-M2.7 returned (both DeepSeek lines silent-emptied — known
+failure mode on structured/diff tasks). MiniMax's arithmetic on the 263-case window was off
+(it averaged trips over the 5-day quiet span, ~0.26/600s, rather than the 34-min burst,
+~77/600s) — the burst is far above threshold; the real lesson is C0/C1 (persistence +
+precise window semantics), not a threshold change. Single-model cross-review is weak
+evidence; re-run with minimax-only or add GLM before treating cross-model as load-bearing.
+
+---
+
+## 11. Wave 1 — implementation status (2026-06-17)
+
+Branch `feat/bot-errors-noise-reduction`. All changes in
+`deploy/scripts/bot-errors-dispatcher.py`; tests are **pytest** under
+`deploy/scripts/tests/` (the §6 reference to Vitest was wrong — the dispatcher
+suite is Python). 769 pass; the single `test_bot_errors_deploy_sha_failed`
+failure is the expected SHA-pin drift for a modified pinned script, cleared by
+the approved `whatsoup-bot-errors-deploy.sh pin` step, not in-band.
+
+**Code correction to C0:** the dispatcher runs as a **daemon** (`--daemon
+--interval 30`), not run-once under a timer. In-memory flap counters would
+therefore survive within a daemon lifetime — but disk-persistence is still
+correct (survives natural restarts) and is what we implemented. C0's mandate
+stands; its premise (run-once) was imprecise.
+
+**Landed (committed, behind default-on env knobs, fail-open):**
+- **Pattern E SSOT** (`06b0aa9e`) — `requested_action_text()` is the sole action
+  deriver; removed the two baked inner `requested_action=` evidence strings;
+  precedence reordered so a real action wins over the info "none" fallback
+  (fixes the awaiting_physical false-negative). 4 tests (f10).
+- **Pattern A** (`3bb50ef3`, `cfd4e160`) — `stale_renotify_is_nonactionable()`
+  suppresses self-healed/no-op stale renotify (SSOT action==none OR
+  stale verify-filler OR recovery/no-op source signatures); tag+count+audit;
+  §C5 terminal removal of past-escalate incidents from `openIncidents`+`lastSentAt`
+  with ONE consolidated auto-close summary. 6 tests (f11).
+- **Pattern F** (`140e75f1`) — disk-persisted `flapState` (§C0); `flap_scan_outbox`
+  counts raw trips before storm-collapse (§C1) and emits one consolidated,
+  E-enriched `flap_storm` alert (warning→critical on persistence/count);
+  members suppressed in `should_suppress_send`; `sweep_flap_storms` emits the
+  terminal resolve summary. flap_storm exempt from Pattern A (§C4). 11 tests (f12).
+
+**Deferred follow-ups (precisely scoped):**
+- **Pattern G — runtime-tool-error benign classification** (NOT landed; TS, own
+  bead). Root cause is `src/runtimes/agent/runtime.ts`: `tool_result` handler at
+  **line ~4860** calls `maybeEmitToolFailureAlert` for **every** `event.isError`,
+  and `emitAlertChecked` defaults severity to critical. `classifyToolError`
+  (line 1311) yields only `cancelled|blocked|error`. Fix: add
+  `isBenignToolError(toolName, content, classification)` and gate the alert call
+  (`if (!isBenign) this.maybeEmitToolFailureAlert(...)`; still enqueue the UI
+  toolUpdate). Benign signatures: category `cancelled`/`blocked`; git
+  nothing-to-commit / gitignored-path / did-not-match; grep/rg exit 1 = no match;
+  bare `Exit code 1` from a probe with no stderr fault. Env
+  `BOT_ERRORS_TOOLERROR_BENIGN_CLASSIFICATION` (default 1). Second call site at
+  line ~8203 takes the same gate. Live impact: a `runtime-tool-error:claude-cli:Bash`
+  critical open since 06-13 with 49 benign dups.
+- **C2 liveness-gated resolve** for Pattern F (currently time-stable only) and
+  **C3 N-of-M slow-flapper** counter — both noted in code comments.
+- **Pattern B** (intent: planned-vs-crash + launchd/darwin, §C6) and **Pattern C/D**
+  (inhibition + transient tiering) — Waves 2–3, untouched this session.
+
+**Deploy:** changes take effect on the **next natural dispatcher restart** (Lucas
+controls; no self-restart). The SHA-pin (`deploy/bot-errors-runtime-manifest.json`
++ approved ledger) must be regenerated in that step.
