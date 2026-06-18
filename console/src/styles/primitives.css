@@ -1965,6 +1965,21 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* OPERATOR LAYOUT — soup-operator-layout (mobile responsive pass)
+   The Operator's Fleet-Status + Logs panes are a horizontal flex row on desktop.
+   On narrow/phone viewports that crams both into ~half-width each (line-status
+   cards get clipped mid-word), so below the established 640px narrow-surface
+   breakpoint (DRAWER_BOTTOM_SHEET_QUERY) the panes stack vertically — each
+   full-width and readable, keeping its own internal scroll. Same reachable-on-
+   narrow principle as the §26 bottom-sheet. Viewport @media (not a container
+   query) because it flips the flex container's own direction, mirroring the
+   soup-rail collapse pattern. */
+@media (max-width: 640px) {
+  .soup-operator-layout {
+    flex-direction: column;
+  }
+}
+
 /* --------------------------------------------------------------------------
    AVATAR — soup-av (avatar.md; showcase §20; DD-43)
    Identity at a glance on the two shipped size tokens (--avatar-sm 32 /
