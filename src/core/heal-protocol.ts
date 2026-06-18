@@ -65,6 +65,13 @@ export const EmitHealResultSchema = z.object({
 });
 export type EmitHealResult = z.infer<typeof EmitHealResultSchema>;
 
+/**
+ * Derive the single-flight dedup class from a report's type + error hint. NOTE: only the
+ * FIRST line of `errorHint` contributes to the class (counts/dates/pids are stripped, then
+ * `split('\n')[0]`). Callers that aggregate variable detail (e.g. checkDegradationSignals)
+ * rely on this: keep a fixed first line and put per-item detail on following lines, or the
+ * class drifts every call and single-flight never coalesces.
+ */
 export function normalizeErrorClass(type: string, errorHint: string): string {
   const normalized = errorHint
     .replace(/:\d+/g, '')

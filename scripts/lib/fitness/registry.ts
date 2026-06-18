@@ -124,10 +124,10 @@ export const fitnessRules = [
   },
   {
     id: 'invariant.timer-rearm-without-clear',
-    title: 'Map-stored timers cleared before re-arm',
+    title: 'Inline timer in Map.set re-armed without clear',
     category: 'invariant',
     rationale:
-      'Storing a timer handle in a Map value object and re-arming the same key without first clearing the previous entry orphans the old timer, which keeps firing (the OperationTracker.onToolStart duplicate-placeholder bug class). Retrieve and clear the existing entry before set.',
+      'Forward-looking guard: writing a timer handle INLINE in a Map.set value literal (map.set(key, { t: setTimeout(...) })) and re-arming the key without first clearing the previous entry orphans the old timer. Catches only the inline shape, which the build-then-set codebase does not currently use (zero findings today); the field-assigned OperationTracker.onToolStart variant is covered by its regression test, not this lexical rule.',
     detect: 'ast',
     rings: ['eslint'],
     severity: 'warn',

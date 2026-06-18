@@ -1,20 +1,26 @@
 /**
  * fitness/timer-rearm-without-clear — registry rule `invariant.timer-rearm-without-clear`.
  *
- * Advisory: storing a timer handle in a Map value object — `someMap.set(key, { …,
- * t: setTimeout(...) })` / `setInterval(...)` — and re-arming the same key without first
- * clearing the previous entry orphans the old timer, which keeps firing. This is the
- * OperationTracker.onToolStart bug class: a replayed key overwrote the map entry while
- * its timers leaked (duplicate "Still working…" placeholders).
+ * SCOPE (read before relying on this): this rule catches exactly ONE shape — a timer
+ * handle written INLINE in a `Map.set` value literal: `someMap.set(key, { …, t:
+ * setTimeout(...) })` / `setInterval(...)` — re-armed without first clearing the previous
+ * entry, which orphans the old timer.
  *
- * Conservative by design (low false-positive): a `.set(key, {timer})` is flagged ONLY
- * when its enclosing function contains NO clear-before-set guard — i.e. no
- * `clearTimeout`/`clearInterval`, no `clear*(...)` helper call, and no `.get(...)` lookup
- * of the existing entry. Every correctly-guarded site in the codebase (operation-tracker,
- * vote-grace timers, image-coalesce buffers) retrieves + clears the prior entry, so this
- * rule passes them and fires only on the unguarded shape. It does NOT touch field-assigned
- * timers (`this.timer = setInterval(...)`), which legitimately guard via proxy flags
- * (e.g. `if (this.isTyping) return`) — that pattern is out of scope to avoid false positives.
+ * It is a FORWARD-LOOKING guard. The codebase today uses the build-then-set idiom
+ * (construct the value object with timer fields = null, `map.set(key, obj)`, then arm
+ * timers via field assignment in a later statement/method), so this inline shape occurs
+ * NOWHERE at present and the rule emits zero findings. It is therefore NOT the detector
+ * for the OperationTracker.onToolStart leak — that field-assigned variant needs cross-
+ * statement/type-aware dataflow a lexical lint rule can't do reliably, and is covered by
+ * its own regression test (tests/runtimes/agent/operation-tracker.test.ts) plus the
+ * progress-coalescing bench, not by this rule. The rule's value is preventing the inline
+ * variant from being introduced later.
+ *
+ * Conservative by design (low false-positive): the inline `.set(key, {timer})` is flagged
+ * ONLY when its enclosing function contains NO clear-before-set guard — no
+ * `clearTimeout`/`clearInterval`, no `clear*(...)` helper call, and no `.get(...)` lookup.
+ * Field-assigned timers (`this.timer = setInterval(...)`), which legitimately guard via
+ * proxy flags (e.g. `if (this.isTyping) return`), are out of scope.
  */
 
 const TIMER_FNS = new Set(['setTimeout', 'setInterval']);
