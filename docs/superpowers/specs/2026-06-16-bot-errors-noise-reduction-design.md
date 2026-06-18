@@ -627,3 +627,57 @@ per-remote scoping, gate-off, fail-open on malformed state.
 
 **Deploy:** inert until the next natural dispatcher restart (Lucas-controlled; no
 self-restart), same as Patterns A–G. SHA-pin manifest regenerated in that step.
+
+---
+
+## Pattern I — best-effort remotes are info-tier (declared-flaky ≠ crash)
+
+**Problem (live evidence, 2026-06-18).** The collector probes a fixed roster
+(`--remote …`). One member, `gupta`, is a laptop (`macbook-pro…ts.net`),
+explicitly declared `--best-effort-remote gupta`. It went offline 2026-06-17
+(lid closed / off network), 18 consecutive missed probes. It held two open
+incidents: `relay_host_down:gupta` (**warning** page) and pre-threshold
+`remote-claim-failed:gupta` (**critical**). A laptop sleeping is a
+planned/expected condition — exactly the "intentional shutdown vs crash"
+distinction the project targets — yet it paged.
+
+**Root cause.** `is_best_effort` (operator's "this host is expected to be
+flaky" declaration) only adjusted aggregate rollup counters
+(`bestEffortFailures` subtracted from `hard_failed` so a flaky host can't trip
+the "all remotes down" meta-alert). It had **no effect** on the per-remote
+failure events, which still emitted at warning/critical and paged.
+
+**Fix.** Best-effort per-remote *offline-path* failure events emit at `info`
+instead of `warning`/`critical`, so they surface in the digest without paging.
+Two emission sites, both inside the per-remote loop (where `is_best_effort` is
+already computed):
+1. `emit_relay_host_state_event(…, best_effort=is_best_effort)` — a
+   `relay_host_down` for a best-effort host downgrades `warning → info`.
+   (`relay_host_recovered` was already info.)
+2. `enqueue_meta_alert(…, best_effort=is_best_effort)` — the pre-threshold
+   `remote-claim-failed` (failures 1–2 before down-state) downgrades
+   `critical → info`. A new `best_effort` param drives `effective_severity`,
+   applied to **both** the fresh-alert and still-open renotify event dicts.
+
+Scope boundary: the writefail-harvest / relay / drain-stale alerts are **not**
+downgraded — they only execute after a *successful* outbox claim (host
+reachable), so they are not offline-noise. `if outbox_claim_failed: continue`
+already skips them for a down host.
+
+**Gate / fail-open.** `BOT_ERRORS_BEST_EFFORT_INFO_TIER` (default on). Off, or
+any caller that doesn't opt in (`best_effort` defaults `False`) → prior
+warning/critical behavior. Non-best-effort hosts are wholly unaffected — a real
+server crash still pages.
+
+**Tests.** `deploy/scripts/tests/test_bot_errors_best_effort_info_tier.py` (17):
+gate default-on + off-values; `relay_host_down` info when best-effort,
+warning otherwise / by default / gate-off; recovered always info;
+`enqueue_meta_alert` info when best-effort, critical otherwise / by default /
+gate-off; still-open renotify honors info-tier. Backoff suite stub updated for
+the new kwarg; 58 related collector tests green.
+
+**Deploy:** inert until the next natural collector restart (Lucas-controlled; no
+self-restart), same as Patterns A–H. This one lands in the **collector**, not
+the dispatcher — so activating it requires restarting `bot-errors-collector`
+(the daemon that holds the `--best-effort-remote` roster), distinct from the
+dispatcher restart Patterns A–H need.

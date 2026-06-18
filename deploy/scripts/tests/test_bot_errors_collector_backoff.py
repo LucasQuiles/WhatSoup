@@ -541,7 +541,7 @@ def test_no_per_attempt_meta_alerts_while_down(tmp_state):
 
     meta_alert_calls: list[tuple[str, str]] = []
 
-    def patched_enqueue(r, source, summary, evidence, state, cooldown, extra_diagnostics=None):
+    def patched_enqueue(r, source, summary, evidence, state, cooldown, extra_diagnostics=None, best_effort=False):
         meta_alert_calls.append((r, source))
 
     with _env(state_dir, outbox_dir), \
