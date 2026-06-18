@@ -117,13 +117,15 @@ export function assertConversationAccess(
  * before comparison so this works correctly on macOS, where /var/folders is a
  * symlink to /private/var/folders (and the same for /tmp).
  *
- * Returns true if allowedRoot is undefined (no boundary enforced).
+ * Fail-closed: returns false when allowedRoot is undefined. A session with no
+ * configured root must not be able to read arbitrary host files (audit #1094);
+ * every file-capable session is required to set an explicit allowedRoot.
  */
 export function isPathWithinAllowedRoot(
   resolvedPath: string,
   allowedRoot: string | undefined,
 ): boolean {
-  if (!allowedRoot) return true;
+  if (!allowedRoot) return false;
   let canonicalAllowedRoot: string;
   try {
     canonicalAllowedRoot = realpathSync(allowedRoot);

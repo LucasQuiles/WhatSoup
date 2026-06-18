@@ -46,7 +46,11 @@ export class PassiveRuntime implements Runtime {
 
     const socketPath = this.config.socketPath
       ?? join(this.config.paths.stateRoot, 'whatsoup.sock');
-    const session: SessionContext = { tier: 'global' };
+    // Fail-closed file boundary (audit #1094): give the passive global session an
+    // explicit allowedRoot (the instance state root) so file-capable tools resolve
+    // against a legitimate directory rather than being denied outright, while paths
+    // outside the instance state (system dirs, credentials) are rejected.
+    const session: SessionContext = { tier: 'global', allowedRoot: this.config.paths.stateRoot };
     this.socketServer = new WhatSoupSocketServer(socketPath, this.registry, session);
     this.socketServer.start();
     log.info(

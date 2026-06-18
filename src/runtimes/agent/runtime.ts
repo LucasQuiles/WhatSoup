@@ -1726,7 +1726,19 @@ export class AgentRuntime implements Runtime {
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
         const socketPath = join(claudeDir, 'whatsoup.sock');
 
-        const globalSession: SessionContext = { tier: 'global' };
+        // Fail-closed file boundary (audit #1094): the global session must carry
+        // an explicit allowedRoot or file-capable tools (post_status/send_media/
+        // schedule_message) would be denied. agentCwd is the agent's working root
+        // (the parent of every chatJidToWorkspace() workspace), so legit media the
+        // agent stages under its tree stays reachable while paths outside it
+        // (system dirs, credentials, the instance DB) are rejected.
+        if (!this.cwd) {
+          log.warn(
+            { agentCwd },
+            'agent cwd unset; global MCP file boundary falls back to home directory',
+          );
+        }
+        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
         this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;

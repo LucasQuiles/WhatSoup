@@ -142,7 +142,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'post_status',
       { text: 'hello story', backgroundColor: '#112233', font: 3 },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -165,7 +165,7 @@ describe('status tools', () => {
   it('post_status sends text without optional presentation fields', async () => {
     insertContact(db, ALICE_JID, 'Alice');
 
-    await registry.call('post_status', { text: 'plain story' }, globalSession());
+    await registry.call('post_status', { text: 'plain story' }, globalSession(scratchDir));
 
     expect(mockSock.sendMessage).toHaveBeenCalledWith(
       STATUS_JID,
@@ -183,7 +183,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'post_status',
       { filePath, caption: 'look at this' },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -210,7 +210,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'post_status',
       { filePath, text: 'video caption' },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -255,7 +255,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'post_status',
       { filePath, caption: 'look at this' },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -268,7 +268,7 @@ describe('status tools', () => {
     insertContact(db, ALICE_JID, 'Alice');
     vi.mocked(mockSock.sendMessage).mockRejectedValueOnce(new Error('socket hang up'));
 
-    const textResult = await registry.call('post_status', { text: 'will fail' }, globalSession());
+    const textResult = await registry.call('post_status', { text: 'will fail' }, globalSession(scratchDir));
     expect(textResult.isError).toBe(true);
     expect(textResult.content[0].text).toContain('connection error');
     expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
@@ -278,24 +278,24 @@ describe('status tools', () => {
     const filePath = join(scratchDir, 'photo.jpg');
     writeFileSync(filePath, Buffer.from('fake-image'));
 
-    const mediaResult = await registry.call('post_status', { filePath }, globalSession());
+    const mediaResult = await registry.call('post_status', { filePath }, globalSession(scratchDir));
     expect(mediaResult.isError).toBe(true);
     expect(mediaResult.content[0].text).toContain('permission denied');
     expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('post_status validates required content, connection state, and file boundaries', async () => {
-    const missingContent = await registry.call('post_status', {}, globalSession());
+    const missingContent = await registry.call('post_status', {}, globalSession(scratchDir));
     expect(missingContent.isError).toBe(true);
     expect(missingContent.content[0].text).toMatch(/Provide text/);
 
-    const noRecipients = await registry.call('post_status', { text: 'no recipients' }, globalSession());
+    const noRecipients = await registry.call('post_status', { text: 'no recipients' }, globalSession(scratchDir));
     expect(noRecipients.isError).toBe(true);
     expect(noRecipients.content[0].text).toMatch(/no status recipients/i);
 
     insertContact(db, ALICE_JID, 'Alice');
     connectedSock = null;
-    const disconnected = await registry.call('post_status', { text: 'offline' }, globalSession());
+    const disconnected = await registry.call('post_status', { text: 'offline' }, globalSession(scratchDir));
     expect(disconnected.isError).toBe(true);
     expect(disconnected.content[0].text).toMatch(/not connected/i);
     connectedSock = mockSock;
@@ -303,7 +303,7 @@ describe('status tools', () => {
     const missingFile = await registry.call(
       'post_status',
       { filePath: join(scratchDir, 'missing.jpg') },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(missingFile.isError).toBe(true);
     expect(missingFile.content[0].text).toMatch(/File not found/);
@@ -325,16 +325,27 @@ describe('status tools', () => {
 
     const unsupportedPath = join(scratchDir, 'note.txt');
     writeFileSync(unsupportedPath, 'not media');
-    const unsupported = await registry.call('post_status', { filePath: unsupportedPath }, globalSession());
+    const unsupported = await registry.call('post_status', { filePath: unsupportedPath }, globalSession(scratchDir));
     expect(unsupported.isError).toBe(true);
     expect(unsupported.content[0].text).toMatch(/Unsupported status media extension/);
 
     const largePath = join(scratchDir, 'huge.mov');
     writeFileSync(largePath, '');
     truncateSync(largePath, 50 * 1024 * 1024 + 1);
-    const tooLarge = await registry.call('post_status', { filePath: largePath }, globalSession());
+    const tooLarge = await registry.call('post_status', { filePath: largePath }, globalSession(scratchDir));
     expect(tooLarge.isError).toBe(true);
     expect(tooLarge.content[0].text).toMatch(/File too large/);
+  });
+
+  it('post_status rejects file paths when the session has no allowedRoot (fail-closed, #1094)', async () => {
+    insertContact(db, ALICE_JID, 'Alice');
+    const filePath = join(scratchDir, 'photo.jpg');
+    writeFileSync(filePath, Buffer.from('fake-image'));
+    // No allowedRoot -> isPathWithinAllowedRoot fails closed; even a real, readable
+    // file must be rejected so a rootless global session cannot exfiltrate host files.
+    const result = await registry.call('post_status', { filePath, caption: 'x' }, globalSession());
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/outside workspace/);
   });
 
   it('list_statuses groups stored status messages by sender', async () => {
@@ -362,7 +373,7 @@ describe('status tools', () => {
       contentText: 'photo story',
     });
 
-    const result = await registry.call('list_statuses', {}, globalSession());
+    const result = await registry.call('list_statuses', {}, globalSession(scratchDir));
     expect(result.isError).toBeUndefined();
 
     const body = JSON.parse(result.content[0].text) as {
@@ -422,7 +433,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'list_statuses',
       { sender_jid: ALICE_JID, mark_read: true, limit: 3 },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -468,7 +479,7 @@ describe('status tools', () => {
     const result = await registry.call(
       'list_statuses',
       { sender_jid: CARA_JID, mark_read: true },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -487,14 +498,14 @@ describe('status tools', () => {
     });
     connectedSock = null;
 
-    const result = await registry.call('list_statuses', { mark_read: true }, globalSession());
+    const result = await registry.call('list_statuses', { mark_read: true }, globalSession(scratchDir));
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not connected/i);
   });
 
   it('post_status errors when there are no eligible contacts', async () => {
-    const result = await registry.call('post_status', { text: 'no recipients' }, globalSession());
+    const result = await registry.call('post_status', { text: 'no recipients' }, globalSession(scratchDir));
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/no status recipients/i);
   });
@@ -519,7 +530,7 @@ describe('status tools', () => {
       JSON.stringify({ key: { remoteJid: 'status@broadcast', id: 'status-4', fromMe: false, participant: '111@s.whatsapp.net' } }),
     );
 
-    const result = await registry.call('list_statuses', { mark_read: true }, globalSession());
+    const result = await registry.call('list_statuses', { mark_read: true }, globalSession(scratchDir));
     expect(result.isError).toBeUndefined();
     expect(mockSock.readMessages).toHaveBeenCalledWith([
       expect.objectContaining({
