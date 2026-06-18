@@ -93,6 +93,7 @@ import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import { PendingPollStore } from './pending-poll-store.ts';
 import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
+import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -1467,8 +1468,8 @@ export class AgentRuntime implements Runtime {
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
-      isEnabled: () => this.handoffDistillerEnabled(),
-      getModel: () => this.handoffDistillModel(),
+      isEnabled: () => handoffDistillerEnabled(),
+      getModel: () => handoffDistillModel(),
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
@@ -5185,9 +5186,9 @@ export class AgentRuntime implements Runtime {
       failedEntryCount: this.fallbackChain.failedKeys.size,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
-        enabled: this.handoffDistillerEnabled(),
-        contextInjection: this.handoffContextEnabled(),
-        model: this.handoffDistillModel(),
+        enabled: handoffDistillerEnabled(),
+        contextInjection: handoffContextEnabled(),
+        model: handoffDistillModel(),
       },
     };
   }
@@ -6507,20 +6508,6 @@ export class AgentRuntime implements Runtime {
     return rest;
   }
 
-  // ── Handoff distiller / context-injection flags (default OFF) ───────────────
-  // With all three unset the agent behaves byte-identically to today: no schema
-  // reads, no system-block injection, no distiller construction.
-  private handoffDistillerEnabled(): boolean {
-    return process.env['WHATSOUP_HANDOFF_DISTILLER'] === '1';
-  }
-
-  private handoffContextEnabled(): boolean {
-    return process.env['WHATSOUP_HANDOFF_CONTEXT'] === '1';
-  }
-
-  private handoffDistillModel(): string | null {
-    return process.env['WHATSOUP_HANDOFF_DISTILL_MODEL']?.trim() || null;
-  }
 
   /**
    * Build the `handoffSystemBlock` callback for a fresh/stand-in SessionManager.
@@ -6535,7 +6522,7 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     provider: string,
   ): (() => string | null) | undefined {
-    if (!this.handoffContextEnabled()) return undefined;
+    if (!handoffContextEnabled()) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
       // Seed the distilled handoff context only into a STAND-IN session spawned
