@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
-import { Database } from '../../src/core/database.ts';
+import {
+  Database,
+  storeDecryptionFailure,
+  resolveDecryptionFailure,
+  type DecryptionFailureInput,
+} from '../../src/core/database.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -995,5 +1000,250 @@ describe('migration 28 — pending_polls', () => {
         );
       `);
     }).not.toThrow();
+  });
+});
+
+// ─── Uncovered-branch coverage ───────────────────────────────────────────────
+
+describe('database.ts uncovered-branch coverage', () => {
+  // ── Migration idempotency guards (lines 569–791) ──────────────────────────
+  //
+  // Each ALTER TABLE migration is wrapped in `if (!cols.some(c => c.name === X))`.
+  // The normal open path always takes the true branch (column missing → ALTER).
+  // To cover the false branch (column already present → skip) we open on a file,
+  // delete the schema_migrations rows for the guarded migrations, then reopen.
+  // runPendingMigrations re-runs the migration function, which sees the column
+  // already exists and skips the ALTER.
+
+  it('migration guards skip ALTER when columns already exist (idempotent re-run)', () => {
+    const path = tmpFile();
+    const db = new Database(path);
+    db.open();
+
+    // Capture pre-state for several guarded columns so we can assert no-op.
+    const beforeRawMsgCols = (db.raw.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    const beforeSessCols = (db.raw.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    db.close();
+
+    // Wipe the migration records for every guarded migration so they re-run.
+    const wipe = new DatabaseSync(path);
+    wipe.prepare(
+      'DELETE FROM schema_migrations WHERE version IN (5,8,11,12,13,18,19,24)',
+    ).run();
+    const remaining = wipe.prepare('SELECT count(*) AS n FROM schema_migrations').get() as { n: number };
+    wipe.close();
+    expect(remaining.n).toBeLessThan(29);
+
+    // Reopen — migration functions re-execute but every guard skips the ALTER.
+    const db2 = new Database(path);
+    expect(() => db2.open()).not.toThrow();
+
+    const afterRawMsgCols = (db2.raw.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    const afterSessCols = (db2.raw.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+
+    // Columns unchanged: idempotency guard held.
+    expect(afterRawMsgCols).toEqual(beforeRawMsgCols);
+    expect(afterSessCols).toEqual(beforeSessCols);
+    // Spot-check the specific guarded columns are still present.
+    expect(afterRawMsgCols).toContain('raw_message');
+    expect(afterRawMsgCols).toContain('enrichment_retries');
+    expect(afterRawMsgCols).toContain('input_tokens');
+    expect(afterRawMsgCols).toContain('output_tokens');
+    expect(afterRawMsgCols).toContain('model_used');
+    expect(afterRawMsgCols).toContain('media_path');
+    expect(afterRawMsgCols).toContain('content_text');
+    expect(afterRawMsgCols).toContain('updated_at');
+    expect(afterSessCols).toContain('total_input_tokens');
+    expect(afterSessCols).toContain('total_output_tokens');
+    expect(afterSessCols).toContain('ended_at');
+    expect(afterSessCols).toContain('provider');
+
+    db2.close();
+    cleanup(path);
+  });
+
+  it('runPendingMigrations skips already-applied migrations on plain reopen (line 906)', () => {
+    const path = tmpFile();
+    const db = new Database(path);
+    db.open();
+    const appliedBefore = (db.raw.prepare('SELECT count(*) AS n FROM schema_migrations').get() as { n: number }).n;
+    db.close();
+
+    // Reopen WITHOUT wiping — every migration is in `applied`, so the
+    // `if (applied.has(version)) continue;` branch runs for each entry.
+    const db2 = new Database(path);
+    expect(() => db2.open()).not.toThrow();
+    const appliedAfter = (db2.raw.prepare('SELECT count(*) AS n FROM schema_migrations').get() as { n: number }).n;
+    db2.close();
+
+    // No new migrations recorded — the skip branch fired for every version.
+    expect(appliedAfter).toBe(appliedBefore);
+    cleanup(path);
+  });
+
+  it('verifyRequiredTables recreates chat_aliases when missing (line 949)', () => {
+    const path = tmpFile();
+    const db = new Database(path);
+    db.open();
+    db.close();
+
+    // Externally drop chat_aliases to simulate a phantom-migration state.
+    const saboteur = new DatabaseSync(path);
+    saboteur.exec('DROP TABLE chat_aliases');
+    saboteur.close();
+
+    // Reopen — verifyRequiredTables sees the table missing and recreates it.
+    const db2 = new Database(path);
+    expect(() => db2.open()).not.toThrow();
+    const row = db2.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_aliases'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe('chat_aliases');
+    db2.close();
+    cleanup(path);
+  });
+
+  // ── importFromLegacyDb branches ───────────────────────────────────────────
+
+  it('importFromLegacyDb skips access_list with unrecognized schema (line 1025-1038)', () => {
+    const weirdLegacyPath = tmpFile();
+    const weird = new DatabaseSync(weirdLegacyPath);
+    weird.exec(`
+      CREATE TABLE messages (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT, chat_jid TEXT NOT NULL, sender_jid TEXT NOT NULL,
+        sender_name TEXT, message_id TEXT UNIQUE, content TEXT,
+        content_type TEXT NOT NULL DEFAULT 'text', is_from_me INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL, quoted_message_id TEXT,
+        enrichment_processed_at TEXT, enrichment_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      -- access_list with neither subject_type/subject_id nor phone — unrecognized schema
+      CREATE TABLE access_list (
+        handle TEXT PRIMARY KEY, status TEXT NOT NULL
+      );
+      INSERT INTO access_list (handle, status) VALUES ('whoever', 'allowed');
+    `);
+    weird.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+    // Should not throw and should skip the unrecognized access_list silently.
+    expect(() => freshDb.importFromLegacyDb(weirdLegacyPath)).not.toThrow();
+
+    const row = freshDb.raw.prepare('SELECT count(*) AS n FROM access_list').get() as { n: number };
+    expect(row.n).toBe(0);
+
+    freshDb.close();
+    cleanup(freshPath, weirdLegacyPath);
+  });
+
+  // ── clearChat (line 1230) ──────────────────────────────────────────────────
+
+  it('clearChat soft-deletes all messages in a conversation and returns count', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+      VALUES
+        ('15550000001@s.whatsapp.net', '15550000001', '15550000001@s.whatsapp.net', 'm-a', 'hi', 'text', 0, 1700000000),
+        ('15550000001@s.whatsapp.net', '15550000001', '15550000001@s.whatsapp.net', 'm-b', 'there', 'text', 0, 1700000001),
+        ('15550000002@s.whatsapp.net', '15550000002', '15550000002@s.whatsapp.net', 'm-c', 'other chat', 'text', 0, 1700000002)
+    `).run();
+
+    const changed = db.clearChat('15550000001');
+    expect(changed).toBe(2);
+
+    // Both messages in the cleared chat are now soft-deleted; the other chat is untouched.
+    const cleared = db.raw
+      .prepare("SELECT count(*) AS n FROM messages WHERE conversation_key = '15550000001' AND deleted_at IS NOT NULL")
+      .get() as { n: number };
+    expect(cleared.n).toBe(2);
+
+    const untouched = db.raw
+      .prepare("SELECT deleted_at FROM messages WHERE message_id = 'm-c'")
+      .get() as { deleted_at: string | null };
+    expect(untouched.deleted_at).toBeNull();
+
+    // clearChat is itself idempotent — re-running on the same conversation changes 0 rows.
+    const secondRun = db.clearChat('15550000001');
+    expect(secondRun).toBe(0);
+
+    db.close();
+  });
+
+  // ── storeDecryptionFailure / resolveDecryptionFailure (lines 1251–1266) ───
+
+  it('storeDecryptionFailure upserts and resolveDecryptionFailure marks resolved', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    const input: DecryptionFailureInput = {
+      messageId: 'msg-decrypt-1',
+      chatJid: '15550000003@s.whatsapp.net',
+      senderJid: '15550000003@s.whatsapp.net',
+      errorMessage: 'persister failed',
+      rawKey: { remoteJid: '15550000003@s.whatsapp.net', id: 'msg-decrypt-1', fromMe: false },
+      timestamp: 1700000050,
+    };
+
+    storeDecryptionFailure(db, input);
+
+    const row1 = db.raw
+      .prepare('SELECT message_id, conversation_key, seen_count, resolved, error_message FROM decryption_failures WHERE message_id = ?')
+      .get('msg-decrypt-1') as { message_id: string; conversation_key: string; seen_count: number; resolved: number; error_message: string };
+    expect(row1).toEqual({
+      message_id: 'msg-decrypt-1',
+      conversation_key: '15550000003',
+      seen_count: 1,
+      resolved: 0,
+      error_message: 'persister failed',
+    });
+
+    // Second store with the same message_id hits the ON CONFLICT upsert (seen_count++).
+    storeDecryptionFailure(db, { ...input, errorMessage: 'still failing' });
+    const row2 = db.raw
+      .prepare('SELECT seen_count, error_message FROM decryption_failures WHERE message_id = ?')
+      .get('msg-decrypt-1') as { seen_count: number; error_message: string };
+    expect(row2).toEqual({ seen_count: 2, error_message: 'still failing' });
+
+    // Resolve — flips resolved flag and stamps resolved_at.
+    resolveDecryptionFailure(db, 'msg-decrypt-1');
+    const row3 = db.raw
+      .prepare('SELECT resolved, resolved_at FROM decryption_failures WHERE message_id = ?')
+      .get('msg-decrypt-1') as { resolved: number; resolved_at: string | null };
+    expect(row3.resolved).toBe(1);
+    expect(row3.resolved_at).not.toBeNull();
+
+    db.close();
+  });
+
+  it('resolveDecryptionFailure is a no-op for an unknown message_id', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    // Insert one unresolved row, then resolve a *different* message_id.
+    storeDecryptionFailure(db, {
+      messageId: 'msg-real',
+      chatJid: '15550000004@s.whatsapp.net',
+      senderJid: '15550000004@s.whatsapp.net',
+      errorMessage: 'err',
+      rawKey: { remoteJid: '15550000004@s.whatsapp.net', id: 'msg-real', fromMe: false },
+      timestamp: 1700000060,
+    });
+    resolveDecryptionFailure(db, 'msg-nonexistent');
+
+    const row = db.raw
+      .prepare('SELECT message_id, resolved FROM decryption_failures WHERE message_id = ?')
+      .get('msg-real') as { message_id: string; resolved: number };
+    expect(row).toEqual({ message_id: 'msg-real', resolved: 0 });
+
+    db.close();
   });
 });
