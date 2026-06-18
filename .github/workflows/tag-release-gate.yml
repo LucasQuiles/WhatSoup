@@ -29,6 +29,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+          cache: npm
+          # Cache both the root and console lockfiles so the warm npm cache
+          # covers `npm ci` and `npm --prefix console ci` (mirrors quality.yml).
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
 
       - name: Install dependencies
         run: npm ci
