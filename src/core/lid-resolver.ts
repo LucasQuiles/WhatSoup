@@ -647,6 +647,10 @@ export function setLidAuthDir(authDir: string): void {
  */
 function lookupLidFromDisk(db: Database, lid: string): string | null {
   if (!_lidAuthDir) return null;
+  // Defense-in-depth: a LID is always digits. Reject anything else before
+  // interpolating it into a file path, mirroring the startup hydrate filter
+  // (/^lid-mapping-(\d+)_reverse\.json$/) and preventing path traversal (#1089).
+  if (!/^\d+$/.test(lid)) return null;
   const file = join(_lidAuthDir, `lid-mapping-${lid}_reverse.json`);
   let raw: string;
   try {

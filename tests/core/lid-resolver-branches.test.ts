@@ -33,7 +33,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -484,4 +484,38 @@ describe('canonicalizeChatJid — domain branch matrix', () => {
   // reachable only if resolveLidToJid throws. With a healthy :memory: db that
   // path is not naturally hit; the existing resolve tests cover the happy/miss
   // arms. Not faked here — see summary.
+});
+
+// ── lookupLidFromDisk path-traversal guard (#1089) ───────────────────────────
+
+describe('resolveLid disk fallback — path-traversal guard (#1089)', () => {
+  let db: Database;
+  let baseDir: string;
+  let authDir: string;
+  beforeEach(() => {
+    db = freshDb();
+    baseDir = mkdtempSync(join(tmpdir(), 'ws-lid-trav-'));
+    authDir = join(baseDir, 'auth');
+    mkdirSync(authDir);
+  });
+  afterEach(() => {
+    setLidAuthDir('');
+    db.close();
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it('does not read a reverse-mapping file outside the auth dir for a traversal LID', () => {
+    setLidAuthDir(authDir);
+    // Plant a file above authDir that an unguarded join would reach:
+    //   join(baseDir/auth, `lid-mapping-../../../evil_reverse.json`)
+    //   normalises to baseDir/evil_reverse.json (escapes authDir).
+    writeFileSync(join(baseDir, 'evil_reverse.json'), '"15559999999"');
+    expect(resolveLid(db, '../../../evil')).toBeNull();
+  });
+
+  it('still resolves a legitimate digit-only LID from disk', () => {
+    setLidAuthDir(authDir);
+    writeFileSync(join(authDir, 'lid-mapping-22223333_reverse.json'), '"15550007"');
+    expect(resolveLid(db, '22223333')).toBe('15550007');
+  });
 });
