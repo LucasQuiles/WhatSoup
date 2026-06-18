@@ -14,6 +14,7 @@ import outboxDirectWrite from './outbox-direct-write.mjs';
 import approvedApiClient from './approved-api-client.mjs';
 import ringBoundaries from './ring-boundaries.mjs';
 import unsafeTypeEscape from './unsafe-type-escape.mjs';
+import timerRearmWithoutClear from './timer-rearm-without-clear.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -26,6 +27,7 @@ const plugin = {
     'approved-api-client': approvedApiClient,
     'ring-boundaries': ringBoundaries,
     'unsafe-type-escape': unsafeTypeEscape,
+    'timer-rearm-without-clear': timerRearmWithoutClear,
   },
 };
 

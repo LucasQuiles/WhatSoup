@@ -123,6 +123,17 @@ export const fitnessRules = [
     source: ['feedback:audit_scanners_fail_closed'],
   },
   {
+    id: 'invariant.timer-rearm-without-clear',
+    title: 'Map-stored timers cleared before re-arm',
+    category: 'invariant',
+    rationale:
+      'Storing a timer handle in a Map value object and re-arming the same key without first clearing the previous entry orphans the old timer, which keeps firing (the OperationTracker.onToolStart duplicate-placeholder bug class). Retrieve and clear the existing entry before set.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['feedback:operation_tracker_timer_rearm_leak'],
+  },
+  {
     id: 'invariant.outbox-env-gated',
     title: 'Bot-errors outbox writes go through the env-aware resolver',
     category: 'invariant',
