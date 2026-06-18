@@ -530,3 +530,48 @@ export function isLowSignalPollStatusReply(
   if (textMatchesPollOption(text, options)) return false;
   return LOW_SIGNAL_POLL_STATUS_REPLIES.has(normalizedPollReplyText(text));
 }
+
+// ---------------------------------------------------------------------------
+// PendingPollQuestion live-state helpers
+// ---------------------------------------------------------------------------
+// Pure operations on a single PendingPollQuestion (no AgentRuntime state).
+// Extracted from AgentRuntime as a god-class method-count slice — the call sites
+// switch from `this.X(pending)` to the imported free function, behavior unchanged.
+
+/** Clear and null both expiry timers on a pending poll (idempotent). */
+export function clearPendingPollTimers(pending: PendingPollQuestion): void {
+  if (pending.softExpiryTimer) {
+    clearTimeout(pending.softExpiryTimer);
+    pending.softExpiryTimer = undefined;
+  }
+  if (pending.hardExpiryTimer) {
+    clearTimeout(pending.hardExpiryTimer);
+    pending.hardExpiryTimer = undefined;
+  }
+}
+
+/** Drop every poll-message-id mapping that points at the given question index. */
+export function removePollIdsForQuestion(pending: PendingPollQuestion, questionIndex: number): void {
+  for (const [pollMessageId, index] of pending.pollMessageIdToQuestionIndex) {
+    if (index === questionIndex) pending.pollMessageIdToQuestionIndex.delete(pollMessageId);
+  }
+}
+
+/** Advance currentQuestionIndex past every already-answered question. */
+export function advancePendingPollIndex(pending: PendingPollQuestion): void {
+  while (
+    pending.currentQuestionIndex < pending.questions.length
+    && pending.answersCollected[pending.currentQuestionIndex] !== undefined
+  ) {
+    pending.currentQuestionIndex++;
+  }
+}
+
+/** The poll's still-unanswered questions, paired with their original index. */
+export function unansweredPollQuestions(
+  pending: PendingPollQuestion,
+): Array<{ index: number; question: AskUserQuestion }> {
+  return pending.questions
+    .map((question, index) => ({ index, question }))
+    .filter(({ index }) => pending.answersCollected[index] === undefined);
+}

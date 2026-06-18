@@ -71,7 +71,7 @@ describe('AgentRuntime structural policy', () => {
     const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
     expect(pendingHelper).toBeTruthy();
     const helperBody = pendingHelper?.[1] ?? '';
-    expect(helperBody).toContain('this.clearPendingPollTimers(pending);');
+    expect(helperBody).toContain('clearPendingPollTimers(pending);');
     expect(helperBody).toContain('this.pendingPollQuestions.delete(mapKey);');
     expect(methodBody).toContain("this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');");
   });

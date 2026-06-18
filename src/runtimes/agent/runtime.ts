@@ -573,6 +573,10 @@ import {
   isLowSignalPollStatusReply,
   hasEscapeHatchOption,
   configuredDefaultPollTimeoutMs,
+  clearPendingPollTimers,
+  removePollIdsForQuestion,
+  advancePendingPollIndex,
+  unansweredPollQuestions,
   type PendingPollQuestion,
   type SerializedPendingPoll,
   type ResolutionStrategy,
@@ -1994,7 +1998,7 @@ export class AgentRuntime implements Runtime {
           if (pendingPoll) {
             this.pendingPollQuestions.delete(lidKey);
             this.removePendingPoll(lidKey);
-            this.clearPendingPollTimers(pendingPoll);
+            clearPendingPollTimers(pendingPoll);
             pendingPoll.chatJidAliases.add(lidKey);
             pendingPoll.chatJidAliases.add(newJid);
             pendingPoll.chatJidAliases.add(canonical);
@@ -3172,7 +3176,7 @@ export class AgentRuntime implements Runtime {
       }
 
       if (!bypassPollIntercept) {
-        this.advancePendingPollIndex(pendingPoll);
+        advancePendingPollIndex(pendingPoll);
 
         const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
         if (currentQ) {
@@ -3197,9 +3201,9 @@ export class AgentRuntime implements Runtime {
 
           const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
           pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
-          this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
+          removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
           pendingPoll.currentQuestionIndex++;
-          this.advancePendingPollIndex(pendingPoll);
+          advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
             this.injectPollAnswers(mapKey, pendingPoll);
@@ -3309,21 +3313,10 @@ export class AgentRuntime implements Runtime {
   // AskUserQuestion → WhatsApp Poll bridge
   // ---------------------------------------------------------------------------
 
-  private clearPendingPollTimers(pending: PendingPollQuestion): void {
-    if (pending.softExpiryTimer) {
-      clearTimeout(pending.softExpiryTimer);
-      pending.softExpiryTimer = undefined;
-    }
-    if (pending.hardExpiryTimer) {
-      clearTimeout(pending.hardExpiryTimer);
-      pending.hardExpiryTimer = undefined;
-    }
-  }
-
   private deletePendingPollQuestions(mapKey: string): void {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (!pending) return;
-    this.clearPendingPollTimers(pending);
+    clearPendingPollTimers(pending);
     // Clean up suppression for askuser source
     if (pending.source === 'askuser' || pending.source === undefined) {
       this.suppressedAskUserToolIds.delete(pending.toolId);
@@ -3522,37 +3515,16 @@ export class AgentRuntime implements Runtime {
 
   private shouldContinuePendingPollSend(mapKey: string, pending: PendingPollQuestion): boolean {
     if (this.isPendingPollActive(pending)) return true;
-    this.clearPendingPollTimers(pending);
+    clearPendingPollTimers(pending);
     log.debug({ mapKey, chatJid: pending.chatJid, toolId: pending.toolId }, 'AskUserQuestion poll send abandoned after pending poll was replaced');
     return false;
-  }
-
-  private removePollIdsForQuestion(pending: PendingPollQuestion, questionIndex: number): void {
-    for (const [pollMessageId, index] of pending.pollMessageIdToQuestionIndex) {
-      if (index === questionIndex) pending.pollMessageIdToQuestionIndex.delete(pollMessageId);
-    }
-  }
-
-  private advancePendingPollIndex(pending: PendingPollQuestion): void {
-    while (
-      pending.currentQuestionIndex < pending.questions.length
-      && pending.answersCollected[pending.currentQuestionIndex] !== undefined
-    ) {
-      pending.currentQuestionIndex++;
-    }
-  }
-
-  private unansweredPollQuestions(pending: PendingPollQuestion): Array<{ index: number; question: AskUserQuestion }> {
-    return pending.questions
-      .map((question, index) => ({ index, question }))
-      .filter(({ index }) => pending.answersCollected[index] === undefined);
   }
 
   private sendUnansweredPollTextFallback(
     pending: PendingPollQuestion,
     intro: string,
   ): void {
-    const unanswered = this.unansweredPollQuestions(pending);
+    const unanswered = unansweredPollQuestions(pending);
     unanswered.forEach(({ question }, fallbackIndex) => {
       this.sendDirect(
         pending.chatJid,
@@ -3697,13 +3669,13 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    const unanswered = this.unansweredPollQuestions(pending);
+    const unanswered = unansweredPollQuestions(pending);
     if (unanswered.length === 0) return;
 
     pending.mode = 'textFallback';
     pending.pollMessageIdToQuestionIndex.clear();
     pending.softExpiryTimer = undefined;
-    this.advancePendingPollIndex(pending);
+    advancePendingPollIndex(pending);
     this.persistPendingPoll(mapKey, pending);
     this.sendUnansweredPollTextFallback(
       pending,
@@ -3716,7 +3688,7 @@ export class AgentRuntime implements Runtime {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (!pending || pending !== expectedPending) return;
 
-    if (this.unansweredPollQuestions(pending).length > 0) {
+    if (unansweredPollQuestions(pending).length > 0) {
       this.sendDirect(pending.chatJid, 'This decision has expired — please re-trigger when ready.');
     }
     log.warn({ mapKey, chatJid: pending.chatJid }, 'AskUserQuestion poll hard-expired and was cleared');
@@ -4041,8 +4013,8 @@ export class AgentRuntime implements Runtime {
         // Use answerForPollSelection to apply question-aware formatting (e.g. "Other" directive)
         const winningVote = questionVotes.get(canonicalVoter) ?? vote;
         pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, winningVote.selectedOptions);
-        this.removePollIdsForQuestion(pending, matchedQuestionIndex);
-        this.advancePendingPollIndex(pending);
+        removePollIdsForQuestion(pending, matchedQuestionIndex);
+        advancePendingPollIndex(pending);
       }
     }
 
@@ -4093,7 +4065,7 @@ export class AgentRuntime implements Runtime {
       clearTimeout(pending.softExpiryTimer);
       pending.softExpiryTimer = undefined;
     }
-    this.advancePendingPollIndex(pending);
+    advancePendingPollIndex(pending);
     this.sendUnansweredPollTextFallback(
       pending,
       "I couldn't read your poll vote. Please type your choice for the remaining decision question(s):",
