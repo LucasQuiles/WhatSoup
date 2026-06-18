@@ -3,7 +3,7 @@
 //  Lightweight hook for app-wide hotkeys.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 interface ShortcutHandlers {
@@ -26,6 +26,15 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Keep handlers in a ref so a fresh `{}` literal at the call site doesn't change
+  // handleKeyDown's identity every render (which re-registered the keydown listener on
+  // every UnlockedApp re-render, e.g. each polling/WS tick). The listener now binds once
+  // (re-binding only on navigation) and always calls the latest handlers.
+  const handlersRef = useRef(handlers);
+  useEffect(() => {
+    handlersRef.current = handlers;
+  }, [handlers]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -38,7 +47,7 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
       // Cmd/Ctrl+K — search (works even in inputs)
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        handlers.onSearch?.();
+        handlersRef.current.onSearch?.();
         return;
       }
 
@@ -47,7 +56,7 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
 
       // ? key — toggle shortcuts help
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        handlers.onHelp?.();
+        handlersRef.current.onHelp?.();
         return;
       }
 
@@ -69,7 +78,7 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
         }
       }
     },
-    [navigate, location.pathname, handlers],
+    [navigate, location.pathname],
   );
 
   useEffect(() => {

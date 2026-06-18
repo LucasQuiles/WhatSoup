@@ -10,9 +10,9 @@
  *  S2 - Cmd/Ctrl+K fires EVEN when an input is focused (opt-in exception)
  *  S3 - `?` requires no modifier keys (metaKey/ctrlKey/altKey all must be false)
  *  S4 - number keys 1/2/3 are guarded: navigate only when NOT already on target path
- *  S5 - `handlers` ref is captured inside useCallback dependency array;
- *       if the caller passes a new object each render the callback re-registers;
- *       tests use stable refs to avoid flakiness
+ *  S5 - handlers are held in a ref (not a useCallback dep), so a fresh handlers object
+ *       each render does NOT re-register the listener (#1099); the listener re-binds only
+ *       on navigation, and always invokes the latest handlers (no stale closure)
  *  S6 - no capture-phase (`addEventListener` without `{ capture: true }`)
  *  S7 - key '4' is NOT wired (only 1, 2, 3 produce navigation)
  *
@@ -484,5 +484,37 @@ describe('useKeyboardShortcuts - cleanup on unmount', () => {
 
     addSpy.mockRestore();
     removeSpy.mockRestore();
+  });
+
+  it('does not re-register the listener on re-render with a fresh handlers object (#1099)', () => {
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    // Pass a NEW object literal each render (as App.tsx does). The handlers ref keeps
+    // handleKeyDown stable, so the keydown listener must bind only once across re-renders.
+    const { rerender } = renderHook(
+      () => useKeyboardShortcuts({ onSearch: () => {}, onHelp: () => {} }),
+      { wrapper },
+    );
+    const afterFirst = addSpy.mock.calls.filter(([evt]) => evt === 'keydown').length;
+    rerender();
+    rerender();
+    const afterRerenders = addSpy.mock.calls.filter(([evt]) => evt === 'keydown').length;
+
+    expect(afterFirst).toBe(1);
+    expect(afterRerenders).toBe(1); // no churn on re-render
+
+    addSpy.mockRestore();
+  });
+
+  it('invokes the latest handlers after a re-render (no stale closure)', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = renderHook(({ h }: { h: () => void }) => useKeyboardShortcuts({ onSearch: h }), {
+      wrapper,
+      initialProps: { h: first },
+    });
+    rerender({ h: second });
+    act(() => { fireKey('k', { metaKey: true }); });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });
