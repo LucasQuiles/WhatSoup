@@ -274,10 +274,10 @@ All other v2 properties keep their names (§2, §3.1–3.5, §3.7–3.8).
 | `--focus-ring` | `#6BA6FF` | `#2563EB` |
 | `--scrim` | `rgba(4,6,9,0.62)` | `rgba(23,26,31,0.45)` |
 | `--chrome-glass` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` |
-| `--shadow-raised` | `none` | `0 1px 2px rgba(16,18,22,0.06), 0 2px 8px rgba(16,18,22,0.05)` |
-| `--shadow-overlay` | `0 16px 48px rgba(0,0,0,0.5)` | `0 4px 12px rgba(16,18,22,0.08), 0 24px 64px rgba(16,18,22,0.18)` |
-| `--shadow-xs` | `none` | `0 1px 2px rgba(16,18,22,0.07)` |
-| `--shadow-hover` | `0 4px 12px rgba(0,0,0,0.3)` | `0 4px 12px rgba(16,18,22,0.10)` |
+| `--shadow-raised` | `none` | `0 1px 0 rgba(255,255,255,0.55), 0 2px 6px -1px rgba(60,46,20,0.13), 0 8px 20px -6px rgba(60,46,20,0.12)` |
+| `--shadow-overlay` | `0 16px 48px rgba(0,0,0,0.5)` | `0 1px 0 rgba(255,255,255,0.55), 0 8px 24px -6px rgba(60,46,20,0.18), 0 24px 56px -18px rgba(60,46,20,0.30)` |
+| `--shadow-xs` | `none` | `0 1px 2px rgba(60,46,20,0.10)` |
+| `--shadow-hover` | `0 4px 12px rgba(0,0,0,0.3)` | `0 1px 0 rgba(255,255,255,0.50), 0 4px 14px -2px rgba(60,46,20,0.18)` |
 
 `--chrome-glass` is the only sanctioned translucent substrate; it may back the sticky header chrome
 only. It derives from `--surface-base` so surface-ramp decisions carry glass with the ramp.
