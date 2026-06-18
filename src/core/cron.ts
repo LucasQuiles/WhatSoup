@@ -92,11 +92,19 @@ export function nextCronRun(expression: string, afterUnix: number): number {
 
     const matchMinute = fields.minute === null || fields.minute.includes(minute);
     const matchHour = fields.hour === null || fields.hour.includes(hour);
-    const matchDom = fields.dayOfMonth === null || fields.dayOfMonth.includes(dayOfMonth);
     const matchMonth = fields.month === null || fields.month.includes(month);
+    const matchDom = fields.dayOfMonth === null || fields.dayOfMonth.includes(dayOfMonth);
     const matchDow = fields.dayOfWeek === null || fields.dayOfWeek.includes(dayOfWeek);
 
-    if (matchMinute && matchHour && matchDom && matchMonth && matchDow) {
+    // Standard cron day-field semantics: when BOTH day-of-month and day-of-week
+    // are restricted (neither is '*'), the day matches if EITHER field matches (OR).
+    // When only one is restricted, the '*' field means "any" and normal AND applies.
+    const matchDay =
+      fields.dayOfMonth !== null && fields.dayOfWeek !== null
+        ? fields.dayOfMonth.includes(dayOfMonth) || fields.dayOfWeek.includes(dayOfWeek)
+        : matchDom && matchDow;
+
+    if (matchMinute && matchHour && matchDay && matchMonth) {
       return Math.floor(cursor.getTime() / 1000);
     }
 
