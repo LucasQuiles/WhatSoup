@@ -93,6 +93,10 @@ describe('isBenignToolError — alert-safe self-correctable patterns (return tru
     ['invalid json', 'Bash', 'Unexpected token < in JSON at position 0'],
     ['context window', 'Bash', 'prompt exceeds the context window limit'],
     ['too large', 'Read', 'File content (17906 tokens) exceeds maximum allowed tokens (10000).'],
+    // AskUserQuestion auto-resolve marker — fires with tool_name=unknown on the
+    // non-bridged path; never an agent or runtime fault.
+    ['AskUserQuestion unanswered (unknown tool)', 'unknown', 'Answer questions?'],
+    ['AskUserQuestion unanswered (error-tag wrapped)', 'unknown', '<error>Answer questions?</error>'],
   ];
 
   for (const [label, tool, content] of benign) {
@@ -103,6 +107,10 @@ describe('isBenignToolError — alert-safe self-correctable patterns (return tru
 
   it('is case-insensitive', () => {
     expect(isBenignToolError('Edit', 'FILE HAS NOT BEEN READ YET')).toBe(true);
+  });
+
+  it('matches the AskUserQuestion marker case-insensitively', () => {
+    expect(isBenignToolError('unknown', 'ANSWER QUESTIONS?')).toBe(true);
   });
 });
 
@@ -228,6 +236,13 @@ describe('maybeEmitToolFailureAlert — benign gate', () => {
   it('does NOT alert on a benign error (gate default ON)', () => {
     rv(makeRuntime()).maybeEmitToolFailureAlert(
       emitArgs('Edit', 'File has not been read yet. Read it first.'),
+    );
+    expect(emitAlert).not.toHaveBeenCalled();
+  });
+
+  it('does NOT alert on an unanswered AskUserQuestion (tool_name=unknown)', () => {
+    rv(makeRuntime()).maybeEmitToolFailureAlert(
+      emitArgs('unknown', 'Answer questions?'),
     );
     expect(emitAlert).not.toHaveBeenCalled();
   });

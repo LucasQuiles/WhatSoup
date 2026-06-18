@@ -1127,6 +1127,15 @@ const BENIGN_TOOL_ERROR_PATTERNS: ReadonlyArray<{
   humanized: string;
   alertSafe: boolean;
 }> = [
+  // AskUserQuestion auto-resolve marker. When an interactive question is not
+  // answered (unattended loop, cancelled, or a non-bridged poll path), the
+  // harness auto-resolves the tool_result to the literal "Answer questions?".
+  // This is a user-interaction outcome, never an agent or runtime fault. The
+  // bridged-poll path suppresses it via suppressedAskUserToolIds, but the
+  // non-bridged path leaks through with tool_name=unknown — catch it here so
+  // every path is covered.
+  { match: (l) => l.includes('answer questions?'),
+    humanized: '_no answer to that question, moving on_', alertSafe: true },
   // File too large to read — agent reads narrower slice; never an outage.
   { match: (l) => l.includes('exceeds maximum allowed tokens') || l.includes('content too large'),
     humanized: '_that file was a bit long, reading just the parts I need_', alertSafe: true },
