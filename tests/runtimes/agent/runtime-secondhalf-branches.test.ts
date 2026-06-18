@@ -238,7 +238,7 @@ type CrashInfo = {
 };
 
 type PollRuntimeState = {
-  pendingPollQuestions: Map<string, PendingPollQuestion>;
+  pendingPolls: { questions: Map<string, PendingPollQuestion> };
   chatSessions: Map<string, typeof mockSession>;
   chatQueues: Map<string, IOutboundQueue>;
   handlePendingPollSoftExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
@@ -313,12 +313,12 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
       const original = seedPending({ chatJid: groupJid });
       const replacement = seedPending({ chatJid: groupJid });
-      state.pendingPollQuestions.set(groupJid, replacement);
+      state.pendingPolls.questions.set(groupJid, replacement);
 
       // expectedPending !== current — must be a no-op (no settle/no send)
       state.handlePendingPollSoftExpiry(groupJid, original);
 
-      expect(state.pendingPollQuestions.get(groupJid)).toBe(replacement);
+      expect(state.pendingPolls.questions.get(groupJid)).toBe(replacement);
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
     });
 
@@ -342,13 +342,13 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         awaitReject: () => {},
       });
       const mapKey = 'send_poll:m1';
-      state.pendingPollQuestions.set(mapKey, pending);
+      state.pendingPolls.questions.set(mapKey, pending);
 
       state.handlePendingPollSoftExpiry(mapKey, pending);
 
       expect(resolved).toBe('Yes');
       expect(pending.answersCollected[0]).toBe('Yes');
-      expect(state.pendingPollQuestions.has(mapKey)).toBe(false);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
     });
 
     it('send_poll + admin-wins with no admin vote: falls back to recorded non-admin majority (~4167-4181)', () => {
@@ -370,7 +370,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         awaitReject: () => {},
       });
       const mapKey = 'send_poll:m2';
-      state.pendingPollQuestions.set(mapKey, pending);
+      state.pendingPolls.questions.set(mapKey, pending);
 
       state.handlePendingPollSoftExpiry(mapKey, pending);
 
@@ -393,13 +393,13 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         awaitReject: (err: Error) => { rejection = err; },
       });
       const mapKey = 'send_poll:m3';
-      state.pendingPollQuestions.set(mapKey, pending);
+      state.pendingPolls.questions.set(mapKey, pending);
 
       state.handlePendingPollSoftExpiry(mapKey, pending);
 
       expect(rejection).toBeInstanceOf(Error);
       expect((rejection as unknown as Error).message).toMatch(/Poll expiry/);
-      expect(state.pendingPollQuestions.has(mapKey)).toBe(false);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
     });
 
     it('askuser + majority-after-timeout: settles and injects via sendTurn (~4189-4203)', async () => {
@@ -422,7 +422,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         votesByQuestion: new Map([[0, votes]]),
         toolId: 'tool-au',
       });
-      state.pendingPollQuestions.set(groupJid, pending);
+      state.pendingPolls.questions.set(groupJid, pending);
 
       state.handlePendingPollSoftExpiry(groupJid, pending);
 
@@ -431,7 +431,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.waitFor(() => {
         expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('No'));
       });
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
 
     it('askuser + admin-wins with no admin: uses non-admin majority on timeout (~4207-4221)', () => {
@@ -452,7 +452,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         votesByQuestion: new Map([[0, votes]]),
         toolId: 'tool-aw',
       });
-      state.pendingPollQuestions.set(groupJid, pending);
+      state.pendingPolls.questions.set(groupJid, pending);
 
       state.handlePendingPollSoftExpiry(groupJid, pending);
 
@@ -474,7 +474,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         votesByQuestion: new Map(),
         toolId: 'tool-fb',
       });
-      state.pendingPollQuestions.set(groupJid, pending);
+      state.pendingPolls.questions.set(groupJid, pending);
 
       state.handlePendingPollSoftExpiry(groupJid, pending);
 
@@ -484,7 +484,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         expect.stringContaining('did not receive the poll vote'),
       );
       // Poll is NOT removed — it remains pending for text reply
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(true);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(true);
     });
   });
 
@@ -499,11 +499,11 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
       const original = seedPending({ chatJid: groupJid });
       const replacement = seedPending({ chatJid: groupJid });
-      state.pendingPollQuestions.set(groupJid, replacement);
+      state.pendingPolls.questions.set(groupJid, replacement);
 
       state.handlePendingPollHardExpiry(groupJid, original);
 
-      expect(state.pendingPollQuestions.get(groupJid)).toBe(replacement);
+      expect(state.pendingPolls.questions.get(groupJid)).toBe(replacement);
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
     });
 
@@ -516,14 +516,14 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       state.chatQueues.set(groupJid, mockQueue);
 
       const pending = seedPending({ chatJid: groupJid, answersCollected: {} });
-      state.pendingPollQuestions.set(groupJid, pending);
+      state.pendingPolls.questions.set(groupJid, pending);
 
       state.handlePendingPollHardExpiry(groupJid, pending);
 
       expect(mockQueue.enqueueText).toHaveBeenCalledWith(
         expect.stringContaining('expired'),
       );
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
 
     it('clears the poll without a notice when all questions are already answered (~4243 false branch)', () => {
@@ -535,12 +535,12 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       state.chatQueues.set(groupJid, mockQueue);
 
       const pending = seedPending({ chatJid: groupJid, answersCollected: { 0: 'Yes' } });
-      state.pendingPollQuestions.set(groupJid, pending);
+      state.pendingPolls.questions.set(groupJid, pending);
 
       state.handlePendingPollHardExpiry(groupJid, pending);
 
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
   });
 

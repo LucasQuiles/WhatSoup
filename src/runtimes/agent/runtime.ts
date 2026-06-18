@@ -96,6 +96,7 @@ import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-cap
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
 import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
+import { PendingPollStore } from './pending-poll-store.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -932,7 +933,10 @@ export class AgentRuntime implements Runtime {
   // ---------------------------------------------------------------------------
   // AskUserQuestion → Poll bridge state
   // ---------------------------------------------------------------------------
-  private pendingPollQuestions = new Map<string, PendingPollQuestion>();
+  // The pending-poll map + its two active-guard queries live in the collaborator;
+  // AgentRuntime's settle/expiry/persist/restore/cleanup orchestration drives
+  // this.pendingPolls.questions directly.
+  private readonly pendingPolls = new PendingPollStore();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
   private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
@@ -1994,16 +1998,16 @@ export class AgentRuntime implements Runtime {
           // from the LID key onto the canonical JID (silent timers, boundary set,
           // and in-flight waiters are intentionally left untouched, as before).
           this.autoCompact.rekey(lidKey, canonical);
-          const pendingPoll = this.pendingPollQuestions.get(lidKey);
+          const pendingPoll = this.pendingPolls.questions.get(lidKey);
           if (pendingPoll) {
-            this.pendingPollQuestions.delete(lidKey);
+            this.pendingPolls.questions.delete(lidKey);
             this.removePendingPoll(lidKey);
             clearPendingPollTimers(pendingPoll);
             pendingPoll.chatJidAliases.add(lidKey);
             pendingPoll.chatJidAliases.add(newJid);
             pendingPoll.chatJidAliases.add(canonical);
             pendingPoll.chatJid = canonical;
-            this.pendingPollQuestions.set(canonical, pendingPoll);
+            this.pendingPolls.questions.set(canonical, pendingPoll);
             this.persistPendingPoll(canonical, pendingPoll);
             this.startPendingPollExpiry(canonical, pendingPoll);
           }
@@ -3161,7 +3165,7 @@ export class AgentRuntime implements Runtime {
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
     // chat and the user sends a text reply, resolve it as an option number,
     // label, description match, or free-text answer and inject it back.
-    const pendingPoll = this.pendingPollQuestions.get(mapKey);
+    const pendingPoll = this.pendingPolls.questions.get(mapKey);
     if (pendingPoll) {
       // In groups, determine whether this sender's text should be intercepted
       let bypassPollIntercept = false;
@@ -3314,7 +3318,7 @@ export class AgentRuntime implements Runtime {
   // ---------------------------------------------------------------------------
 
   private deletePendingPollQuestions(mapKey: string): void {
-    const pending = this.pendingPollQuestions.get(mapKey);
+    const pending = this.pendingPolls.questions.get(mapKey);
     if (!pending) return;
     clearPendingPollTimers(pending);
     // Clean up suppression for askuser source
@@ -3328,7 +3332,7 @@ export class AgentRuntime implements Runtime {
       pending.awaitResolve = undefined;
       pending.awaitReject = undefined;
     }
-    this.pendingPollQuestions.delete(mapKey);
+    this.pendingPolls.questions.delete(mapKey);
     this.removePendingPoll(mapKey);
   }
 
@@ -3406,7 +3410,7 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Restore pending polls from the persistence table on runtime start. Live
-   * polls (hard_closes_at > now) are rehydrated into `pendingPollQuestions`
+   * polls (hard_closes_at > now) are rehydrated into `pendingPolls.questions`
    * with re-armed timers using the remaining time. Expired polls
    * (hard_closes_at <= now) have a brief "decision expired during downtime"
    * message sent to the originating chat (best-effort via outbound queue) and
@@ -3449,7 +3453,7 @@ export class AgentRuntime implements Runtime {
         }
         const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
         const pending = deserializePendingPoll(serialized);
-        this.pendingPollQuestions.set(row.map_key, pending);
+        this.pendingPolls.questions.set(row.map_key, pending);
         this.startPendingPollExpiry(row.map_key, pending);
         restored += 1;
       } catch (err) {
@@ -3506,20 +3510,6 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private isPendingPollActive(pending: PendingPollQuestion): boolean {
-    for (const active of this.pendingPollQuestions.values()) {
-      if (active === pending) return true;
-    }
-    return false;
-  }
-
-  private shouldContinuePendingPollSend(mapKey: string, pending: PendingPollQuestion): boolean {
-    if (this.isPendingPollActive(pending)) return true;
-    clearPendingPollTimers(pending);
-    log.debug({ mapKey, chatJid: pending.chatJid, toolId: pending.toolId }, 'AskUserQuestion poll send abandoned after pending poll was replaced');
-    return false;
-  }
-
   private sendUnansweredPollTextFallback(
     pending: PendingPollQuestion,
     intro: string,
@@ -3540,7 +3530,7 @@ export class AgentRuntime implements Runtime {
     answer: string,
   ): void {
     // Re-read and verify object identity — idempotent guard
-    const current = this.pendingPollQuestions.get(mapKey);
+    const current = this.pendingPolls.questions.get(mapKey);
     if (current !== pending || pending.resolvedAt !== undefined) {
       log.debug({ mapKey, reason }, 'settlePoll called but poll already settled or removed');
       return;
@@ -3588,7 +3578,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
-    const pending = this.pendingPollQuestions.get(mapKey);
+    const pending = this.pendingPolls.questions.get(mapKey);
     if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
 
     // send_poll awaiters should settle/reject without sending AskUser fallback text
@@ -3685,7 +3675,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private handlePendingPollHardExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
-    const pending = this.pendingPollQuestions.get(mapKey);
+    const pending = this.pendingPolls.questions.get(mapKey);
     if (!pending || pending !== expectedPending) return;
 
     if (unansweredPollQuestions(pending).length > 0) {
@@ -3761,7 +3751,7 @@ export class AgentRuntime implements Runtime {
         source: 'send_poll',
         sentPollMessageIds: [pollId],
       };
-      this.pendingPollQuestions.set(mapKey, pending);
+      this.pendingPolls.questions.set(mapKey, pending);
       this.persistPendingPoll(mapKey, pending);
       this.startPendingPollExpiry(mapKey, pending);
 
@@ -3791,7 +3781,7 @@ export class AgentRuntime implements Runtime {
       // Fetch admin JIDs if strategy requires it
       if ((resolution === 'admin-only' || resolution === 'admin-wins') && isGroupJid(chatJid)) {
         void this.fetchGroupAdminJids(chatJid).then(admins => {
-          if (this.pendingPollQuestions.get(mapKey) === pending) {
+          if (this.pendingPolls.questions.get(mapKey) === pending) {
             pending.adminJids = admins;
             if (admins === null) {
               log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
@@ -3869,7 +3859,7 @@ export class AgentRuntime implements Runtime {
       source: 'askuser' as const,
       resolvedAt: undefined,
     };
-    this.pendingPollQuestions.set(mapKey, pending);
+    this.pendingPolls.questions.set(mapKey, pending);
     this.persistPendingPoll(mapKey, pending);
 
     const pollMessageIds: string[] = [];
@@ -3895,12 +3885,12 @@ export class AgentRuntime implements Runtime {
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
           }
-          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          if (!this.pendingPolls.shouldContinueSend(mapKey, pending)) return;
         }
 
         try {
           const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
-          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          if (!this.pendingPolls.shouldContinueSend(mapKey, pending)) return;
           if (result.waMessageId) {
             pollMessageIds.push(result.waMessageId);
             pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
@@ -3909,7 +3899,7 @@ export class AgentRuntime implements Runtime {
             allHaveSecret = false;
           }
         } catch (err) {
-          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          if (!this.pendingPolls.shouldContinueSend(mapKey, pending)) return;
           log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
           allHaveSecret = false;
         }
@@ -3924,7 +3914,7 @@ export class AgentRuntime implements Runtime {
       await sendPollLoop();
     }
 
-    if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+    if (!this.pendingPolls.shouldContinueSend(mapKey, pending)) return;
 
     pending.sentPollMessageIds = [...pollMessageIds];
 
@@ -3958,7 +3948,7 @@ export class AgentRuntime implements Runtime {
   }): void {
     let matchedMapKey: string | null = null;
     let matchedQuestionIndex: number | undefined;
-    for (const [mapKey, pending] of this.pendingPollQuestions) {
+    for (const [mapKey, pending] of this.pendingPolls.questions) {
       if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
       const index = pending.pollMessageIdToQuestionIndex.get(data.pollMessageId);
       if (index !== undefined) {
@@ -3973,7 +3963,7 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    const pending = this.pendingPollQuestions.get(matchedMapKey)!;
+    const pending = this.pendingPolls.questions.get(matchedMapKey)!;
     const currentQ = pending.questions[matchedQuestionIndex];
     if (!currentQ) {
       log.warn({ mapKey: matchedMapKey, index: matchedQuestionIndex }, 'poll vote for out-of-range question index');
@@ -4038,7 +4028,7 @@ export class AgentRuntime implements Runtime {
     reason: string;
   }): void {
     let matchedMapKey: string | null = null;
-    for (const [mapKey, pending] of this.pendingPollQuestions) {
+    for (const [mapKey, pending] of this.pendingPolls.questions) {
       if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
       if (pending.pollMessageIdToQuestionIndex.has(data.pollMessageId)) {
         matchedMapKey = mapKey;
@@ -4051,7 +4041,7 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    const pending = this.pendingPollQuestions.get(matchedMapKey);
+    const pending = this.pendingPolls.questions.get(matchedMapKey);
     if (!pending || pending.mode !== 'poll') return;
 
     if (pending.source === 'send_poll') {
@@ -4099,12 +4089,12 @@ export class AgentRuntime implements Runtime {
     const answerText = lines.join('\n').trim();
 
     // Clear pending state BEFORE sending the turn — sendTurnPerChat checks
-    // pendingPollQuestions and would re-intercept as another answer.
+    // pendingPolls.questions and would re-intercept as another answer.
     this.deletePendingPollQuestions(mapKey);
 
     // Route through sendTurnPerChat for proper lifecycle handling.
     // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
-    // pendingPollQuestions from being populated in shared mode.
+    // pendingPolls.questions from being populated in shared mode.
     void this.sendTurnPerChat(pending.chatJid, answerText, mapKey).catch((err) => {
       log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
     });
@@ -4258,7 +4248,7 @@ export class AgentRuntime implements Runtime {
         this.turnHadToolActivity.delete(toolScopeKey);
         this.clearToolNames(toolScopeKey);
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
-        const hasPendingPoll = mapKey !== undefined && this.pendingPollQuestions.has(mapKey);
+        const hasPendingPoll = mapKey !== undefined && this.pendingPolls.questions.has(mapKey);
         if (mapKey !== undefined) {
           if (hasPendingPoll) {
             // Do NOT gate — the turn is logically still open (waiting for poll vote).
@@ -5035,7 +5025,7 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingRespawnTimers.clear();
     this.postTurnGate.clear();
-    for (const mapKey of Array.from(this.pendingPollQuestions.keys())) {
+    for (const mapKey of Array.from(this.pendingPolls.questions.keys())) {
       this.deletePendingPollQuestions(mapKey);
     }
     // Clear silent-compact timers, resolve+clear in-flight waiters, and drop all
