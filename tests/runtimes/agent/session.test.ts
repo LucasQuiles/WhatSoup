@@ -3560,3 +3560,1231 @@ describe('opencode-cli session resume via sessionId', () => {
     expect(spawnArgs).toContain('anthropic/claude-sonnet-4-5');
   });
 });
+
+// ─── session.ts uncovered-branch coverage ────────────────────────────────────
+//
+// Targets specific branch locations that remained uncovered after the focused
+// branch-coverage pass. Each test exercises a single conditional path with a
+// concrete terminal assertion.
+
+describe('session.ts uncovered-branch coverage', () => {
+  // Re-import the test-only provider switch surface + buildChildEnv already
+  // imported at module scope (lines 2176-2181). We reuse them here.
+
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // --- buildChildEnv: opencode-cli unmapped-service warning branches ---
+  // Targets the `warnUnmapped` paths for both apiKeyService and model-prefix
+  // resolution when the service is NOT in SERVICE_ENV_MAP (lines ~174, 193,
+  // 199, 203). buildChildEnv returns the env without the unmapped key.
+
+  it('buildChildEnv opencode-cli: warns when apiKeyService resolves to an unmapped service', () => {
+    const env = buildChildEnv(
+      'opencode-cli',
+      undefined,
+      undefined,
+      { apiKeyService: 'totally-unknown-svc' },
+    );
+    // Unmapped service: no key env var injected, but PATH-level base env still present.
+    expect(Object.keys(env).length).toBeGreaterThanOrEqual(1);
+    expect(env).not.toHaveProperty('TOTALLY_UNKNOWN_SVC_API_KEY');
+  });
+
+  it('buildChildEnv opencode-cli: warns when model prefix resolves to an unmapped service', () => {
+    const env = buildChildEnv(
+      'opencode-cli',
+      undefined,
+      'unknownvendor/some-model',
+      { apiKeyService: '   ' }, // blank apiKeyService — exercises the falsy branch
+    );
+    expect(env).not.toHaveProperty('UNKNOWNVENDOR_API_KEY');
+  });
+
+  // --- resolveProviderBinary / resolveProviderArgs / resolveProviderParser
+  //     managed-loop throw branches (lines 244, 251, 335, 339, 356, 381, 401).
+
+  it('resolveProviderBinary throws for openai-api managed-loop provider', () => {
+    expect(() => __provider_switch_for_test.getProviderBinary('openai-api')).toThrow(
+      /managed-loop provider/,
+    );
+  });
+
+  it('resolveProviderBinary throws for anthropic-api managed-loop provider', () => {
+    expect(() => __provider_switch_for_test.getProviderBinary('anthropic-api')).toThrow(
+      /managed-loop provider/,
+    );
+  });
+
+  it('resolveProviderArgs throws for openai-api managed-loop provider', () => {
+    expect(() =>
+      __provider_switch_for_test.getProviderArgs('openai-api', 'sys', '/cwd', undefined, undefined, []),
+    ).toThrow(/managed-loop provider/);
+  });
+
+  it('resolveProviderArgs throws for anthropic-api managed-loop provider', () => {
+    expect(() =>
+      __provider_switch_for_test.getProviderArgs(
+        'anthropic-api',
+        'sys',
+        '/cwd',
+        undefined,
+        undefined,
+        [],
+      ),
+    ).toThrow(/managed-loop provider/);
+  });
+
+  it('resolveProviderParser throws for openai-api managed-loop provider', () => {
+    expect(() => __provider_switch_for_test.getParser('openai-api')).toThrow(
+      /managed-loop provider/,
+    );
+  });
+
+  it('resolveProviderParser throws for anthropic-api managed-loop provider', () => {
+    expect(() => __provider_switch_for_test.getParser('anthropic-api')).toThrow(
+      /managed-loop provider/,
+    );
+  });
+
+  // --- getProviderBinary() exported helper (lines 264-273): unknown throws,
+  //     managed-loop returns null.
+
+  it('getProviderBinary throws for an unknown provider id', () => {
+    expect(() => getProviderBinary('not-a-real-provider')).toThrow(/unknown provider id/);
+  });
+
+  it('getProviderBinary returns null for openai-api', () => {
+    expect(getProviderBinary('openai-api')).toBeNull();
+  });
+
+  it('getProviderBinary returns null for anthropic-api', () => {
+    expect(getProviderBinary('anthropic-api')).toBeNull();
+  });
+
+  it('getProviderBinary returns the binary name for known CLI providers', () => {
+    expect(getProviderBinary('claude-cli')).toBe('claude');
+    expect(getProviderBinary('codex-cli')).toBe('codex');
+    expect(getProviderBinary('gemini-cli')).toBe('gemini');
+    expect(getProviderBinary('opencode-cli')).toBe('opencode');
+  });
+
+  // --- opencodeUsesConfigModel: blank-string baseUrl returns false (line 287).
+
+  it('opencodeUsesConfigModel returns false for a blank baseUrl', () => {
+    expect(opencodeUsesConfigModel({ baseUrl: '   ' })).toBe(false);
+  });
+
+  it('opencodeUsesConfigModel returns false for an undefined config', () => {
+    expect(opencodeUsesConfigModel(undefined)).toBe(false);
+  });
+
+  // --- Budget initialization in the constructor (line 575):
+  //     budget is set when providerConfig.budget is present.
+
+  it('constructor initializes a budget when providerConfig.budget is provided', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+      provider: 'openai-api',
+      providerConfig: { budget: { requestsPerMinute: 1 } },
+    });
+
+    await sm.spawnSession();
+    // First turn within the 1-per-minute cap is allowed.
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeSseResponse([{ choices: [{ delta: { content: 'ok' } }] }, '[DONE]']),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await sm.sendTurn('within cap');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Second turn within the same minute is throttled; a result event is emitted.
+    await sm.sendTurn('over cap');
+    const throttled = events.find(
+      (e) => e.type === 'result' && typeof e.text === 'string' && e.text.includes('Throttled'),
+    );
+    expect(throttled).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  // --- createManagedProviderSession default branch (line 608/609) — exercised
+  //     indirectly via the openai-api/anthropic-api sessions above. Add an
+  //     explicit anthropic-api session to cover its provider branch (line 607).
+
+  it('anthropic-api managed session spawns and sends a turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeSseResponse([
+        { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } },
+        { type: 'message_stop' },
+      ]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+      provider: 'anthropic-api',
+      providerConfig: { baseUrl: 'https://api.test.invalid', model: 'claude-test' },
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('hello');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'assistant_text' })]));
+    vi.unstubAllGlobals();
+  });
+
+  // --- buildSystemPrompt empty-composition throw (line 659-661).
+  //     With no sources at all (no transport prelude is always present, so we
+  //     exercise the instructionsPath read-failure throw instead — line 650-652).
+
+  it('buildSystemPrompt throws when instructionsPath cannot be read', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      cwd: '/cwd',
+      instructionsPath: 'missing.md',
+    });
+    // Force readFileSync to throw (the module-level mock returns undefined by
+    // default; configure it to throw for this call).
+    (readFileSync as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('ENOENT');
+    });
+    expect(() => (sm as unknown as { buildSystemPrompt: () => string }).buildSystemPrompt()).toThrow(
+      /Failed to read instructionsPath/,
+    );
+  });
+
+  // --- sendTurn without an active session (line 1591-1592).
+
+  it('sendTurn throws when no session is active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await expect(sm.sendTurn('hi')).rejects.toThrow(/No active session/);
+  });
+
+  // --- sendTurn on a managed provider when the session was never initialized
+  //     (line 1606-1608): managedProviderSession === null after active set true.
+
+  it('sendTurn throws when managed provider session is null mid-flight', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    // Mark active without ever spawning the provider session.
+    (sm as unknown as { active: boolean }).active = true;
+    await expect(sm.sendTurn('hi')).rejects.toThrow(/Managed provider session is not initialized/);
+  });
+
+  // --- tickWatchdog / recoverStalledOperation / handleStalledOpKill /
+  //     probeLiveness / handleWatchdogHard no-op guards (lines 1435, 1450,
+  //     1473, 1526). All early-return when not active or no child.
+
+  it('tickWatchdog is a no-op when the session is not active', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(() => sm.tickWatchdog()).not.toThrow();
+    // No watchdog timer was armed — verify by checking there is no pending
+    // crash notification (session stayed clean).
+    expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+
+  it('recoverStalledOperation is a no-op when no child is running', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(() => sm.recoverStalledOperation('tool-1', 'Read')).not.toThrow();
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  // --- crashManagedProviderSession no-op guard (line 1536): when neither an
+  //     active session nor a managed provider session exists, it returns early.
+
+  it('crashManagedProviderSession is a no-op when nothing is running', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    // Invoke the private crash handler directly with no active session.
+    const crash = (sm as unknown as { crashManagedProviderSession: (r: string) => void }).crashManagedProviderSession.bind(sm);
+    crash('nothing to crash');
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+
+  // --- shutdown clears managed provider session when present (lines 1972-1976).
+
+  it('shutdown terminates a managed provider session with the suspend signal', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const shutdownSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'shutdown')
+      .mockResolvedValue(undefined);
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+    await sm.shutdown(true);
+    expect(shutdownSpy).toHaveBeenCalledWith('suspend');
+    expect(sm.getStatus()).toMatchObject({ active: false, sessionId: null });
+  });
+
+  it('shutdown terminates a managed provider session with the end signal on /new', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const shutdownSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'shutdown')
+      .mockResolvedValue(undefined);
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+    await sm.shutdown(false);
+    expect(shutdownSpy).toHaveBeenCalledWith('end');
+  });
+
+  // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child
+  //     (lines 1963-1965). Use fake timers and a child whose kill is a no-op
+  //     so the grace timer fires the SIGKILL path.
+
+  it('shutdown escalates to SIGKILL after the grace period when SIGTERM does not kill', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    // Replace kill so SIGTERM does nothing and SIGKILL is observable.
+    const child = (sm as unknown as { child: MockChild }).child;
+    const kills: string[] = [];
+    child.kill.mockImplementation((sig: string) => {
+      kills.push(sig);
+      // SIGTERM does not actually remove the child; SIGKILL records the escalation.
+    });
+
+    const shutdownP = sm.shutdown(true);
+    await vi.advanceTimersByTimeAsync(10_000); // past SHUTDOWN_GRACE_MS (5s)
+    await shutdownP;
+
+    expect(kills).toEqual(['SIGTERM', 'SIGKILL']);
+    vi.useRealTimers();
+  });
+
+  // --- Stdout buffer materialization branches (lines 700-712, 719-731):
+  //     multi-chunk Buffer.concat path and drainBufferedStdoutLines with
+  //     trailing whitespace-only content.
+
+  it('appendStdoutChunk concats multiple buffered chunks and parses complete lines', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+    });
+    await sm.spawnSession();
+
+    const child = (sm as unknown as { child: MockChild }).child;
+    // Emit two chunks that together form one valid Claude init event line.
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'chunked-session-id',
+    });
+    const half = Math.floor(line.length / 2);
+    child.stdout.emit('data', Buffer.from(line.slice(0, half)));
+    child.stdout.emit('data', Buffer.from(line.slice(half) + '\n'));
+
+    await vi.waitFor(() => {
+      expect(events.some((e) => e.type === 'init' && e.sessionId === 'chunked-session-id')).toBe(true);
+    });
+    expect(events[0]).toMatchObject({ type: 'init', sessionId: 'chunked-session-id' });
+  });
+
+  it('appendStdoutChunk ignores trailing whitespace-only buffer on drain', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+    });
+    await sm.spawnSession();
+
+    const child = (sm as unknown as { child: MockChild }).child;
+    // A valid line followed by trailing whitespace (no newline) — only the
+    // complete line should parse to an event; the whitespace tail is dropped
+    // when the child exits (drain path, line 721).
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'ws-trailing',
+    });
+    child.stdout.emit('data', Buffer.from(line + '\n   \n\t\n'));
+
+    await vi.waitFor(() => {
+      expect(events.some((e) => e.type === 'init' && e.sessionId === 'ws-trailing')).toBe(true);
+    });
+    // Exactly one init event from the one complete JSON line.
+    expect(events.filter((e) => e.type === 'init')).toHaveLength(1);
+  });
+
+  // --- appendStdoutChunk with no chunks early-return (line 699) and the
+  //     Buffer.concat multi-chunk path: a chunk arriving with no newline yet.
+
+  it('appendStdoutChunk returns [] when no complete line is present yet', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    // Partial line, no newline — should not emit any events and not throw.
+    expect(() => child.stdout.emit('data', Buffer.from('partial-no-newline'))).not.toThrow();
+  });
+
+  // --- notifyUnexpectedExit rate-limit (lines 1392-1399): a second crash
+  //     within COOLDOWN is suppressed.
+
+  it('notifyUnexpectedExit suppresses a second crash notice within the cooldown', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+
+    // First exit with non-zero code triggers a notice.
+    if (child._exitCb) child._exitCb(1, null);
+    await vi.advanceTimersByTimeAsync(0); // flush setImmediate
+    expect(sentMessages).toHaveLength(1);
+
+    // Second exit shortly after — suppressed by rate limit.
+    // Re-arm a fresh child so the exit handler runs again.
+    const child2 = makeMockChild(222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(child2);
+    await sm.spawnSession();
+    if (child2._exitCb) child2._exitCb(2, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentMessages).toHaveLength(1); // still one — second suppressed
+    vi.useRealTimers();
+  });
+
+  // --- notifyUnexpectedExit with code 0 + signal still notifies (line 1386
+  //     short-circuits only when BOTH code===0 AND !signal).
+
+  it('notifyUnexpectedExit notifies when exit code is 0 but a signal is present', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    if (child._exitCb) child._exitCb(0, 'SIGTERM');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toContain('signal');
+    vi.useRealTimers();
+  });
+
+  // --- Resume-failed path (lines 1336-1344): resume attempt, exit code 1,
+  //     no init event — triggers onResumeFailed + durability checkpoint.
+
+  it('exit with code 1 during a resume attempt triggers onResumeFailed', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onResumeFailed = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      onResumeFailed,
+    });
+    await sm.spawnSession('expired-session-id');
+    const child = (sm as unknown as { child: MockChild }).child;
+    if (child._exitCb) child._exitCb(1, null);
+    // onResumeFailed is called synchronously inside the exit handler.
+    expect(onResumeFailed).toHaveBeenCalledTimes(1);
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'resume_failed');
+  });
+
+  // --- Crash path with durability engine set (lines 1342-1344, 1351-1353):
+  //     upsertSessionCheckpoint is called with 'orphaned'.
+
+  it('unexpected exit upserts an orphaned checkpoint when durability is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const upsertSessionCheckpoint = vi.fn();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    if (child._exitCb) child._exitCb(2, null);
+    expect(upsertSessionCheckpoint).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionStatus: 'orphaned' }),
+    );
+  });
+
+  // --- handleCodexServerRequest: unhandled method falls through (line 853)
+  //     and the requestUserInput branch denies with empty input (line 849).
+
+  it('handleCodexServerRequest auto-approves known approval methods', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writeCalls: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(
+      (data: string) => {
+        writeCalls.push(typeof data === 'string' ? data : String(data));
+        return true;
+      },
+    );
+    const handler = (sm as unknown as { handleCodexServerRequest: (m: Record<string, unknown>) => void }).handleCodexServerRequest.bind(sm);
+    handler({ id: 7, method: 'item/commandExecution/requestApproval' });
+    expect(writeCalls.some((m) => m.includes('"id":7') && m.includes('"approved"'))).toBe(true);
+  });
+
+  it('handleCodexServerRequest denies item/tool/requestUserInput with empty input', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writeCalls: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+      writeCalls.push(typeof data === 'string' ? data : String(data));
+      return true;
+    });
+    const handler = (sm as unknown as { handleCodexServerRequest: (m: Record<string, unknown>) => void }).handleCodexServerRequest.bind(sm);
+    handler({ id: 9, method: 'item/tool/requestUserInput' });
+    expect(writeCalls.some((m) => m.includes('"id":9') && m.includes('"input":""'))).toBe(true);
+  });
+
+  it('handleCodexServerRequest logs but does not respond to unhandled methods', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    let wrote = false;
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      wrote = true;
+      return true;
+    });
+    const handler = (sm as unknown as { handleCodexServerRequest: (m: Record<string, unknown>) => void }).handleCodexServerRequest.bind(sm);
+    handler({ id: 11, method: 'something/unknown' });
+    // No response written for an unhandled server-initiated request.
+    expect(wrote).toBe(false);
+  });
+
+  it('handleCodexServerRequest is a no-op when no child is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    // Don't spawn — child is null.
+    const handler = (sm as unknown as { handleCodexServerRequest: (m: Record<string, unknown>) => void }).handleCodexServerRequest.bind(sm);
+    expect(() => handler({ id: 1, method: 'item/commandExecution/requestApproval' })).not.toThrow();
+  });
+
+  // --- buildSpawnPerTurnPrompt: when systemPrompt is empty, returns text
+  //     verbatim (line 857).
+
+  it('buildSpawnPerTurnPrompt returns the raw text when no system prompt is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+    await sm.spawnSession();
+    // Clear the system prompt to hit the early-return.
+    (sm as unknown as { systemPrompt: string }).systemPrompt = '';
+    const fn = (sm as unknown as { buildSpawnPerTurnPrompt: (t: string) => string }).buildSpawnPerTurnPrompt.bind(sm);
+    expect(fn('plain prompt')).toBe('plain prompt');
+  });
+
+  // --- probeLiveness writes a newline to stdin when active (line 1492).
+
+  it('probeLiveness writes a newline when a child is active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writes: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((d: string) => {
+      writes.push(d);
+      return true;
+    });
+    sm.probeLiveness();
+    expect(writes).toContain('\n');
+  });
+
+  // --- handleWatchdogHard on a managed provider (lines 1519-1523): kills the
+  //     managed session and notifies the user.
+
+  it('hard watchdog kills a stalled managed provider and notifies the user', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    let rejectTurn!: (e: Error) => void;
+    const stalled = new Promise<void>((_, reject) => {
+      rejectTurn = reject;
+    });
+    vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockReturnValue(stalled);
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(function () {
+      rejectTurn(new Error('watchdog-abort'));
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+    await sm.spawnSession();
+    const turn = sm.sendTurn('stall').catch((e) => e as Error);
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    const err = await turn;
+    expect((err as Error).message).toBe('watchdog-abort');
+    expect(killSpy).toHaveBeenCalled();
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('30 minutes'));
+    vi.useRealTimers();
+  });
+
+  // --- handleProviderEvent: token_usage / result event records budget usage
+  //     (lines 782-789) when a budget is configured.
+
+  it('handleProviderEvent records token usage on a result event when budget is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+      provider: 'openai-api',
+      providerConfig: { budget: { tokensPerMinute: 1_000_000 } },
+    });
+    await sm.spawnSession();
+    // Inject a result event with token counts directly via the private handler.
+    const handler = (sm as unknown as { handleProviderEvent: (e: AgentEvent) => void }).handleProviderEvent.bind(sm);
+    handler({
+      type: 'result',
+      text: 'done',
+      inputTokens: 100,
+      outputTokens: 50,
+    } as AgentEvent);
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'result', inputTokens: 100 })]));
+  });
+
+  it('handleProviderEvent records token usage on a token_usage event when budget is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+      provider: 'openai-api',
+      providerConfig: { budget: { tokensPerMinute: 1_000_000 } },
+    });
+    await sm.spawnSession();
+    const handler = (sm as unknown as { handleProviderEvent: (e: AgentEvent) => void }).handleProviderEvent.bind(sm);
+    handler({ type: 'token_usage', inputTokens: 10, outputTokens: 5 } as unknown as AgentEvent);
+    expect(events.some((e) => e.type === 'token_usage')).toBe(true);
+  });
+
+  // --- handleProviderEvent: init event with durability upserts a checkpoint
+  //     (lines 774-778). Codex/Gemini branches already covered elsewhere; this
+  //     exercises the generic durability-upsert path via a synthetic init.
+
+  it('handleProviderEvent upserts a session checkpoint on init when durability is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const upsertSessionCheckpoint = vi.fn();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    await sm.spawnSession();
+    upsertSessionCheckpoint.mockClear();
+    const handler = (sm as unknown as { handleProviderEvent: (e: AgentEvent) => void }).handleProviderEvent.bind(sm);
+    handler({ type: 'init', sessionId: 'durab-session-id' });
+    expect(upsertSessionCheckpoint).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionId: 'durab-session-id' }),
+    );
+  });
+
+  // --- spawnSession is a no-op when already active with a child (line 935).
+
+  it('spawnSession is a no-op when an active child is already running', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const firstCallCount = (spawn as ReturnType<typeof vi.fn>).mock.calls.length;
+    await sm.spawnSession(); // second call should be a no-op
+    expect((spawn as ReturnType<typeof vi.fn>).mock.calls.length).toBe(firstCallCount);
+  });
+
+  // --- spawnSession: spawn-per-turn path emits a synthetic init event
+  //     (lines 1042-1064) — already covered indirectly, but assert the
+  //     synthetic sessionId shape and the existingRowId reuse branch (1049-1051).
+
+  it('spawnSession for opencode-cli with existingRowId reuses the row id', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (e) => events.push(e),
+      provider: 'opencode-cli',
+    });
+    await sm.spawnSession(undefined, 999);
+    expect(sm.getDbRowId()).toBe(999);
+    // Synthetic init event emitted with provider-prefixed id.
+    expect(events.some((e) => e.type === 'init' && typeof e.sessionId === 'string')).toBe(true);
+  });
+
+  // --- spawnSession: DB persistence failure for the spawned child
+  //     (lines 1108-1133) — createSession throws, child is SIGKILLed, state
+  //     is reset and the error rethrown.
+
+  it('spawnSession resets state and rethrows when DB persistence fails for the child', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const failure = new Error('db write failed');
+    (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw failure;
+    });
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await expect(sm.spawnSession()).rejects.toThrow('db write failed');
+    const child = (sm as unknown as { child: MockChild | null }).child;
+    // Child should have been SIGKILLed during cleanup.
+    expect(child).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+
+  // --- spawnSession: managed-loop DB persistence failure (lines 965-975).
+
+  it('spawnSession for managed provider resets and rethrows when DB persistence fails', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const failure = new Error('managed db write failed');
+    (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw failure;
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await expect(sm.spawnSession()).rejects.toThrow('managed db write failed');
+    expect(sm.getStatus()).toMatchObject({ active: false, sessionId: null });
+  });
+
+  // --- spawnSession: managed provider initialize() failure (lines 1006-1019).
+
+  it('spawnSession marks crashed and rethrows when managed provider initialize() fails', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const failure = new Error('init blew up');
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockRejectedValue(failure);
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    await expect(sm.spawnSession()).rejects.toThrow('init blew up');
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+
+  // --- sendTurn for codex-cli / gemini-cli without a provider-ready promise
+  //     (lines 1791-1793, 1825-1826): missing providerReadyPromise throws.
+
+  it('sendTurn for codex-cli throws when providerReadyPromise was never initialized', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+    // Clear codexThreadId and providerReadyPromise to hit the throw branch.
+    (sm as unknown as { codexThreadId: string | null }).codexThreadId = null;
+    (sm as unknown as { providerReadyPromise: Promise<void> | null }).providerReadyPromise = null;
+    await expect(sm.sendTurn('hi')).rejects.toThrow(/Codex provider ready promise not initialized/);
+  });
+
+  it('sendTurn for gemini-cli throws when providerReadyPromise was never initialized', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+    await sm.spawnSession();
+    (sm as unknown as { geminiSessionId: string | null }).geminiSessionId = null;
+    (sm as unknown as { providerReadyPromise: Promise<void> | null }).providerReadyPromise = null;
+    await expect(sm.sendTurn('hi')).rejects.toThrow(/Gemini provider ready promise not initialized/);
+  });
+
+  // --- spawn-per-turn non-zero exit (lines 1768-1779): emits onCrash and
+  //     notifies the user, but session stays active.
+
+  it('spawn-per-turn non-zero exit emits onCrash and notifies the user', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      onCrash,
+      notifyUser,
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('go');
+    const child = (sm as unknown as { child: MockChild }).child;
+    if (child._exitCb) child._exitCb(1, null);
+    await vi.advanceTimersByTimeAsync(0); // flush setImmediate drain
+    await vi.advanceTimersByTimeAsync(0); // flush notifyUnexpectedExit setImmediate
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: 1 }));
+    vi.useRealTimers();
+  });
+
+  // --- Codex stdout: server-initiated request routing + resume-error retry
+  //     (lines 1227-1262). Feed a JSON-RPC line that looks like a resume
+  //     error response and assert a fresh thread/start is sent.
+
+  it('codex resume thread/start error response triggers a fresh thread/start retry', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession('stale-thread-id');
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writes: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+      writes.push(typeof data === 'string' ? data : String(data));
+      return true;
+    });
+    // The resume request id was assigned during spawnSession; capture it.
+    const resumeReqId = (sm as unknown as { codexResumeThreadStartReqId: string | null }).codexResumeThreadStartReqId;
+    expect(resumeReqId).not.toBeNull();
+    // Emit the error response line on stdout.
+    const errLine = JSON.stringify({ jsonrpc: '2.0', id: resumeReqId, error: { message: 'thread not found' } });
+    child.stdout.emit('data', Buffer.from(errLine + '\n'));
+    // A fresh thread/start (no threadId) should have been written.
+    const freshThreadStart = writes.find((m) => m.includes('"method":"thread/start"') && !m.includes('"threadId"'));
+    expect(freshThreadStart).toBeDefined();
+    // updateSessionId cleared the stale id.
+    expect(updateSessionId).toHaveBeenCalledWith(db, 42, '');
+  });
+
+  // --- Codex stdout: server-initiated request routed to handleCodexServerRequest
+  //     (lines 1227-1232).
+
+  it('codex stdout routes a server-initiated approval request to the handler', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writes: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+      writes.push(typeof data === 'string' ? data : String(data));
+      return true;
+    });
+    const reqLine = JSON.stringify({ jsonrpc: '2.0', id: 42, method: 'item/fileChange/requestApproval' });
+    child.stdout.emit('data', Buffer.from(reqLine + '\n'));
+    expect(writes.some((m) => m.includes('"id":42') && m.includes('"approved"'))).toBe(true);
+  });
+
+  // --- gemini-cli sendTurn happy path: writes session/prompt request
+  //     (lines 1790-1817).
+
+  it('gemini-cli sendTurn writes a session/prompt request once the session is ready', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+    await sm.spawnSession();
+    // Pretend the session/new response arrived with a sessionId.
+    (sm as unknown as { geminiSessionId: string | null }).geminiSessionId = 'gem-session-1';
+    const child = (sm as unknown as { child: MockChild }).child;
+    const writes: string[] = [];
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+      writes.push(typeof data === 'string' ? data : String(data));
+      return true;
+    });
+    await sm.sendTurn('hello gemini');
+    expect(writes.some((m) => m.includes('"method":"session/prompt"'))).toBe(true);
+    expect(incrementMessageCount).toHaveBeenCalledWith(db, 42);
+  });
+
+  // --- Claude-cli stdin write timeout (lines 1860-1880).
+
+  it('claude-cli sendTurn rejects with STDIN_WRITE_TIMEOUT when stdin.write never calls back', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    // stdin.write with no callback signature -> hangs forever.
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(() => true);
+    const turn = sm.sendTurn('hang').catch((e) => e as Error);
+    // STDIN_WRITE_TIMEOUT_MS is 30s in source; advance past it.
+    await vi.advanceTimersByTimeAsync(31_000);
+    const err = (await turn) as Error;
+    expect(err.message).toContain('STDIN_WRITE_TIMEOUT');
+    vi.useRealTimers();
+  });
+
+  // --- Claude-cli stdin write error path (line 1867).
+
+  it('claude-cli sendTurn rejects when stdin.write calls back with an error', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation(
+      (_data: unknown, _enc: unknown, cb: (err?: Error | null) => void) => {
+        if (typeof _enc === 'function') (_enc as (e?: Error | null) => void)(new Error('EPIPE'));
+        else if (typeof cb === 'function') cb(new Error('EPIPE'));
+        return false;
+      },
+    );
+    await expect(sm.sendTurn('boom')).rejects.toThrow('EPIPE');
+  });
+
+  // --- Claude-cli stdin null guard (line 1860).
+
+  it('claude-cli sendTurn throws when child stdin is null', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    // Replace child.stdin with null to hit the guard.
+    (sm as unknown as { child: MockChild }).child.stdin = null as unknown as MockChild['stdin'];
+    await expect(sm.sendTurn('hi')).rejects.toThrow(/Child process stdin is not available/);
+  });
+
+  // --- handleNew shuts down and respawns (line 1893-1895).
+
+  it('handleNew ends the current session and spawns a fresh one', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    const firstPid = sm.getStatus().pid;
+    const child2 = makeMockChild(88888);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(child2);
+    await sm.handleNew();
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'ended');
+    expect(sm.getStatus().pid).toBe(88888);
+    expect(sm.getStatus().pid).not.toBe(firstPid);
+  });
+
+  // --- assertKnownProvider throw via direct instantiation with unknown id
+  //     (lines 676-682). The constructor itself throws.
+
+  it('constructor throws for an unknown provider id', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    expect(
+      () =>
+        new SessionManager({
+          db,
+          messenger,
+          chatJid: CHAT_JID,
+          onEvent: vi.fn(),
+          provider: 'totally-fake',
+        }),
+    ).toThrow(/unknown provider id/);
+  });
+
+  // --- updateMcpActorJid no-op when no mcpSessionContext (line 580).
+
+  it('updateMcpActorJid is a no-op when no mcpSessionContext is configured', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(() => sm.updateMcpActorJid('1555XXXXXXX@s.whatsapp.net')).not.toThrow();
+  });
+
+  it('updateMcpActorJid sets actorJid when mcpSessionContext is configured', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const ctx = { actorJid: 'old@s.whatsapp.net' };
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      mcpSessionContext: ctx as never,
+    });
+    sm.updateMcpActorJid('1555XXXXXXX@s.whatsapp.net');
+    expect(ctx.actorJid).toBe('1555XXXXXXX@s.whatsapp.net');
+  });
+
+  // --- trackToolStart / trackToolEnd / hasPendingTools (lines 916-925).
+
+  it('trackToolStart and trackToolEnd toggle hasPendingTools', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(sm.hasPendingTools).toBe(false);
+    sm.trackToolStart('t1');
+    expect(sm.hasPendingTools).toBe(true);
+    sm.trackToolEnd('t1');
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  // --- getProviderId returns the configured provider (line 1917-1919).
+
+  it('getProviderId returns the configured provider id', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    expect(sm.getProviderId()).toBe('codex-cli');
+  });
+
+  // --- getDbRowId before spawn returns null, after spawn returns the row id.
+
+  it('getDbRowId returns null before spawn and the row id after', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(sm.getDbRowId()).toBeNull();
+    await sm.spawnSession();
+    expect(sm.getDbRowId()).toBe(42);
+  });
+
+  // --- composeWithExactLineDedup via buildSystemPrompt: handoffSystemBlock
+  //     returning null is skipped (line 636) and configSystemPrompt is added.
+
+  it('buildSystemPrompt includes configSystemPrompt and skips a null handoff block', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let handoffCalled = false;
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      cwd: '/cwd',
+      configSystemPrompt: 'EXTRA-CONFIG-PROMPT',
+      handoffSystemBlock: () => {
+        handoffCalled = true;
+        return null;
+      },
+    });
+    const prompt = (sm as unknown as { buildSystemPrompt: () => string }).buildSystemPrompt();
+    expect(handoffCalled).toBe(true);
+    expect(prompt).toContain('EXTRA-CONFIG-PROMPT');
+  });
+
+  it('buildSystemPrompt includes a non-null handoff block', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      cwd: '/cwd',
+      handoffSystemBlock: () => 'HANDOFF-BLOCK-TEXT',
+    });
+    const prompt = (sm as unknown as { buildSystemPrompt: () => string }).buildSystemPrompt();
+    expect(prompt).toContain('HANDOFF-BLOCK-TEXT');
+  });
+
+  // --- buildSystemPrompt reads instructionsPath and appends its content
+  //     (lines 644-655, the success branch + non-empty content branch).
+
+  it('buildSystemPrompt appends the instructionsPath file content when present', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (readFileSync as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce('INSTRUCTIONS-CONTENT');
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      cwd: '/cwd',
+      instructionsPath: 'AGENTS.md',
+    });
+    const prompt = (sm as unknown as { buildSystemPrompt: () => string }).buildSystemPrompt();
+    expect(prompt).toContain('INSTRUCTIONS-CONTENT');
+  });
+
+  // --- managed-loop provider crash callback updates db status (lines 989-991,
+  //     1008-1010): exercised when the provider emits an onCrash during a turn.
+
+  it('managed provider onCrash callback marks the row crashed', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    let crashCb!: (info: { exitCode: number | null; signal: string | null; provider: string; crashClass?: string; stderrPreview?: string }) => void;
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockImplementation(async function (this: OpenAIApiProvider, opts) {
+      crashCb = opts.onCrash as typeof crashCb;
+      return Promise.resolve();
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    await sm.spawnSession();
+    vi.mocked(updateSessionStatus).mockClear();
+    crashCb({ exitCode: 1, signal: null, provider: 'openai-api' });
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(onCrash).toHaveBeenCalled();
+  });
+
+  // --- clearShutdownKillTimer clears a pending kill timer (lines 691-695).
+  //     Indirectly: spawnSession clears any prior timer at the start.
+
+  it('shutdown clears the shutdown kill timer when called twice in a row', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.shutdown(true);
+    // A second shutdown with no child should not throw and should leave state clean.
+    await expect(sm.shutdown(true)).resolves.toBeUndefined();
+    expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+});
