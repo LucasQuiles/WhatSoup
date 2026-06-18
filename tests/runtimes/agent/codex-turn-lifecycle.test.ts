@@ -502,7 +502,9 @@ describe('Codex turn lifecycle — runtime level', () => {
     (runtime as any).durability = durability;
     (runtime as any).currentTurnChatJid = 'stale@s.whatsapp.net';
     (runtime as any).turnHadVisibleOutput = true;
-    (runtime as any).activeToolNames.set('tool-1', 'search_contacts');
+    // Tool-scope keys are `${mapKey}#${ordinal}` — seed one for this chat so the
+    // scoped per_chat cleanup (clearToolScopeFor) clears it.
+    (runtime as any).activeToolNames.set('1234@s.whatsapp.net#1', new Map([['tool-1', 'search_contacts']]));
     (runtime as any).chatQueues.set('1234@s.whatsapp.net', mockQueue);
     (runtime as any).chatSessions.set('1234@s.whatsapp.net', mockSession);
     (runtime as any).perChatInboundSeqQueue.set('1234@s.whatsapp.net', [77]);
