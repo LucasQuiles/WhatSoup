@@ -193,6 +193,11 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
 # the gate is off, or on any ambiguity, symptoms are NOT suppressed.
 INHIBITION_ENABLED = env_flag("BOT_ERRORS_INHIBITION_ENABLED", True)
 
+# Pattern B (Part 2) env gate. Default-on; "0/false/no/off" disables the
+# maintenance-window suppression gate, restoring prior (always-alert) behavior.
+# FAIL-OPEN: when the gate is off, or on any ambiguity, alerts are NOT silenced.
+MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
+
 
 def _load_inhibition_map() -> dict[str, set[str]]:
     """Seed inhibition map, optionally merged with BOT_ERRORS_INHIBITION_MAP.
@@ -644,6 +649,64 @@ def is_incident_clear(event: dict[str, Any]) -> bool:
 
 def is_daily_health_clear(event: dict[str, Any]) -> bool:
     return is_incident_clear(event) and str(event.get("source") or "") == "daily-health"
+
+
+def maintenance_state_path() -> Path:
+    """Path to the maintenance-window state file.
+
+    MUST match ``bot-errors-maintenance.py``'s resolution so the CLI and the
+    dispatcher agree on a single file (``BOT_ERRORS_STATE_DIR`` honored).
+    """
+    return state_root() / "maintenance.json"
+
+
+def _load_maintenance_windows() -> dict[str, dict[str, Any]]:
+    """Read active maintenance windows keyed by ``machine|instance``.
+
+    FAIL-OPEN: missing / corrupt / non-dict file -> ``{}``. Expired entries are
+    dropped at read time so a stale window never silences alerts.
+    """
+    path = maintenance_state_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    current = int(time.time())
+    out: dict[str, dict[str, Any]] = {}
+    for key, win in parsed.items():
+        if not isinstance(win, dict):
+            continue
+        expires = win.get("expiresAt")
+        try:
+            if expires is not None and int(expires) > current:
+                out[str(key)] = win
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def active_maintenance_window(event: dict[str, Any]) -> str | None:
+    """Reason string if an active maintenance window covers the event's scope.
+
+    Scope is derived via ``incident_scope`` (``machine|instance``) — the same
+    derivation incidents use — so the CLI and dispatcher key on identical
+    scopes. Returns None when no active window covers the scope.
+    """
+    scope = incident_scope(event)
+    windows = _load_maintenance_windows()
+    win = windows.get(scope)
+    if not isinstance(win, dict):
+        return None
+    reason = win.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return f"planned maintenance for {scope}: {reason.strip()}"
+    return f"planned maintenance for {scope}"
 
 
 def evidence_field(text: str, key: str) -> str | None:
@@ -1451,6 +1514,19 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
         return "daily-health info events are retained for heartbeat freshness but not posted to BOT ERRORS"
+    # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
+    # maintenance window. CLEAR events are never gated here: a recovery during
+    # maintenance must still close the incident. FAIL-OPEN: gate off, or any
+    # ambiguity in the window file, sends as before.
+    if (
+        MAINTENANCE_ENABLED
+        and is_incident_alert(event)
+        and not is_incident_clear(event)
+    ):
+        maintenance_reason = active_maintenance_window(event)
+        if maintenance_reason is not None:
+            event.setdefault("diagnostics", {})["maintenanceSilenced"] = True
+            return f"maintenance_silenced: {maintenance_reason}"
     migrate_legacy_unqualified_incident(event, incident_state)
     key = incident_key(event)
     current = int(time.time())
