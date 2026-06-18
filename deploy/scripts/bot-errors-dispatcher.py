@@ -137,6 +137,21 @@ DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES = {
     "whatsapp_device_bond_lost",
     "instance_logged_out",
 }
+# Pattern C — inhibition table (root cause suppresses symptom).
+#
+# Direction: root source -> set of downstream SYMPTOM sources it suppresses
+# while the root incident is OPEN for the same scope (machine|instance). This is
+# the same map consulted by stronger_open_incident_for(); Pattern C extends the
+# seed edges so a single root-cause alert (bond loss, logout, host unreachable)
+# collapses the per-instance health symptoms that fan out from it.
+#
+# Source-string convention matches incident_source() output: bare sources
+# (e.g. "whatsapp_device_bond_lost", "instance_logged_out") and qualified
+# per-instance health symptoms emitted by the watchdog as "local_health:<name>".
+# The bare token "local_health" is listed in symptom sets and matched against
+# any "local_health:<instance>" source via prefix-aware membership (see
+# symptom_source_matches); scope already pins machine|instance, so the
+# <instance> suffix is redundant for scoping but is part of the literal source.
 SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
     "instance_logged_out": {
         "health_body_degraded",
@@ -146,10 +161,14 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
         "instance_unreachable",
         "instance_never_reachable",
         "instance_degraded",
+        # Pattern C: a logged-out instance cannot pass its local health probe.
+        "local_health",
     },
     "instance_unreachable": {
         "instance_never_reachable",
         "instance_degraded",
+        # Pattern C: an unreachable host's per-instance health probe will fail.
+        "local_health",
     },
     "instance_degraded": {
         "instance_never_reachable",
@@ -163,8 +182,69 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
         "instance_degraded",
         "outbound_quarantined",
         "outbound_send_failed",
+        # Pattern C: bond loss takes the instance offline; its health probe and
+        # downstream logout symptom are collapsed into the single bond alert.
+        "local_health",
     },
 }
+
+# Pattern C env gate. Default-on; "0/false/no/off" turns the inhibition lookup
+# into a no-op so prior (non-inhibited) behavior is restored. FAIL-OPEN: when
+# the gate is off, or on any ambiguity, symptoms are NOT suppressed.
+INHIBITION_ENABLED = env_flag("BOT_ERRORS_INHIBITION_ENABLED", True)
+
+
+def _load_inhibition_map() -> dict[str, set[str]]:
+    """Seed inhibition map, optionally merged with BOT_ERRORS_INHIBITION_MAP.
+
+    The override is JSON mapping root_source -> list/array of symptom sources.
+    Each listed symptom set is UNION-merged over the seed (additive; never
+    removes seed edges). Malformed JSON or wrong shape logs to stderr and falls
+    back to the pure seed — it never crashes the dispatcher.
+    """
+    seed: dict[str, set[str]] = {
+        root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()
+    }
+    raw = os.environ.get("BOT_ERRORS_INHIBITION_MAP", "").strip()
+    if not raw:
+        return seed
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("BOT_ERRORS_INHIBITION_MAP must be a JSON object")
+        for root, symptoms in parsed.items():
+            if not isinstance(root, str) or not isinstance(symptoms, (list, tuple, set)):
+                raise ValueError(f"invalid inhibition edge for root={root!r}")
+            bucket = seed.setdefault(str(root), set())
+            for symptom in symptoms:
+                if not isinstance(symptom, str):
+                    raise ValueError(f"non-string symptom for root={root!r}")
+                bucket.add(symptom)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(
+            f"[bot-errors-dispatcher] BOT_ERRORS_INHIBITION_MAP ignored "
+            f"(malformed; falling back to seed): {exc}",
+            file=sys.stderr,
+        )
+        return {root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()}
+    return seed
+
+
+# Effective root->symptom inhibition map (seed merged with env override).
+INHIBITION_MAP = _load_inhibition_map()
+
+
+def symptom_source_matches(source: str, symptom_sources: set[str]) -> bool:
+    """True if ``source`` is a member of ``symptom_sources``.
+
+    Exact match, plus prefix-aware match for the per-instance health symptom:
+    a source like "local_health:sample" matches the bare token "local_health".
+    """
+    if source in symptom_sources:
+        return True
+    if "local_health" in symptom_sources and source.startswith("local_health:"):
+        return True
+    return False
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
 TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-test-auth(?:/|\s|$)", re.I)
 
@@ -1389,9 +1469,13 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)
+        root_source = stronger_key.rsplit("|", 1)[-1]
         if is_incident_clear(event):
             return f"clear for {key} suppressed because stronger incident {stronger_key} remains open"
-        return f"symptom incident {key} suppressed because stronger incident {stronger_key} remains open"
+        return (
+            f"symptom incident {key} suppressed because stronger incident "
+            f"{stronger_key} remains open (inhibited_by:{root_source})"
+        )
     if is_incident_alert(event):
         open_record = open_incidents.get(key)
         if isinstance(open_record, dict):
@@ -1594,17 +1678,42 @@ def close_superseded_incidents(event: dict[str, Any], incident_state: dict[str, 
         old_key = f"{scope}|{old_source}"
         open_incidents.pop(old_key, None)
         last_sent.pop(old_key, None)
+    # Prefix-aware close for per-instance health symptoms. Stored health
+    # incidents use the QUALIFIED key form "{scope}|local_health:<instance>"
+    # (incident_source() qualifies them), so the exact-key pop above is a no-op
+    # for them. When a bare "local_health" token is in the symptom set, also
+    # close any open incident in the SAME scope whose stored source matches via
+    # symptom_source_matches (i.e. "{scope}|local_health:*"). Reuses the same
+    # prefix logic as the inhibition path; exact-match behavior for all other
+    # sources is unchanged. Collect keys first to avoid mutating while iterating.
+    if "local_health" in superseded_sources:
+        scope_prefix = f"{scope}|"
+        prefixed_keys = [
+            key
+            for key in open_incidents
+            if key.startswith(scope_prefix)
+            and symptom_source_matches(key[len(scope_prefix):], superseded_sources)
+        ]
+        for key in prefixed_keys:
+            open_incidents.pop(key, None)
+            last_sent.pop(key, None)
 
 
 def stronger_open_incident_for(
     event: dict[str, Any],
     incident_state: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
+    # Pattern C gate — FAIL-OPEN. When inhibition is disabled, never suppress.
+    if not INHIBITION_ENABLED:
+        return None
     source = incident_source(event)
     scope = incident_scope(event)
     open_incidents = incident_state.setdefault("openIncidents", {})
-    for stronger_source, superseded_sources in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items():
-        if source not in superseded_sources:
+    for stronger_source, superseded_sources in INHIBITION_MAP.items():
+        if not symptom_source_matches(source, superseded_sources):
+            continue
+        # A root incident must never suppress itself.
+        if source == stronger_source:
             continue
         stronger_key = f"{scope}|{stronger_source}"
         record = open_incidents.get(stronger_key)
@@ -1640,6 +1749,13 @@ def mark_suppressed_by_stronger(
     if critical_failure_code(event):
         stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(event)
     stronger_record["suppressedCount"] = int_field(stronger_record, "suppressedCount") + 1
+    # Pattern C — tag the suppressed symptom with inhibited_by:<root_source>,
+    # mirroring how Pattern F tags flap_storm members. The root source is the
+    # last segment of the stronger_key (scope|root_source). Auto-release is
+    # automatic: this reason is derived at decision time from open-incident
+    # state, so it disappears once the root incident clears (NO persistent flag).
+    root_source = stronger_key.rsplit("|", 1)[-1]
+    stronger_record["lastSuppressedSymptomReason"] = f"inhibited_by:{root_source}"
 
 
 def incident_event_fields_from_key(key: str) -> dict[str, str]:
