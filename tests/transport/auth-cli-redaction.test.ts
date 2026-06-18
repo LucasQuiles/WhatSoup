@@ -42,4 +42,27 @@ describe('auth CLI redaction', () => {
     expect(source).not.toContain('Authenticated successfully as ${jid}');
     expect(source).not.toContain('Auth directory: ${config.authDir}');
   });
+
+  it('redacts the full credential path including parent directories (no username leak)', () => {
+    const redacted = redactAuthCliText('Auth directory: /home/testuser/.config/whatsoup/instances/agent-beta/auth');
+    expect(redacted).toBe('Auth directory: [REDACTED CREDENTIAL PATH]');
+    expect(redacted).not.toContain('testuser');
+    expect(redacted).not.toContain('home');
+  });
+
+  it('does not over-redact a leading assignment label or preceding word', () => {
+    expect(redactAuthCliText('backup=/home/testuser/.config/whatsoup/x')).toBe('backup=[REDACTED CREDENTIAL PATH]');
+    expect(redactAuthCliText('see word/secrets.env here')).toBe('see word[REDACTED CREDENTIAL PATH] here');
+  });
+
+  it('completes in linear time on adversarial path-like input (ReDoS guard)', () => {
+    // CREDENTIAL_PATH previously used a nested quantifier (`(?:~|/[^...]+)*`) that
+    // backtracked exponentially on strings starting with '/' and repeating '!/'.
+    const adversarial = '/' + '!/'.repeat(31);
+    const start = performance.now();
+    const out = redactAuthCliText(adversarial);
+    const elapsedMs = performance.now() - start;
+    expect(out).toBe(adversarial); // no credential suffix → unchanged
+    expect(elapsedMs).toBeLessThan(1000);
+  });
 });
