@@ -184,6 +184,15 @@ export default function Inbox() {
       toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setIsSending(false)
+      // Drop the optimistic PK from the animation set: the entrance animation has played and
+      // the optimistic bubble is now replaced by server data (or removed on error). Without
+      // this the Set grows by one negative PK per send for the component's lifetime.
+      setAnimatedPks(prev => {
+        if (!prev.has(optimisticPk)) return prev
+        const next = new Set(prev)
+        next.delete(optimisticPk)
+        return next
+      })
     }
   }
 
