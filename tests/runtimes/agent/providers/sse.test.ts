@@ -50,3 +50,19 @@ describe('readSseDataLines', () => {
     expect(await collect(stream)).toEqual(['payload']);
   });
 });
+
+describe('sse.ts EOF trailing-frame flush', () => {
+  it('flushes a trailing data: frame left without a final newline', async () => {
+    // Final chunk carries a `data: ` line with no trailing newline, exercising
+    // the EOF flush path (drainLines flush=true keeps the trailing segment).
+    const stream = makeStream(['data: trailing']);
+    expect(await collect(stream)).toEqual(['trailing']);
+  });
+
+  it('does not flush a trailing frame that is not a data: line', async () => {
+    // Final chunk carries a non-data field with no trailing newline; the EOF
+    // flush must drop it rather than yield it.
+    const stream = makeStream(['event: no-data-here']);
+    expect(await collect(stream)).toEqual([]);
+  });
+});

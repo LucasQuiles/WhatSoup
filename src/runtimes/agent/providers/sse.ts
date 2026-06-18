@@ -32,15 +32,11 @@ export async function* readSseDataLines(
       yield* drainLines(decoder.decode(value, { stream: true }), false);
     }
 
+    // Flush at EOF: drainLines(flush=true) keeps every split segment (it does
+    // not pop the last partial line), so a final `data:` frame that arrived
+    // without a trailing newline is emitted here. `buffer` is always '' after
+    // a flush drain, so no further leftover-buffer handling is reachable.
     yield* drainLines(decoder.decode(), true);
-
-    if (buffer.length > 0) {
-      const line = buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer;
-      if (line.startsWith('data: ')) {
-        yield line.slice(6).trim();
-      }
-      buffer = '';
-    }
   } finally {
     reader.releaseLock();
   }
