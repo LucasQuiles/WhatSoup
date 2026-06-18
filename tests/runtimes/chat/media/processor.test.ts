@@ -211,6 +211,38 @@ describe('processMedia — disk persistence', () => {
     });
   });
 
+  describe('audio', () => {
+    // Regression guard for #1074: the cache-file extension must follow the real
+    // MIME type, not a hardcoded '.ogg', so transcribe_audio can later infer the
+    // correct format.
+    it('persists an M4A voice note with the .m4a extension (not .ogg)', async () => {
+      const buf = Buffer.from('fake-m4a');
+      vi.mocked(downloadMedia).mockResolvedValue({ buffer: buf, mimeType: 'audio/mp4' });
+      vi.mocked(writeTempFile).mockReturnValue('/tmp/voice.m4a');
+      vi.mocked(transcribeAudio).mockResolvedValue('hello');
+
+      const db = makeDb();
+      const msg = makeMsg({ contentType: 'audio', messageId: 'aud-001' });
+      await processMedia(msg, makeDownloadFn(buf), db, 'aud-001');
+
+      expect(writeTempFile).toHaveBeenCalledWith(buf, 'm4a');
+      expect(updateMediaPath).toHaveBeenCalledWith(db, 'aud-001', '/tmp/voice.m4a');
+    });
+
+    it('persists an OGG voice note with the .ogg extension', async () => {
+      const buf = Buffer.from('fake-ogg');
+      vi.mocked(downloadMedia).mockResolvedValue({ buffer: buf, mimeType: 'audio/ogg' });
+      vi.mocked(writeTempFile).mockReturnValue('/tmp/voice.ogg');
+      vi.mocked(transcribeAudio).mockResolvedValue('hi');
+
+      const db = makeDb();
+      const msg = makeMsg({ contentType: 'audio', messageId: 'aud-002' });
+      await processMedia(msg, makeDownloadFn(buf), db, 'aud-002');
+
+      expect(writeTempFile).toHaveBeenCalledWith(buf, 'ogg');
+    });
+  });
+
   describe('sticker', () => {
     it('uses webp extension for sticker', async () => {
       const buf = Buffer.from('fake-sticker');

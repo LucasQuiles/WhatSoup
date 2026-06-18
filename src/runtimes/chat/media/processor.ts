@@ -1,6 +1,7 @@
 import { createChildLogger } from '../../../logger.ts';
 import type { IncomingMessage } from '../../../core/types.ts';
 import { transcribeAudio } from '../providers/whisper.ts';
+import { extensionForMimeType } from '../providers/transcription/local-audio.ts';
 import { downloadMedia, writeTempFile } from '../../../core/media-download.ts';
 import { updateMediaPath } from '../../../core/messages.ts';
 import type { Database } from '../../../core/database.ts';
@@ -104,7 +105,10 @@ export async function processMedia(
       return { content: "[audio — couldn't download]", images: [] };
     }
 
-    persistMediaPath(result.buffer, 'ogg', db, messageId);
+    // Derive the cache-file extension from the real MIME type so transcribe_audio
+    // can later infer the correct format (e.g. audio/mp4 → .m4a). A hardcoded
+    // '.ogg' mislabels M4A/WebM voice notes and degrades transcription (#1074).
+    persistMediaPath(result.buffer, extensionForMimeType(result.mimeType), db, messageId);
 
     try {
       const transcript = await transcribeAudio(result.buffer, result.mimeType);
