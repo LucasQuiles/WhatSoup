@@ -41,6 +41,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          # Include the console sub-package lockfile in the cache key so the warm
+          # npm cache also covers `npm --prefix console ci` (the default key hashes
+          # only the root lockfile, so console re-downloads its deps every run).
+          cache-dependency-path: |
+            package-lock.json
+            console/package-lock.json
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
@@ -199,10 +205,12 @@ jobs:
       - name: Install console dependencies
         run: npm --prefix console ci
 
-      - name: Test suite
-        run: npm test -- --pool=forks
-
-      - name: Coverage thresholds
+      # Single full-suite gate. `coverage:check` runs `vitest run --coverage`,
+      # which executes the ENTIRE suite (and fails on any test failure) before
+      # enforcing thresholds — a strict superset of a plain `vitest run`. The
+      # previously-separate "Test suite" step re-ran all ~6651 tests with no
+      # coverage, doubling test wall-time per matrix leg for zero added signal.
+      - name: Test suite + coverage thresholds
         run: npm run coverage:check -- --pool=forks
 
       - name: Failure-scenario drills
