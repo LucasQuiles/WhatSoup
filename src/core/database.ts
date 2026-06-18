@@ -728,6 +728,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [28, runMigration28],
   [29, runMigration29],
   [30, runMigration30],
+  [31, runMigration31],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -772,6 +773,20 @@ function runMigration30(db: DatabaseSync): void {
   if (!cols.some((c) => c.name === 'timezone')) {
     db.exec('ALTER TABLE scheduled_messages ADD COLUMN timezone TEXT');
   }
+}
+
+// audit 1065: track LLM attempts separately from the user response rate-limit.
+// rate_limits records only successful responses; llm_attempts records every LLM
+// invocation (including ones whose send later fails), so outage retry cost is
+// observable without charging the user's response allowance.
+function runMigration31(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS llm_attempts (
+      sender_jid TEXT NOT NULL,
+      attempt_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_llm_attempts_sender ON llm_attempts(sender_jid, attempt_at);
+  `);
 }
 
 function runMigration27(db: DatabaseSync): void {

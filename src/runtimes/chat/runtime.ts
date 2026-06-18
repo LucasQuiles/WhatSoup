@@ -9,7 +9,7 @@ import { sendTracked } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
-import { recordResponse } from './rate-limits-db.ts';
+import { recordResponse, recordAttempt } from './rate-limits-db.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   response_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rate_limits_sender ON rate_limits(sender_jid, response_at);
+
+-- audit 1065: LLM attempts recorded separately from successful responses.
+CREATE TABLE IF NOT EXISTS llm_attempts (
+  sender_jid TEXT NOT NULL,
+  attempt_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_attempts_sender ON llm_attempts(sender_jid, attempt_at);
 
 CREATE TABLE IF NOT EXISTS enrichment_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,6 +289,16 @@ export class ChatRuntime implements Runtime {
     let llmDurationMs = 0;
 
     const llmStart = Date.now();
+
+    // audit 1065: record the LLM attempt before invoking the provider. This counts
+    // every message that reaches the LLM — separate from recordResponse (success
+    // only) — so retry/outage LLM cost is observable without charging the user's
+    // response rate-limit. Best-effort; never block a reply on bookkeeping.
+    try {
+      recordAttempt(this.db, rateLimitKey);
+    } catch (err) {
+      log.error({ traceId, err }, 'failed to record llm attempt');
+    }
 
     // Primary provider: try once, wait, retry once
     try {
