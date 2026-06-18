@@ -715,3 +715,269 @@ describe('chat-management tools', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// chat-management.ts uncovered-branch coverage
+//
+// Targets the residual branches not exercised by the happy-path suites above.
+// Each test is paired to one or more lines that the per-file coverage report
+// previously flagged as not-covered.
+// ---------------------------------------------------------------------------
+
+describe('chat-management.ts uncovered-branch coverage', () => {
+  let db: Database;
+  let registry: ToolRegistry;
+  let mockSock: WhatsAppSocket;
+
+  beforeEach(() => {
+    db = makeDb();
+    mockSock = makeMockSock();
+    registry = new ToolRegistry();
+    registerChatManagementTools(db, () => mockSock, (tool) => registry.register(tool));
+    seedConversations(db);
+  });
+
+  // --- list_chats: contentPreview / metadata branches ---
+
+  describe('list_chats — residual branches', () => {
+    it('returns null contentPreview when the last message has neither content_text nor content', async () => {
+      // Media-only message: both `content` and `content_text` are NULL.
+      db.raw
+        .prepare(
+          `INSERT INTO messages
+             (chat_jid, conversation_key, sender_jid, sender_name, message_id,
+              content, content_text, content_type, is_from_me, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          '333@s.whatsapp.net',
+          '333',
+          '333@s.whatsapp.net',
+          'Carol',
+          'msg-media',
+          null,
+          null,
+          'image',
+          0,
+          8000,
+        );
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 10, include_last_message: true },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{ lastMessage: { messageId: string; contentPreview: string | null } | null }>;
+      };
+      const mediaChat = data.chats.find((c) => c.lastMessage?.messageId === 'msg-media');
+      expect(mediaChat).toBeDefined();
+      expect(mediaChat?.lastMessage).toMatchObject({ messageId: 'msg-media', contentPreview: null });
+    });
+
+    it('reports isArchived / isPinned when the chats row has the corresponding flags set', async () => {
+      db.raw.exec(`
+        INSERT INTO chats
+          (jid, conversation_key, name, unread_count, is_archived, is_pinned, mute_until, ephemeral_duration)
+        VALUES
+          ('111@s.whatsapp.net', '111', 'Alice Chat', 0, 1, 1, NULL, NULL)
+      `);
+
+      const result = await registry.call('list_chats', { limit: 10 }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{
+          conversationKey: string;
+          isArchived: boolean | undefined;
+          isPinned: boolean | undefined;
+        }>;
+      };
+      const alice = data.chats.find((c) => c.conversationKey === '111');
+      expect(alice).toBeDefined();
+      expect(alice?.isArchived).toBe(true);
+      expect(alice?.isPinned).toBe(true);
+    });
+
+    it('returns null senderName and null lastMessage for chats that have no messages', async () => {
+      // chats-only conversation: the UNION ALL branch of base_conversation_rows.
+      db.raw.exec(`
+        INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived, is_pinned)
+        VALUES ('555@s.whatsapp.net', '555', 'Empty Chat', 0, 0, 0)
+      `);
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 10, include_last_message: true, query: 'empty' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{ lastMessage: unknown }>;
+      };
+      expect(data.chats).toHaveLength(1);
+      expect(data.chats[0]).toMatchObject({ lastMessage: null });
+    });
+
+    it('returns null senderName for messages with no sender_name set', async () => {
+      db.raw
+        .prepare(
+          `INSERT INTO messages
+             (chat_jid, conversation_key, sender_jid, sender_name, message_id,
+              content, content_text, content_type, is_from_me, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          '444@s.whatsapp.net',
+          '444',
+          '444@s.whatsapp.net',
+          null,
+          'msg-noname',
+          'hi',
+          'hi',
+          'text',
+          0,
+          9000,
+        );
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 10, include_last_message: true },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{
+          lastMessage: { messageId: string; senderName: string | null } | null;
+        }>;
+      };
+      const chat = data.chats.find((c) => c.lastMessage?.messageId === 'msg-noname');
+      expect(chat).toBeDefined();
+      expect(chat?.lastMessage).toMatchObject({ messageId: 'msg-noname', senderName: null });
+    });
+  });
+
+  // --- get_chat: normalization / not-found branches ---
+
+  describe('get_chat — residual branches', () => {
+    it('accepts a raw JID with a @g.us domain and normalises it for lookup', async () => {
+      // Seed a group conversation using the encoded key form ('..._at_g.us').
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('grp1@g.us', 'grp1_at_g.us', 'grp1@g.us', 'Group Member', 'gmsg1', 'group hello', 'text', 0, 11000)
+      `);
+
+      const result = await registry.call(
+        'get_chat',
+        { conversation_key: 'grp1@g.us' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        conversationKey: string;
+        messageCount: number;
+        chatJid: string;
+      };
+      expect(data.conversationKey).toBe('grp1_at_g.us');
+      expect(data.messageCount).toBe(1);
+      expect(data.chatJid).toBe('grp1@g.us');
+    });
+  });
+
+  // --- forward_message: error & fallback branches ---
+
+  describe('forward_message — residual branches', () => {
+    it('rejects a malformed to_jid when a global session is bound to a conversation', async () => {
+      // session.conversationKey is set AND to_jid has no '@' -> toConversationKey throws.
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: 'not-a-jid' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Invalid to_jid');
+      expect(result.content[0].text).toContain('not-a-jid');
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('falls back to text when raw_message is unparseable JSON', async () => {
+      // rawMessage present but invalid -> JSON.parse throws -> catch arm runs.
+      db.raw
+        .prepare(`UPDATE messages SET raw_message = ? WHERE message_id = 'msg1'`)
+        .run('{ this is not valid json');
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { method: string };
+      expect(data.method).toBe('text');
+      expect(mockSock.sendMessage).toHaveBeenCalledWith('333@s.whatsapp.net', { text: 'First message' });
+    });
+
+    it('uses the content_type placeholder when content is null in the text fallback', async () => {
+      // Set content NULL so the `row.content ?? '[X] message]'` branch fires.
+      db.raw.exec(`UPDATE messages SET content = NULL WHERE message_id = 'msg1'`);
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { method: string };
+      expect(data.method).toBe('text');
+      expect(mockSock.sendMessage).toHaveBeenCalledWith('333@s.whatsapp.net', {
+        text: '[text message]',
+      });
+    });
+
+    it('falls back to text when the raw_message column has been dropped from the schema', async () => {
+      // Simulate pre-migration-5 schema: dropping the column makes the SELECT throw.
+      db.raw.exec('ALTER TABLE messages DROP COLUMN raw_message');
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { method: string };
+      expect(data.method).toBe('text');
+      expect(mockSock.sendMessage).toHaveBeenCalledWith('333@s.whatsapp.net', { text: 'First message' });
+    });
+  });
+
+  // --- mute_chat: default-until branch ---
+
+  describe('mute_chat — residual branches', () => {
+    it('uses a default 8h mute window when `until` is omitted', async () => {
+      // Capture the value passed to chatModify so we can assert it's a sensible
+      // future unix-seconds value (8h from now, within a small tolerance window).
+      const before = Math.floor(Date.now() / 1000);
+      await registry.call(
+        'mute_chat',
+        { jid: '111@s.whatsapp.net', mute: true },
+        globalSession(),
+      );
+      const after = Math.floor(Date.now() / 1000);
+
+      expect(mockSock.chatModify).toHaveBeenCalledTimes(1);
+      const [modifyArg, jidArg] = (mockSock.chatModify as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(jidArg).toBe('111@s.whatsapp.net');
+      const muteValue = (modifyArg as { mute: number | null }).mute;
+      expect(typeof muteValue).toBe('number');
+      // 8 hours = 28800 seconds. Allow for clock drift around the boundary.
+      expect(muteValue).toBeGreaterThanOrEqual(before + 8 * 3600 - 2);
+      expect(muteValue).toBeLessThanOrEqual(after + 8 * 3600 + 2);
+    });
+  });
+});
