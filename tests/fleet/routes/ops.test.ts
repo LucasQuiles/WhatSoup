@@ -4377,6 +4377,46 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
+  // ---- Line 886: scanHealthPortInventory ENOENT on missing sibling config.json ----
+  it('handleCreateLine skips a sibling without a config.json during healthPort inventory (line 886 true)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nojson-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      // Seed an empty sibling dir (no config.json) — line 886 ENOENT path.
+      const siblingDir = path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', 'empty-line');
+      fs.mkdirSync(siblingDir, { recursive: true });
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'nojson-line', type: 'chat',
+          adminPhones: ['15550000001'],
+        })),
+        res, deps);
+      // The empty sibling is skipped (line 886 continue), so create succeeds.
+      expect(res._status).toBe(201);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+    }
+  });
+
   // ---- Line 877/879: scanHealthPortInventory skips non-directory entries and excludeName ----
   it('handleConfigUpdate ignores a file entry and the excluded instance during healthPort inventory (lines 877/879)', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-invskip-'));
