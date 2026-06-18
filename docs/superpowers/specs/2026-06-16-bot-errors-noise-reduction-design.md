@@ -580,3 +580,50 @@ stands; its premise (run-once) was imprecise.
 **Deploy:** changes take effect on the **next natural dispatcher restart** (Lucas
 controls; no self-restart). The SHA-pin (`deploy/bot-errors-runtime-manifest.json`
 + approved ledger) must be regenerated in that step.
+
+---
+
+## Pattern H — relay-host flap coalescing (added 2026-06-17)
+
+**Evidence (live `sent/` over ~30h).** The collector emits `relay_host_down`
+(warning) when a peer relay probe misses and a paired `relay_host_recovered`
+(info) when it returns. Measured flaps: `10:40 down(4 peers) → 10:46 up`,
+`16:17 down(3 peers) → 16:23 up`, `18:55 down(2 peers) → 19:01 up` — every
+one a ~6-minute self-healed blip (one missed ~5-6 min probe interval), fanned per
+host. Tally: **42 down + 52 recovered = 94 pages**, virtually all transient,
+zero-intervention. This is precisely the "auto-recovered updates that don't
+require intervention" class.
+
+**Root cause of the leak.** `relay_host_recovered` is emitted as an `info`
+*alert* (not a `clear`), so `is_incident_alert` (requires warning/error/critical)
+is false and `is_incident_clear` is false — it falls straight through
+`should_suppress_send` and always sends. The down (warning) classified `outage`
+and also always sent.
+
+**Design (reuses Pattern D machinery; one new handler).**
+1. `classify_failure_mode`: `relay_host_down → "transient"` (gated). Pattern D
+   then HOLDS the down at warning tier, never surfacing it unless it persists past
+   `TRANSIENT_PROMOTE_SECONDS` — at which point it promotes to an outage and pages.
+2. `coalesce_relay_recovered(event, state)`: pairs a `relay_host_recovered` to its
+   `relay_host_down` incident by source-segment substitution and decides:
+   - paired down is a **held, unpromoted** transient → suppress the recovery and
+     retire the held record (flap pages neither leg);
+   - paired down **promoted** to an outage, or has a **surfaced open incident** →
+     recovery is meaningful → send;
+   - **no held record** → fail toward visibility → send (never silence a recovery
+     the operator may be waiting on).
+   Hooked early in `should_suppress_send` (the info severity bypasses the alert/
+   clear branches).
+
+**Gate / fail-open.** `BOT_ERRORS_RELAY_FLAP_COALESCE` (default on). Off → down
+classifies `outage` and recovered sends, exactly as before. Any handler error →
+send. Per-remote scoped (keyed `…|relay_host_down:<remote>`). Bookkeeping reuses
+`transientState` (no new sidecar; survives restart with the rest of Pattern D).
+
+**Tests.** `deploy/scripts/tests/test_bot_errors_relay_flap_coalesce.py` (12):
+classification both gate states, down-held-not-surfaced, recovered-coalesced +
+record-retired, full lifecycle both legs silent, promoted/open/orphan all send,
+per-remote scoping, gate-off, fail-open on malformed state.
+
+**Deploy:** inert until the next natural dispatcher restart (Lucas-controlled; no
+self-restart), same as Patterns A–G. SHA-pin manifest regenerated in that step.
