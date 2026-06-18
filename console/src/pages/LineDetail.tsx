@@ -233,6 +233,7 @@ export default function LineDetail() {
         value={activeTab}
         onChange={(id) => setActiveTab(id as TabId)}
         inset
+        lazyPanels
         className="flex-shrink-0 bg-surface-raised"
       >
         {tabs.map(tab => {

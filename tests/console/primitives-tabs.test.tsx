@@ -95,3 +95,34 @@ describe('Tabs — roving tabindex + keyboard contract', () => {
     expect(document.getElementById(describedBy ?? '')?.textContent).toBe('not configured');
   });
 });
+
+describe('Tabs — lazyPanels aria-controls (#1057)', () => {
+  function LazyHarness() {
+    const [active, setActive] = useState('one');
+    return (
+      <>
+        <Tabs label="Lazy tabs" value={active} onChange={setActive} lazyPanels>
+          <Tab id="one">One</Tab>
+          <Tab id="two">Two</Tab>
+        </Tabs>
+        {/* Only the active panel is mounted (conditional render, as LineDetail does). */}
+        <div role="tabpanel" id={`tabpanel-${active}`} aria-labelledby={`tab-${active}`}>
+          panel {active}
+        </div>
+      </>
+    );
+  }
+
+  it('inactive tabs omit aria-controls when only the active panel is mounted', () => {
+    render(<LazyHarness />);
+    const one = screen.getByRole('tab', { name: 'One' }); // active
+    const two = screen.getByRole('tab', { name: 'Two' }); // inactive, panel not mounted
+    expect(one.getAttribute('aria-controls')).toBe('tabpanel-one'); // points at the live panel
+    expect(two.hasAttribute('aria-controls')).toBe(false); // no dangling target
+  });
+
+  it('default (no lazyPanels) keeps aria-controls on every tab for TabPanel consumers', () => {
+    render(<Harness />);
+    expect(screen.getByRole('tab', { name: 'Two' }).getAttribute('aria-controls')).toBe('tabpanel-two');
+  });
+});
