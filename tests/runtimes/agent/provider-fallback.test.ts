@@ -207,10 +207,12 @@ type FallbackView = {
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
   formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
   buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
-  // Background handoff distiller seams.
-  startHandoffDistillSweepTimer(): void;
-  handoffDistillTimer: ReturnType<typeof setInterval> | null;
-  handoffDistillRunner: unknown | null;
+  // Background handoff distiller seams (extracted into HandoffDistillCoordinator).
+  handoffDistill: {
+    start(): void;
+    timer: ReturnType<typeof setInterval> | null;
+    runner: unknown | null;
+  };
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1452,9 +1454,9 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
     const { runtime, db } = makeDistillRuntime();
     const v = view(runtime);
     withEnv({ [DISTILLER_FLAG]: undefined, [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk' }, () => {
-      v.startHandoffDistillSweepTimer();
-      expect(v.handoffDistillTimer).toBeNull();
-      expect(v.handoffDistillRunner).toBeNull();
+      v.handoffDistill.start();
+      expect(v.handoffDistill.timer).toBeNull();
+      expect(v.handoffDistill.runner).toBeNull();
     });
     db.close();
   });
@@ -1464,9 +1466,9 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
     const v = view(runtime);
     // Known flag, but unknown model id → resolveDistillModel returns null.
     withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'gpt-4o-mini', DEEPSEEK_API_KEY: 'sk' }, () => {
-      v.startHandoffDistillSweepTimer();
-      expect(v.handoffDistillTimer).toBeNull();
-      expect(v.handoffDistillRunner).toBeNull();
+      v.handoffDistill.start();
+      expect(v.handoffDistill.timer).toBeNull();
+      expect(v.handoffDistill.runner).toBeNull();
     });
     db.close();
   });
@@ -1475,16 +1477,16 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
     const { runtime, db } = makeDistillRuntime();
     const v = view(runtime);
     withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk-deep' }, () => {
-      v.startHandoffDistillSweepTimer();
-      expect(v.handoffDistillTimer).not.toBeNull();
-      expect(v.handoffDistillRunner).not.toBeNull();
+      v.handoffDistill.start();
+      expect(v.handoffDistill.timer).not.toBeNull();
+      expect(v.handoffDistill.runner).not.toBeNull();
       // Idempotent: a second call does not re-arm.
-      const timer = v.handoffDistillTimer;
-      v.startHandoffDistillSweepTimer();
-      expect(v.handoffDistillTimer).toBe(timer);
+      const timer = v.handoffDistill.timer;
+      v.handoffDistill.start();
+      expect(v.handoffDistill.timer).toBe(timer);
       // Clean up the armed interval deterministically (it is unref'd anyway).
-      if (v.handoffDistillTimer) clearInterval(v.handoffDistillTimer);
-      v.handoffDistillTimer = null;
+      if (v.handoffDistill.timer) clearInterval(v.handoffDistill.timer);
+      v.handoffDistill.timer = null;
     });
     db.close();
   });
