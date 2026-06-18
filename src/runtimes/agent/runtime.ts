@@ -109,6 +109,7 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
+import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor } from './fallback-config.ts';
 import {
   createProviderMcpBridge,
   writeProviderMcpConfig,
@@ -4879,7 +4880,7 @@ export class AgentRuntime implements Runtime {
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
-        this.fallbackProviderConfigFor(entry.provider),
+        fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
       );
       const eligible = service ? lookupCredential(service) !== null : true;
       state.push({ ...entry, eligible });
@@ -5241,7 +5242,7 @@ export class AgentRuntime implements Runtime {
     const fallbackEntry = this.effectiveFallbackEntry;
     if (!fallbackEntry) return this.agentProviderConfig;
     if (fallbackEntry.provider === 'opencode-cli') return this.agentProviderConfig;
-    return this.fallbackProviderConfigFor(fallbackEntry.provider) ?? this.agentProviderConfig;
+    return fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
   }
 
   private primaryOpencodeProviderConfig(): OpencodeProviderConfig | undefined {
@@ -5278,16 +5279,7 @@ export class AgentRuntime implements Runtime {
    * `providerConfig.apiKeyService`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    const service = resolveProviderKeyService(provider, model, this.fallbackProviderConfigFor(provider));
-    if (!service) return null;
-    return lookupCredential(service) !== null;
-  }
-
-  private fallbackProviderConfigFor(provider: string | undefined): Record<string, unknown> | undefined {
-    if (provider === undefined) return undefined;
-    if (provider === this.agentProvider) return this.agentProviderConfig;
-    if (provider === 'openai-api' || provider === 'anthropic-api') return this.agentProviderConfig;
-    return undefined;
+    return fallbackKeyPresentFor(provider, model, this.agentProvider, this.agentProviderConfig);
   }
 
   /** User-facing notice for a usage-limit teardown when no fallback replay can run. */
@@ -5493,7 +5485,7 @@ export class AgentRuntime implements Runtime {
     const service = resolveProviderKeyService(
       fallbackEntry.provider,
       fallbackEntry.model,
-      this.fallbackProviderConfigFor(fallbackEntry.provider),
+      fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig),
     );
     if (service) {
       const key = lookupCredential(service);
