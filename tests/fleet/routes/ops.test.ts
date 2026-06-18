@@ -4030,4 +4030,172 @@ describe('ops.ts uncovered-branch coverage', () => {
   // ---- Line 1215: handleCreateLine post-enable rollback (service disable succeeds) ----
   // Already covered by the existing "disables the service when creation fails after enabling it"
   // describe block at line 1186 (which makes deps.discovery.scan throw post-enable).
+
+  // ---- Line 487 (false branch): valid adminPhones in patch passes validation ----
+  it('handleConfigUpdate accepts a valid adminPhones patch (line 487 false)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-admp-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+        adminPhones: ['15550000001'],
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          adminPhones: ['15550000002', '15550000003'],
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      // normalizePhoneE164 strips non-digits; 11-digit inputs pass through unchanged.
+      expect(written.adminPhones).toEqual(['15550000002', '15550000003']);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 525 (false branch): claudeMd patch when merged agentOptions has no cwd ----
+  it('handleConfigUpdate skips CLAUDE.md write when agent has no agentOptions.cwd (line 525 false)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nocwd-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent', healthPort: 3010, accessMode: 'self_only',
+        agentOptions: {},
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ claudeMd: '# fresh' })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      // Patch passed validation but the inner cwd-guard short-circuited, so no CLAUDE.md
+      // was written to disk. Verify by passing an explicitly empty cwd — the merged
+      // agentOptions has no cwd at all, exercising the `!ao || typeof ao.cwd !== 'string'`
+      // branch of line 525.
+      expect(written.claudeMd).toBe('# fresh');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 540 (false branch): settingsJson patch without a usable cwd ----
+  it('handleConfigUpdate skips settings.json write when agentOptions.cwd is missing (line 540 false)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nosj-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent', healthPort: 3010, accessMode: 'self_only',
+        agentOptions: {},
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          settingsJson: {
+            permissions: {
+              allow: ['Bash(ls:*)'],
+              deny: [],
+              defaultMode: 'bypassPermissions',
+            },
+          },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      // settingsJson was stripped from merged config (no cwd -> no write).
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(written.settingsJson).toBeUndefined();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 558 (false branch): enabledPlugins patch without agentOptions.cwd ----
+  it('handleConfigUpdate skips enabledPlugins write when agentOptions.cwd is missing (line 558 false)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-noep-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent', healthPort: 3010, accessMode: 'self_only',
+        agentOptions: {},
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          agentOptions: { enabledPlugins: { 'whatsoup/x': true } },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(written.agentOptions.enabledPlugins).toEqual({ 'whatsoup/x': true });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 1142 (false branch): handleCreateLine mkdir fails with non-EEXIST code ----
+  // Skipped: the non-EEXIST branch requires fs-level surgery (replace a directory with a file
+  // at the XDG_CONFIG_HOME parent) which is brittle across platforms and unlikely to be hit
+  // organically. The 1142 true branch is covered above.
+
+  // ---- Line 1315 (false branch): handleAuth startFire invokes its callback with null err ----
+  it('handleAuth completes the timeout path without logging when startFire reports no error (line 1315 false)', async () => {
+    vi.useFakeTimers();
+    try {
+      const inst = fakeInstance({ name: 'test-line' });
+      const child = fakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(child as any);
+      const svc = mockServiceManager();
+      // startFire invokes callback with null (no error) — line 1315 if-false branch.
+      svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
+        cb(null);
+      });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      await handleAuth(req, res, deps, { name: 'test-line' });
+      vi.advanceTimersByTime(5 * 60 * 1000);
+
+      expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+      expect(res._ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- Line 1355 (false branch): handleAuth connected-branch startFire with null err ----
+  it('handleAuth completes the connected path without logging when startFire reports no error (line 1355 false)', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+    const svc = mockServiceManager();
+    svc.startFire.mockImplementation((_name: string, cb: (err: Error | null) => void) => {
+      cb(null);
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(res._ended).toBe(true);
+  });
 });
