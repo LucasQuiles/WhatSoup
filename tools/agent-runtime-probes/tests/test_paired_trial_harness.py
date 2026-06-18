@@ -696,6 +696,43 @@ def test_cache_not_worse_zero_deltas_is_not_worse():
     assert probe._cache_not_worse(cache) is True
 
 
+def test_handle_present_fail_closed_on_store_error_and_absent_handle():
+    # handle_present is a B3 ADOPTION predicate and must fail-closed. Two real fail-opens:
+    # (L223) a None/absent handle must NOT be present even with a clean store_status — the guard is
+    #   `isinstance(handle, str) and handle and store_status not in {"store_error"}`; an and->or
+    #   weakening would accept an absent handle (the store_status term alone would satisfy it).
+    absent = probe.handle_present(
+        {"present": True, "report": {"metadata": {"handle": None, "store_status": "stored"}}})
+    assert absent["handle_present"] is False
+    # (L222) a roundtrip-sourced handle whose store_status is "store_error" must NOT be present —
+    #   `store_status = store_status or "stored"` must PRESERVE an existing "store_error"; an and-
+    #   weakening would overwrite it with "stored" and accept a failed-store handle as present.
+    store_err = probe.handle_present({"present": True, "report": {
+        "metadata": {"handle": None, "store_status": "store_error"},
+        "roundtrip": {"handle": "a" * 64}}})
+    assert store_err["handle_present"] is False
+
+
+def test_intervention_reducer_id_ignores_non_string_ids():
+    # The reducer-id set is built ONLY from string non-empty reducer_ids (guard
+    # `isinstance(reducer_id, str) and reducer_id`); a non-string id is malformed and excluded. An
+    # and->or weakening would coerce a non-str id (e.g. int) via str() into the set, making a single
+    # consistent string-id intervention look ambiguous (-> None) and breaking the canary reducer match.
+    events = [{"reducer_id": "r1"}, {"reducer_id": "r1"}, {"reducer_id": 123}]
+    assert probe.intervention_reducer_id_of(events) == "r1"
+
+
+def test_canary_empty_reducer_id_is_missing_not_differs():
+    # An empty canary reducer_id means the report did NOT prove which reducer it ran (guard
+    # `not isinstance(id, str) or not id`); it must be reported as canary_report_missing_reducer_id,
+    # not conflated with a genuine reducer_id_differs mismatch. An and->or weakening would skip this
+    # branch and mislabel an empty id as "reducer_id_differs" at the next check.
+    side = {"present": True, "report": {"summary": {"verdict": "pass"}, "reducer_id": ""}}
+    res = probe.canary_passed(side, intervention_reducer_id="r1")
+    assert res["canary_pass"] is False
+    assert res["mismatch_detail"] == "canary_report_missing_reducer_id"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
