@@ -109,22 +109,30 @@ class Flip(ast.NodeTransformer):
 
 
 def _enumerate(tree):
-    """Return [(lineno, kind)] for every mutable node in source order."""
+    """Return [(lineno, col_offset, kind)] for every mutable node in source order.
+
+    Identity is (lineno, col_offset) so that multiple same-kind nodes on ONE line
+    (e.g. both compares in `a > 0 and b > 0`) are disambiguated and each is mutated
+    in isolation — a bare lineno would collapse them and only ever mutate the first.
+    """
     out = []
     for node in ast.walk(tree):
         if _is_cmp(node):
-            out.append((node.lineno, "cmp"))
+            out.append((node.lineno, node.col_offset, "cmp"))
         if _is_rel(node):
-            out.append((node.lineno, "rel"))
+            out.append((node.lineno, node.col_offset, "rel"))
         elif isinstance(node, ast.BoolOp):
-            out.append((node.lineno, "bool"))
+            out.append((node.lineno, node.col_offset, "bool"))
         elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            out.append((node.lineno, "not"))
+            out.append((node.lineno, node.col_offset, "not"))
     return out
 
 
-def _fresh_match(kind, lineno):
-    """Re-parse src and return the first node of `kind` at `lineno`, or None."""
+def _fresh_match(kind, lineno, col_offset):
+    """Re-parse src and return the node of `kind` at (`lineno`, `col_offset`), or None.
+
+    Matching on both line AND column distinguishes same-kind siblings on one line.
+    """
     fresh = ast.parse(SRC)
     nodes = []
     for n in ast.walk(fresh):
@@ -136,7 +144,7 @@ def _fresh_match(kind, lineno):
             nodes.append(n)
         elif kind == "not" and isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
             nodes.append(n)
-    match = [n for n in nodes if n.lineno == lineno]
+    match = [n for n in nodes if n.lineno == lineno and n.col_offset == col_offset]
     return (fresh, match[0]) if match else (None, None)
 
 
@@ -160,8 +168,8 @@ def main():
     candidates = _enumerate(ast.parse(SRC))
 
     results = []
-    for lineno, kind in candidates:
-        fresh, node = _fresh_match(kind, lineno)
+    for lineno, col_offset, kind in candidates:
+        fresh, node = _fresh_match(kind, lineno, col_offset)
         if node is None:
             continue
         fn = Flip(id(node), kind)
