@@ -1100,62 +1100,126 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
 }
 
 /**
+ * Single source of truth for the benign tool-error patterns.
+ *
+ * Each entry pairs a `match` predicate (run against the lowercased error text)
+ * with the casual, user-friendly `humanized` rewrite AND an `alertSafe` flag.
+ * The same table powers two consumers so the list never drifts between them:
+ *   1. `humanizeError` — rewrites technical errors into friendly chat text.
+ *      It uses EVERY entry regardless of `alertSafe` (cosmetic only).
+ *   2. `isBenignToolError` — decides whether a tool error should be suppressed
+ *      from the BOT ERRORS alert channel. It only treats `alertSafe: true`
+ *      entries as benign.
+ *
+ * `alertSafe` semantics — split cosmetic-benign from alert-safe-benign:
+ *   - `true`  → genuinely agent-self-correctable, NEVER an infra/provider
+ *               outage. Safe to humanize AND suppress the alert.
+ *   - `false` → humanize the text for chat, but STILL raise the alert. These
+ *               patterns (overloaded/timeout/econnrefused/rate limit/enospc/
+ *               enomem/exit code N) can indicate REAL persistent outages, and
+ *               suppressing them would silence alerting exactly when it matters.
+ *
+ * Fail-open rule: if a pattern is genuinely ambiguous, mark it `alertSafe:
+ * false` so it keeps alerting. Only mark `true` for never-an-outage cases.
+ */
+const BENIGN_TOOL_ERROR_PATTERNS: ReadonlyArray<{
+  match: (lower: string, raw: string) => boolean;
+  humanized: string;
+  alertSafe: boolean;
+}> = [
+  // File too large to read — agent reads narrower slice; never an outage.
+  { match: (l) => l.includes('exceeds maximum allowed tokens') || l.includes('content too large'),
+    humanized: '_that file was a bit long, reading just the parts I need_', alertSafe: true },
+  // File not found — wrong path; agent retries with the right one.
+  { match: (l) => l.includes('no such file') || l.includes('file not found') || l.includes('enoent'),
+    humanized: '_file not found, looking for the right path_', alertSafe: true },
+  // Command not found — ambiguous (could be a missing binary on the host);
+  // fail open to alerting.
+  { match: (l) => l.includes('command not found'),
+    humanized: '_command not found, trying another approach_', alertSafe: false },
+  // Timeout — can be a real provider/network outage; alert.
+  { match: (l) => l.includes('timed out') || l.includes('timeout'),
+    humanized: '_that took too long, retrying_', alertSafe: false },
+  // Network / connection errors — can be a real outage; alert.
+  { match: (l) => l.includes('econnrefused') || l.includes('econnreset') || l.includes('fetch failed'),
+    humanized: '_connection failed, will retry_', alertSafe: false },
+  // No matches found (grep/glob) — empty search yield; agent refines.
+  { match: (l) => l.includes('no matches found') || l.includes('no files found'),
+    humanized: '_no results, refining search_', alertSafe: true },
+  // Git conflicts — agent resolves; never an outage.
+  { match: (l) => l.includes('merge conflict'),
+    humanized: '_merge conflict detected, resolving_', alertSafe: true },
+  // Rate limit / overloaded — Anthropic 529 capacity outage / 429; alert.
+  { match: (l) => l.includes('rate limit') || l.includes('overloaded') || l.includes('429'),
+    humanized: '_rate limited, waiting a moment_', alertSafe: false },
+  // Syntax/parse errors — agent fixes its own code; never an outage.
+  { match: (l) => l.includes('syntax error'),
+    humanized: '_syntax error, fixing_', alertSafe: true },
+  // Disk / storage — real disk pressure; alert.
+  { match: (l) => l.includes('enospc') || l.includes('no space left'),
+    humanized: '_disk full, freeing space_', alertSafe: false },
+  // Process / memory — real memory pressure / OOM-kill; alert.
+  { match: (l) => l.includes('enomem') || l.includes('out of memory') || l.includes('killed'),
+    humanized: '_out of memory, scaling down_', alertSafe: false },
+  // Invalid JSON / parse — malformed tool output; agent retries.
+  { match: (l) => l.includes('unexpected token') || l.includes('json parse') || l.includes('invalid json'),
+    humanized: '_got malformed data, retrying_', alertSafe: true },
+  // String replacement not found (Edit tool) — Edit retry; never an outage.
+  { match: (l) => l.includes('not found in file') || l.includes('old_string'),
+    humanized: '_text not found in file, re-reading to get the right context_', alertSafe: true },
+  // Edit rejected because the file was never Read this session (Edit tool).
+  { match: (l) => l.includes('file has not been read yet'),
+    humanized: '_need to read that file first, re-reading_', alertSafe: true },
+  // Agent worktree creation failure (self-correctable: falls back to in-place).
+  { match: (l) => l.includes('cannot create agent worktree') || l.includes('worktreecreate hooks'),
+    humanized: '_could not make a worktree, working in place_', alertSafe: true },
+  // Git push / pull errors — ambiguous (could be auth/remote outage); alert.
+  { match: (l) => l.includes('rejected') && l.includes('push'),
+    humanized: '_push rejected, pulling latest changes first_', alertSafe: false },
+  // Max context / token budget — agent compacts; never an outage.
+  { match: (l) => l.includes('context window') || l.includes('max_tokens') || l.includes('context length'),
+    humanized: '_hitting context limits, compacting_', alertSafe: true },
+  // Exit code (generic — ambiguous). Matches against the trimmed raw text;
+  // fail open to alerting.
+  { match: (_l, raw) => /^exit code \d+$/i.test(raw.trim()),
+    humanized: '_exited with error, continuing_', alertSafe: false },
+];
+
+/**
  * Rewrite common technical error messages into casual, user-friendly language.
  * Returns null if no rewrite matches (use the original).
  */
 function humanizeError(_toolName: string, text: string): string | null {
   const lower = text.toLowerCase();
-
-  // File too large to read
-  if (lower.includes('exceeds maximum allowed tokens') || lower.includes('content too large'))
-    return '_that file was a bit long, reading just the parts I need_';
-  // File not found
-  if (lower.includes('no such file') || lower.includes('file not found') || lower.includes('enoent'))
-    return '_file not found, looking for the right path_';
-  // Command not found
-  if (lower.includes('command not found'))
-    return '_command not found, trying another approach_';
-  // Timeout
-  if (lower.includes('timed out') || lower.includes('timeout'))
-    return '_that took too long, retrying_';
-  // Network / connection errors
-  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed'))
-    return '_connection failed, will retry_';
-  // No matches found (grep/glob)
-  if (lower.includes('no matches found') || lower.includes('no files found'))
-    return '_no results, refining search_';
-  // Git conflicts
-  if (lower.includes('merge conflict'))
-    return '_merge conflict detected, resolving_';
-  // Rate limit / overloaded
-  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429'))
-    return '_rate limited, waiting a moment_';
-  // Syntax/parse errors
-  if (lower.includes('syntax error'))
-    return '_syntax error, fixing_';
-  // Disk / storage
-  if (lower.includes('enospc') || lower.includes('no space left'))
-    return '_disk full, freeing space_';
-  // Process / memory
-  if (lower.includes('enomem') || lower.includes('out of memory') || lower.includes('killed'))
-    return '_out of memory, scaling down_';
-  // Invalid JSON / parse
-  if (lower.includes('unexpected token') || lower.includes('json parse') || lower.includes('invalid json'))
-    return '_got malformed data, retrying_';
-  // String replacement not found (Edit tool)
-  if (lower.includes('not found in file') || lower.includes('old_string'))
-    return '_text not found in file, re-reading to get the right context_';
-  // Git push / pull errors
-  if (lower.includes('rejected') && lower.includes('push'))
-    return '_push rejected, pulling latest changes first_';
-  // Max context / token budget
-  if (lower.includes('context window') || lower.includes('max_tokens') || lower.includes('context length'))
-    return '_hitting context limits, compacting_';
-  // Exit code (generic — keep it brief)
-  if (/^exit code \d+$/i.test(text.trim()))
-    return `_exited with error, continuing_`;
-
+  for (const pattern of BENIGN_TOOL_ERROR_PATTERNS) {
+    if (pattern.match(lower, text)) return pattern.humanized;
+  }
   return null;
+}
+
+/**
+ * True ONLY for known, genuinely self-correctable tool errors that the agent
+ * recovers from on its own and that are NEVER a sign of a persistent infra /
+ * provider outage (e.g. an Edit "File has not been read yet" rejection, an
+ * old_string mismatch, a worktree-create failure, an empty search yield).
+ *
+ * This gates the BOT ERRORS alert: returning true suppresses the alert. It
+ * therefore only honors `alertSafe: true` entries. Patterns that humanize but
+ * stay alert-worthy (timeout, overloaded/rate limit, econnrefused, enospc,
+ * enomem, exit code N) carry `alertSafe: false` and return false here, so a
+ * real outage still alerts. Unknown / unmatched errors also return false — this
+ * filter fails open to alerting and only ever skips the alert-safe allowlist.
+ *
+ * `toolName` is accepted for future per-tool refinement; today the allowlist is
+ * tool-agnostic (the patterns are specific enough to be safe across tools).
+ */
+export function isBenignToolError(_toolName: string, content: string): boolean {
+  if (typeof content !== 'string' || content.length === 0) return false;
+  const lower = content.toLowerCase();
+  for (const pattern of BENIGN_TOOL_ERROR_PATTERNS) {
+    if (pattern.alertSafe && pattern.match(lower, content)) return true;
+  }
+  return false;
 }
 
 // Provider-failure string matchers are the single source of truth in
@@ -1674,6 +1738,18 @@ export class AgentRuntime implements Runtime {
     mapKey?: string;
   }): void {
     if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    // Benign-error filter (default ON; set BOT_ERRORS_RUNTIME_TOOL_BENIGN_FILTER='0'
+    // to restore alert-on-every-error behavior). Fails open: only the explicit
+    // self-correctable allowlist is skipped — unknown errors still alert. The
+    // call-site queue.enqueueToolUpdate(...) already fired, so the in-chat status
+    // line is unaffected; this only gates the BOT ERRORS alert channel.
+    if (
+      process.env['BOT_ERRORS_RUNTIME_TOOL_BENIGN_FILTER'] !== '0' &&
+      isBenignToolError(args.toolName, args.content)
+    ) {
+      return;
+    }
 
     const now = Date.now();
     for (const [key, recordedAt] of this.recentToolFailureAlerts) {
