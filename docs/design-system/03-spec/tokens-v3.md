@@ -35,8 +35,8 @@ Theme-agnostic. Never referenced from component CSS or TSX.
 
 | Token | Value |
 |---|---|
-| `--font-sans` | `"Geist", "Helvetica Neue", "Segoe UI", Arial, sans-serif` |
-| `--font-mono` | `"Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace` |
+| `--font-sans` | `"Hanken Grotesk", "Helvetica Neue", "Segoe UI", Arial, sans-serif` |
+| `--font-mono` | `"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace` |
 
 ### 2.2 Spacing — 4px grid, no half steps
 
@@ -447,8 +447,8 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 
 | Legacy | Disposition | v3 target |
 |---|---|---|
-| `--font-sans` | formalized | `--font-sans` (value: Outfit → Geist) |
-| `--font-mono` | formalized | `--font-mono` (value: IBM Plex Mono → Geist Mono) |
+| `--font-sans` | formalized | `--font-sans` (value: Outfit → Geist → Hanken Grotesk, showcase identity) |
+| `--font-mono` | formalized | `--font-mono` (value: IBM Plex Mono → Geist Mono → IBM Plex Mono, showcase identity) |
 | `--fw-normal` / `--fw-medium` / `--fw-semibold` | rejected-superseded | weights are baked into the named ramp |
 
 ### 6.10 Shadows / overlays / motion (10)

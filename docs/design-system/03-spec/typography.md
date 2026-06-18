@@ -1,4 +1,4 @@
-# Typography — Geist pair, closed named ramp, casing and figure laws
+# Typography — Hanken Grotesk + IBM Plex Mono pair, closed named ramp, casing and figure laws
 
 v3.0.0-draft · G2-locked direction · pending G3
 
@@ -8,9 +8,9 @@ Ramp definitions live in `tokens-v3.md` §2.6; this document is the usage law. S
 
 ## 1. Faces
 
-- **Geist** (`--font-sans`) — all chrome, labels, prose. Weights 400/500/600 only.
-- **Geist Mono** (`--font-mono`) — all data lanes: numerics, ids, timestamps, phones, log text,
-  KPI values, and the nameplate. Weights 400/500/600.
+- **Hanken Grotesk** (`--font-sans`) — all chrome, labels, prose. Weights 400/500/600 only.
+- **IBM Plex Mono** (`--font-mono`) — all data lanes: numerics, ids, timestamps, phones, log text,
+  KPI values, and the nameplate. Weights 400/500/600. Tabular figures for scan-stable columns.
 - Fallback stacks (tokens-v3 §2.1) are metric-tolerant; offline render degrades without breakage.
 - No third face, ever. No italic except the typing indicator. Hierarchy is expressed by size and
   weight only — never by a new font.

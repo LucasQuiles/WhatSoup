@@ -16,11 +16,11 @@ product's playfulness budget; everything else stays calm.
 [tick] SOUP [· context subtitle]
 ```
 
-- **Wordmark**: `SOUP` in `--type-nameplate` (Geist Mono 600 14/24), uppercase, letter-spacing
+- **Wordmark**: `SOUP` in `--type-nameplate` (IBM Plex Mono 600 14/24), uppercase, letter-spacing
   +0.38em, ink `--text-1`, `white-space: nowrap`.
 - **Tick**: one 8×8px square, corner radius 1px, fill `--mode-passive-solid` — brand heritage
   teal, deliberately NOT the action accent. Sits before the wordmark at a `--sp-3` (12px) gap.
-- **Subtitle** (optional, context label such as a page or build tag): Geist Mono 400 11/16,
+- **Subtitle** (optional, context label such as a page or build tag): IBM Plex Mono 400 11/16,
   +0.18em, `--text-2`; hides first under width pressure.
 
 ### 1.2 Mandatory tuning rules (G2 open item 2 — resolved)
@@ -35,8 +35,9 @@ product's playfulness budget; everything else stays calm.
    24px line box carries dead space below the baseline. When vertically centering inside chrome
    (the 56px header bar), align the **cap-height midpoint**, not the line box: flex-center the
    lockup, then apply `translateY(0.5px)` at the 14px size (half the difference between line-box
-   center and cap-height center for Geist Mono caps). This offset is a declared optical correction
-   (layout-density §1 exception) and re-derives if the nameplate size ever changes.
+   center and cap-height center for IBM Plex Mono caps). This offset is a declared optical correction
+   (layout-density §1 exception) and re-derives if the nameplate size or face ever changes
+   (the 0.5px was derived for the prior mono cap metrics; re-verify against IBM Plex Mono caps).
 3. **Tick placement/size/color.** Tick is 8×8px (cap-height-scaled: ~0.78× cap height), radius
    1px, `--mode-passive-solid` in both themes, vertically aligned to the cap-height midline using
    the same optical offset as rule 2. Gap to wordmark: `--sp-3`. The tick never animates, never
@@ -56,7 +57,7 @@ metaphor may survive only in naming history, never in imagery.
 
 The identity is a small **system**, not a single lockup: a favicon, minimal icon/badge marks, and
 the text wordmark. The in-product **nameplate stays the locked instrument label** (§1.1–§1.3,
-Geist-Mono engraved style) for console chrome. For friendlier brand-signal surfaces — landing,
+IBM-Plex-Mono engraved style) for console chrome. For friendlier brand-signal surfaces — landing,
 identity, marketing — the wordmark may move toward a **round, dense, tightly-spaced** display read
 (heavy round grotesque, **uppercase** — the §1.3 case discipline still binds — tracking ≈ −0.05 to
 −0.06em) where the context calls for it. The favicon

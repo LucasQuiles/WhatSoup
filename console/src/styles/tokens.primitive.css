@@ -55,9 +55,11 @@
   --radius-md: 6px;
   --radius-lg: 8px;
 
-  /* Font stacks (§2.1) — updated to Geist pair */
-  --font-sans: "Geist", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* Font stacks (§2.1) — showcase identity triad: Hanken Grotesk (body) +
+     IBM Plex Mono (data/nameplate). Bricolage Grotesque (display) arrives with
+     the display tier. Geist retained as inert @font-face until its removal. */
+  --font-sans: "Hanken Grotesk", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 :root {
