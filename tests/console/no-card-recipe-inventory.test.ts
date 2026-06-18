@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// Anti-sprawl guard (DD-38). card.md:60 mandates `card-via-primitive`. As of
-// 2026-06-16 Card.tsx IS built (f315b1a5) and 2 consumers are migrated onto it
-// (ErrorBoundary, LogsTab); 11 files still render the raw `.c-card` CSS recipe.
-// This pins those 11 remaining consumers to an allowlist (tracked migration debt →
+// Anti-sprawl guard (DD-38). card.md:60 mandates `card-via-primitive`. Card.tsx IS
+// built (f315b1a5) and a further wave of consumers has migrated onto it (ErrorBoundary,
+// LogsTab, then AccessTab, ScheduledMessageRow, Inbox, Ops; MessageBubble's panel is on
+// <Card> but the surface still carries the `c-card--detail` modifier so it stays a recipe
+// consumer). The remaining files still render the raw `.c-card` CSS recipe.
+// This pins those remaining consumers to an allowlist (tracked migration debt →
 // the Card primitive, scoped in 06-implementation/card-primitive-build-spec.md)
 // and FAILS on any NEW file that reaches for the raw recipe, so new cards cannot
 // bypass the primitive while the existing ones migrate. Migrating a file off
@@ -24,16 +26,16 @@ const CARD_RECIPE = /\bc-card\b/
 const ALLOWLIST = new Set<string>([
   'console/src/components/primitives/Card.tsx',
   'console/src/components/ActiveHoursHeatmap.tsx',
+  // MessageBubble's hover panel renders via <Card>; only the `c-card--detail` modifier
+  // (a recipe-class match) remains on the surface, so it stays a tracked consumer.
   'console/src/components/MessageBubble.tsx',
-  'console/src/components/line-detail/AccessTab.tsx',
   'console/src/components/line-detail/GroupCard.tsx',
   'console/src/components/line-detail/MetricsTab.tsx',
   'console/src/components/line-detail/ProvidersKeysCard.tsx',
-  'console/src/components/line-detail/ScheduledMessageRow.tsx',
   'console/src/components/line-detail/SummaryTab.tsx',
-  'console/src/pages/Inbox.tsx',
   'console/src/pages/SoupKitchen.tsx',
-  // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx
+  // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx,
+  // line-detail/AccessTab.tsx, line-detail/ScheduledMessageRow.tsx, Inbox.tsx
 ])
 
 function tsxFiles(dir: string): string[] {

@@ -20,7 +20,7 @@ import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown
 import { SearchInput } from '../components/shared/SearchInput.js'
 import { Button } from '../components/primitives/Button'
 import { ActionButton } from '../components/primitives/ActionButton'
-import { TextArea } from '../components/primitives'
+import { TextArea, Card } from '../components/primitives'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -220,8 +220,8 @@ export default function Inbox() {
     >
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
-      <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
+      <Card
+        className="flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
       >
         {/* Line picker — toolbar pattern */}
         <LinePicker
@@ -250,11 +250,11 @@ export default function Inbox() {
             typingKeys={typingJids}
           />
         )}
-      </div>
+      </Card>
 
       {/* ═══ Center: Messages ═══ */}
-      <div
-        className="c-card flex-1 flex flex-col min-h-0 overflow-hidden"
+      <Card
+        className="flex-1 flex flex-col min-h-0 overflow-hidden"
       >
         {selectedChat && currentChat ? (
           <>
@@ -471,11 +471,11 @@ export default function Inbox() {
             />
           </div>
         )}
-      </div>
+      </Card>
 
       {/* ═══ Right: Contact details ═══ */}
-      <div
-        className="soup-inbox-contact c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-contact)]"
+      <Card
+        className="soup-inbox-contact flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-contact)]"
       >
         {currentChat ? (
           <>
@@ -617,7 +617,7 @@ export default function Inbox() {
             </div>
           </div>
         )}
-      </div>
+      </Card>
       <SaveContactDialog
         key={saveContactChat ?? 'none'}
         open={saveContactChat !== null}

@@ -57,7 +57,10 @@ describe('design token component classes', () => {
   it('uses detail card classes for message bubble hover metadata', () => {
     const messageBubble = read('console/src/components/MessageBubble.tsx')
 
-    expect(messageBubble).toContain('c-card c-card--detail')
+    // The hover panel renders via the <Card> primitive (which supplies `c-card`); the
+    // detail-only modifier and the float z-index stay on the surface, never a raw `z-50`.
+    expect(messageBubble).toContain('<Card')
+    expect(messageBubble).toContain('c-card--detail')
     expect(messageBubble).toContain('z-[var(--z-float)]')
     expect(messageBubble).not.toContain('z-50')
   })

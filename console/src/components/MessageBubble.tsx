@@ -5,6 +5,7 @@ import { formatFullTime, formatTime } from '../lib/format-time'
 import { resolveViewportPlacement, type ViewportPlacement } from '../hooks/useViewportPlacement'
 import MessageContent from './MessageContent'
 import { Button } from './primitives/Button'
+import { Card } from './primitives'
 import type { Message } from '../types'
 
 interface MessageBubbleProps {
@@ -35,9 +36,9 @@ const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored
       : { bottom: '100%', left: rightAnchored ? undefined : 0, right: rightAnchored ? 0 : undefined }
 
   return (
-    <div
+    <Card
       data-placement={placement}
-      className="absolute z-[var(--z-float)] pointer-events-none c-card c-card--detail mb-[var(--sp-2)]"
+      className="absolute z-[var(--z-float)] pointer-events-none c-card--detail mb-[var(--sp-2)]"
       style={style}
     >
       <div className="flex flex-col gap-[var(--sp-2)]">
@@ -64,7 +65,7 @@ const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored
           </div>
         </div>
       </div>
-    </div>
+    </Card>
   )
 }
 

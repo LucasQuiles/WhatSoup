@@ -10,6 +10,7 @@ import {
 } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { Button } from '../primitives/Button'
+import { Card } from '../primitives'
 import type { AccessEntry } from './types'
 
 interface PendingAction { subjectType: string; subjectId: string; subjectName: string; action: 'allow' | 'block' }
@@ -153,27 +154,27 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
     <div className="space-y-4">
       {/* Pending queue */}
       {pending.length > 0 && (
-        <div className="c-card overflow-hidden">
+        <Card className="overflow-hidden">
           <div
             className="c-toolbar c-border-b c-col-header text-text-2"
           >
             Pending ({pending.length})
           </div>
           {pending.map(e => renderItem(e, 'pending'))}
-        </div>
+        </Card>
       )}
 
       {/* Allowed + Blocked in two columns */}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(var(--panel-access-col), 1fr))' }}>
-        <div className="c-card overflow-hidden">
+        <Card className="overflow-hidden">
           <div
             className="c-toolbar c-border-b c-col-header text-text-2"
           >
             Allowed ({allowed.length})
           </div>
           {allowed.map(e => renderItem(e, 'allowed'))}
-        </div>
-        <div className="c-card overflow-hidden">
+        </Card>
+        <Card className="overflow-hidden">
           <div
             className="c-toolbar c-border-b c-col-header text-text-2"
           >
@@ -186,7 +187,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
           ) : (
             blocked.map(e => renderItem(e, 'blocked'))
           )}
-        </div>
+        </Card>
       </div>
 
       <ConfirmDialog
