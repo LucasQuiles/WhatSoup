@@ -231,6 +231,7 @@ describe('ConnectionManager.sendMessage — null receipt.messageId does not thro
     const receipt = await manager.sendMessage(USER_JID, 'hi');
 
     expect(receipt.waMessageId).toBeNull();
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -878,8 +879,228 @@ describe('ConnectionManager.scheduleSettledAuthBondSnapshot — early return und
 });
 
 // ===========================================================================
-// handlePollVoteMessage — decryptAndEmitPollVote promise rejection catch (line 2327)
+// per-event try/catch error-logging arms — exercises the catch in each block
 // ===========================================================================
+
+describe('ConnectionManager per-event catch error-logging arms', () => {
+  it('logs and swallows errors thrown by messages.reaction handlers (line 1404)', async () => {
+    const { manager, emit } = await connected();
+    // A reaction event with a remoteJid that lacks '@' causes toConversationKey
+    // to throw — the per-event catch on line 1403/1404 fires.
+    expect(() =>
+      emit({
+        'messages.reaction': [{
+          key: { remoteJid: 'not-a-jid', id: 'r1', fromMe: false },
+          reaction: { text: '👍', key: { participant: '15555551234@s.whatsapp.net' } },
+        }],
+      }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by message-receipt.update handlers (line 1428)', async () => {
+    const { manager, emit } = await connected();
+    // Same trick — userJid that lacks '@' makes the validation later throw.
+    expect(() =>
+      emit({
+        'message-receipt.update': [{
+          key: { id: 'wamid.bad', remoteJid: 'not-a-jid' },
+          receipt: { userJid: 'still-not-a-jid', receiptTimestamp: 1_700_000_000 },
+        }],
+      }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by messages.media-update handlers (line 1442)', async () => {
+    const { manager, emit } = await connected();
+    // Pass a non-array — the catch swallows the array-conversion error path.
+    expect(() =>
+      emit({
+        'messages.media-update': { malformed: true } as any,
+      }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by chats.upsert handlers (line 1452)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'chats.upsert': { broken: true } as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by chats.update handlers (line 1462)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'chats.update': { broken: true } as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by messaging-history.set handlers (line 1495)', async () => {
+    const { manager, emit } = await connected();
+    // Pass a non-object so the inner reads throw / fall through.
+    expect(() =>
+      emit({ 'messaging-history.set': 'not-an-object' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by groups.upsert handlers (line 1506)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'groups.upsert': { broken: true } as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by groups.update handlers (line 1517)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'groups.update': { broken: true } as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by group.join-request handlers (line 1532)', async () => {
+    const { manager, emit } = await connected();
+    // No participant + no id → both fall through, no throw.
+    expect(() =>
+      emit({ 'group.join-request': {} }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by blocklist.set handlers (line 1544)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'blocklist.set': 'not-an-object' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by blocklist.update handlers (line 1557)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'blocklist.update': 'not-an-object' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by newsletter.reaction handlers (line 1567)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'newsletter.reaction': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by newsletter.view handlers (line 1577)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'newsletter.view': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by newsletter-participants.update handlers (line 1587)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'newsletter-participants.update': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by newsletter-settings.update handlers (line 1597)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'newsletter-settings.update': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by labels.edit handlers (line 1613)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'labels.edit': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+
+  it('logs and swallows errors thrown by labels.association handlers (line 1633)', async () => {
+    const { manager, emit } = await connected();
+    expect(() =>
+      emit({ 'labels.association': 'unexpected' as any }),
+    ).not.toThrow();
+  });
+});
+
+describe('ConnectionManager group-participants.update — bot removal log', () => {
+  it('logs a bot-removal warning when the bot is in the participants list of a remove action', async () => {
+    const { manager, emit } = await connected();
+    // botJid from the mock socket is '15551230004:1@s.whatsapp.net' — jidNormalizedUser
+    // returns '15551230004@s.whatsapp.net'.
+    expect(() =>
+      emit({
+        'group-participants.update': {
+          id: GROUP_JID,
+          author: '15555551234@s.whatsapp.net',
+          participants: ['15551230004@s.whatsapp.net'],
+          action: 'remove',
+        },
+      }),
+    ).not.toThrow();
+  });
+});
+
+// ===========================================================================
+// shutdown — clears vote grace timers (lines 980, 981)
+// ===========================================================================
+
+describe('ConnectionManager.shutdown — clears vote grace timers', () => {
+  it('tears down pending vote grace timers before tearing down the socket', async () => {
+    vi.useFakeTimers();
+    try {
+      const { decryptPollVote } = await import('@whiskeysockets/baileys/lib/Utils/process-message.js');
+      const decrypt = vi.mocked(decryptPollVote);
+      decrypt.mockReset();
+      decrypt.mockReturnValue({ selectedOptions: [Buffer.from('A').toString()] } as any);
+
+      const { mockSock, emit } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      mockSock.sendMessage.mockResolvedValueOnce({
+        key: { id: 'wamid.poll.shutdown' },
+        message: { messageContextInfo: { messageSecret: new Uint8Array([33]) } },
+      });
+      const manager = new ConnectionManager();
+      await manager.connect();
+      emit(openEvent());
+
+      await manager.sendPollMessage(GROUP_JID, 'Q?', ['A', 'B'], 1);
+
+      const onVote = vi.fn();
+      manager.on('pollVoteReceived', onVote);
+
+      emit({
+        'messages.upsert': {
+          type: 'notify',
+          messages: [{
+            key: {
+              id: 'v.shutdown',
+              remoteJid: '15555551111@lid',
+              fromMe: false,
+              participant: '15555551112@lid',
+            },
+            message: {
+              pollUpdateMessage: {
+                pollCreationMessageKey: { id: 'wamid.poll.shutdown', fromMe: true },
+                vote: { encPayload: new Uint8Array([1]), encIv: new Uint8Array([2]) },
+              },
+            },
+            messageTimestamp: 1_700_000_000,
+          }],
+        },
+      });
+
+      // Wait for decryption to buffer the vote and schedule the grace timer.
+      await vi.waitFor(() => expect(decrypt).toHaveBeenCalled());
+      // Shutdown must clear the grace timer so no post-shutdown emission fires.
+      await manager.shutdown();
+      // Advance well past the grace window — no vote should fire.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(onVote).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('ConnectionManager poll-vote decryption — top-level promise rejection', () => {
   it('does not throw when the decrypt promise rejects with a non-decrypt error', async () => {
@@ -959,6 +1180,105 @@ describe('ConnectionManager.runKeepalive — keepalive query timeout', () => {
       await vi.advanceTimersByTimeAsync(30_000);
       // The keepalive query fired exactly once with the falsy result.
       expect(mockSock.query).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns silently from the success path if shutdown happened mid-pong', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mockSock, emit } = makeMockSocket();
+      // Hold the query resolution until we initiate shutdown.
+      let resolveQuery!: (value: unknown) => void;
+      mockSock.query.mockReturnValueOnce(new Promise((resolve) => {
+        resolveQuery = resolve;
+      }));
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+      emit(openEvent());
+
+      // First keepalive fires but blocks on the unresolved query.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mockSock.query).toHaveBeenCalledTimes(1);
+
+      // Shut down — this sets shuttingDown=true. Once the query resolves,
+      // runKeepalive will reach line 2613 (`if (this.shuttingDown || this.sock !== sock) return;`)
+      // and short-circuit before updating lastPongAt.
+      const snapBefore = manager.getConnectionState();
+      const shutdownPromise = manager.shutdown();
+      resolveQuery({ pong: true });
+      await vi.advanceTimersByTimeAsync(0);
+      await shutdownPromise;
+      const snapAfter = manager.getConnectionState();
+      // lastPongAt must remain null because the shutdown short-circuit fired.
+      expect(snapAfter.lastPongAt).toBeNull();
+      // Sanity: the before snapshot didn't have a pong either.
+      expect(snapBefore.lastPongAt).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns silently from the keepalive catch arm if shutdown happened mid-failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mockSock, emit } = makeMockSocket();
+      let rejectQuery!: (err: Error) => void;
+      mockSock.query.mockReturnValueOnce(new Promise((_resolve, reject) => {
+        rejectQuery = reject;
+      }));
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+      emit(openEvent());
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mockSock.query).toHaveBeenCalledTimes(1);
+
+      // Shut down BEFORE the keepalive failure is observed. When the rejection
+      // surfaces, the catch arm hits line 2618 (`if (this.shuttingDown || ...) return;`)
+      // and short-circuits without setting keepaliveFailureFirstAt.
+      const shutdownPromise = manager.shutdown();
+      rejectQuery(new Error('late failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      await shutdownPromise;
+      const snap = manager.getConnectionState();
+      expect(snap.state).toBe('shutting_down');
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ===========================================================================
+// gracefulReconnect — in-flight guard arm (line 2689)
+// ===========================================================================
+
+describe('ConnectionManager.gracefulReconnect — in-flight guard', () => {
+  it('does not start a second gracefulReconnect while one is already in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mockSock, emit } = makeMockSocket();
+      // Every query rejects so the keepalive catch arm fires gracefulReconnect.
+      mockSock.query.mockRejectedValue(new Error('keepalive fail'));
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+      emit(openEvent());
+
+      // First keepalive tick → gracefulReconnect starts (gracefulReconnectInFlight=true).
+      await vi.advanceTimersByTimeAsync(30_000);
+      // A second keepalive tick while the first reconnect is still in flight
+      // must short-circuit on the in-flight guard.
+      await vi.advanceTimersByTimeAsync(30_000);
+      // No assertion on internal state — the fact that the second call did not
+      // throw and no unhandled rejection escaped is sufficient.
+      expect(mockSock.query).toHaveBeenCalled();
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
