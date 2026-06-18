@@ -251,18 +251,19 @@ describe('useKeyboardShortcuts - number key navigation', () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it('navigates to /ops on key 3 when not already there', () => {
+  it('navigates to /operator on key 3 when not already there', () => {
     mockPathname = '/';
     renderHook(() => useKeyboardShortcuts({}), { wrapper });
 
     act(() => { fireKey('3'); });
 
-    expect(mockNavigate).toHaveBeenCalledWith('/ops');
+    // Canonical /operator route, not the /ops alias (which redirects → history pollution).
+    expect(mockNavigate).toHaveBeenCalledWith('/operator');
     expect(mockNavigate).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT navigate when key 3 pressed and already on /ops (S4)', () => {
-    mockPathname = '/ops';
+  it('does NOT navigate when key 3 pressed and already on /operator (S4)', () => {
+    mockPathname = '/operator';
     renderHook(() => useKeyboardShortcuts({}), { wrapper });
 
     act(() => { fireKey('3'); });
