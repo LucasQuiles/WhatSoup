@@ -21,6 +21,10 @@ interface CooldownEntry {
 
 const groupCooldowns = new Map<string, CooldownEntry>();
 
+// Bound the cooldown map so a long-lived process spanning many distinct groups cannot
+// grow it without bound (mirrors PresenceCache's evict-oldest cap).
+const MAX_GROUP_COOLDOWN_ENTRIES = 10_000;
+
 /**
  * Check whether an outbound group send should be allowed.
  *
@@ -50,6 +54,13 @@ export function canSendToGroup(chatJid: string, cfg: EchoGuardConfig, senderToke
 
 export function recordGroupOutbound(chatJid: string, senderToken?: string): void {
   if (!isGroupJid(chatJid)) return;
+  // Refresh recency by re-inserting at the tail, then evict the oldest entry when at
+  // capacity, so the map stays bounded regardless of how many distinct groups are seen.
+  groupCooldowns.delete(chatJid);
+  if (groupCooldowns.size >= MAX_GROUP_COOLDOWN_ENTRIES) {
+    const oldest = groupCooldowns.keys().next().value;
+    if (oldest !== undefined) groupCooldowns.delete(oldest);
+  }
   groupCooldowns.set(chatJid, { timestamp: Date.now(), senderToken });
 }
 

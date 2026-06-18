@@ -67,6 +67,22 @@ describe('echo-guard', () => {
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(true);
   });
 
+  it('evicts the oldest cooldown entry when over capacity (bounded growth)', () => {
+    const firstJid = '100000000000000000@g.us';
+    recordGroupOutbound(firstJid);
+    expect(canSendToGroup(firstJid, DEFAULT_CFG)).toBe(false); // cooldown active
+
+    // Fill the cap (10_000) with distinct groups; firstJid is the oldest entry.
+    for (let i = 0; i < 10_000; i++) {
+      recordGroupOutbound(`2${String(i).padStart(17, '0')}@g.us`);
+    }
+
+    // The oldest (firstJid) was evicted — its cooldown no longer suppresses.
+    expect(canSendToGroup(firstJid, DEFAULT_CFG)).toBe(true);
+    // A still-resident recent group keeps its active cooldown.
+    expect(canSendToGroup('200000000000000000@g.us', DEFAULT_CFG)).toBe(false);
+  });
+
   // --- Session-aware tests ---
 
   it('allows rapid sends from the same sender token (intra-session)', () => {
