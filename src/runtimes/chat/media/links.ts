@@ -1,10 +1,14 @@
-import { promises as dns } from 'node:dns';
+import { promises as dns, lookup as dnsLookup, type LookupAddress } from 'node:dns';
+import { Agent } from 'undici';
 import { createChildLogger } from '../../../logger.ts';
 
 const log = createChildLogger('media:links');
 
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CONTENT_LENGTH = 2000;
+// Hard cap on bytes read from a fetched URL. Prevents a malicious/large response from
+// exhausting memory (the preview only needs the first ~2000 chars of extracted content).
+const MAX_FETCH_BYTES = 5_000_000;
 
 /**
  * Returns true if the hostname resolves to a private/loopback address range.
@@ -44,6 +48,95 @@ export function isPrivateIP(ip: string): boolean {
   }
   if (ip === '0.0.0.0' || ip === '::1' || ip === '::') return true;
   return false;
+}
+
+/**
+ * A `dns.lookup`-compatible callback that rejects resolution to a private/reserved IP.
+ * Used as the undici connect-time lookup, which undici invokes for the initial connection
+ * AND for every redirect hop, so the *actual* connected IP is validated. This closes two
+ * SSRF gaps a one-shot pre-fetch `dns.lookup` cannot:
+ *  - redirect-follow SSRF: a public URL that 3xx-redirects to http://169.254.169.254/ etc.
+ *  - DNS-rebinding TOCTOU: a hostname that resolves public at check time, private at connect.
+ * Exported for direct testing.
+ */
+export function ssrfSafeLookup(
+  hostname: string,
+  options: Parameters<typeof dnsLookup>[1],
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    address: string | LookupAddress[],
+    family?: number,
+  ) => void,
+  // Injectable resolver (defaults to node's dns.lookup). undici always calls with 3 args,
+  // so it uses the default; tests pass a fake to exercise this validator without ESM mocking.
+  resolve: typeof dnsLookup = dnsLookup,
+): void {
+  resolve(hostname, options as never, (err, address, family) => {
+    if (err) {
+      callback(err, address as string | LookupAddress[], family);
+      return;
+    }
+    const resolved: LookupAddress[] = Array.isArray(address)
+      ? (address as LookupAddress[])
+      : [{ address: address as string, family: family as number }];
+    const blocked = resolved.find((entry) => isPrivateIP(entry.address));
+    if (blocked) {
+      callback(
+        new Error(`SSRF blocked: ${hostname} resolves to private IP ${blocked.address}`),
+        '',
+        0,
+      );
+      return;
+    }
+    callback(null, address as string | LookupAddress[], family);
+  });
+}
+
+export const ssrfSafeAgent = new Agent({
+  connect: { lookup: ssrfSafeLookup as never },
+});
+
+/**
+ * Read a fetch Response body with a hard byte cap so an oversized response cannot
+ * exhaust memory. Streams when possible (real fetch) and truncates at the cap; falls
+ * back to `.text()` (e.g. in tests that stub fetch without a body stream).
+ */
+export async function readBodyCapped(
+  response: { body?: unknown; text: () => Promise<string> },
+  maxBytes: number,
+): Promise<string> {
+  const body = response.body as ReadableStream<Uint8Array> | null | undefined;
+  if (!body || typeof body.getReader !== 'function') {
+    const text = await response.text();
+    return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= maxBytes) {
+        await reader.cancel();
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  const merged = new Uint8Array(Math.min(total, maxBytes));
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= merged.length) break;
+    const slice = chunk.subarray(0, merged.length - offset);
+    merged.set(slice, offset);
+    offset += slice.byteLength;
+  }
+  return new TextDecoder().decode(merged);
 }
 
 export interface LinkContent {
@@ -105,8 +198,19 @@ export async function extractLinkContent(url: string): Promise<LinkContent> {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; bot/1.0)' },
-    });
-    html = await response.text();
+      // Validate the connected IP at connect time and on every redirect hop (SSRF guard).
+      dispatcher: ssrfSafeAgent,
+    } as RequestInit & { dispatcher: Agent });
+    const declaredLength = Number(response.headers?.get?.('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_FETCH_BYTES) {
+      log.warn({ url, declaredLength }, 'Response exceeds size cap — using raw fallback');
+      return {
+        title: url,
+        content: `[couldn't fetch content]`,
+        fallbackLevel: 'raw',
+      };
+    }
+    html = await readBodyCapped(response, MAX_FETCH_BYTES);
   } catch (err) {
     log.warn({ err, url }, 'Failed to fetch URL — using raw fallback');
     return {
