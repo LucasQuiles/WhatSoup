@@ -46,4 +46,17 @@ describe('validateBase64Image', () => {
     const buf = Buffer.from(result, 'base64');
     expect(buf.length).toBeGreaterThan(0);
   });
+
+  // Regression guard for #1093: length-not-multiple-of-4 input passes the
+  // alphabet regex and decodes (Buffer.from drops trailing bits), so it must be
+  // rejected as non-canonical rather than returned as a "clean" string.
+  it('throws on non-multiple-of-4 input that does not round-trip', () => {
+    expect(() => validateBase64Image('AB')).toThrow('not canonically encoded');
+    expect(() => validateBase64Image('ABC')).toThrow('not canonically encoded');
+  });
+
+  it('accepts canonical (padded) encoding of a single byte', () => {
+    const valid = Buffer.from([5]).toString('base64'); // "BQ=="
+    expect(validateBase64Image(valid)).toBe(valid);
+  });
 });
