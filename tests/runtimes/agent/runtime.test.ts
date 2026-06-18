@@ -552,7 +552,7 @@ type PerChatCleanupRuntimeState = {
   perChatTurnText: Map<string, string>;
   perChatAssistantItemText: Map<string, Map<string, string>>;
   pendingTurnText: Map<string, string>;
-  pendingPollQuestions: Map<string, PendingPollQuestion>;
+  pendingPolls: { questions: Map<string, PendingPollQuestion> };
   resumeFailedHandling: Set<string>;
   autoCompact: AutoCompactView;
   imageCoalesce: ImageCoalescerView;
@@ -2010,7 +2010,7 @@ describe('AgentRuntime', () => {
         msg: makeMsg({ chatJid: lidKey, contentType: 'image', inboundSeq: 6 }),
         inboundSeqs: [6, 7],
       });
-      state.pendingPollQuestions.set(lidKey, {
+      state.pendingPolls.questions.set(lidKey, {
         questions: [{
           question: 'Pick one',
           header: 'Alias',
@@ -2061,7 +2061,7 @@ describe('AgentRuntime', () => {
       });
       expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
       expect(state.imageCoalesce.buffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
-      const migratedPoll = state.pendingPollQuestions.get(canonicalJid);
+      const migratedPoll = state.pendingPolls.questions.get(canonicalJid);
       expect(migratedPoll?.chatJid).toBe(canonicalJid);
       expect(migratedPoll?.chatJidAliases.has(lidKey)).toBe(true);
       expect(migratedPoll?.chatJidAliases.has(canonicalJid)).toBe(true);
@@ -2077,7 +2077,7 @@ describe('AgentRuntime', () => {
       expect(state.perChatTurnText.has(lidKey)).toBe(false);
       expect(state.perChatAssistantItemText.has(lidKey)).toBe(false);
       expect(state.pendingTurnText.has(lidKey)).toBe(false);
-      expect(state.pendingPollQuestions.has(lidKey)).toBe(false);
+      expect(state.pendingPolls.questions.has(lidKey)).toBe(false);
       expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
       expect(state.autoCompact.cooldownUntil.has(lidKey)).toBe(false);
       expect(state.autoCompact.lastSuccessAt.has(lidKey)).toBe(false);
@@ -2110,7 +2110,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     state.chatSessions.set(lidKey, mockSession);
     state.chatQueues.set(lidKey, mockQueue);
-    state.pendingPollQuestions.set(lidKey, {
+    state.pendingPolls.questions.set(lidKey, {
       questions: [{
         question: 'Pick a runtime',
         header: 'Runtime',
@@ -2149,7 +2149,7 @@ describe('AgentRuntime', () => {
     await vi.waitFor(() => {
       expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('A: Go'));
     });
-    expect(state.pendingPollQuestions.has(canonicalJid)).toBe(false);
+    expect(state.pendingPolls.questions.has(canonicalJid)).toBe(false);
   });
 
   it('normalizes legacy pending poll timeout during LID remap before re-arming timers', async () => {
@@ -2166,7 +2166,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     state.chatSessions.set(lidKey, mockSession);
     state.chatQueues.set(lidKey, mockQueue);
-    state.pendingPollQuestions.set(lidKey, {
+    state.pendingPolls.questions.set(lidKey, {
       questions: [{
         question: 'Pick a runtime',
         header: 'Runtime',
@@ -2197,7 +2197,7 @@ describe('AgentRuntime', () => {
     try {
       runtime.handleJidAliasChanged('15550004444', canonicalJid);
 
-      const migratedPoll = state.pendingPollQuestions.get(canonicalJid);
+      const migratedPoll = state.pendingPolls.questions.get(canonicalJid);
       expect(migratedPoll?.timeoutMs).toBe(3_600_000);
       for (const [, delay] of setTimeoutSpy.mock.calls) {
         expect(delay).toEqual(expect.any(Number));
@@ -7676,7 +7676,7 @@ describe('AgentRuntime', () => {
         ]);
         const db = makeDb();
         const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-        const state = runtime as unknown as { pendingPollQuestions: PerChatCleanupRuntimeState['pendingPollQuestions'] };
+        const state = runtime as unknown as { pendingPolls: PerChatCleanupRuntimeState['pendingPolls'] };
 
         await runtime.start();
         await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
@@ -7724,7 +7724,7 @@ describe('AgentRuntime', () => {
         await vi.advanceTimersByTimeAsync(3 * 60 * 1000 + 1);
 
         expect(sentMessages.some((message) => message.text.includes('option number or text'))).toBe(false);
-        const pending = state.pendingPollQuestions.get('5678@s.whatsapp.net');
+        const pending = state.pendingPolls.questions.get('5678@s.whatsapp.net');
         expect(pending?.mode).toBe('poll');
         expect(pending?.pollMessageIdToQuestionIndex.has('POLL_REPLACED_NEW')).toBe(true);
         expect(pending?.pollMessageIdToQuestionIndex.has('POLL_REPLACED_OLD')).toBe(false);
@@ -7755,7 +7755,7 @@ describe('AgentRuntime', () => {
       };
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger as unknown as Messenger, 'test', { sessionScope: 'per_chat' });
-      const state = runtime as unknown as { pendingPollQuestions: PerChatCleanupRuntimeState['pendingPollQuestions'] };
+      const state = runtime as unknown as { pendingPolls: PerChatCleanupRuntimeState['pendingPolls'] };
 
       await runtime.start();
       await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
@@ -7805,7 +7805,7 @@ describe('AgentRuntime', () => {
           && (meta as { toolId?: string }).toolId === 'tool-stale-old',
       )).toBe(true));
 
-      const pending = state.pendingPollQuestions.get('5678@s.whatsapp.net');
+      const pending = state.pendingPolls.questions.get('5678@s.whatsapp.net');
       expect(pending?.mode).toBe('poll');
       expect(pending?.pollMessageIdToQuestionIndex.has('POLL_STALE_NEW')).toBe(true);
       expect(pending?.pollMessageIdToQuestionIndex.has('POLL_STALE_OLD')).toBe(false);
@@ -8057,7 +8057,7 @@ describe('AgentRuntime', () => {
     };
 
     type AdminRuntimeState = {
-      pendingPollQuestions: Map<string, AdminPollPending>;
+      pendingPolls: { questions: Map<string, AdminPollPending> };
       chatSessions: Map<string, typeof mockSession>;
       chatQueues: Map<string, IOutboundQueue>;
       handlePollVoteReceived: (data: {
@@ -8108,7 +8108,7 @@ describe('AgentRuntime', () => {
       if (source === 'send_poll' && awaitResolve) {
         pending.awaitResolve = awaitResolve;
       }
-      state.pendingPollQuestions.set(mapKey, pending);
+      state.pendingPolls.questions.set(mapKey, pending);
       return pending;
     }
 
@@ -8153,7 +8153,7 @@ describe('AgentRuntime', () => {
         expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('Yes'));
       });
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
 
     it('E2Eb — send_poll source: admin vote resolves the awaitResolve promise with the admin selection', async () => {
@@ -8193,7 +8193,7 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => {
         expect(resolved).toBe('Yes');
       });
-      expect(state.pendingPollQuestions.has(mapKey)).toBe(false);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
       // send_poll source does NOT use sendTurn — assert it stays untouched
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
@@ -8232,7 +8232,7 @@ describe('AgentRuntime', () => {
 
       // Poll NOT resolved: no answer collected, pending still present, sendTurn not called
       expect(pending.answersCollected[0]).toBeUndefined();
-      expect(state.pendingPollQuestions.has(groupJid)).toBe(true);
+      expect(state.pendingPolls.questions.has(groupJid)).toBe(true);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
   });
@@ -8316,9 +8316,9 @@ describe('AgentRuntime', () => {
       expect(byChat.has('chatC@g.us')).toBe(false);
 
       // chatC live poll restored into the in-memory map; expired rows deleted from table
-      const state = runtime as unknown as { pendingPollQuestions: Map<string, unknown> };
-      expect(state.pendingPollQuestions.has('send_poll:c1')).toBe(true);
-      expect(state.pendingPollQuestions.has('send_poll:a1')).toBe(false);
+      const state = runtime as unknown as { pendingPolls: { questions: Map<string, unknown> } };
+      expect(state.pendingPolls.questions.has('send_poll:c1')).toBe(true);
+      expect(state.pendingPolls.questions.has('send_poll:a1')).toBe(false);
       const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
       expect(remaining.cnt).toBe(1);
 
