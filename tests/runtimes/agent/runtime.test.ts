@@ -1600,7 +1600,8 @@ describe('AgentRuntime', () => {
     (runtime as unknown as { perChatTurnContentType: Map<string, string | null> }).perChatTurnContentType.set('test@s.whatsapp.net', 'text');
     (runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.set('test@s.whatsapp.net', 'partial');
     (runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.set('test@s.whatsapp.net', new Map([[1, 'tool output']]));
-    (runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.set('tool-1', 'search_contacts');
+    // Tool-scope keys are `${mapKey}#${ordinal}` — seed one for the crashing chat.
+    (runtime as unknown as { activeToolNames: Map<string, Map<string, string>> }).activeToolNames.set('test@s.whatsapp.net#1', new Map([['tool-1', 'search_contacts']]));
     mockQueue.abortTurn.mockClear();
     mockQueue.enqueueText.mockClear();
     mockQueue.flush.mockClear();
@@ -3916,6 +3917,30 @@ describe('AgentRuntime', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('per_chat crash cleanup scopes tool-state to the crashing mapKey (does not stomp other chats)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      activeToolNames: Map<string, Map<string, string>>;
+      turnHadToolActivity: Set<string>;
+      cleanupPerChatCrashTurnState: (mapKey: string) => void;
+    };
+    // Two concurrent chats each have in-flight tool state (scope keys are `${mapKey}#${ordinal}`).
+    state.activeToolNames.set('chat-a#1', new Map([['t1', 'Read']]));
+    state.activeToolNames.set('chat-b#1', new Map([['t2', 'Bash']]));
+    state.turnHadToolActivity.add('chat-a#1');
+    state.turnHadToolActivity.add('chat-b#1');
+
+    // chat-a crashes — only chat-a's scope must be cleared; chat-b is mid-turn.
+    state.cleanupPerChatCrashTurnState('chat-a');
+
+    expect(state.activeToolNames.has('chat-a#1')).toBe(false);
+    expect(state.turnHadToolActivity.has('chat-a#1')).toBe(false);
+    expect(state.activeToolNames.has('chat-b#1')).toBe(true);
+    expect(state.turnHadToolActivity.has('chat-b#1')).toBe(true);
   });
 
   it('shutdown clears pending auto-respawn timers before per_chat session cleanup', async () => {

@@ -37,6 +37,9 @@ export class MessageScheduler {
   }
 
   start(): void {
+    // Idempotent: a second start() must not orphan the first interval (matches the
+    // guard every sibling scheduler/poller uses, e.g. database-retention, consolidation).
+    if (this.timer !== null) return;
     this.timer = setInterval(() => {
       this.tick().catch((err) => log.error({ err }, 'scheduler tick failed'));
     }, this.config.intervalMs);
