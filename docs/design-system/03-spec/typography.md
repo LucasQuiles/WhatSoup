@@ -8,12 +8,15 @@ Ramp definitions live in `tokens-v3.md` §2.6; this document is the usage law. S
 
 ## 1. Faces
 
+- **Bricolage Grotesque** (`--font-display`) — the editorial display tier only: `--type-display`,
+  `--type-title`, and the Landing hero. Weights 600/700/800. Falls back to Hanken Grotesk.
 - **Hanken Grotesk** (`--font-sans`) — all chrome, labels, prose. Weights 400/500/600 only.
 - **IBM Plex Mono** (`--font-mono`) — all data lanes: numerics, ids, timestamps, phones, log text,
   KPI values, and the nameplate. Weights 400/500/600. Tabular figures for scan-stable columns.
 - Fallback stacks (tokens-v3 §2.1) are metric-tolerant; offline render degrades without breakage.
-- No third face, ever. No italic except the typing indicator. Hierarchy is expressed by size and
-  weight only — never by a new font.
+- The identity triad (display / body / mono) is closed at three faces — no fourth. The display face
+  is reserved to the display tier; chrome and data never borrow it. No italic except the typing
+  indicator. Within a tier, hierarchy is size and weight only — never a new font.
 
 ## 2. The named ramp (closed)
 

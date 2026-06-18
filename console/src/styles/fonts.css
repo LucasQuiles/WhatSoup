@@ -110,3 +110,32 @@
   font-display: swap;
   src: url("/fonts/IBMPlexMono-600.woff2") format("woff2");
 }
+
+/* ── Bricolage Grotesque (display) — showcase --font-display ──────
+   Source: @fontsource/bricolage-grotesque v5 (github.com/ateliertriay/bricolage),
+   SIL OFL 1.1. Editorial display face for the display tier + Landing hero.
+   Provenance: console/public/fonts/README.md (sha256 per file). */
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/BricolageGrotesque-600.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/BricolageGrotesque-700.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/fonts/BricolageGrotesque-800.woff2") format("woff2");
+}

@@ -19,6 +19,12 @@ an inert @font-face during the cutover and is removed once nothing references it
 - **License:** SIL Open Font License 1.1. Copyright 2017 IBM Corp.
 - **Weights:** 400/500/600 (latin, normal). Includes tabular figures for data lanes.
 
+### Bricolage Grotesque (active — display tier + Landing hero, `--font-display`)
+- **Package:** `@fontsource/bricolage-grotesque` v5 (https://www.npmjs.com/package/@fontsource/bricolage-grotesque)
+- **Upstream:** https://github.com/ateliertriay/bricolage
+- **License:** SIL Open Font License 1.1. Copyright the Bricolage Grotesque Project Authors.
+- **Weights:** 600/700/800 (latin, normal) — editorial display read; falls back to Hanken.
+
 ### Geist (inert — retained until removal)
 - **Repository:** https://github.com/vercel/geist-font
 - **Release tag:** v1.7.2 — **License:** SIL Open Font License 1.1
@@ -28,7 +34,8 @@ an inert @font-face during the cutover and is removed once nothing references it
 
 ## Weights shipped
 
-400/500/600 only (no italics), matching the `--type-*` weight set.
+No italics. Body/mono (Hanken, IBM Plex Mono, Geist): 400/500/600, matching the
+`--type-*` ramp. Display (Bricolage Grotesque): 600/700/800 for the editorial display read.
 
 ## Files and sha256
 
@@ -40,6 +47,9 @@ an inert @font-face during the cutover and is removed once nothing references it
 | IBMPlexMono-400.woff2 | 400 | 08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7 |
 | IBMPlexMono-500.woff2 | 500 | 01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22 |
 | IBMPlexMono-600.woff2 | 600 | 0d1f0b8d0722224e32e9f28261bdc86c79115be73444ae5eceb73976a1bcdf83 |
+| BricolageGrotesque-600.woff2 | 600 | b34fc8c1ef0ac8798455ac2979eae4b4f90f0d327e3584d1032fa77a8a9a66ca |
+| BricolageGrotesque-700.woff2 | 700 | 4c373ce3c1cca41c864eb3e27c059a59fc6310547ab9c9b6cd780d387ba24206 |
+| BricolageGrotesque-800.woff2 | 800 | 3e1b5f0a56ee995b7c1445bc54e6ec98c5dffb585ef5c4baf86731cf68e27c61 |
 | Geist-Regular.woff2 | 400 | d8bce822db092746889bcf3f57350b41f53708b025458fe7af30729ec4ce0df2 |
 | Geist-Medium.woff2 | 500 | b0a0867cda44efef4529a4b13ce37fd9fd6e1597708615287542a51bc7452ab4 |
 | Geist-SemiBold.woff2 | 600 | b1e6a1dd2122485d0a1f3a8d30a45443aa9453224f83018bec35f8266bc77915 |
