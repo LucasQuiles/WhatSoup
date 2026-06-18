@@ -563,6 +563,16 @@ def test_estimate_replay_zero_token_field_is_not_measured():
     assert probe._estimate_replay_tokens({"replay_tokens": 0}) == (0, "unknown")
 
 
+def test_bucket_name_boundaries_are_pinned():
+    # Lock every exact bucket edge so a future >=/<= refactor cannot silently mis-bucket a boundary
+    # turn count. The 201+ branch depends on the final fallback at tc==lo (201); pinning it here turns
+    # that equivalence into a durable detector.
+    cases = {0: "0-10", 10: "0-10", 11: "11-50", 50: "11-50", 51: "51-200",
+             200: "51-200", 201: "201+", 202: "201+"}
+    for tc, expected in cases.items():
+        assert probe._bucket_name(tc) == expected, (tc, probe._bucket_name(tc), expected)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
