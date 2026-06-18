@@ -41,6 +41,12 @@ const ALLOWLIST = new Map<string, string>([
       'Esc dismisses the bubble without moving focus off the trigger (showcase §24) — ' +
       'scoped to the anchored bubble, not a global overlay, so intentionally not useDismissable.',
   ],
+  [
+    'console/src/components/primitives/InlineEdit.tsx',
+    'Field-level edit-in-place onKeyDown (showcase §17): Esc cancels the edit and reverts ' +
+      'the draft, staying on the same control — it is not an overlay/global dismissal and moves ' +
+      'no focus, so useDismissable (focus-trap + stack) would be wrong here.',
+  ],
 ])
 
 function tsxFiles(dir: string): string[] {
