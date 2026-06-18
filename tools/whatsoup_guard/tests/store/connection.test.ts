@@ -83,6 +83,12 @@ describe('openDatabase', () => {
     db.close();
   });
 
+  it('sets busy_timeout on a file database so concurrent writers wait instead of failing', () => {
+    const db = openDatabase(tempDbPath());
+    expect(db.pragma('busy_timeout', { simple: true })).toBe(5000);
+    db.close();
+  });
+
   it('reopens the same temp-file database idempotently without duplicating migration versions', () => {
     const file = tempDbPath();
     openDatabase(file).close();

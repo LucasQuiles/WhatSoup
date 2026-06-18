@@ -45,6 +45,10 @@ function configureDatabase(db: SqliteDatabase, file: string): void {
   db.pragma('foreign_keys = ON');
   if (!isMemoryDatabase(file)) {
     db.pragma('journal_mode = WAL');
+    // The same state file is opened by multiple processes (cli/cycle, cli/cycle-runtime,
+    // cli/mute). Without a busy timeout a concurrent writer fails immediately with
+    // SQLITE_BUSY; wait-and-retry instead, matching the main runtime DB (5000ms).
+    db.pragma('busy_timeout = 5000');
   }
 }
 
