@@ -832,6 +832,19 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Bound an evict-oldest dedup map. Mirrors the recentToolFailureAlerts cap so
+   * window-pruned maps can't grow without limit between prunes (e.g. one entry per
+   * distinct chat that never recurs within the window).
+   */
+  private capDedupeMap(map: Map<string, number>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
+    while (map.size > max) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+
+  /**
    * Clear all tool-scope state belonging to one mapKey. Tool scope keys are
    * `${mapKey}#${ordinal}` (see createToolScopeKey), so on a per_chat crash we must
    * drop only the crashing chat's scopes — a blanket `.clear()` would stomp other
@@ -5360,6 +5373,7 @@ export class AgentRuntime implements Runtime {
     }
     if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
       this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+      this.capDedupeMap(this.recentFallbackEmptyTurnAlerts);
       emitAlertChecked(
         this.instanceName,
         'fallback_empty_turn',
@@ -6179,6 +6193,7 @@ export class AgentRuntime implements Runtime {
     ].join(':');
     if (this.recentProviderFallbackNotices.has(noticeKey)) return;
     this.recentProviderFallbackNotices.set(noticeKey, now);
+    this.capDedupeMap(this.recentProviderFallbackNotices);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const credentialsMissing = activation.keyPresent === false;
