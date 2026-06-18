@@ -8356,10 +8356,10 @@ describe('AgentRuntime', () => {
         sentPollMessageIds: ['POLL_Y'],
       };
 
-      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
-        .persistPendingPoll('send_poll:y', pending);
-      (runtime as unknown as { removePendingPoll(k: string): void })
-        .removePendingPoll('send_poll:y');
+      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
+        .pollPersistence.save('send_poll:y', pending);
+      (runtime as unknown as { pollPersistence: { remove(k: string): void } })
+        .pollPersistence.remove('send_poll:y');
 
       const snapAfter = runtime.getHealthSnapshot();
       expect((snapAfter.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(2);
@@ -8389,8 +8389,8 @@ describe('AgentRuntime', () => {
         sentPollMessageIds: ['POLL_LEGACY'],
       } as PendingPollQuestion;
 
-      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
-        .persistPendingPoll('legacy-timeout', pending);
+      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
+        .pollPersistence.save('legacy-timeout', pending);
 
       const row = db.raw
         .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
@@ -8426,8 +8426,8 @@ describe('AgentRuntime', () => {
         sentPollMessageIds: ['POLL_HUGE'],
       } as PendingPollQuestion;
 
-      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
-        .persistPendingPoll('huge-timeout', pending);
+      (runtime as unknown as { pollPersistence: { save(k: string, p: PendingPollQuestion): void } })
+        .pollPersistence.save('huge-timeout', pending);
 
       const row = db.raw
         .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
