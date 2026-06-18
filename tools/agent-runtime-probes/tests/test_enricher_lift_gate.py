@@ -905,6 +905,66 @@ def test_mutation_pin_sample_size_boundary_n50_passes_n49_fails():
     assert rep49["verdict_status"] == "inconclusive_sample_size"
 
 
+# --------------------------------------------------------------------------- #
+# Adoption-boundary pins (mutation-audit: enricher_lift_gate eq/bool/rel survivors).
+# These pin the FAIL-CLOSED boundaries that decide adoption. Each is exact (integer or
+# same-constant), so the boundary is reachable — distinct from the float-threshold /
+# unreachable survivors documented EQUIVALENT in the ledger.
+# --------------------------------------------------------------------------- #
+def test_paired_outcomes_exact_tie_is_not_a_win():
+    # win is STRICT '>' (fail-closed parity convention): an exactly-equal score is a LOSS,
+    # never a win. A '>'->'>= ' mutation would credit the enricher for a tie and inflate
+    # the win vector that every downstream lift statistic is built on.
+    base = [{"fixture_id": "f0", "score": 0.5}, {"fixture_id": "f1", "score": 0.5}]
+    enr = [{"fixture_id": "f0", "score": 0.5}, {"fixture_id": "f1", "score": 0.7}]
+    assert gate.paired_outcomes(base, enr) == [0, 1]  # f0 tie -> 0, f1 strict win -> 1
+
+
+def test_holm_pvalue_exactly_at_threshold_does_not_reject():
+    # reject = p < threshold (STRICT): a p-value exactly AT the Holm threshold is NOT
+    # significant. For a single arm threshold == HOLM_ALPHA exactly (same float constant),
+    # so p == HOLM_ALPHA must NOT reject. A '<'->'<=' mutation would reject at equality.
+    res = gate.holm_pass({"only": gate.HOLM_ALPHA}, alpha=gate.HOLM_ALPHA)
+    assert res["per_arm"]["only"]["threshold"] == gate.HOLM_ALPHA
+    assert res["per_arm"]["only"]["reject_null"] is False
+    assert res["family_pass"] is False
+
+
+def test_judge_noise_one_nonnumeric_scale_bound_raises():
+    # The scale-bound guard is `not isinstance(lo) OR not isinstance(hi)`: EITHER bound
+    # being non-numeric is fatal. An 'or'->'and' mutation would only raise when BOTH are
+    # bad, letting a half-malformed scale through into normalization (USAGE-TRUTH discipline).
+    bad_hi = {"scale": {"min": 0, "max": "x"}, "per_item": [{"judge_scores": [0.8, 0.82]}]}
+    try:
+        gate.judge_noise(bad_hi)
+        assert False, "expected LiftGateInputError on non-numeric scale max"
+    except gate.LiftGateInputError as e:
+        assert "judge_scale_missing" in str(e)
+
+
+def test_added_tokens_one_nonnumeric_provider_field_raises():
+    # The provider-token guard is `not isinstance(base) OR not isinstance(enr)`: EITHER
+    # field non-numeric is fatal (USAGE-TRUTH, no zero coercion). An 'or'->'and' mutation
+    # would only raise when BOTH are bad, admitting a half-missing usage report.
+    bad = {"baseline_input_tokens": 1000, "enriched_input_tokens": "x",
+           "prefix_churn": False, "added_tokens_budget": 1000}
+    try:
+        gate.added_tokens_and_churn(bad)
+        assert False, "expected LiftGateInputError on non-numeric enriched tokens"
+    except gate.LiftGateInputError as e:
+        assert "usage_missing_provider_tokens" in str(e)
+
+
+def test_added_tokens_exactly_at_budget_is_within_budget():
+    # The over-budget check is `added_tokens > budget` (STRICT): added tokens EXACTLY at the
+    # budget are WITHIN budget, not over. Tokens are integer provider truth, so the boundary
+    # is exact. A '>'->'>= ' mutation would flag an at-budget enricher as over and block it.
+    args = list(strong_lift_inputs())
+    args[6] = make_usage(enr=2000, budget=1000)  # added = 2000 - 1000 = 1000 == budget
+    rep = gate.evaluate(*args, tau=3.0)
+    assert "added_tokens_over_budget" not in rep["failed_predicates"]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
