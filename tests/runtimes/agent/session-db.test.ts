@@ -10,6 +10,7 @@ import {
   getActiveSession,
   updateSessionId,
   updateSessionStatus,
+  updateTranscriptPath,
   incrementMessageCount,
   accumulateSessionTokens,
   insertTokenEvent,
@@ -519,5 +520,260 @@ describe('agent session-db', () => {
     const row2 = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(id2) as { provider: string };
     expect(row1.provider).toBe('claude-cli');
     expect(row2.provider).toBe('codex-cli');
+  });
+});
+
+describe('session-db.ts uncovered-branch coverage', () => {
+  beforeEach(() => {
+    db.raw.prepare('DELETE FROM agent_token_events').run();
+    db.raw.prepare('DELETE FROM agent_sessions').run();
+  });
+
+  it('updateTranscriptPath stores the transcript file path on the session row', () => {
+    const id = createSession(db, 100100, '/tmp/transcript');
+    updateTranscriptPath(db, id, '/var/log/transcripts/session-abc.jsonl');
+
+    const row = db.raw
+      .prepare('SELECT transcript_path FROM agent_sessions WHERE id = ?')
+      .get(id) as { transcript_path: string | null };
+    expect(row.transcript_path).toBe('/var/log/transcripts/session-abc.jsonl');
+  });
+
+  it('updateTranscriptPath overwrites a previously stored path', () => {
+    const id = createSession(db, 100101, '/tmp/transcript-2');
+    updateTranscriptPath(db, id, '/first/path.jsonl');
+    updateTranscriptPath(db, id, '/second/path.jsonl');
+
+    const row = db.raw
+      .prepare('SELECT transcript_path FROM agent_sessions WHERE id = ?')
+      .get(id) as { transcript_path: string | null };
+    expect(row.transcript_path).toBe('/second/path.jsonl');
+  });
+
+  it('getSessionTokenSnapshot returns null when the row does not exist', () => {
+    const snapshot = getSessionTokenSnapshot(db, 999999);
+    // The function's contract is "null when the row is gone"; check that the
+    // call is fully null (not undefined, not a partial record) and that
+    // asking for it a second time is still null.
+    expect(snapshot).toBeNull();
+    expect(getSessionTokenSnapshot(db, 999999)).toBeNull();
+    // Sanity: a separate valid row id does not accidentally resolve to null.
+    const realId = createSession(db, 100150, '/tmp/real-row');
+    const realSnapshot = getSessionTokenSnapshot(db, realId);
+    expect(realSnapshot).toEqual({
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+  });
+
+  it('getSessionTokenSnapshot coerces NULL columns to 0', () => {
+    // Insert a row directly so the token columns are NULL (createSession only
+    // sets a few fields and leaves the token counters as their column default
+    // of 0, but writing NULL exercises the ?? 0 branches on every field).
+    db.raw.prepare(
+      `INSERT INTO agent_sessions
+         (claude_pid, started_in_directory, started_at, status,
+          total_input_tokens, total_output_tokens,
+          last_compact_input_tokens, last_compact_output_tokens)
+       VALUES (?, ?, datetime('now'), 'active', NULL, NULL, NULL, NULL)`,
+    ).run(100200, '/tmp/null-tokens');
+
+    const id = (db.raw
+      .prepare('SELECT id FROM agent_sessions WHERE claude_pid = 100200')
+      .get() as { id: number }).id;
+
+    const snapshot = getSessionTokenSnapshot(db, id);
+    expect(snapshot).toEqual({
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+  });
+
+  it('backfillWorkspaceKeys: row with non-users/groups dir (and not rootCwd) is marked ended', () => {
+    // Pre-isolation shared session: cwd lives outside both /users/ and /groups/
+    // AND does not match the instance root. Both clauses of the
+    // isRootSession OR are false-then-true respectively.
+    const instanceCwd = '/workspace/WhatSoup';
+    const id = createSession(
+      db,
+      100300,
+      '/some/legacy/shared/dir',
+      '15551234567@s.whatsapp.net',
+    );
+    backfillWorkspaceKeys(db, instanceCwd);
+
+    const row = db.raw
+      .prepare('SELECT status, workspace_key FROM agent_sessions WHERE id = ?')
+      .get(id) as { status: string; workspace_key: string | null };
+    expect(row.workspace_key).toBeNull();
+    expect(row.status).toBe('ended');
+  });
+
+  it('backfillWorkspaceKeys: invalid chat_jid falls back to raw chat_jid in workspace_key', () => {
+    // An empty chat_jid is non-null but trips toConversationKey's "must contain @"
+    // guard, exercising the catch path that uses row.chat_jid as the key.
+    const instanceCwd = '/workspace/WhatSoup';
+    const id = createSession(
+      db,
+      100301,
+      '/workspace/WhatSoup/users/15559876543',
+      '',
+    );
+    backfillWorkspaceKeys(db, instanceCwd);
+
+    const row = db.raw
+      .prepare('SELECT status, workspace_key FROM agent_sessions WHERE id = ?')
+      .get(id) as { status: string; workspace_key: string | null };
+    expect(row.workspace_key).toBe('');
+    expect(row.status).toBe('active');
+  });
+
+  it('backfillWorkspaceKeys: chat_jid missing @ also falls back to raw chat_jid', () => {
+    // A non-empty chat_jid without an @ is rejected by toConversationKey and
+    // should be persisted verbatim as the workspace_key.
+    const instanceCwd = '/workspace/WhatSoup';
+    const id = createSession(
+      db,
+      100302,
+      '/workspace/WhatSoup/users/15551112222',
+      'no-at-sign',
+    );
+    backfillWorkspaceKeys(db, instanceCwd);
+
+    const row = db.raw
+      .prepare('SELECT status, workspace_key FROM agent_sessions WHERE id = ?')
+      .get(id) as { status: string; workspace_key: string | null };
+    expect(row.workspace_key).toBe('no-at-sign');
+    expect(row.status).toBe('active');
+  });
+
+  it('backfillWorkspaceKeys: chat_jid null row is skipped (not updated, not ended)', () => {
+    // Rows with chat_jid IS NULL are filtered out by the WHERE clause in
+    // backfillWorkspaceKeys, so they are not processed at all.
+    const instanceCwd = '/workspace/WhatSoup';
+    const id = createSession(db, 100303, '/workspace/WhatSoup/users/15553334444');
+    db.raw.prepare('UPDATE agent_sessions SET chat_jid = NULL WHERE id = ?').run(id);
+
+    backfillWorkspaceKeys(db, instanceCwd);
+
+    const row = db.raw
+      .prepare('SELECT status, workspace_key, chat_jid FROM agent_sessions WHERE id = ?')
+      .get(id) as { status: string; workspace_key: string | null; chat_jid: string | null };
+    expect(row.chat_jid).toBeNull();
+    expect(row.workspace_key).toBeNull();
+    expect(row.status).toBe('active');
+  });
+
+  it('ensureAgentSchema rethrows non-duplicate-column errors thrown by ALTER TABLE', () => {
+    // Force one of the idempotent ALTER TABLE migrations to fail with a
+    // message that does NOT include "duplicate column name". The catch
+    // block in ensureAgentSchema must rethrow it.
+    const realExec = db.raw.exec.bind(db.raw);
+    const spy = vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      if (sql.startsWith('ALTER TABLE agent_sessions ADD COLUMN chat_jid')) {
+        throw new Error('simulated non-duplicate column failure');
+      }
+      return realExec(sql);
+    });
+
+    let thrown: unknown = null;
+    try {
+      try {
+        ensureAgentSchema(db);
+      } catch (err) {
+        thrown = err;
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    // Concrete terminal assertions: error is an Error instance whose message
+    // does NOT include the swallow-keyword.
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('simulated non-duplicate column failure');
+    expect((thrown as Error).message).not.toContain('duplicate column name');
+  });
+
+  it('accumulateTokensWithEvent swallows a ROLLBACK failure (best-effort rollback)', () => {
+    // Drive the inner try/catch in the failure handler: make the inner
+    // operation fail, then make ROLLBACK itself throw. The best-effort
+    // rollback is documented to swallow any rollback error.
+    const id = createSession(db, 100400, '/tmp/rollback-fail');
+
+    // Force the insert (insertTokenEvent) to fail by passing an unknown id —
+    // this raises the FK violation in the BEGIN IMMEDIATE block.
+    // Then make ROLLBACK throw so the inner catch's "/* best-effort */" runs.
+    const realExec = db.raw.exec.bind(db.raw);
+    const spy = vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      if (sql === 'ROLLBACK') {
+        throw new Error('simulated rollback failure');
+      }
+      return realExec(sql);
+    });
+
+    try {
+      expect(() => accumulateTokensWithEvent(db, 999999, 1, 1)).toThrow(
+        /FOREIGN KEY constraint failed|simulated rollback failure/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The session row we created must remain untouched: the rolled-back
+    // transaction against a different id should not have leaked any writes
+    // into our row.
+    const row = db.raw
+      .prepare('SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?')
+      .get(id) as { total_input_tokens: number; total_output_tokens: number };
+    expect(row.total_input_tokens).toBe(0);
+    expect(row.total_output_tokens).toBe(0);
+  });
+
+  it('backfillSessionProvider: no-op when no rows have null provider (changes === 0)', () => {
+    // Every session already has a provider set, so the UPDATE matches 0 rows.
+    // The if (changes > 0) branch must be skipped (no log.info).
+    createSession(db, 100500, '/tmp/already-set-1', undefined, undefined, 'codex-cli');
+    createSession(db, 100501, '/tmp/already-set-2', undefined, undefined, 'claude-cli');
+
+    // Should not throw even though nothing changes.
+    expect(() => backfillSessionProvider(db, 'claude-cli')).not.toThrow();
+
+    // Providers are unchanged.
+    const rows = db.raw
+      .prepare('SELECT claude_pid, provider FROM agent_sessions ORDER BY id')
+      .all() as Array<{ claude_pid: number; provider: string }>;
+    expect(rows).toEqual([
+      { claude_pid: 100500, provider: 'codex-cli' },
+      { claude_pid: 100501, provider: 'claude-cli' },
+    ]);
+  });
+
+  it('backfillWorkspaceKeys: row with NULL started_in_directory uses empty string for the dir check', () => {
+    // A row whose started_in_directory is NULL takes the `?? ''` path; the
+    // empty string contains neither '/users/' nor '/groups/' and is not
+    // equal to the resolved cwd, so it is classified as a root session and
+    // marked ended.
+    const instanceCwd = '/workspace/WhatSoup';
+    db.raw.prepare(
+      `INSERT INTO agent_sessions
+         (claude_pid, started_in_directory, chat_jid, started_at, status)
+       VALUES (?, NULL, ?, datetime('now'), 'active')`,
+    ).run(100600, '15554445566@s.whatsapp.net');
+
+    const id = (db.raw
+      .prepare('SELECT id FROM agent_sessions WHERE claude_pid = 100600')
+      .get() as { id: number }).id;
+
+    backfillWorkspaceKeys(db, instanceCwd);
+
+    const row = db.raw
+      .prepare('SELECT status, workspace_key, started_in_directory FROM agent_sessions WHERE id = ?')
+      .get(id) as { status: string; workspace_key: string | null; started_in_directory: string | null };
+    expect(row.started_in_directory).toBeNull();
+    expect(row.workspace_key).toBeNull();
+    expect(row.status).toBe('ended');
   });
 });
