@@ -589,3 +589,152 @@ describe('SdkTwilioSmsPort listInboundSince — outbound echo support', () => {
     expect(messagesList.mock.calls[1][0]).toMatchObject({ limit: 10 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// twilio-port.ts uncovered-branch coverage
+// ---------------------------------------------------------------------------
+
+describe('twilio-port.ts uncovered-branch coverage', () => {
+  // Reusable message builder mirroring the MessageInstanceLike shape.
+  function makeMsg(overrides: Partial<{
+    sid: string;
+    from: string;
+    to: string;
+    body: string;
+    direction: string;
+    dateSent: Date;
+    dateCreated: Date;
+    status: string;
+  }> = {}) {
+    const base = new Date('2025-06-01T12:00:00Z');
+    return {
+      sid: overrides.sid ?? 'SMcov1',
+      from: overrides.from ?? '+15551230000',
+      to: overrides.to ?? '+15559990000',
+      body: overrides.body ?? 'cov body',
+      direction: overrides.direction ?? 'inbound',
+      dateSent: overrides.dateSent ?? base,
+      dateCreated: overrides.dateCreated ?? base,
+      status: overrides.status ?? 'received',
+    };
+  }
+
+  // --- placeCall success path (lines 347-355) -------------------------------
+
+  it('placeCall forwards {to, from, twiml, statusCallback} and returns {sid, status}', async () => {
+    const callsCreate = vi.fn().mockResolvedValue({ sid: 'CAcall1', status: 'queued' });
+    const client = makeMockClient({});
+    (client.calls as { create: typeof callsCreate }).create = callsCreate;
+    const factory = vi.fn().mockReturnValue(client);
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.placeCall({
+      to: '+15551230000',
+      from: '+15559990000',
+      twiml: '<Response><Say>hi</Say></Response>',
+      statusCallback: 'https://example.invalid/status',
+    });
+
+    expect(result).toEqual({ sid: 'CAcall1', status: 'queued' });
+    expect(callsCreate).toHaveBeenCalledWith({
+      to: '+15551230000',
+      from: '+15559990000',
+      twiml: '<Response><Say>hi</Say></Response>',
+      statusCallback: 'https://example.invalid/status',
+    });
+  });
+
+  // --- placeCall error path: scrubAndRethrow (lines 356-357) -----------------
+
+  it('placeCall scrubs token from error and preserves code/status', async () => {
+    const callsCreate = vi.fn().mockRejectedValue(
+      Object.assign(new Error(`call failed token=${TOKEN}`), { code: 13225, status: 400 }),
+    );
+    const client = makeMockClient({});
+    (client.calls as { create: typeof callsCreate }).create = callsCreate;
+    const factory = vi.fn().mockReturnValue(client);
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.placeCall({ to: '+15551230000', twiml: '<Response/>' }).catch((e) => e);
+
+    expect((err as Error).message).not.toContain(TOKEN);
+    expect((err as Error).message).toContain('[REDACTED]');
+    expect((err as { code?: number }).code).toBe(13225);
+    expect((err as { status?: number }).status).toBe(400);
+  });
+
+  // --- listInboundSince: unknown direction → skip (line 300) ----------------
+
+  it('skips records whose direction is neither inbound nor outbound-*', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const messages = [
+      makeMsg({ sid: 'SMkeep', direction: 'inbound', dateSent: new Date('2025-06-01T12:00:00Z') }),
+      makeMsg({ sid: 'SMskip', direction: 'shortcoded', dateSent: new Date('2025-06-01T12:01:00Z') }),
+    ];
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce(messages)
+      .mockResolvedValueOnce([]);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result.map((m) => m.sid)).toEqual(['SMkeep']);
+  });
+
+  // --- list error path: phoneNumber configured, Promise.all rejects (line 275) ---
+
+  it('listInboundSince scrubs token when the parallel (to/from) list call rejects', async () => {
+    const listError = Object.assign(new Error(`list bomb ${TOKEN}`), { code: 50001, status: 500 });
+    const messagesList = vi.fn().mockRejectedValue(listError);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.listInboundSince(new Date('2025-01-01T00:00:00Z')).catch((e) => e);
+
+    expect((err as Error).message).not.toContain(TOKEN);
+    expect((err as Error).message).toContain('[REDACTED]');
+    expect((err as { code?: number }).code).toBe(50001);
+    expect((err as { status?: number }).status).toBe(500);
+  });
+
+  // --- list error path: messagingServiceSid-only config, single list rejects (line 288) ---
+
+  it('listInboundSince scrubs token when the single list call rejects (no phoneNumber)', async () => {
+    const listError = Object.assign(new Error(`mss bomb ${TOKEN}`), { code: 50002, status: 503 });
+    const messagesList = vi.fn().mockRejectedValue(listError);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const mssConfig: TwilioSmsConfig = { ...BASE_CONFIG, phoneNumber: undefined, messagingServiceSid: 'mg00000000000000000000000000000000' };
+    const port = new SdkTwilioSmsPort(mssConfig, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.listInboundSince(new Date('2025-01-01T00:00:00Z')).catch((e) => e);
+
+    expect((err as Error).message).not.toContain(TOKEN);
+    expect((err as Error).message).toContain('[REDACTED]');
+    expect((err as { code?: number }).code).toBe(50002);
+    expect((err as { status?: number }).status).toBe(503);
+  });
+
+  // --- scrub fallback: non-Error thrown object with no message/stack/code (lines 123,125,126,129) ---
+
+  it('initClient scrubs a non-Error rejection (no message/stack/code/status) and rethrows', async () => {
+    // Factory rejects with a non-Error object lacking every typed field,
+    // forcing every ternary in scrubAndRethrow to its falsy branch.
+    const factory = vi.fn().mockRejectedValue({ unrelated: true });
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const err = await port.verifyCredentials().catch((e) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    // String({unrelated:true}) → "[object Object]"
+    expect((err as Error).message).toBe('[object Object]');
+    expect((err as { code?: number }).code).toBeUndefined();
+    expect((err as { status?: number }).status).toBeUndefined();
+  });
+});
