@@ -93,6 +93,21 @@ describe('CommandPalette — command list', () => {
     expect(screen.getByText('No results')).toBeTruthy();
   });
 
+  it('announces the live result count when results are present (#1100)', () => {
+    renderPalette();
+    fireEvent.change(combobox(), { target: { value: 'inbox' } });
+    const count = within(screen.getByRole('listbox')).getAllByRole('option').length;
+    expect(count).toBeGreaterThan(0);
+    expect(screen.getByRole('status').textContent).toBe(`${count} result${count === 1 ? '' : 's'} available`);
+  });
+
+  it('announces "No results available" via the live region on empty (#1100)', () => {
+    renderPalette();
+    fireEvent.change(combobox(), { target: { value: 'zzzzzz' } });
+    // Single status live region (the visual empty-state no longer carries role=status).
+    expect(screen.getByRole('status').textContent).toBe('No results available');
+  });
+
   it('renders only routes when no lines are loaded yet', () => {
     useLinesMock.mockReturnValue({ data: undefined, isError: false, error: null });
     renderPalette();
