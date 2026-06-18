@@ -61,7 +61,10 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
             if (location.pathname !== '/inbox') navigate('/inbox');
             return;
           case '3':
-            if (location.pathname !== '/ops') navigate('/ops');
+            // Navigate to the canonical /operator route, not the /ops alias: /ops is a
+            // <Navigate to="/operator" replace> redirect, so navigate('/ops') from /operator
+            // pushes a spurious history entry before the redirect — breaking the Back button.
+            if (location.pathname !== '/operator') navigate('/operator');
             return;
         }
       }
