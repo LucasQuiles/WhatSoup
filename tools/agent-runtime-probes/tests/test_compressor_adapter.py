@@ -231,6 +231,24 @@ def test_corpus_aggregates_adopt_fallback_and_errors():
             raise AssertionError("expected AdapterError")
 
 
+def test_corpus_fallback_partition_is_non_adopted_not_adopted():
+    # fallback = [not reduced_applied and i not in errored]: the partition of NON-adopted,
+    # non-errored items. Removing the `not` would collect the ADOPTED items instead. A
+    # symmetric 1-adopt/1-fallback corpus hides this (both counts are 1); use an ASYMMETRIC
+    # 2-adopt/1-fallback corpus so the miscount flips fallback_count AND fallback_indices.
+    with tempfile.TemporaryDirectory() as d:
+        items = [
+            {"raw": "alpha   beta   gamma   delta"},                       # 0 adopt (synthetic)
+            {"raw": "one   two   three   four"},                           # 1 adopt (synthetic)
+            {"raw": "keep do not retry", "reduced": "keep retry",
+             "anchors": [{"kind": "negation", "text": "do not retry"}]},   # 2 fallback (anchor drop)
+        ]
+        rep = ca.adapt_corpus(items, store_dir=d)
+        assert rep["adopted_count"] == 2 and rep["adopted_indices"] == [0, 1]
+        assert rep["fallback_count"] == 1 and rep["fallback_indices"] == [2]
+        assert rep["error_count"] == 0
+
+
 def _run_main(argv):
     saved = sys.argv
     sys.argv = ["compressor_adapter.py"] + argv

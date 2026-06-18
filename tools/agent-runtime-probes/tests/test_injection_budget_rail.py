@@ -497,6 +497,43 @@ def test_main_in_process_error_path_returns_one():
     assert report["budget_status"] == "error"
 
 
+# --------------------------------------------------------------------------- #
+# Cap-boundary pins (mutation-audit: injection_budget_rail rel survivors). The caps are
+# integers, so every boundary below is EXACT and reachable.
+# --------------------------------------------------------------------------- #
+def test_zero_max_tokens_is_a_valid_cap_not_an_error():
+    # max_tokens < 0 is invalid; max_tokens == 0 is a VALID (admit-nothing) cap. A '<'->'<='
+    # mutation of the `max_tokens < 0` guard would reject a zero token budget as invalid_cap.
+    res = rail.apply_injection_budget(_items(2), [1, 1], max_tokens=0, max_items=10)
+    assert res["item_count"] == 0
+    assert res["total_admitted_tokens"] == 0
+    assert [d["rank_index"] for d in res["dropped_items"]] == [0, 1]
+
+
+def test_zero_max_items_is_a_valid_cap_not_an_error():
+    # max_items == 0 is a VALID (admit-nothing) cap. A '<'->'<=' mutation of the
+    # `max_items < 0` guard would reject it as invalid_cap.
+    res = rail.apply_injection_budget(_items(2), [1, 1], max_tokens=1000, max_items=0)
+    assert res["item_count"] == 0
+    assert all(d["reason"] == "item_capped" for d in res["dropped_items"])
+
+
+def test_item_exactly_filling_token_budget_is_admitted():
+    # admission is `total_admitted_tokens + tokens > max_tokens` (STRICT): an item that
+    # EXACTLY fills the remaining budget is admitted, not dropped. A '>'->'>=' mutation
+    # would drop the at-budget item and under-fill the rail.
+    res = rail.apply_injection_budget(_items(2), [250, 250], max_tokens=500, max_items=10)
+    assert res["item_count"] == 2
+    assert res["total_admitted_tokens"] == 500
+    assert res["budget_status"] == "within_budget"
+
+
+def test_coerce_cap_zero_is_valid():
+    # _coerce_cap parses a CLI cap fail-closed; cap "0" is a valid non-negative cap. The
+    # `parsed < 0` guard is STRICT — a '<'->'<=' mutation would reject "0" as invalid_cap.
+    assert rail._coerce_cap("0", 500) == 0
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
