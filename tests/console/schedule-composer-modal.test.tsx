@@ -788,6 +788,8 @@ describe('ScheduleComposerModal — save success (create)', () => {
 
     const [, callBody] = createScheduledMock.mock.calls[0] as [string, Record<string, unknown>]
     expect(callBody.recurrence).toBe('0 9 * * *')
+    // #1067: a recurring schedule pins the browser's IANA timezone.
+    expect(callBody.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
   })
 
   it('includes recurrence field in body when Weekly segment is selected', async () => {
@@ -859,6 +861,8 @@ describe('ScheduleComposerModal — save success (create)', () => {
     const [, callBody] = createScheduledMock.mock.calls[0] as [string, Record<string, unknown>]
     // recurrence must be absent; text must be present to confirm the right branch executed
     expect(Object.keys(callBody)).not.toContain('recurrence')
+    // #1067: timezone is only pinned for recurring schedules — absent for one-shots.
+    expect(Object.keys(callBody)).not.toContain('timezone')
     expect(typeof callBody.text).toBe('string')
   })
 

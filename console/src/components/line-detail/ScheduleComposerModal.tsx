@@ -190,6 +190,9 @@ export function ScheduleComposerModal({
     const cron = recurrenceToCron(recurrence)
     if (cron) {
       body.recurrence = cron
+      // audit 1067: pin the recurrence to the user's IANA zone so Daily/Weekly
+      // presets fire at their local time (DST-aware), not UTC. Backend defaults to UTC.
+      body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
     }
 
     setSubmitting(true)
