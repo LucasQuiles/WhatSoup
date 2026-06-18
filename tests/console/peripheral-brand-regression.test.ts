@@ -51,11 +51,28 @@ function normalizeSvgReference(value: string): string | null {
   return path
 }
 
+function commentSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = []
+  const block = /<!--[\s\S]*?-->|\/\*[\s\S]*?\*\//g
+  for (const match of text.matchAll(block)) {
+    spans.push([match.index, match.index + match[0].length])
+  }
+  const line = /(^|[^\S\r\n])(\/\/.*)$/gm
+  for (const match of text.matchAll(line)) {
+    const start = match.index + match[1].length
+    spans.push([start, start + match[2].length])
+  }
+  return spans
+}
+
+function isIndexInSpans(index: number, spans: Array<[number, number]>): boolean {
+  return spans.some(([start, end]) => index >= start && index < end)
+}
+
 function collectSvgReferences(text: string): Set<string> {
-  const cleaned = text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  // Exclude references inside comments by position rather than rewriting the
+  // source via replace() (regex comment-stripping is provably incomplete).
+  const spans = commentSpans(text)
   const references = new Set<string>()
   const patterns = [
     /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
@@ -66,7 +83,8 @@ function collectSvgReferences(text: string): Set<string> {
   ]
 
   for (const pattern of patterns) {
-    for (const match of cleaned.matchAll(pattern)) {
+    for (const match of text.matchAll(pattern)) {
+      if (match.index !== undefined && isIndexInSpans(match.index, spans)) continue
       const reference = normalizeSvgReference(match[1])
       if (reference) references.add(reference)
     }
