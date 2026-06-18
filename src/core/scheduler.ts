@@ -129,7 +129,7 @@ export class MessageScheduler {
           this.db.raw
             .prepare(
               `UPDATE scheduled_messages
-               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?
+               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?, retry_count = 0
                WHERE id = ?`,
             )
             .run(sentAt, row.run_count + 1, nextRun, row.id);
@@ -147,16 +147,54 @@ export class MessageScheduler {
         }
       } catch (err) {
         const newRetryCount = row.retry_count + 1;
+        const errorMsg = err instanceof Error ? err.message : String(err);
         if (newRetryCount >= this.config.maxRetries) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          this.db.raw
-            .prepare(
-              `UPDATE scheduled_messages
-               SET status = 'failed', retry_count = ?, error = ?
-               WHERE id = ?`,
-            )
-            .run(newRetryCount, errorMsg, row.id);
-          log.warn({ id: row.id, retries: newRetryCount, err }, 'scheduler: message permanently failed');
+          if (row.recurrence) {
+            // Recurring: a recurring schedule must not be permanently destroyed by
+            // transient per-occurrence failures. Skip the current occurrence, advance to
+            // the next cron slot, and reset retry_count so failures don't accumulate
+            // across occurrences. Only mark 'failed' if the next slot is uncomputable.
+            let nextRun: number | null = null;
+            try {
+              nextRun = nextCronRun(row.recurrence, Date.now());
+            } catch {
+              nextRun = null;
+            }
+            if (nextRun !== null) {
+              this.db.raw
+                .prepare(
+                  `UPDATE scheduled_messages
+                   SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?
+                   WHERE id = ?`,
+                )
+                .run(nextRun, `Occurrence skipped after ${newRetryCount} failures: ${errorMsg}`, row.id);
+              log.warn(
+                { id: row.id, retries: newRetryCount, nextRun, err },
+                'scheduler: recurring occurrence failed, skipped to next slot',
+              );
+            } else {
+              this.db.raw
+                .prepare(
+                  `UPDATE scheduled_messages
+                   SET status = 'failed', retry_count = ?, error = ?
+                   WHERE id = ?`,
+                )
+                .run(newRetryCount, `Recurring failed (cannot compute next slot): ${errorMsg}`, row.id);
+              log.warn(
+                { id: row.id, retries: newRetryCount, err },
+                'scheduler: recurring message permanently failed (invalid cron)',
+              );
+            }
+          } else {
+            this.db.raw
+              .prepare(
+                `UPDATE scheduled_messages
+                 SET status = 'failed', retry_count = ?, error = ?
+                 WHERE id = ?`,
+              )
+              .run(newRetryCount, errorMsg, row.id);
+            log.warn({ id: row.id, retries: newRetryCount, err }, 'scheduler: message permanently failed');
+          }
         } else {
           this.db.raw
             .prepare(
