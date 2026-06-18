@@ -26,6 +26,7 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/runtimes/agent/outbound-queue.test.ts',
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
+  'tests/runtimes/chat/providers/pinecone.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
 ].sort();
 
