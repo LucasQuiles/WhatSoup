@@ -135,7 +135,7 @@ const Landing: FC = () => {
             </p>
             <h1
               id="landing-hero-title"
-              className="font-sans font-black text-text-1 text-4xl tracking-[var(--tracking-tighter)] max-w-[var(--landing-hero-measure)]"
+              className="font-[family-name:var(--font-display)] font-black text-text-1 text-4xl tracking-[var(--tracking-tighter)] max-w-[var(--landing-hero-measure)]"
             >
               Run your agents like a <span className="text-accent">fleet.</span>
             </h1>
