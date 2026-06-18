@@ -270,8 +270,15 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
       >
         <ModalHeader title="Add New Line" onClose={handleClose} />
 
-        {/* Step strip — Stepper primitive (DD-43 P1 extraction) */}
-        <Stepper steps={STEPS} currentStep={currentStep} ariaLabel="Wizard progress" />
+        {/* Step strip — Stepper primitive (DD-43 P1 extraction). checkOnDone
+            adopts the showcase §23 forward treatment: ✓ on done steps + the
+            active-step mode-identity halo. The strip carries its own
+            wizard-accent-scope so --wizard-accent resolves here (the ModalBody
+            scope below does not enclose it): neutral confirm-green pre-selection,
+            the line-mode colour once a type is picked. */}
+        <div className="wizard-accent-scope" data-line-type={lineType}>
+          <Stepper steps={STEPS} currentStep={currentStep} ariaLabel="Wizard progress" checkOnDone />
+        </div>
 
         <ModalBody>
           {/* wizard-accent-scope carries data-line-type for static CSS accent resolution */}

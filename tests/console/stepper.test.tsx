@@ -136,3 +136,78 @@ describe('Stepper — active / done modifier classes', () => {
     expect(currents.length).toBe(1);
   });
 });
+
+describe('Stepper — checkOnDone (showcase §23 forward treatment)', () => {
+  it('defaults off: done steps still render their number, no --forward modifier', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C']} currentStep={2} />,
+    );
+    const root = container.querySelector('.soup-wiz-steps')!;
+    expect(root.classList.contains('soup-wiz-steps--forward')).toBe(false);
+    const circles = container.querySelectorAll('.soup-wiz-steps__circle');
+    // done steps 0,1 keep numbers when checkOnDone is off
+    expect(circles[0]!.textContent).toBe('1');
+    expect(circles[1]!.textContent).toBe('2');
+  });
+
+  it('adds the --forward root modifier when enabled', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C']} currentStep={2} checkOnDone />,
+    );
+    const root = container.querySelector('.soup-wiz-steps')!;
+    expect(root.classList.contains('soup-wiz-steps--forward')).toBe(true);
+  });
+
+  it('renders ✓ on completed steps, numbers on active/upcoming', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C', 'D']} currentStep={2} checkOnDone />,
+    );
+    const circles = container.querySelectorAll('.soup-wiz-steps__circle');
+    expect(circles[0]!.textContent).toBe('✓'); // done
+    expect(circles[1]!.textContent).toBe('✓'); // done
+    expect(circles[2]!.textContent).toBe('3');  // active
+    expect(circles[3]!.textContent).toBe('4');  // upcoming
+  });
+
+  it('renders the ✓ glyph as decorative (aria-hidden) — status reaches AT via text, not glyph', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B']} currentStep={1} checkOnDone />,
+    );
+    const glyph = container.querySelector('.soup-wiz-steps__circle [aria-hidden="true"]')!;
+    expect(glyph).not.toBeNull();
+    expect(glyph.textContent).toBe('✓');
+  });
+});
+
+describe('Stepper — showStateText (§12 status law: state as text)', () => {
+  it('defaults on: every step emits a visually-hidden state label', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C']} currentStep={1} />,
+    );
+    const labels = container.querySelectorAll('.soup-wiz-steps__sr');
+    expect(Array.from(labels).map((n) => n.textContent)).toEqual([
+      'Completed',     // step 0 (before current)
+      'Current step',  // step 1 (current)
+      'Upcoming',      // step 2 (after current)
+    ]);
+  });
+
+  it('omits the state labels when showStateText is false', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C']} currentStep={1} showStateText={false} />,
+    );
+    expect(container.querySelectorAll('.soup-wiz-steps__sr').length).toBe(0);
+  });
+
+  it('state text is independent of checkOnDone (both can apply together)', () => {
+    const { container } = render(
+      <Stepper steps={['A', 'B', 'C']} currentStep={2} checkOnDone />,
+    );
+    const labels = container.querySelectorAll('.soup-wiz-steps__sr');
+    expect(Array.from(labels).map((n) => n.textContent)).toEqual([
+      'Completed',
+      'Completed',
+      'Current step',
+    ]);
+  });
+});
