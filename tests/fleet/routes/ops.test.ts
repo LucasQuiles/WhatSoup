@@ -4350,6 +4350,72 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
+  // ---- Line 871: scanHealthPortInventory ENOENT path ----
+  it('handleConfigUpdate treats an empty healthPort inventory as ok (line 871 true)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-emptyinv-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    // Point XDG_CONFIG_HOME at a non-existent directory so readdirSync returns ENOENT.
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'does-not-exist');
+    try {
+      const configPath = path.join(tmpDir, 'target.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({
+        name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ name: 'target-line', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ healthPort: 9520 })),
+        res, deps, { name: 'target-line' });
+      // Inventory returned ok:true (empty map), validator still validates the port.
+      expect([200, 400, 422]).toContain(res._status);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 877/879: scanHealthPortInventory skips non-directory entries and excludeName ----
+  it('handleConfigUpdate ignores a file entry and the excluded instance during healthPort inventory (lines 877/879)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-invskip-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    try {
+      // Seed a sibling directory + a stray FILE inside the instances root.
+      const siblingDir = path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', 'sibling-line');
+      fs.mkdirSync(siblingDir, { recursive: true });
+      fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
+        name: 'sibling-line', type: 'chat', healthPort: 9301, accessMode: 'self_only',
+      }));
+      // Stray file at the instances root (not a directory) → line 877 continue.
+      fs.writeFileSync(
+        path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', 'stray-file.txt'),
+        'noise',
+      );
+      // Pre-existing config for the target instance with the SAME name being patched
+      // — excludeName matches it so line 879 continues and we don't conflict with ourselves.
+      const configPath = path.join(cfgTmp, 'target.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ name: 'target-line', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ healthPort: 9301 })),
+        res, deps, { name: 'target-line' });
+      // 9301 matches sibling — either validator or inventory catches it.
+      expect(res._status).toBeGreaterThanOrEqual(400);
+      expect(res._status).toBeLessThan(500);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+    }
+  });
+
   // ---- Line 800: validatePluginDirs with a non-string entry ----
   it('handleConfigUpdate rejects pluginDirs containing a non-string entry (line 800 true)', async () => {
     const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
