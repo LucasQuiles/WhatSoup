@@ -991,8 +991,8 @@ button.soup-pill[aria-disabled="true"] {
 /* Visually hide the label text while keeping it accessible */
 .soup-toolbar-search__label {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  width: var(--bw);
+  height: var(--bw);
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
@@ -1611,7 +1611,7 @@ button.soup-pill[aria-disabled="true"] {
   position: absolute;
   left: var(--sp-2);
   right: var(--sp-2);
-  bottom: -1px;                /* flush over the baseline rule */
+  bottom: calc(-1 * var(--bw));  /* flush over the baseline rule */
   height: 2px;
   background: var(--accent);
 }
@@ -1619,7 +1619,7 @@ button.soup-pill[aria-disabled="true"] {
 .soup-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .soup-tab__reason {
   position: absolute;
-  width: 1px; height: 1px;
+  width: var(--bw); height: var(--bw);
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
