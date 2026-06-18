@@ -95,6 +95,7 @@ Default behavior is intentionally conservative:
 | Script | Purpose | Provider call by default? |
 |---|---|---|
 | `tools/dependency_audit.py` | Fail-closed supply-chain guard for any out-of-band test-lane dependency: verifies a pinned manifest's sha256 against live PyPI digests (tamper-evidence), records PEP 740 / Sigstore provenance, checks OSV advisories (offline `--osv-zip` or `--allow-network`), and FAILS CLOSED on digest mismatch / advisory / `--require-signed`. Never installs; emits a metadata-only verdict. Probes stay stdlib-only; vetted deps live in `.venv-test` (outside the probe import path), see `requirements-test.txt` + `tests/property/`. | No provider call; PyPI/OSV network only with `--allow-network` |
+| `tools/mutation_sweep.py` | Reproducibility tool for the mutation-audit campaign (`mutmut` is unavailable offline). For a probe, flips every `Eq/NotEq`, `Lt/LtE/Gt/GtE`, `And/Or`, and `Not` node ONE at a time on a throwaway copy of the tree, runs the probe's standalone suite, and reports each mutant `killed` (boundary pinned) or `SURVIVED` (suite cannot distinguish it — a REAL gap to pin red-green, or a documented EQUIVALENT). `python3 tools/mutation_sweep.py <probe>`; portable (root from `__file__`), stdlib-only, live tree never modified. A clean run is `SURVIVORS: 0/N` or a documented-equivalent residue. | No provider/host call |
 
 ## Examples
 
