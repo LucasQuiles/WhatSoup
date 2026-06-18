@@ -98,6 +98,18 @@ def test_main_fails_closed_on_unwritable_store():
         assert rc == 1 and rep["overall_verdict"] == "FAIL" and "error_type" in rep
 
 
+def test_control_single_item_corpus_does_not_false_detect():
+    # The control guard is `full.startswith(other) and other != masked_prefixes[i]`. It must EXCLUDE
+    # the degenerate single-item case where the "neighbor" prefix IS this item's own prefix
+    # (other == masked_prefixes[i]) — comparing a prefix against itself is not a real different-prefix
+    # detection. A ==/!= flip would treat that self-comparison as a control failure and wrongly report
+    # control_prefix_change_detected=False on a 1-item corpus.
+    single = [{"prefix": "operate on /Users/testuser/agent-runtime-probes with care",
+               "suffixes": [" then summarize", ""]}]
+    m = e3.run_corpus(corpus=single)
+    assert m["control_prefix_change_detected"] is True
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

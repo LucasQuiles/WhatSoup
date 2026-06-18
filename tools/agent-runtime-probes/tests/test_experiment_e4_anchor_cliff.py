@@ -95,6 +95,27 @@ def test_main_fails_closed_on_unwritable_store():
         assert rc == 1 and rep["overall_verdict"] == "FAIL" and "error_type" in rep
 
 
+def test_sweep_governor_pass_per_point_matches_verdict():
+    # governor_pass = (governor overall_verdict == "PASS"): a ==/!= flip inverts the per-point label.
+    # The deterministic sweep PASSes the governor at the lightest compression (keep 1.0) and FAILs it
+    # at the most aggressive (keep 0.4).
+    m = e4.run_sweep()
+    by_frac = {p["keep_fraction"]: p for p in m["sweep_points"]}
+    assert by_frac[1.0]["governor_pass"] is True
+    assert by_frac[0.4]["governor_pass"] is False
+
+
+def test_sweep_blind_spot_and_safe_ceiling_counts_are_exact():
+    # governor_only_unsafe_adoptions = count(governor_pass AND not anchor_pass): the deterministic
+    # sweep has EXACTLY 3 such blind spots. An and->or weakening counts 6 (every point); removing the
+    # `not` counts 1 (only the all-pass point). safe_ratio_ceiling = max ratio among COMPOSED
+    # adoptions; only the keep=1.0 point composes (ratio 1.0), so the ceiling is 1.0 — an and->or
+    # weakening of the safe filter would include every point's ratio and raise the ceiling above 1.0.
+    m = e4.run_sweep()
+    assert m["governor_only_unsafe_adoptions"] == 3
+    assert m["safe_ratio_ceiling"] == 1.0
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
