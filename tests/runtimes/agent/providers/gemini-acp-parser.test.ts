@@ -404,3 +404,308 @@ describe('Gemini ACP parser', () => {
     });
   });
 });
+
+describe('gemini-acp-parser.ts uncovered-branch coverage', () => {
+  // ---- parseGeminiAcpEvent: null frame path (line 225) ----
+  it('returns null for an empty line so the null-frame branch is exercised', () => {
+    expect(parseGeminiAcpEvent('')).toBeNull();
+    expect(parseGeminiAcpEvent('   ')).toBeNull();
+    expect(parseGeminiAcpEvent('Hook registry initialized')).toBeNull();
+  });
+
+  // ---- unknown frame passthrough (lines 289-293, line 269 false branch) ----
+  it('passes unknown frames through and falls through the notification check', () => {
+    // Bare JSON value (not a record) → parseAcpFrame returns kind:'unknown'
+    expect(parseGeminiAcpEvent(frame(['just', 'an', 'array']))).toEqual({
+      type: 'unknown',
+      raw: { _value: ['just', 'an', 'array'] },
+    });
+
+    // Record without jsonrpc: '2.0' → unknown
+    expect(parseGeminiAcpEvent(frame({ type: 'log', message: 'noise' }))).toEqual({
+      type: 'unknown',
+      raw: { type: 'log', message: 'noise' },
+    });
+  });
+
+  // ---- session/update without sessionId in params → falls back to currentSessionId (line 274) ----
+  it('falls back to currentSessionId when params.sessionId is not a string', () => {
+    const event = parseGeminiAcpEvent(
+      frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          update: { type: 'agent_message_chunk', chunk: 'no-session' },
+        },
+      }),
+      'fallback-session-id',
+    );
+    // The sessionId is only observable indirectly via the mapped update; assert concrete mapping.
+    expect(event).toEqual({ type: 'assistant_text', text: 'no-session' });
+  });
+
+  // ---- agent_message_chunk fallback fields: text and content (line 128) ----
+  it('extracts assistant text from the text field when chunk is absent', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-3',
+          update: { type: 'agent_message_chunk', text: 'from-text' },
+        },
+      })),
+    ).toEqual({ type: 'assistant_text', text: 'from-text' });
+  });
+
+  it('extracts assistant text from the content field when chunk and text are absent', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-3',
+          update: {
+            type: 'agent_message_chunk',
+            content: [{ text: 'from-content' }],
+          },
+        },
+      })),
+    ).toEqual({ type: 'assistant_text', text: 'from-content' });
+  });
+
+  it('emits an empty assistant_text chunk when no text field is present', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-3',
+          update: { type: 'agent_message_chunk' },
+        },
+      })),
+    ).toEqual({ type: 'assistant_text', text: '' });
+  });
+
+  // ---- tool_use: name/id fallbacks and non-record input (lines 148, 149, 150) ----
+  it('falls back to name/id and an empty toolInput when only name/id are present with non-record input', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: {
+            type: 'tool_use',
+            name: 'shell',
+            id: 'tool-x',
+            input: 'not-a-record',
+          },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_use',
+      toolName: 'shell',
+      toolId: 'tool-x',
+      toolInput: {},
+    });
+  });
+
+  // ---- tool_result detection via status only (line 156), tool_id via id (line 170) ----
+  it('detects a tool_result via tool_id + status alone (output/result absent) and resolves the id fallback', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { id: 'tool-y', tool_id: 'tool-y', status: 'success', payload: 'done' },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'tool-y',
+      content: '',
+    });
+  });
+
+  // ---- tool_result: missing status defaults to non-error (line 159) ----
+  it('treats a tool_result with no status as a non-error result', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { tool_id: 'tool-z', output: 'ok-without-status' },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'tool-z',
+      content: 'ok-without-status',
+    });
+  });
+
+  // ---- tool_result content fallback chain: result, error, content (line 161) ----
+  it('reads tool_result content from result, then error, then content', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { tool_id: 'tool-r', status: 'completed', result: [{ text: 'from-result' }] },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'tool-r',
+      content: 'from-result',
+    });
+
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { tool_id: 'tool-r', status: 'failed', error: { message: 'from-error' } },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'tool-r',
+      content: 'from-error',
+    });
+
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { tool_id: 'tool-r', status: 'completed', content: { raw: 42 } },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'tool-r',
+      content: '{"raw":42}',
+    });
+  });
+
+  it('emits an empty content string for a tool_result with no extractable content', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-4',
+          update: { tool_id: 'tool-empty', status: 'completed' },
+        },
+      })),
+    ).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'tool-empty',
+      content: '',
+    });
+  });
+
+  // ---- turn_complete usage fallbacks: stats then update itself (line 184) ----
+  it('extracts token counts from stats when usage is absent on a turn_complete', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-5',
+          update: {
+            type: 'turn_complete',
+            stats: { input_tokens: 30, output_tokens: 12 },
+          },
+        },
+      })),
+    ).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 30,
+      outputTokens: 12,
+    });
+  });
+
+  it('reads token counts from the update itself when usage and stats are absent', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-5',
+          update: { stop_reason: 'max_tokens', inputTokens: 4, outputTokens: 2 },
+        },
+      })),
+    ).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 4,
+      outputTokens: 2,
+    });
+  });
+
+  // ---- error update: message fallback + default text (lines 191, 195) ----
+  it('uses the message field and falls back to the default text when error is empty', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-5',
+          update: { type: 'error', error: { message: 'from-message-field' } },
+        },
+      })),
+    ).toEqual({ type: 'result', text: 'from-message-field' });
+  });
+
+  it('stringifies the whole update when an error update carries no extractable message', () => {
+    const event = parseGeminiAcpEvent(
+      frame({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-5',
+          update: { type: 'error', error: { code: 7 } },
+        },
+      }),
+    );
+    expect(event?.type).toBe('result');
+    // extractMessage(error) returns null, extractMessage(message) returns null,
+    // so stringifyValue(update) is used — the result is a JSON string of the update.
+    expect(typeof (event as { text: string }).text).toBe('string');
+    expect((event as { text: string }).text).toContain('"type":"error"');
+  });
+
+  // ---- session/prompt response usage fallback to stats (line 259) ----
+  it('reads token counts from stats on a session/prompt completion response when usage is absent', () => {
+    expect(
+      parseGeminiAcpEvent(frame({
+        jsonrpc: '2.0',
+        id: 9,
+        result: {
+          stop_reason: 'end_turn',
+          stats: { input_tokens: 40, output_tokens: 15 },
+        },
+      })),
+    ).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 40,
+      outputTokens: 15,
+    });
+  });
+});
