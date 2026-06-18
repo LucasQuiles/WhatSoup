@@ -113,10 +113,10 @@ names. Those bridge values mirror today's fallbacks and intentionally differ fro
 where a visual/type-floor pass is still owed — except `--type-nameplate`, whose bridge value already
 equals this final ramp (`600 14px/24px var(--font-mono)`); it was promoted from pending to consumed
 when the SOUP nameplate landed (Nav lockup, `brand.md` §1) and remains reserved to the single
-`.soup-nameplate__wm` consumer. The 3 unconsumed spec tokens (`--type-display`, `--type-title`,
-`--type-data-lg`) stay pending until that pass. `tests/console/design-token-type-ramp.test.ts` pins
-the bridge inventory and the pending spec tokens; it does not replace final primitive spec-drift
-enforcement.
+`.soup-nameplate__wm` consumer. The display tier (`--type-display` 26/32, `--type-title` 19/24) was
+promoted from pending to implemented at its §2.6 spec value (F-TYPE-3 display-tier slice); only
+`--type-data-lg` remains pending. `tests/console/design-token-type-ramp.test.ts` pins the bridge
+inventory and the pending spec token; it does not replace final primitive spec-drift enforcement.
 
 ### 2.7 Channel-tint strengths
 
