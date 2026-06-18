@@ -45,14 +45,18 @@ export class ContactsDirectory {
   constructor(maxEntries?: number);
   constructor(db: Database, maxEntries?: number);
   constructor(dbOrMax?: Database | number, maxEntries?: number) {
+    let max: number;
     if (typeof dbOrMax === 'number') {
-      this.maxEntries = dbOrMax;
+      max = dbOrMax;
     } else if (dbOrMax != null) {
       this.db = dbOrMax;
-      this.maxEntries = maxEntries ?? 500;
+      max = maxEntries ?? 500;
     } else {
-      this.maxEntries = maxEntries ?? 500;
+      max = maxEntries ?? 500;
     }
+    // Floor to >=1: a 0/negative cap would make the eviction loop's
+    // `size >= maxEntries` always true and spin forever on the first observe().
+    this.maxEntries = Math.max(1, Math.floor(max));
   }
 
   /** Inject the database after construction (for ConnectionManager). */
@@ -132,7 +136,8 @@ export class ContactsDirectory {
         // Fix: use while loop to correctly drain when multiple keys are added
         // and the map may already be at or beyond capacity.
         while (this.map.size >= this.maxEntries) {
-          const oldest = this.insertOrder.shift()!;
+          const oldest = this.insertOrder.shift();
+          if (oldest === undefined) break; // nothing left to evict — avoid spinning
           this.map.delete(oldest);
         }
         this.insertOrder.push(key);

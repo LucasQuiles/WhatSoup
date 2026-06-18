@@ -705,3 +705,19 @@ describe('buildLidMappings (edge cases)', () => {
   });
 
 });
+
+describe('ContactsDirectory eviction guard (#1091)', () => {
+  it('floors maxEntries to >=1 and does not hang when constructed with 0', () => {
+    const dir = new ContactsDirectory(0);
+    // Pre-fix this spun forever: `size >= 0` is always true and insertOrder is empty.
+    dir.observe('15550100001@s.whatsapp.net', 'Q');
+    expect(dir.size).toBe(1);
+    expect(dir.resolve('Q')).toBeDefined();
+  });
+
+  it('does not hang with a negative maxEntries', () => {
+    const dir = new ContactsDirectory(-5);
+    dir.observe('15550100001@s.whatsapp.net', 'Q');
+    expect(dir.size).toBe(1);
+  });
+});
