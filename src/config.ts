@@ -199,7 +199,7 @@ function expandTilde(p: string): string {
   return p;
 }
 
-function stringArrayProp(source: Record<string, unknown> | undefined, key: string): string[] {
+function stringArrayProp(source: Record<string, unknown> | null | undefined, key: string): string[] {
   const value = source?.[key];
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
@@ -944,6 +944,11 @@ export const config = {
 
   // Per-instance seed data for chat_aliases.
   chatAliases: stringRecordProp(instance, 'chatAliases'),
+
+  // Group JIDs the bot auto-responds to (no @mention required). Seeded into the
+  // access_list as 'allowed' at startup — the durable, source-reproducible
+  // equivalent of a hand-inserted access grant. See seedAutoRespondGroups.
+  autoRespondGroups: stringArrayProp(instance, 'autoRespondGroups'),
 
   // Per-instance send decoration policies.
   profiles: profileRecordProp(instance, 'profiles'),
