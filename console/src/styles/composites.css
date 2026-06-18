@@ -811,7 +811,7 @@ body::before {
 
 /* ═══ Keyboard shortcut key — c-kbd from design system ═══ */
 .c-kbd {
-  padding: 1px var(--sp-1h);
+  padding: var(--bw) var(--sp-1h);
   border-radius: var(--radius-sm);
   background: var(--btn-neutral-bg);
   border: var(--bw) solid var(--border-subtle);
