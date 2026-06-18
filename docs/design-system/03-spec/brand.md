@@ -66,7 +66,16 @@ single electric-blue accent stays locked, and warmth comes from warmer neutral s
 This warmth is now implemented in the product surface ramp (decision-log #4): the neutral surface
 ladders run warm (hue ~70°, chroma ≤ 0.012) in both themes per `tokens-v3.md` §2.8/§3.1, and the
 pre-paint browser `theme-color` tracks the warm `--surface-base`. Reference exploration: standalone
-identity showcase (not wired to the product).
+identity showcase.
+
+The primary mark is now **wired into the product** (G8): `console/public/favicon.svg` is the round
+"S" monogram — a 32×32 `rx=7` accent square (`#6BA6FF`) with the flat `#0A0E14` "S", path-identical
+to the identity-showcase Candidate A / in-product nav mark. The legacy purple/blue bolt
+(`#863bff/#7e14ff/#47bfff`, display-p3, gaussian-blur glow, `<mask>` illustration) is retired. PWA
+identity coverage ships alongside: `console/public/manifest.webmanifest` (name/short_name, warm
+`theme_color`/`background_color`, a `maskable`-purpose icon) and `console/public/icon-maskable.svg`
+(full-bleed accent, glyph inside the maskable safe zone), linked from `index.html` via
+`<link rel="manifest">`.
 
 ### 1.5 Multi-channel positioning (2026-06-13 follow-on decision #5)
 
@@ -157,12 +166,12 @@ gradient/illustration assets in the console bundle).
 `design:brand-assets` is the identity asset audit. The package script fail-closes the already-zero
 canonical `/favicon.svg` shell link (`soup/brand-favicon-link-required`) and hard-fails peripheral
 legacy copy / orphan public SVGs. SVG reachability must be proven by public-relative asset paths in
-actual references; comments, prose, or basename-only mentions are not usage evidence. The unresolved
-visual asset lanes remain report-only: whether the favicon is still the legacy purple/blue bolt,
-whether gradients/glow/masks remain in production brand assets, whether the favicon canvas is square,
-and whether the HTML/PWA manifest path can carry the future maskable SOUP mark. A PASS with
-report-only findings means the inventory ran; it does not approve the visual asset or replace 16px
-screenshot proof.
+actual references; comments, prose, or basename-only mentions are not usage evidence. As of G8 the
+visual asset lanes are **resolved to zero findings**: the favicon carries the SOUP identity palette
+(no legacy bolt colors, no display-p3), no gradients/glow/masks remain in production brand assets,
+the favicon canvas is square (32×32), and the HTML/PWA manifest path carries the maskable SOUP mark.
+A PASS still means the inventory ran; the visual asset itself is approved by SSOT path-equivalence to
+the identity-showcase Candidate A mark plus 16px legibility, not by the audit alone.
 
 `console/index.html` owns document-shell brand/chrome hooks: the favicon link, PWA manifest link
 when present, and browser `theme-color`. `theme-color` initializes to the dark `--surface-base`

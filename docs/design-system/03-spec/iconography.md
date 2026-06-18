@@ -61,6 +61,9 @@ ramp (replace ad-hoc sizes), set the single stroke default, sweep filled/stroke 
 `icon-only-needs-aria-label`, `no-interactive-12px-icon`.
 
 Brand assets are exempt from the Lucide-only product-icon rule, but not from visual identity law.
+The identity-mark asset set is now shipped (G8): `console/public/favicon.svg` (round "S" monogram,
+32×32 `rx=7` accent square, flat), `console/public/icon-maskable.svg` (full-bleed maskable variant),
+and the `console/public/manifest.webmanifest` icon entries — the canonical non-Lucide brand glyph.
 Favicon, badge, PWA, and maskable assets are governed by `brand.md` §1.3–§1.4 and inventoried by
 `design:brand-assets`; changing those files requires both the brand and iconography SSOTs to move
 with the asset packet.
