@@ -633,11 +633,11 @@ self-restart), same as Patterns A–G. SHA-pin manifest regenerated in that step
 ## Pattern I — best-effort remotes are info-tier (declared-flaky ≠ crash)
 
 **Problem (live evidence, 2026-06-18).** The collector probes a fixed roster
-(`--remote …`). One member, `gupta`, is a laptop (`macbook-pro…ts.net`),
-explicitly declared `--best-effort-remote gupta`. It went offline 2026-06-17
+(`--remote …`). One member, `&lt;remote-laptop&gt;`, is a laptop (`&lt;host&gt;.ts.net`),
+explicitly declared `--best-effort-remote &lt;remote-laptop&gt;`. It went offline 2026-06-17
 (lid closed / off network), 18 consecutive missed probes. It held two open
-incidents: `relay_host_down:gupta` (**warning** page) and pre-threshold
-`remote-claim-failed:gupta` (**critical**). A laptop sleeping is a
+incidents: `relay_host_down:&lt;remote-laptop&gt;` (**warning** page) and pre-threshold
+`remote-claim-failed:&lt;remote-laptop&gt;` (**critical**). A laptop sleeping is a
 planned/expected condition — exactly the "intentional shutdown vs crash"
 distinction the project targets — yet it paged.
 
