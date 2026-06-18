@@ -20,8 +20,8 @@ function makeDb(): Database {
   return db;
 }
 
-function globalSession(): SessionContext {
-  return { tier: 'global' };
+function globalSession(allowedRoot?: string): SessionContext {
+  return { tier: 'global', allowedRoot };
 }
 
 function chatSession(conversationKey: string): SessionContext {
@@ -85,7 +85,7 @@ describe('scheduling tools', () => {
     const result = await registry.call(
       'schedule_message',
       { scheduled_at: scheduledAt, text: 'missing target' },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBe(true);
@@ -100,7 +100,7 @@ describe('scheduling tools', () => {
     const result = await registry.call(
       'schedule_message',
       { chatJid: CHAT_BETA_JID, scheduled_at: scheduledAt, filePath, caption: 'launch poster' },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     expect(result.isError).toBeUndefined();
@@ -152,7 +152,7 @@ describe('scheduling tools', () => {
     const pastResult = await registry.call(
       'schedule_message',
       { chatJid: CHAT_ALPHA_JID, scheduled_at: past, text: 'too late' },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(pastResult.isError).toBe(true);
     expect(pastResult.content[0].text).toMatch(/future UTC unix timestamp/);
@@ -160,7 +160,7 @@ describe('scheduling tools', () => {
     const emptyResult = await registry.call(
       'schedule_message',
       { chatJid: CHAT_ALPHA_JID, scheduled_at: Math.floor(Date.now() / 1000) + 3600 },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(emptyResult.isError).toBe(true);
     expect(emptyResult.content[0].text).toMatch(/Provide text/);
@@ -171,7 +171,7 @@ describe('scheduling tools', () => {
     const missing = await registry.call(
       'schedule_message',
       { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: join(scratchDir, 'missing.png') },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(missing.isError).toBe(true);
     expect(missing.content[0].text).toMatch(/File not found/);
@@ -181,7 +181,7 @@ describe('scheduling tools', () => {
     const unsupported = await registry.call(
       'schedule_message',
       { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: unsupportedPath },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(unsupported.isError).toBe(true);
     expect(unsupported.content[0].text).toMatch(/Unsupported file extension/);
@@ -192,7 +192,7 @@ describe('scheduling tools', () => {
     const large = await registry.call(
       'schedule_message',
       { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: largePath },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(large.isError).toBe(true);
     expect(large.content[0].text).toMatch(/File too large/);
@@ -207,7 +207,7 @@ describe('scheduling tools', () => {
       const result = await registry.call(
         'schedule_message',
         { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: outsidePath },
-        { ...globalSession(), allowedRoot: scratchDir },
+        { ...globalSession(scratchDir), allowedRoot: scratchDir },
       );
 
       expect(result.isError).toBe(true);
@@ -215,6 +215,20 @@ describe('scheduling tools', () => {
     } finally {
       rmSync(outsideDir, { recursive: true, force: true });
     }
+  });
+
+  it('schedule_message rejects media paths when the session has no allowedRoot (fail-closed, #1094)', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const filePath = join(scratchDir, 'poster.jpg');
+    writeFileSync(filePath, Buffer.from('fake-image'));
+    // No allowedRoot -> fail closed: a rootless global session cannot read host files.
+    const result = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath, caption: 'x' },
+      globalSession(),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Path outside workspace/);
   });
 
   it('schedule_message stores document, audio, video, and sticker media payloads', async () => {
@@ -237,7 +251,7 @@ describe('scheduling tools', () => {
         filename: 'custom.pdf',
         text: 'doc fallback caption',
       },
-      globalSession(),
+      globalSession(scratchDir),
     );
     await registry.call(
       'schedule_message',
@@ -248,7 +262,7 @@ describe('scheduling tools', () => {
         ptt: true,
         seconds: 9,
       },
-      globalSession(),
+      globalSession(scratchDir),
     );
     await registry.call(
       'schedule_message',
@@ -261,7 +275,7 @@ describe('scheduling tools', () => {
         gifPlayback: true,
         viewOnce: true,
       },
-      globalSession(),
+      globalSession(scratchDir),
     );
     await registry.call(
       'schedule_message',
@@ -271,7 +285,7 @@ describe('scheduling tools', () => {
         filePath: stickerPath,
         isAnimated: true,
       },
-      globalSession(),
+      globalSession(scratchDir),
     );
 
     const rows = db.raw.prepare(
@@ -346,7 +360,7 @@ describe('scheduling tools', () => {
     const result = await registry.call(
       'list_scheduled',
       { chatJid: CHAT_ALPHA_JID, status: 'failed', limit: 10 },
-      globalSession(),
+      globalSession(scratchDir),
     );
     expect(result.isError).toBeUndefined();
 
@@ -394,14 +408,14 @@ describe('scheduling tools', () => {
   });
 
   it('cancel_scheduled reports missing and non-pending rows', async () => {
-    const missing = await registry.call('cancel_scheduled', { id: 99 }, globalSession());
+    const missing = await registry.call('cancel_scheduled', { id: 99 }, globalSession(scratchDir));
     expect(missing.isError).toBe(true);
     expect(missing.content[0].text).toMatch(/Scheduled message 99 not found/);
 
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
     ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'sent' }), 1700000100, 'sent');
-    const sent = await registry.call('cancel_scheduled', { id: 1 }, globalSession());
+    const sent = await registry.call('cancel_scheduled', { id: 1 }, globalSession(scratchDir));
     expect(sent.isError).toBe(true);
     expect(sent.content[0].text).toMatch(/is sent and cannot be cancelled/);
   });

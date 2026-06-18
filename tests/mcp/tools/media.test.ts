@@ -486,21 +486,23 @@ describe('registerMediaTools', () => {
     expect(mediaCalls).toHaveLength(1);
   });
 
-  it('allows any path for global session without allowedRoot', async () => {
+  it('rejects any path for a global session without allowedRoot (fail-closed, #1094)', async () => {
     // Write to a location outside of any workspace
     const outsidePath = join(tmpdir(), `global-test-${randomBytes(4).toString('hex')}.jpg`);
     writeFileSync(outsidePath, 'data');
     filesToClean.push(outsidePath);
 
-    // Global session has no allowedRoot
+    // Global session has no allowedRoot -> fail closed: the boundary check must
+    // reject the path rather than allowing arbitrary host-file reads (audit #1094).
     const result = await registry.call(
       'send_media',
       { filePath: outsidePath, chatJid: '1234567890@s.whatsapp.net' },
       globalSession(),
     );
 
-    expect(result.isError).toBeUndefined();
-    expect(mediaCalls).toHaveLength(1);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/outside|allowed root|workspace/i);
+    expect(mediaCalls).toHaveLength(0);
   });
 
   it('returns error for nonexistent file', async () => {
