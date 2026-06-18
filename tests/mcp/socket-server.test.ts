@@ -557,3 +557,425 @@ describe('WhatSoupSocketServer', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Uncovered-branch coverage
+// ---------------------------------------------------------------------------
+
+describe('socket-server.ts uncovered-branch coverage', () => {
+  let server: WhatSoupSocketServer;
+  let registry: ToolRegistry;
+  let session: SessionContext;
+  let socketPath: string;
+
+  beforeEach(() => {
+    socketPath = makeSocketPath();
+    registry = new ToolRegistry();
+    session = makeSession();
+  });
+
+  afterEach(() => {
+    server?.stop();
+    try { unlinkSync(socketPath); } catch { /* already gone */ }
+  });
+
+  // --- buffer overflow DoS guard (src line 88-92) ---
+
+  it('closes the connection when the receive buffer exceeds 1 MB', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+
+    // Send > 1 MB without a newline so the buffer guard fires.
+    const oversized = 'x'.repeat(1_024 * 1_024 + 1);
+    client.write(oversized);
+
+    await waitForClientClose(client, 2000);
+    // Terminal assertion: server recorded no connection after the destroy.
+    await vi.waitFor(() => {
+      expect(server.connectionCount).toBe(0);
+    });
+  });
+
+  // --- handleRequest catch -> -32603 Internal error (src line 236-244) ---
+  // registry.call swallows tool-handler errors, so we force listTools() to
+  // throw by registering a tool whose schema serialisation throws. The
+  // resulting synchronous throw bubbles up through handleRequest's try block.
+
+  it('returns JSON-RPC internal error -32603 when the handler throws synchronously', async () => {
+    // A schema whose .describe introspection path throws during listTools.
+    const throwingSchema = {
+      get description() { throw new Error('schema boom'); },
+      // satisfy ToolDeclaration.schema typing at runtime; listTools uses zodToJsonSchema
+      // which falls through to the fallback branch once it stops matching Zod types,
+      // but buildListSchema reads schema.description via withZodDescription first.
+    } as unknown as import('zod').ZodType;
+
+    registry.register(
+      makeTool({
+        name: 'boom_tool',
+        description: 'boom',
+        schema: throwingSchema,
+      }),
+    );
+
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/list',
+      params: {},
+    }) as { id: number; error: { code: number; message: string } };
+
+    expect(response.id).toBe(7);
+    expect(response.error.code).toBe(-32603);
+    expect(response.error.message).toMatch(/Internal error \[E/);
+  });
+
+  // --- tools/call with no name (src line 219 defaulting `name ?? ''`) ---
+
+  it('tools/call with missing name falls back to empty name and yields Unknown tool error', async () => {
+    registry.register(makeTool({ name: 'real_tool', description: 'real' }));
+
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/call',
+      params: { arguments: {} },
+    }) as { result: { content: Array<{ text: string }>; isError: boolean } };
+
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toContain('Unknown tool:');
+  });
+
+  // --- tools/call with no params at all (src line 218-220 defaulting) ---
+
+  it('tools/call without params defaults name and arguments, yielding Unknown tool', async () => {
+    registry.register(
+      makeTool({
+        name: 'noargs_tool',
+        scope: 'global',
+        targetMode: 'caller-supplied',
+        schema: z.object({}),
+        handler: async () => 'ok-noargs',
+      }),
+    );
+
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // No `params` key — handler defaults name='' and arguments={}, which the
+    // registry resolves to "Unknown tool" rather than throwing.
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+    }) as { result: { content: Array<{ text: string }>; isError: boolean } };
+
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toContain('Unknown tool:');
+  });
+
+  // --- updateDeliveryJid / updateActorJid with no active connections ---
+  // Exercises the for...of 0-iteration branch (src lines 174-176, 187-189)
+  // alongside a connection to also cover the >=1 iteration branch.
+
+  it('updateDeliveryJid and updateActorJid propagate to base session with no connections', () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+
+    server.updateDeliveryJid('15550000000@s.whatsapp.net');
+    server.updateActorJid('15550000001@s.whatsapp.net');
+
+    expect(session.deliveryJid).toBe('15550000000@s.whatsapp.net');
+    expect(session.actorJid).toBe('15550000001@s.whatsapp.net');
+  });
+
+  it('updateActorJid clears actorJid on the base session with no connections', () => {
+    session = makeSession({ tier: 'global', actorJid: '15550000002@s.whatsapp.net' });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+
+    server.updateActorJid(undefined);
+
+    expect(session).toEqual({ tier: 'global', actorJid: undefined });
+  });
+
+  // --- updateDeliveryJid / updateActorJid propagation to an active connection ---
+  // Covers src lines 174-176 and 187-189 (the per-session assignment inside the
+  // for...of loop, which only runs when connectionSessions is non-empty).
+
+  it('updateDeliveryJid propagates to a live connection session via a tool call', async () => {
+    const captured: string[] = [];
+    registry.register(
+      makeTool({
+        name: 'jid_probe',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string() }),
+        handler: async (params) => { captured.push(params['chatJid'] as string); return 'ok'; },
+      }),
+    );
+    session = makeSession({
+      tier: 'chat-scoped',
+      conversationKey: 'probe1',
+      deliveryJid: 'old-probe@s.whatsapp.net',
+    });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Hold an open connection while we update the JID.
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+    await vi.waitFor(() => { expect(server.connectionCount).toBe(1); });
+
+    server.updateDeliveryJid('new-probe@s.whatsapp.net');
+
+    // Drive the live connection's session through the registry.
+    const response = await new Promise<unknown>((resolve, reject) => {
+      client.write(JSON.stringify({
+        jsonrpc: '2.0', id: 60, method: 'tools/call',
+        params: { name: 'jid_probe', arguments: {} },
+      }) + '\n');
+      let buf = '';
+      client.on('data', (chunk) => {
+        buf += chunk.toString();
+        for (const line of buf.split('\n')) {
+          if (!line.trim()) continue;
+          try { resolve(JSON.parse(line)); client.end(); } catch { /* partial */ }
+        }
+      });
+      client.on('error', reject);
+    });
+
+    client.destroy();
+
+    expect(captured).toEqual(['new-probe@s.whatsapp.net']);
+    expect(response).toMatchObject({ id: 60 });
+  });
+
+  it('updateActorJid propagates to a live connection session', async () => {
+    registry.register(
+      makeTool({
+        name: 'actor_probe',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string() }),
+        handler: async (_params, sess) => { return sess.actorJid ?? '<none>'; },
+      }),
+    );
+    session = makeSession({
+      tier: 'chat-scoped',
+      conversationKey: 'probe2',
+      deliveryJid: '15550000003@s.whatsapp.net',
+    });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+    await vi.waitFor(() => { expect(server.connectionCount).toBe(1); });
+
+    server.updateActorJid('15550000004@s.whatsapp.net');
+
+    const response = await new Promise<{ result: { content: Array<{ text: string }> } }>((resolve, reject) => {
+      client.write(JSON.stringify({
+        jsonrpc: '2.0', id: 61, method: 'tools/call',
+        params: { name: 'actor_probe', arguments: {} },
+      }) + '\n');
+      let buf = '';
+      client.on('data', (chunk) => {
+        buf += chunk.toString();
+        for (const line of buf.split('\n')) {
+          if (!line.trim()) continue;
+          try { resolve(JSON.parse(line)); client.end(); } catch { /* partial */ }
+        }
+      });
+      client.on('error', reject);
+    });
+
+    client.destroy();
+
+    expect(response.result.content[0].text).toContain('15550000004@s.whatsapp.net');
+  });
+
+  // --- stop() idempotency: stop() before start() (src line 156 `if (this.server)`) ---
+
+  it('stop() before start() is a no-op (server is null)', () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    expect(() => server.stop()).not.toThrow();
+    // Re-stop after a started server to also cover the null-out path.
+    server.start();
+    server.stop();
+    expect(() => server.stop()).not.toThrow();
+    // Final concrete state check: no connections and socket file cleaned up.
+    expect(server.connectionCount).toBe(0);
+    expect(existsSync(socketPath)).toBe(false);
+  });
+
+  // --- stop() unlinkSync catch when socket file already removed (src line 161) ---
+
+  it('stop() tolerates an already-removed socket file', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Remove the socket file out from under the server before stop().
+    try { unlinkSync(socketPath); } catch { /* ignore */ }
+
+    expect(() => server.stop()).not.toThrow();
+    expect(server.connectionCount).toBe(0);
+  });
+
+  // --- blank/whitespace lines inside a frame are skipped (src line 99) ---
+
+  it('blank lines embedded between JSON-RPC frames are skipped without response', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpcMessagesUntilId(socketPath, [
+      { jsonrpc: '2.0', id: 11, method: 'initialize', params: {} },
+      // interleave a literal blank/whitespace line
+      '   ',
+      '',
+      { jsonrpc: '2.0', id: 12, method: 'initialize', params: {} },
+    ], 12) as { id: number; result: { protocolVersion: string } };
+
+    expect(response.id).toBe(12);
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
+  // --- multiple JSON-RPC frames in a single data chunk (src line 93 split) ---
+
+  it('parses multiple newline-delimited frames delivered in one chunk', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+
+    const batch = [
+      JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'initialize', params: {} }),
+      JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'initialize', params: {} }),
+      JSON.stringify({ jsonrpc: '2.0', id: 22, method: 'initialize', params: {} }),
+    ].join('\n') + '\n';
+
+    const responses: Array<{ id: number; result: { protocolVersion: string } }> = await new Promise((resolve, reject) => {
+      const seen: Array<{ id: number; result: { protocolVersion: string } }> = [];
+      let buf = '';
+      client.on('data', (chunk) => {
+        buf += chunk.toString();
+        for (const line of buf.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line) as { id: number; result: { protocolVersion: string } };
+            seen.push(parsed);
+            if (seen.length === 3) resolve(seen);
+          } catch { /* partial */ }
+        }
+      });
+      client.on('error', reject);
+      client.write(batch);
+    });
+
+    client.destroy();
+
+    const ids = responses.map((r) => r.id).sort();
+    expect(ids).toEqual([20, 21, 22]);
+    expect(responses.every((r) => r.result.protocolVersion === '2024-11-05')).toBe(true);
+  });
+
+  // --- partial-then-complete frame (buffer reassembly, src line 95 `?? ''`) ---
+
+  it('reassembles a frame split across two data chunks', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+
+    const full = JSON.stringify({ jsonrpc: '2.0', id: 30, method: 'initialize', params: {} });
+    const half = Math.floor(full.length / 2);
+
+    const response = await new Promise<{ id: number; result: { protocolVersion: string } }>((resolve, reject) => {
+      client.on('data', (chunk) => {
+        for (const line of chunk.toString().split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            resolve(JSON.parse(line));
+          } catch { /* partial */ }
+        }
+      });
+      client.on('error', reject);
+      // Write first half (no newline), then second half with newline on the
+      // next event-loop tick so the server sees two separate data chunks.
+      client.write(full.slice(0, half));
+      setImmediate(() => client.write(full.slice(half) + '\n'));
+    });
+
+    client.destroy();
+
+    expect(response.id).toBe(30);
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
+  // --- start() unlinkSync no-op when socket file absent (src line 60) ---
+
+  it('start() is harmless when the target socket path does not exist yet', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    expect(() => server.start()).not.toThrow();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 40, method: 'initialize', params: {},
+    }) as { result: { protocolVersion: string } };
+
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
+  // --- tools/call handler rejection surfaces as ToolError, not -32603 ---
+  // Guards against regression: registry.call catches handler throws, so the
+  // socket layer returns a ToolError payload (isError: true) rather than the
+  // JSON-RPC internal-error envelope.
+
+  it('tools/call whose handler rejects yields an isError result, not a JSON-RPC error', async () => {
+    registry.register(
+      makeTool({
+        name: 'reject_tool',
+        scope: 'global',
+        targetMode: 'caller-supplied',
+        schema: z.object({}),
+        handler: async () => { throw new Error('handler failure'); },
+      }),
+    );
+
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 50, method: 'tools/call',
+      params: { name: 'reject_tool', arguments: {} },
+    }) as { id: number; result: { content: Array<{ text: string }>; isError: boolean }; error?: unknown };
+
+    expect(response.id).toBe(50);
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toContain('handler failure');
+  });
+});
