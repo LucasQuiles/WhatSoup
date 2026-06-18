@@ -75,6 +75,13 @@ export class OperationTracker {
 
   onToolStart(toolId: string, toolName: string, category: ToolCategory): void {
     this.clearThinkingTimers();
+    // A phantom/replayed tool_use can re-arm a toolId that is still tracked. Clear the
+    // previous op's timers before overwriting, otherwise they are orphaned but keep
+    // firing — producing duplicate progress placeholders for one logical operation.
+    const existing = this.operations.get(toolId);
+    if (existing) {
+      this.clearOperationTimers(existing);
+    }
     const key = thresholdKeyForCategory(category);
     const threshold: ToolThreshold = this.config.toolThresholds[key] ?? this.config.toolThresholds.default;
     const op: TrackedOperationInternal = {

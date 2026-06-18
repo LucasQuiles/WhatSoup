@@ -65,6 +65,15 @@ export const SEND_TIMEOUT_MS = 15_000;
 export const TEXT_AGGREGATE_DELAY_MS = 2_000;
 /** Suppress repeated terminal/error text from respawn loops without affecting normal repeated assistant output. */
 export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
+/**
+ * Coalesce identical progress placeholders ("_Still working..._", etc.) within this window.
+ * A parallel tool batch arms one slow/stall timer per tool, so several operations cross
+ * their thresholds within seconds of each other and each renders the same placeholder text.
+ * Without coalescing the user receives N identical messages back-to-back. The window is
+ * wide enough to span a staggered batch yet short enough that a genuinely later nudge —
+ * after real continued silence — still reaches the user.
+ */
+export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
 
 interface TerminalTextDedupeEntry {
   lastSeenAt: number;
@@ -185,6 +194,8 @@ export class OutboundQueue implements IOutboundQueue {
   private lastSubmittedTextDedupeKey: string | undefined;
   /** Recent terminal text sends. Only terminalized text can suppress a later duplicate. */
   private readonly recentTerminalTextKeys = new Map<string, TerminalTextDedupeEntry>();
+  /** Rendered progress-placeholder text → timestamp of last enqueue, for short-window coalescing. */
+  private readonly recentProgressTextAt = new Map<string, number>();
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -447,15 +458,15 @@ export class OutboundQueue implements IOutboundQueue {
           this.startTyping();
           return;
         }
-        this.enqueue(`_${name} is thinking..._`);
+        this.enqueueProgress(`_${name} is thinking..._`);
         return;
       }
 
       case 'thinking_stalled': {
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueue(`_${name} may be stuck..._`);
+          this.enqueueProgress(`_${name} may be stuck..._`);
         } else {
-          this.enqueue(`_${name} has gone silent \u2014 checking..._`);
+          this.enqueueProgress(`_${name} has gone silent \u2014 checking..._`);
         }
         return;
       }
@@ -475,13 +486,13 @@ export class OutboundQueue implements IOutboundQueue {
             return;
           }
           this.friendlyProgressSent.add(event.toolId);
-          this.enqueue(`_${name} is working on something, this might take a moment..._`);
+          this.enqueueProgress(`_${name} is working on something, this might take a moment..._`);
           return;
         }
         // full mode
         const elapsed = formatElapsed(event.elapsedMs);
         const desc = event.toolName === 'Agent' ? 'running a subagent' : `running ${event.toolName}`;
-        this.enqueue(`_${name} has been ${desc} for ${elapsed}..._`);
+        this.enqueueProgress(`_${name} has been ${desc} for ${elapsed}..._`);
         return;
       }
 
@@ -491,12 +502,12 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueue('_Still working..._');
+          this.enqueueProgress('_Still working..._');
         } else if (this.toolUpdateMode === 'friendly') {
-          this.enqueue(`_${name} is still working on it..._`);
+          this.enqueueProgress(`_${name} is still working on it..._`);
         } else {
           const elapsed = formatElapsed(event.elapsedMs);
-          this.enqueue(`_\u23f3 ${name} is taking longer than expected (${elapsed})..._`);
+          this.enqueueProgress(`_\u23f3 ${name} is taking longer than expected (${elapsed})..._`);
         }
         return;
       }
@@ -508,13 +519,43 @@ export class OutboundQueue implements IOutboundQueue {
         }
         const elapsed = formatElapsed(event.elapsedMs);
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueue(`_Still working (${elapsed})..._`);
+          this.enqueueProgress(`_Still working (${elapsed})..._`);
         } else if (this.toolUpdateMode === 'friendly') {
-          this.enqueue(`_${name}: Still working (${elapsed})..._`);
+          this.enqueueProgress(`_${name}: Still working (${elapsed})..._`);
         } else {
-          this.enqueue(`_\u23f3 ${name}: Still working (${elapsed})..._`);
+          this.enqueueProgress(`_\u23f3 ${name}: Still working (${elapsed})..._`);
         }
         return;
+      }
+    }
+  }
+
+  /**
+   * Enqueue an ephemeral progress placeholder, coalescing identical text seen within
+   * PROGRESS_TEXT_DEDUPE_WINDOW_MS. A parallel tool batch makes several operations cross
+   * their slow/stall thresholds within seconds of each other, each rendering the same
+   * placeholder; without this the user would receive N identical "_Still working..._"
+   * messages back-to-back. Suppressed placeholders still re-assert the typing indicator
+   * so the user knows work is ongoing. Reset per-turn via flush()/abortTurn().
+   */
+  private enqueueProgress(text: string): void {
+    const now = Date.now();
+    this.pruneProgressTextDedupe(now);
+    const lastAt = this.recentProgressTextAt.get(text);
+    if (lastAt !== undefined && now - lastAt < PROGRESS_TEXT_DEDUPE_WINDOW_MS) {
+      // Identical placeholder already shown recently \u2014 keep the indicator alive, drop the duplicate.
+      this.startTyping();
+      log.info({ chatJid: this.chatJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
+      return;
+    }
+    this.recentProgressTextAt.set(text, now);
+    this.enqueue(text);
+  }
+
+  private pruneProgressTextDedupe(now: number): void {
+    for (const [key, ts] of this.recentProgressTextAt) {
+      if (now - ts >= PROGRESS_TEXT_DEDUPE_WINDOW_MS) {
+        this.recentProgressTextAt.delete(key);
       }
     }
   }
@@ -553,6 +594,7 @@ export class OutboundQueue implements IOutboundQueue {
     // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
     this.friendlyProgressSent.clear();
+    this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
   }
 
@@ -578,6 +620,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.streamBufferParts = [];
     this.toolBuffer = [];
     this.friendlyProgressSent.clear();
+    this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
     this.stopTyping(false);
   }

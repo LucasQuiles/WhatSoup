@@ -7,6 +7,7 @@ import {
   TYPING_REFRESH_MS,
   TEXT_AGGREGATE_DELAY_MS,
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+  PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
@@ -1315,6 +1316,95 @@ describe('OutboundQueue', () => {
       await vi.runAllTimersAsync();
       expect(minimal.calls).toHaveLength(1);
       expect(minimal.calls[0]).toContain('Still working');
+    });
+
+    it('coalesces identical concurrent operation_slow placeholders into one message', async () => {
+      // Reproduces the "Still working… x3 back to back" report: a parallel tool
+      // batch arms one slow-timer per tool; in minimal mode every operation_slow
+      // renders the identical text "_Still working..._". Without coalescing the
+      // user receives N identical messages.
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      for (const toolId of ['tool-a', 'tool-b', 'tool-c']) {
+        queue.enqueueProgressUpdate(
+          {
+            type: 'operation_slow',
+            toolId,
+            toolName: 'Read',
+            category: 'reading',
+            elapsedMs: 9_000,
+            expectedMs: 3_000,
+          },
+          INSTANCE,
+        );
+      }
+      // Bounded advance: drains the single send without looping on the typing heartbeat
+      // that the suppressed duplicates re-assert.
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+
+      expect(calls).toEqual(['_Still working..._']);
+
+      queue.abortTurn(); // clean up typing interval
+    });
+
+    it('allows an identical progress placeholder again after the dedupe window elapses', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      const event: ProgressEvent = {
+        type: 'operation_slow',
+        toolId: 'tool-a',
+        toolName: 'Read',
+        category: 'reading',
+        elapsedMs: 9_000,
+        expectedMs: 3_000,
+      };
+
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(calls).toHaveLength(1);
+
+      // A second identical placeholder inside the window is suppressed…
+      queue.enqueueProgressUpdate({ ...event, toolId: 'tool-b' }, INSTANCE);
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(calls).toHaveLength(1);
+
+      // …but once the window passes, a genuine later nudge is allowed through.
+      // (flush() would reset the dedupe map, so advance fake time instead.)
+      await vi.advanceTimersByTimeAsync(PROGRESS_TEXT_DEDUPE_WINDOW_MS + 1);
+      queue.enqueueProgressUpdate({ ...event, toolId: 'tool-c' }, INSTANCE);
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(calls).toHaveLength(2);
+
+      queue.abortTurn(); // clean up typing interval
+    });
+
+    it('does NOT coalesce progress placeholders that render distinct text', async () => {
+      // Safety boundary for the coalescing fix: only *identical* text is suppressed.
+      // Two slow events with different elapsed render different strings and must both send,
+      // so genuinely distinct progress information is never lost.
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+
+      queue.enqueueProgressUpdate(
+        { type: 'operation_slow', toolId: 't1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, expectedMs: 15_000 },
+        INSTANCE,
+      );
+      queue.enqueueProgressUpdate(
+        { type: 'operation_slow', toolId: 't2', toolName: 'Bash', category: 'running', elapsedMs: 90_000, expectedMs: 15_000 },
+        INSTANCE,
+      );
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS * 2);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toContain('45s');
+      expect(calls[1]).toContain('1m 30s');
+
+      queue.abortTurn(); // clean up typing interval
     });
 
     it('suppresses thinking_long in minimal mode', async () => {
