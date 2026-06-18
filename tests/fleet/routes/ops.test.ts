@@ -4064,63 +4064,112 @@ describe('ops.ts uncovered-branch coverage', () => {
   });
 
   // ---- Line 671/675/679: validateNumericBounds upper-bound failure (above-max) ----
-  it('handleConfigUpdate rejects rateLimitPerHour above 10000 (line 671 second clause)', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-rlh-'));
+  // validateNumericBounds is invoked from handleCreateLine, not handleConfigUpdate.
+  it('handleCreateLine rejects rateLimitPerHour above 10000 (line 671 above-max)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-rlh-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const configPath = path.join(tmpDir, 'config.json');
-      fs.writeFileSync(configPath, JSON.stringify({
-        type: 'chat', healthPort: 3010, accessMode: 'self_only',
-      }));
-      const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
       const res = mockRes();
-      await handleConfigUpdate(
-        mockReq(JSON.stringify({ rateLimitPerHour: 99999 })),
-        res, deps, { name: 'test-line' });
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'rlh-line', type: 'chat',
+          adminPhones: ['15550000001'], rateLimitPerHour: 99999,
+        })),
+        res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/rateLimitPerHour/);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
     }
   });
 
-  it('handleConfigUpdate rejects maxTokens above 200000 (line 675 second clause)', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-mt-'));
+  it('handleCreateLine rejects maxTokens above 200000 (line 675 above-max)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-mt-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const configPath = path.join(tmpDir, 'config.json');
-      fs.writeFileSync(configPath, JSON.stringify({
-        type: 'chat', healthPort: 3010, accessMode: 'self_only',
-      }));
-      const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
       const res = mockRes();
-      await handleConfigUpdate(
-        mockReq(JSON.stringify({ maxTokens: 999999 })),
-        res, deps, { name: 'test-line' });
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'mt-line', type: 'chat',
+          adminPhones: ['15550000001'], maxTokens: 999999,
+        })),
+        res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/maxTokens/);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
     }
   });
 
-  it('handleConfigUpdate rejects tokenBudget above 10000000 (line 679 second clause)', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-tb-'));
+  it('handleCreateLine rejects tokenBudget above 10000000 (line 679 above-max)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-tb-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
     try {
-      const configPath = path.join(tmpDir, 'config.json');
-      fs.writeFileSync(configPath, JSON.stringify({
-        type: 'chat', healthPort: 3010, accessMode: 'self_only',
-      }));
-      const inst = fakeInstance({ configPath });
-      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
       const res = mockRes();
-      await handleConfigUpdate(
-        mockReq(JSON.stringify({ tokenBudget: 99999999 })),
-        res, deps, { name: 'test-line' });
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'tb-line', type: 'chat',
+          adminPhones: ['15550000001'], tokenBudget: 99999999,
+        })),
+        res, deps);
       expect(res._status).toBe(400);
       expect(JSON.parse(res._body).error).toMatch(/tokenBudget/);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
     }
   });
 
@@ -4298,6 +4347,83 @@ describe('ops.ts uncovered-branch coverage', () => {
       expect(res._ended).toBe(true);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // ---- Line 800: validatePluginDirs with a non-string entry ----
+  it('handleConfigUpdate rejects pluginDirs containing a non-string entry (line 800 true)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-pd2-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-pd2-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          agentOptions: { pluginDirs: [42] },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/pluginDirs/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 1089: handleCreateLine pluginDirs validate false branch (returns false) ----
+  it('handleCreateLine accepts a pluginDirs entry within the home directory (line 1089 false)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-crpd-'));
+    const pluginDir = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-crplugin-'));
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-crpd-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'crpd-line', type: 'agent',
+          adminPhones: ['15550000001'],
+          agentOptions: {
+            cwd: agentCwd,
+            sessionScope: 'single',
+            pluginDirs: [pluginDir],
+          },
+        })),
+        res, deps);
+      expect(res._status).toBe(201);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+      fs.rmSync(pluginDir, { recursive: true, force: true });
     }
   });
 
