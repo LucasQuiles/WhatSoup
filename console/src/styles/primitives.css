@@ -1965,6 +1965,35 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* The mobile back affordance is hidden on desktop — both list + thread are
+   visible there, so there is no pane to return to. */
+.soup-inbox-back {
+  display: none;
+}
+
+/* Phone master-detail (mobile responsive pass): below the 640px narrow-surface
+   breakpoint (DRAWER_BOTTOM_SHEET_QUERY) the chats list + thread can't both fit
+   — the thread squeezes to an unusable sliver — so show ONE pane at a time.
+   data-mobile-detail reflects the React selection state: 'list' (no chat
+   selected) shows the full-width chats list and hides the thread; 'thread' (a
+   chat selected) hides the list and shows the full-width thread plus its back
+   affordance. CSS-only switch — selection state stays the single source of
+   truth, mirroring the contact-pane container-query ethos above. */
+@media (max-width: 640px) {
+  .soup-inbox-chats {
+    width: 100%;
+  }
+  .soup-inbox-layout[data-mobile-detail="list"] .soup-inbox-thread {
+    display: none;
+  }
+  .soup-inbox-layout[data-mobile-detail="thread"] .soup-inbox-chats {
+    display: none;
+  }
+  .soup-inbox-back {
+    display: inline-flex;
+  }
+}
+
 /* OPERATOR LAYOUT — soup-operator-layout (mobile responsive pass)
    The Operator's Fleet-Status + Logs panes are a horizontal flex row on desktop.
    On narrow/phone viewports that crams both into ~half-width each (line-status
