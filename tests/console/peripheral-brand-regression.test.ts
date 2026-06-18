@@ -51,11 +51,25 @@ function normalizeSvgReference(value: string): string | null {
   return path
 }
 
+function stripComments(text: string): string {
+  // Fixpoint loop: a single `<!--...-->` pass is incomplete sanitization (CodeQL
+  // js/incomplete-multi-character-sanitization) — nested markers leave a residual `<!--`.
+  let cleaned = text
+  let previous: string
+  do {
+    previous = cleaned
+    cleaned = cleaned
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  } while (cleaned !== previous)
+  // Remove any residual comment markers that fragment concatenation or unclosed
+  // comments can leave behind, so no `<!--`/`-->` survives the sanitizer.
+  return cleaned.replace(/<!--|-->/g, '')
+}
+
 function collectSvgReferences(text: string): Set<string> {
-  const cleaned = text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  const cleaned = stripComments(text)
   const references = new Set<string>()
   const patterns = [
     /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,

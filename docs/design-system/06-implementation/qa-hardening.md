@@ -695,8 +695,13 @@ The package script currently promotes only the already-zero canonical favicon-li
 hard-fail independently. Peripheral legacy copy is scanned in HTML, JSON/webmanifest, and SVG
 metadata/text. Public SVG reachability is path-normalized against actual SVG references (`href`/`src`,
 manifest `src`, CSS `url()`, imports, and path-like string references); comments or bare prose
-mentions of an asset basename do not count as usage. The favicon artwork, badge, PWA, and
-maskable asset findings remain report-only until the approved asset set lands and is visually proven.
+mentions of an asset basename do not count as usage. Comment stripping is sanitized to a fixpoint
+and then has any residual `<!--`/`-->` markers removed, so overlapping, unclosed, or
+fragment-concatenated comment markers cannot survive to be misread as references (CodeQL
+`js/incomplete-multi-character-sanitization`); the same hardened helper is mirrored in the
+`source-assets-reachability` and `peripheral-brand-regression` test harnesses. The favicon
+artwork, badge, PWA, and maskable asset findings remain report-only until the approved asset set
+lands and is visually proven.
 `--fail-on-findings` exists for that later promotion packet. A PASS with report-only findings must
 never be cited as visual approval or 16px legibility proof.
 

@@ -21,10 +21,20 @@ function filesUnder(dir: string, matchesFile: (name: string) => boolean): string
 }
 
 function stripComments(text: string): string {
-  return text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  // Fixpoint loop: a single `<!--...-->` pass is incomplete sanitization (CodeQL
+  // js/incomplete-multi-character-sanitization) — nested markers leave a residual `<!--`.
+  let cleaned = text
+  let previous: string
+  do {
+    previous = cleaned
+    cleaned = cleaned
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  } while (cleaned !== previous)
+  // Remove any residual comment markers that fragment concatenation or unclosed
+  // comments can leave behind, so no `<!--`/`-->` survives the sanitizer.
+  return cleaned.replace(/<!--|-->/g, '')
 }
 
 function normalizeAssetReference(sourceFile: string, value: string): string | null {
@@ -75,6 +85,14 @@ function sourceAssetFiles(): string[] {
 }
 
 describe('console source asset reachability', () => {
+  it('strips nested/overlapping comment markers to a fixpoint (no residual <!--)', () => {
+    // A single `<!--...-->` pass leaves a residual marker on overlapping input;
+    // the fixpoint loop must remove all of them (CodeQL js/incomplete-multi-character-sanitization).
+    expect(stripComments('<!--<!-- a -->-->')).not.toContain('<!--')
+    expect(stripComments('<!--<!-- a -->-->')).not.toContain('-->')
+    expect(stripComments('keep <!--<!--x-->--> me').replace(/\s+/g, ' ').trim()).toBe('keep me')
+  })
+
   it('resolves path-like source asset references and ignores prose mentions', () => {
     const sourceFile = resolve(srcRoot, 'components', 'Example.tsx')
     const references = collectAssetReferences(sourceFile, `

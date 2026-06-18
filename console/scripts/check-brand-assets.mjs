@@ -143,11 +143,27 @@ function purposeTokens(value) {
   return typeof value === 'string' ? value.trim().split(/\s+/).filter(Boolean) : [];
 }
 
+// Strip HTML/CSS/JS comments to a fixpoint. A single pass of `<!--...-->` removal is
+// incomplete sanitization (CodeQL js/incomplete-multi-character-sanitization): nested or
+// overlapping markers like `<!--<!-- -->-->` leave a residual `<!--`. Looping until the
+// text stops changing guarantees no comment markers survive.
+function stripComments(text) {
+  let cleaned = text;
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1');
+  } while (cleaned !== previous);
+  // Remove any residual comment markers that fragment concatenation or unclosed
+  // comments can leave behind, so no `<!--`/`-->` survives the sanitizer.
+  return cleaned.replace(/<!--|-->/g, '');
+}
+
 function collectSvgReferences(text) {
-  const cleaned = text
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1');
+  const cleaned = stripComments(text);
   const references = new Set();
   const patterns = [
     /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
