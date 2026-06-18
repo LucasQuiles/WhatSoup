@@ -84,9 +84,12 @@ describe('AgentRuntime structural policy', () => {
   });
 
   it('sandboxPerChat workspace sweep timer is unrefd and cleared structurally', async () => {
-    const source = await readRuntimeSource();
+    const source = await readFile(
+      new URL('../../../src/runtimes/agent/workspace-sweeper.ts', import.meta.url),
+      'utf8',
+    );
 
-    expect(source).toContain('this.workspaceSweepTimer.unref?.();');
-    expect(source).toContain('clearInterval(this.workspaceSweepTimer);');
+    expect(source).toContain('this.timer.unref?.();');
+    expect(source).toContain('clearInterval(this.timer);');
   });
 });
