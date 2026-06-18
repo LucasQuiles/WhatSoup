@@ -26,6 +26,7 @@ interface TabsCtx {
   value: string;
   onChange: (id: string) => void;
   listRef: React.RefObject<HTMLDivElement | null>;
+  lazyPanels: boolean;
 }
 const TabsContext = createContext<TabsCtx | null>(null);
 
@@ -37,11 +38,18 @@ export interface TabsProps {
   onChange: (id: string) => void;
   /** Adds side padding so the rule aligns with page gutters (tabs.md inset). */
   inset?: boolean;
+  /**
+   * Set when the caller conditionally mounts only the active panel (instead of
+   * TabPanel's hidden mechanic). Inactive tabs then omit `aria-controls` so they
+   * don't point at non-existent panel ids (ARIA 1.2 / axe aria-valid-attr-value);
+   * the tab↔panel link is still carried by `aria-labelledby` on the live panel.
+   */
+  lazyPanels?: boolean;
   children: ReactNode;
   className?: string;
 }
 
-export const Tabs: FC<TabsProps> = ({ label, value, onChange, inset = false, children, className }) => {
+export const Tabs: FC<TabsProps> = ({ label, value, onChange, inset = false, lazyPanels = false, children, className }) => {
   const listRef = useRef<HTMLDivElement | null>(null);
 
   // Roving focus: operate on the rendered, enabled-or-disabled tab buttons in
@@ -65,7 +73,7 @@ export const Tabs: FC<TabsProps> = ({ label, value, onChange, inset = false, chi
 
   const cls = ['soup-tabs', inset ? 'soup-tabs--inset' : '', className].filter(Boolean).join(' ');
   return (
-    <TabsContext value={{ value, onChange, listRef }}>
+    <TabsContext value={{ value, onChange, listRef, lazyPanels }}>
       <div ref={listRef} role="tablist" aria-label={label} className={cls} onKeyDown={handleKeyDown}>
         {children}
       </div>
@@ -96,7 +104,9 @@ export const Tab: FC<TabProps> = ({ id, disabled = false, disabledReason, childr
       role="tab"
       id={`tab-${id}`}
       aria-selected={selected}
-      aria-controls={`tabpanel-${id}`}
+      // Omit aria-controls for inactive tabs when only the active panel is mounted
+      // (lazyPanels) — otherwise it points at a non-existent id (axe aria-valid-attr-value).
+      aria-controls={!ctx.lazyPanels || selected ? `tabpanel-${id}` : undefined}
       aria-disabled={disabled || undefined}
       aria-describedby={reasonId}
       tabIndex={selected && !disabled ? 0 : -1}
