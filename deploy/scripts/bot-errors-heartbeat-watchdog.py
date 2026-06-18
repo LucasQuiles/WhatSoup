@@ -729,18 +729,228 @@ def service_is_active(status: str) -> bool:
     return normalized == "active" or normalized.startswith("active ")
 
 
+# ---------------------------------------------------------------------------
+# Pattern B (Part 1) — planned-vs-crash intent detection.
+#
+# The bare ``is-active`` check cannot tell a deliberate ``systemctl stop`` (or a
+# restart in flight) from a crash: both read "not active" and both page. That is
+# the single largest source of false-positive lifecycle alerts. Here we ask
+# systemd for the structured exit context (Result/ActiveState/SubState/
+# ExecMainStatus) and classify intent:
+#   - clean stop  (Result=success, inactive/deactivating)  -> planned, log only
+#   - restart in flight (activating, within grace window)   -> hold, no alert
+#   - crash       (failed / non-success Result / stalled)   -> alert as before
+# Fail-closed: any ambiguity, probe error, or unknown state classifies as a
+# crash so a genuine outage is never silently dropped. Env-gated, default-on.
+# ---------------------------------------------------------------------------
+
+# systemd ``Result`` values that mean the unit ended abnormally (a crash).
+_SYSTEMD_CRASH_RESULTS = {
+    "exit-code",
+    "signal",
+    "core-dump",
+    "watchdog",
+    "oom-kill",
+    "timeout",
+    "start-limit-hit",
+    "resources",
+    "protocol",
+}
+
+
+def intent_detection_enabled() -> bool:
+    raw = os.environ.get("BOT_ERRORS_WATCHDOG_INTENT_DETECTION", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def restart_grace_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_RESTART_GRACE_SECONDS", "45")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 45.0
+    return max(0.0, value) if math.isfinite(value) else 45.0
+
+
+def monotonic_now_seconds() -> float:
+    """CLOCK_MONOTONIC seconds since boot — same reference systemd stamps its
+    ``*Monotonic`` timestamps with, so the two can be subtracted directly."""
+    return time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+def dry_service_intent() -> dict[str, dict[str, str]]:
+    raw = os.environ.get("BOT_ERRORS_DRY_SERVICE_INTENT", "").strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        str(key): {str(k): str(v) for k, v in value.items()}
+        for key, value in loaded.items()
+        if isinstance(value, dict)
+    }
+
+
+def service_intent_properties(service: str) -> dict[str, str]:
+    """Structured systemd exit context for one unit. Dry channel for tests."""
+    dry = dry_service_intent()
+    if service in dry:
+        return dict(dry[service])
+    proc = subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            service,
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "StateChangeTimestampMonotonic",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=service_check_timeout(),
+        check=False,
+    )
+    props: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            props[key.strip()] = value.strip()
+    if proc.returncode != 0 and not props:
+        props["_showError"] = (proc.stderr.strip() or f"rc={proc.returncode}")[:160]
+    return props
+
+
+def activating_elapsed_seconds(props: dict[str, str], monotonic_now: float) -> float | None:
+    raw = props.get("StateChangeTimestampMonotonic")
+    try:
+        ts_us = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if ts_us <= 0:
+        return None
+    return max(0.0, monotonic_now - ts_us / 1_000_000.0)
+
+
+def classify_service_intent(
+    props: dict[str, str], grace_seconds: float, monotonic_now: float
+) -> tuple[str, str]:
+    """Return (classification, detail). classification is one of
+    active | planned | activating_grace | crash. Fail-closed to crash."""
+    active_state = props.get("ActiveState", "").strip().lower()
+    sub_state = props.get("SubState", "").strip().lower()
+    result = props.get("Result", "").strip().lower()
+    exec_status = props.get("ExecMainStatus", "").strip()
+
+    if active_state in {"active", "reloading"}:
+        return "active", f"ActiveState={active_state} SubState={sub_state or 'running'}"
+
+    if active_state == "activating":
+        elapsed = activating_elapsed_seconds(props, monotonic_now)
+        if elapsed is None or elapsed < grace_seconds:
+            return (
+                "activating_grace",
+                f"restart in flight: elapsed={'unknown' if elapsed is None else round(elapsed, 1)}s "
+                f"grace={grace_seconds}s SubState={sub_state}",
+            )
+        return (
+            "crash",
+            f"restart stalled: activating elapsed={round(elapsed, 1)}s >= grace={grace_seconds}s "
+            f"SubState={sub_state}",
+        )
+
+    if active_state == "failed" or result in _SYSTEMD_CRASH_RESULTS:
+        return (
+            "crash",
+            f"ActiveState={active_state or 'unknown'} Result={result or 'unknown'} "
+            f"ExecMainStatus={exec_status or '?'} SubState={sub_state}",
+        )
+
+    if active_state in {"inactive", "deactivating"}:
+        if result in {"", "success"} and exec_status in {"", "0"}:
+            return (
+                "planned",
+                f"clean stop: ActiveState={active_state} SubState={sub_state or 'dead'} "
+                f"Result={result or 'success'}",
+            )
+        return (
+            "crash",
+            f"unclean stop: ActiveState={active_state} Result={result or 'unknown'} "
+            f"ExecMainStatus={exec_status or '?'} SubState={sub_state}",
+        )
+
+    # Unknown/maintenance/empty/probe-error -> alert rather than risk a miss.
+    show_error = props.get("_showError")
+    detail = f"unclassified: ActiveState={active_state or 'unknown'} Result={result or 'unknown'}"
+    if show_error:
+        detail += f" probe_error={show_error}"
+    return "crash", detail
+
+
+def _log_intent_skip(service: str, name: str, classification: str, detail: str) -> None:
+    print(
+        f"[watchdog] intent-skip service={service} instance={name} "
+        f"classification={classification} {detail}",
+        file=sys.stderr,
+    )
+
+
 def local_service_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
+    use_intent = intent_detection_enabled() and sys.platform != "darwin"
+    grace = restart_grace_seconds()
+    monotonic_now = monotonic_now_seconds() if use_intent else 0.0
+    legacy_states = dry_service_states()
     for item in expected_local_services():
         service = item["service"]
-        status = local_service_status(service)
-        if service_is_active(status):
-            continue
+        name = item["name"]
         key = f"local_service:{service}"
+        # Legacy single-string dry channel still wins (backwards compatibility).
+        if service in legacy_states:
+            status = legacy_states[service]
+            if not service_is_active(status):
+                problems[key] = (
+                    f"local service inactive: service={service} instance={name} "
+                    f"status={status} expected=always_on profile={profile}"
+                )
+            continue
+        if not use_intent:
+            status = local_service_status(service)
+            if not service_is_active(status):
+                problems[key] = (
+                    f"local service inactive: service={service} instance={name} "
+                    f"status={status} expected=always_on profile={profile}"
+                )
+            continue
+        try:
+            props = service_intent_properties(service)
+            classification, detail = classify_service_intent(props, grace, monotonic_now)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: ambiguity must alert.
+            problems[key] = (
+                f"local service intent check failed: service={service} instance={name} "
+                f"error={str(exc)[:160]} expected=always_on profile={profile}"
+            )
+            continue
+        if classification in {"active", "planned", "activating_grace"}:
+            if classification != "active":
+                _log_intent_skip(service, name, classification, detail)
+            continue
         problems[key] = (
-            f"local service inactive: service={service} instance={item['name']} "
-            f"status={status} expected=always_on profile={profile}"
+            f"local service crash: service={service} instance={name} "
+            f"intent={classification} {detail} expected=always_on profile={profile}"
         )
     return problems
 

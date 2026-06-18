@@ -522,6 +522,24 @@ stands; its premise (run-once) was imprecise.
   members suppressed in `should_suppress_send`; `sweep_flap_storms` emits the
   terminal resolve summary. flap_storm exempt from Pattern A (§C4). 11 tests (f12).
 
+**Wave 2 — landed (2026-06-17):**
+- **Pattern B Part 1 — planned-vs-crash intent detection** (`heartbeat-watchdog.py`).
+  Replaced the bare `systemctl is-active` check with structured
+  `systemctl --user show -p Result,ActiveState,SubState,ExecMainStatus,StateChangeTimestampMonotonic`.
+  `classify_service_intent()` returns `active|planned|activating_grace|crash`:
+  clean stop (`Result=success` + inactive/deactivating) → planned (log-only,
+  no alert); restart in flight (`activating` within `BOT_ERRORS_RESTART_GRACE_SECONDS`,
+  default 45, measured via CLOCK_MONOTONIC vs systemd's monotonic stamp) → hold;
+  `failed` / non-success `Result` (exit-code, signal, oom-kill, timeout, …) /
+  stalled-activating → crash, alerts as before. **Fail-closed**: unknown state,
+  probe error, or exception classifies as crash so a real outage is never dropped.
+  Incident key `local_service:<service>` is preserved (dedup continuity). Env
+  `BOT_ERRORS_WATCHDOG_INTENT_DETECTION` (default 1); gate-off falls back to the
+  legacy is-active path. Dry channel `BOT_ERRORS_DRY_SERVICE_INTENT` (JSON props).
+  21 tests (`test_bot_errors_heartbeat_watchdog_intent.py`).
+- **Still deferred for Pattern B:** Part 2 (maintenance-window CLI + dispatcher
+  `should_suppress_send` gate, §C6) and launchd/darwin intent parity.
+
 **Deferred follow-ups (precisely scoped):**
 - **Pattern G — runtime-tool-error benign classification** (NOT landed; TS, own
   bead). Root cause is `src/runtimes/agent/runtime.ts`: `tool_result` handler at
@@ -538,8 +556,8 @@ stands; its premise (run-once) was imprecise.
   critical open since 06-13 with 49 benign dups.
 - **C2 liveness-gated resolve** for Pattern F (currently time-stable only) and
   **C3 N-of-M slow-flapper** counter — both noted in code comments.
-- **Pattern B** (intent: planned-vs-crash + launchd/darwin, §C6) and **Pattern C/D**
-  (inhibition + transient tiering) — Waves 2–3, untouched this session.
+- **Pattern B Part 2** (maintenance-window CLI + launchd/darwin, §C6) and
+  **Pattern C/D** (inhibition + transient tiering) — Wave 3, untouched.
 
 **Deploy:** changes take effect on the **next natural dispatcher restart** (Lucas
 controls; no self-restart). The SHA-pin (`deploy/bot-errors-runtime-manifest.json`
