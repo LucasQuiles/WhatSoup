@@ -541,7 +541,6 @@ export {
   type PendingPollQuestion,
 } from './poll-resolution.ts';
 import {
-  serializePendingPoll,
   deserializePendingPoll,
   evaluateResolution,
   evaluateResolutionOnTimeout,
