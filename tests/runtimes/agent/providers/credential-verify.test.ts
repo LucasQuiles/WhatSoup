@@ -76,6 +76,20 @@ describe('verifyFallbackCredential', () => {
     expect(capturedInit!.signal).toBeInstanceOf(AbortSignal);
   });
 
+  // Regression guard for #1056: a 3xx must abort rather than forward the bearer
+  // header to the redirect target.
+  it("sets redirect: 'error' so a 3xx never forwards the bearer key", async () => {
+    let capturedInit: RequestInit | undefined;
+    const spyFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedInit = init;
+      return { status: 200, ok: true };
+    }) as unknown as typeof fetch;
+
+    await verifyFallbackCredential('openai', 'any-key', spyFetch);
+
+    expect(capturedInit?.redirect).toBe('error');
+  });
+
   // 7. Each mapped service probes its exact documented URL.
   it.each([
     ['deepseek', 'https://api.deepseek.com/models'],

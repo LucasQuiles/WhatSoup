@@ -32,6 +32,9 @@ export async function proxyToInstance(
         method,
         headers,
         body: body && method !== 'GET' ? body : undefined,
+        // A 3xx must abort, not forward the bearer health token to the redirect
+        // target (#1056); matches the convention in fleet/routes/credentials.ts.
+        redirect: 'error',
         signal: controller.signal,
       });
 
