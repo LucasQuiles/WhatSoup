@@ -63,4 +63,60 @@ describe('contacts-sync', () => {
       ]);
     });
   });
+
+  // Closes the residual branch-coverage gaps in src/core/contacts-sync.ts:
+  //   - handleContactsUpsert catch fallback when toConversationKey throws
+  //   - handleContactsUpdate if (u.name !== undefined) TRUE branch
+  //   - if (u.notify !== undefined) FALSE branch
+  //   - if (u.name !== undefined) FALSE branch
+  describe('residual-branch coverage', () => {
+    it('falls back to regex-stripped phone when toConversationKey throws on a JID without "@"', () => {
+      // 'noatsymbol' has no "@" → toConversationKey throws → catch branch uses c.id.replace(/@.*$/, '')
+      handleContactsUpsert(db, [{ id: 'noatsymbol', name: 'NoAt', notify: 'NoAtNotify' }]);
+      const row = db.raw.prepare(
+        'SELECT canonical_phone, display_name, notify_name FROM contacts WHERE jid = ?'
+      ).get('noatsymbol') as
+        | { canonical_phone: string | null; display_name: string | null; notify_name: string | null }
+        | undefined;
+      expect(row?.canonical_phone).toBe('noatsymbol');
+      expect(row?.display_name).toBe('NoAt');
+      expect(row?.notify_name).toBe('NoAtNotify');
+    });
+
+    it('updates only display_name when the update object carries only name (no notify)', () => {
+      handleContactsUpsert(db, [{ id: '1234@s.whatsapp.net', name: 'Alice', notify: 'Ali' }]);
+      handleContactsUpdate(db, [{ id: '1234@s.whatsapp.net', name: 'Alice Renamed' }]);
+      const row = db.raw.prepare(
+        'SELECT display_name, notify_name FROM contacts WHERE jid = ?'
+      ).get('1234@s.whatsapp.net') as
+        | { display_name: string | null; notify_name: string | null }
+        | undefined;
+      expect(row?.display_name).toBe('Alice Renamed');
+      expect(row?.notify_name).toBe('Ali');
+    });
+
+    it('updates only notify_name when the update object carries only notify (no name)', () => {
+      handleContactsUpsert(db, [{ id: '1234@s.whatsapp.net', name: 'Alice', notify: 'Ali' }]);
+      handleContactsUpdate(db, [{ id: '1234@s.whatsapp.net', notify: 'Ali2' }]);
+      const row = db.raw.prepare(
+        'SELECT display_name, notify_name FROM contacts WHERE jid = ?'
+      ).get('1234@s.whatsapp.net') as
+        | { display_name: string | null; notify_name: string | null }
+        | undefined;
+      expect(row?.display_name).toBe('Alice');
+      expect(row?.notify_name).toBe('Ali2');
+    });
+
+    it('applies no field changes when the update object carries neither name nor notify', () => {
+      handleContactsUpsert(db, [{ id: '1234@s.whatsapp.net', name: 'Alice', notify: 'Ali' }]);
+      handleContactsUpdate(db, [{ id: '1234@s.whatsapp.net' }]);
+      const row = db.raw.prepare(
+        'SELECT display_name, notify_name FROM contacts WHERE jid = ?'
+      ).get('1234@s.whatsapp.net') as
+        | { display_name: string | null; notify_name: string | null }
+        | undefined;
+      expect(row?.display_name).toBe('Alice');
+      expect(row?.notify_name).toBe('Ali');
+    });
+  });
 });
