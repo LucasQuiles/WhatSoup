@@ -64,6 +64,30 @@ describe('cron parser', () => {
       expect(date.getUTCDate()).toBe(5); // same day
       expect(date.getUTCHours()).toBe(18);
     });
+
+    // Standard cron: when BOTH day-of-month and day-of-week are restricted, the
+    // day matches if EITHER field matches (OR), not AND. Regression guard for #1068.
+    it('matches day-of-week first when both DoM and DoW are restricted (OR)', () => {
+      // Thursday 2026-01-01; "0 0 13 * 5" = midnight on the 13th OR any Friday.
+      // OR semantics → next Friday 2026-01-02. (Buggy AND skips to Fri-the-13th 2026-02-13.)
+      const from = Math.floor(new Date('2026-01-01T00:00:00Z').getTime() / 1000);
+      const next = nextCronRun('0 0 13 * 5', from);
+      expect(new Date(next * 1000).toISOString()).toBe('2026-01-02T00:00:00.000Z');
+    });
+
+    it('matches day-of-month first when both DoM and DoW are restricted (OR)', () => {
+      // Saturday 2026-01-10; next 13th (Tue 2026-01-13) precedes next Friday (2026-01-16).
+      const from = Math.floor(new Date('2026-01-10T00:00:00Z').getTime() / 1000);
+      const next = nextCronRun('0 0 13 * 5', from);
+      expect(new Date(next * 1000).toISOString()).toBe('2026-01-13T00:00:00.000Z');
+    });
+
+    it('still ANDs the day field with hour/minute when only one day field is restricted', () => {
+      // Only DoW restricted (DoM = '*'): "0 0 * * 5" from Thu 2026-01-01 → Fri 2026-01-02.
+      const from = Math.floor(new Date('2026-01-01T00:00:00Z').getTime() / 1000);
+      const next = nextCronRun('0 0 * * 5', from);
+      expect(new Date(next * 1000).toISOString()).toBe('2026-01-02T00:00:00.000Z');
+    });
   });
 
   describe('cronToHuman', () => {
