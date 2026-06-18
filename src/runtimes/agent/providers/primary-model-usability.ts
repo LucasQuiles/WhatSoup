@@ -186,3 +186,18 @@ async function withTimeout<T>(
     );
   });
 }
+
+/**
+ * Whether a primary-model usability probe result should raise an operator alert.
+ * Pure predicate over PrimaryModelUsabilityResult, relocated from AgentRuntime
+ * (god-class decomposition slice BEAD-PURE-3). A transient 'unknown' caused by
+ * missing config / unsupported provider is not actionable; any other non-'usable'
+ * status is.
+ */
+export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
+  if (result.model === null) return false;
+  if (result.status === 'unknown') {
+    return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
+  }
+  return result.status !== 'usable';
+}
