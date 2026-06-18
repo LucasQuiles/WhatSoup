@@ -631,6 +631,35 @@ describe('Drawer — bottom-sheet placement (modal)', () => {
     expect(scrim!.getAttribute('aria-hidden')).toBe('true');
   });
 
+  it('portals the modal sheet to document.body, escaping the inline layout (DD-24 fix)', () => {
+    // The bottom-sheet is position:fixed and must dock to the VIEWPORT bottom.
+    // It is portaled to document.body so it escapes the DrawerLayout's
+    // `container-type` containing block (which previously docked the absolute
+    // sheet to the inline layout's bottom — off-screen on a tall/scrolled narrow
+    // page). Proving the shell is NOT inside the render container guards that.
+    const { container } = render(
+      <Drawer open onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const shell = screen.getByRole('dialog');
+    expect(container.contains(shell)).toBe(false);
+    expect(document.body.contains(shell)).toBe(true);
+    // The modal scrim is portaled alongside the shell (same overlay fragment).
+    const scrim = document.querySelector('.soup-drawer-scrim--bottom-sheet')!;
+    expect(container.contains(scrim)).toBe(false);
+  });
+
+  it('does NOT portal the right placement — it stays inline (non-modal, DD-19 exception)', () => {
+    const { container } = render(
+      <Drawer open onClose={() => {}} aria-label="sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const shell = screen.getByRole('complementary');
+    expect(container.contains(shell)).toBe(true);
+  });
+
   it('Escape dismisses the bottom-sheet exactly once', () => {
     const onClose = vi.fn();
     render(
