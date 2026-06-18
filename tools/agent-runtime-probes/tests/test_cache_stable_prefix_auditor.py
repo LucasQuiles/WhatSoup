@@ -462,6 +462,49 @@ def test_breakpoint_keeps_earliest_index_across_pairs():
     assert cross["breakpoint_capture_index"] == 1
 
 
+def _cap(model="A", perm="default", tools=("t1", "t2")):
+    return {"parse_status": "ok", "model": model, "permission_mode": perm,
+            "tool_name_hashes": sorted(tools), "ordered_tool_name_hashes": list(tools)}
+
+
+def test_breakpoint_invariant_base_longer_than_cap_no_index_error():
+    # The bounds guard `i >= len(cap_hashes) or cap_hashes[i] != h` must short-circuit when base is
+    # LONGER than cap (a truncation): a > weakening would index cap_hashes[len(cap)] and raise
+    # IndexError instead of returning (True, len(cap)).
+    moved, idx = probe._breakpoint_invariant(["a", "b", "c"], ["a", "b"])
+    assert moved is True and idx == 2
+
+
+def test_single_dimension_churn_flags_risk():
+    # any_churn = model OR permission OR tool_set OR breakpoint: ANY single churn dimension must flag
+    # cache_stability_risk. An and->or weakening would require ALL dimensions to churn together,
+    # hiding a single-dimension (here model-only) prefix change.
+    cross = probe.cross_capture_churn([_cap(model="A"), _cap(model="B")])
+    assert cross["model_churn"] is True
+    assert cross["cache_stability_risk"] == "churn_detected"
+
+
+def test_first_differing_capture_index_is_the_earliest():
+    # first_differing_capture_index records the FIRST capture that differed (guard `differed and
+    # first_differing_capture_index is None`). An and->or weakening would keep overwriting it,
+    # recording the LAST differing capture instead of the first. Two captures both differ from base.
+    cross = probe.cross_capture_churn([_cap(model="A"), _cap(model="B"), _cap(model="C")])
+    assert cross["first_differing_capture_index"] == 1
+
+
+def test_section_artifact_empty_sections_is_unsupported_shape():
+    # An empty `sections` list is an unsupported section artifact (guard `not isinstance(sections,
+    # list) or not sections`). An and->or weakening would accept an empty list and proceed.
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        json.dump({"sections": []}, f)
+        p = Path(f.name)
+    try:
+        rep = probe.build_section_report(p)
+    finally:
+        p.unlink(missing_ok=True)
+    assert rep["section_artifact_status"] == "unsupported_shape"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

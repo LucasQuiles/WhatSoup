@@ -552,6 +552,17 @@ def test_main_returns_one_on_missing_input():
 # Main runner
 # ---------------------------------------------------------------------------
 
+def test_estimate_replay_zero_token_field_is_not_measured():
+    # A provider-truth token field must be POSITIVE to count as a measurement (guard `... and tok > 0`).
+    # A 0-value field is degenerate and must FALL THROUGH to the next source, NOT be returned as a
+    # (0, "local_measured"/"synthetic") value. A >= weakening would treat 0 input/total/replay tokens
+    # as a measured/synthetic value, contaminating the bucket proof-class — and only local_measured
+    # opens the downstream savings gate, so a degenerate 0-token session must not masquerade as proven.
+    assert probe._estimate_replay_tokens({"input_tokens": 0, "replay_tokens": 5000}) == (5000, "synthetic")
+    assert probe._estimate_replay_tokens({"total_tokens": 0, "replay_tokens": 5000}) == (5000, "synthetic")
+    assert probe._estimate_replay_tokens({"replay_tokens": 0}) == (0, "unknown")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
