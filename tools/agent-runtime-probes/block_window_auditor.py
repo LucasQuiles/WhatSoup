@@ -250,8 +250,11 @@ def main() -> int:
     json.dump(report, sys.stdout, indent=2 if args.pretty else None)
     sys.stdout.write("\n")
 
-    # Exit nonzero on error / missing input
-    if "_error" in report or report.get("error_type") == "missing_input":
+    # Exit nonzero on error / missing / malformed input. NOTE: the malformed-input report carries
+    # error_type="malformed_input" WITHOUT an "_error" key, and missing_input is narrower than the
+    # set of error states, so guarding on `"_error" or error_type=="missing_input"` alone let a
+    # malformed capture exit 0 (a fail-open CI exit). Catch every typed error_type explicitly.
+    if "_error" in report or report.get("error_type") in {"missing_input", "malformed_input"}:
         return 1
     return 0
 

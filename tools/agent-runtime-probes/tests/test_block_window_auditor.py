@@ -665,6 +665,41 @@ def test_main_direct_call_pretty_flag():
 # Main runner
 # ---------------------------------------------------------------------------
 
+def test_malformed_capture_exits_nonzero():
+    # SOURCE-BUG FIX: a malformed capture yields parse_status="invalid" / error_type="malformed_input"
+    # with NO "_error" key. The CLI exit must be NONZERO (fail-closed). The prior guard
+    # `"_error" in report or error_type=="missing_input"` let a malformed capture exit 0 — a fail-open
+    # CI exit (a degraded/unparseable run read as clean). Now guarded on the full typed error set.
+    path = _write_jsonl("this is not valid jsonl {{{\n")
+    try:
+        rc, report = _run_main_with_args(path)
+    finally:
+        path.unlink(missing_ok=True)
+    assert rc != 0, "malformed capture must exit nonzero, not be read as a clean run"
+    assert report["error_type"] == "malformed_input"
+
+
+def test_risk_flag_floor_is_exclusive():
+    # cache_read_zero_above_floor risk = (cache_read == 0 AND input_tokens > floor), STRICT: input
+    # EXACTLY AT the floor is NOT above it -> no risk. A >= weakening would flag an at-floor session.
+    at_floor = json.dumps({"type": "message_delta",
+                           "usage": {"cache_read_input_tokens": 0, "input_tokens": 1000}}) + "\n"
+    above = json.dumps({"type": "message_delta",
+                        "usage": {"cache_read_input_tokens": 0, "input_tokens": 1001}}) + "\n"
+    assert probe._compute_cache_read_zero_above_floor(at_floor, 1000)[0] is False
+    assert probe._compute_cache_read_zero_above_floor(above, 1000)[0] is True
+
+
+def test_usage_scan_defensive_on_malformed_events():
+    # The usage-candidate scan guards each event shape with AND chains; an and->or weakening would
+    # index/append a malformed usage and crash. A message_start whose message lacks "usage", and a
+    # bare event whose "usage" is not a dict, must both be SKIPPED (-> "unknown"), never crash.
+    no_usage_start = json.dumps({"type": "message_start", "message": {"id": "x"}}) + "\n"
+    assert probe._compute_cache_read_zero_above_floor(no_usage_start, 1000)[0] == "unknown"
+    nondict_usage = json.dumps({"type": "other", "usage": "not_a_dict"}) + "\n"
+    assert probe._compute_cache_read_zero_above_floor(nondict_usage, 1000)[0] == "unknown"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
