@@ -27,7 +27,7 @@
  *     with `recurrenceToCron`/`cronToRecurrence` making submit/edit-load a
  *     one-liner.
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Clock } from 'lucide-react'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
@@ -109,11 +109,20 @@ export function ScheduleComposerModal({
   const [recurrence, setRecurrence] = useState<RecurrenceValue>({ kind: 'once' })
   const [submitting, setSubmitting] = useState(false)
 
-  // Populate from editMessage when opening
+  // Populate from editMessage when opening. Keyed on the open/editMessage identity via a
+  // ref so it fires exactly once per open (or edit-target change) — NOT every time the
+  // `chats` array reference churns (chats refetch on window focus / unreadCount updates),
+  // which would otherwise clobber the operator's in-progress edits with a silent reset.
+  const populatedKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      populatedKeyRef.current = null
+      return
+    }
+    const key = editMessage ? `edit:${editMessage.id}` : 'new'
+    if (key === populatedKeyRef.current) return
+    populatedKeyRef.current = key
     if (editMessage) {
-      // Find matching chat
       const match = chats.find(c => c.conversationKey === editMessage.chatJid) ?? null
       setSelectedChat(match)
       setContentType((editMessage.contentType === 'text' ? 'text' : 'media') as ContentType)
@@ -133,6 +142,14 @@ export function ScheduleComposerModal({
       setRecurrence({ kind: 'once' })
     }
   }, [open, editMessage, chats])
+
+  // Resolve the edit target's chat once `chats` loads (if it arrived after the modal
+  // opened). Only fills an unset selection — never overwrites other in-progress edits.
+  useEffect(() => {
+    if (!open || !editMessage || selectedChat) return
+    const match = chats.find(c => c.conversationKey === editMessage.chatJid)
+    if (match) setSelectedChat(match)
+  }, [open, editMessage, chats, selectedChat])
 
   const handleSubmit = useCallback(async () => {
     if (!selectedChat) {
