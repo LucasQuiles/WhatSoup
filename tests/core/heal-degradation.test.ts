@@ -142,7 +142,7 @@ describe('checkDegradationSignals', () => {
     expect(sendTracked).not.toHaveBeenCalled();
   });
 
-  it('emits separate heal reports per sender when multiple senders each have 5+ failures', () => {
+  it('coalesces multiple senders into ONE aggregated report per tick', () => {
     const recentTs = new Date(Date.now() - 2 * 60 * 1000).toISOString();
     for (let i = 0; i < 5; i++) {
       insertDecryptionFailure(db, 'sender-a@s.whatsapp.net', recentTs);
@@ -151,6 +151,29 @@ describe('checkDegradationSignals', () => {
 
     checkDegradationSignals(db, messenger, null, null);
 
-    expect(sendTracked).toHaveBeenCalledTimes(2);
+    expect(sendTracked).toHaveBeenCalledOnce();
+    const message = vi.mocked(sendTracked).mock.calls[0][2] as string;
+    expect(message).toContain('sender-a@s.whatsapp.net');
+    expect(message).toContain('sender-b@s.whatsapp.net');
+  });
+
+  it('single-flights across ticks even as failure counts change (stable error class)', () => {
+    const recentTs = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    for (let i = 0; i < 5; i++) insertDecryptionFailure(db, 'sender-a@s.whatsapp.net', recentTs);
+
+    // Tick 1 → one report.
+    checkDegradationSignals(db, messenger, null, null);
+    expect(sendTracked).toHaveBeenCalledOnce();
+
+    // More failures arrive (count rises) and a second sender appears; next 60s tick.
+    for (let i = 0; i < 3; i++) {
+      insertDecryptionFailure(db, 'sender-a@s.whatsapp.net', recentTs);
+      insertDecryptionFailure(db, 'sender-b@s.whatsapp.net', recentTs);
+    }
+    checkDegradationSignals(db, messenger, null, null);
+
+    // Still one report — the active degraded report suppresses the repeat (was the bug:
+    // sender_jid+count baked into the class made every tick a "new" class).
+    expect(sendTracked).toHaveBeenCalledOnce();
   });
 });

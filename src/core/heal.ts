@@ -358,12 +358,19 @@ export function checkDegradationSignals(
     HAVING cnt >= 5
   `).all(cutoff) as Array<{ sender_jid: string; cnt: number }>;
 
-  for (const { sender_jid, cnt } of failures) {
-    emitHealReport(db, messenger, durability, {
-      type: 'degraded',
-      stderr: `${cnt} unresolved decryption failures from ${sender_jid} in last 5 minutes`,
-    }, activeControlReportId);
-  }
+  if (failures.length === 0) return;
+
+  // Coalesce per-sender signals into ONE degraded report per tick. The FIRST line is a
+  // fixed string so normalizeErrorClass produces a STABLE error class — otherwise each
+  // sender / rising count yields a distinct class and the single-flight guard never
+  // engages, paging Q with near-identical reports every 60s tick (bounded only by the
+  // global valve). Per-sender specifics go on following lines (not part of the class).
+  const totalFailures = failures.reduce((sum, f) => sum + f.cnt, 0);
+  const detail = failures.map((f) => `  ${f.cnt} from ${f.sender_jid}`).join('\n');
+  emitHealReport(db, messenger, durability, {
+    type: 'degraded',
+    stderr: `decryption failures degraded\n${failures.length} sender(s), ${totalFailures} unresolved in last 5 minutes\n${detail}`,
+  }, activeControlReportId);
 }
 
 function formatHealReport(payload: {
