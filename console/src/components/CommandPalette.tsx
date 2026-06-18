@@ -185,9 +185,21 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           }}
           onKeyDown={handleKeyDown}
         />
+        {/*
+          Single live region announcing the filtered count to assistive tech as the query
+          changes (APG combobox pattern / WCAG 4.1.3). Kept OUTSIDE the listbox — aria-live on
+          the listbox itself would announce on every option render — and always mounted so the
+          screen reader registers updates. It voices both the empty and non-empty cases, so the
+          visual empty-state below no longer carries its own (would-be duplicate) live role.
+        */}
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {filtered.length === 0
+            ? 'No results available'
+            : `${filtered.length} result${filtered.length === 1 ? '' : 's'} available`}
+        </div>
         <div id={listboxId} role="listbox" aria-label="Commands" className="soup-cmdk__list">
           {filtered.length === 0 ? (
-            <div className="soup-cmdk__empty" role="status" aria-live="polite">
+            <div className="soup-cmdk__empty">
               No results
             </div>
           ) : (
