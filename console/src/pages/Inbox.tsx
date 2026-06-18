@@ -16,7 +16,7 @@ import { SaveContactDialog } from '../components/SaveContactDialog'
 import ChatList from '../components/ChatList'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
-import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
+import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronLeft, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
 import { SearchInput } from '../components/shared/SearchInput.js'
 import { Button } from '../components/primitives/Button'
 import { ActionButton } from '../components/primitives/ActionButton'
@@ -214,6 +214,7 @@ export default function Inbox() {
   return (
     <motion.div
       className="soup-inbox-layout flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
+      data-mobile-detail={selectedChat ? 'thread' : 'list'}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
@@ -221,7 +222,7 @@ export default function Inbox() {
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <Card
-        className="flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
+        className="soup-inbox-chats flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
       >
         {/* Line picker — toolbar pattern */}
         <LinePicker
@@ -254,7 +255,7 @@ export default function Inbox() {
 
       {/* ═══ Center: Messages ═══ */}
       <Card
-        className="flex-1 flex flex-col min-h-0 overflow-hidden"
+        className="soup-inbox-thread flex-1 flex flex-col min-h-0 overflow-hidden"
       >
         {selectedChat && currentChat ? (
           <>
@@ -262,6 +263,18 @@ export default function Inbox() {
             <div
               className="flex items-center bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
             >
+              {/* Mobile-only back affordance — returns to the conversation list on
+                  narrow surfaces where the master-detail shows one pane at a time.
+                  Hidden ≥640px via .soup-inbox-back (CSS); on desktop both panes
+                  are visible so no back path is needed. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="soup-inbox-back flex-shrink-0"
+                icon={<ChevronLeft size={18} strokeWidth={1.75} />}
+                aria-label="Back to conversations"
+                onClick={() => setSelectedChat(null)}
+              />
               <div
                 className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-surface-overlay"
               >
