@@ -11,6 +11,16 @@ import { nowUnixSec } from '../../fleet/time-utils.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
+// #1067: validate a recurrence timezone is a real IANA zone before storing it.
+function isValidIanaTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string }> = {
   '.png':  { type: 'image',    mime: 'image/png' },
   '.jpg':  { type: 'image',    mime: 'image/jpeg' },
@@ -52,6 +62,11 @@ const ScheduleMessageSchema = z.object({
   isAnimated: z.boolean().optional(),
   mediaType: z.enum(['image', 'video', 'audio', 'document', 'sticker']).optional(),
   recurrence: z.string().optional().describe('5-field cron expression for recurring messages'),
+  timezone: z
+    .string()
+    .refine(isValidIanaTimeZone, { message: 'Invalid IANA timezone' })
+    .optional()
+    .describe('IANA timezone (e.g. America/New_York) the recurrence is evaluated in; defaults to UTC'),
   chatName: z.string().optional().describe('Display name for the target chat'),
 });
 
@@ -84,6 +99,7 @@ interface ScheduledMessageRow {
   payload: string;
   scheduled_at: number;
   recurrence: string | null;
+  timezone: string | null;
   next_run_at: number | null;
   run_count: number;
   status: string;
@@ -222,6 +238,7 @@ function rowToScheduledMessage(row: ScheduledMessageRow) {
     payload,
     scheduledAt: row.scheduled_at,
     recurrence: row.recurrence,
+    timezone: row.timezone,
     nextRunAt: row.next_run_at,
     runCount: row.run_count,
     status: row.status,
@@ -311,9 +328,9 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       const { contentType, payload, mediaBlob } = buildScheduledPayload(parsed, session);
       const nextRunAt = parsed.recurrence ? parsed.scheduled_at : null;
       const result = db.raw.prepare(
-        `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, next_run_at, status, media_blob)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      ).run(parsed.chatJid, parsed.chatName ?? null, contentType, JSON.stringify(payload), parsed.scheduled_at, parsed.recurrence ?? null, nextRunAt, mediaBlob);
+        `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, timezone, next_run_at, status, media_blob)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      ).run(parsed.chatJid, parsed.chatName ?? null, contentType, JSON.stringify(payload), parsed.scheduled_at, parsed.recurrence ?? null, parsed.timezone ?? null, nextRunAt, mediaBlob);
 
       return {
         id: Number(result.lastInsertRowid),
@@ -420,13 +437,13 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         // Anchor next_run_at to the new scheduled_at if both are changing,
         // otherwise use the supplied scheduled_at or wall-clock now.
         const base = scheduled_at ?? nowUnixSec() - 60;
-        const nextRun = nextCronRun(recurrence, base);
+        const nextRun = nextCronRun(recurrence, base, row.timezone ?? 'UTC');
         updates.push('next_run_at = ?');
         values.push(nextRun);
       } else if (scheduled_at !== undefined && row.recurrence) {
         // scheduled_at changed on an already-recurring row — recompute next_run_at
         // so the scheduler fires at the new time, not the stale next_run_at.
-        const nextRun = nextCronRun(row.recurrence, scheduled_at - 60);
+        const nextRun = nextCronRun(row.recurrence, scheduled_at - 60, row.timezone ?? 'UTC');
         updates.push('next_run_at = ?');
         values.push(nextRun);
       }

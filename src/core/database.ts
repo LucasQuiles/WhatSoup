@@ -727,6 +727,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [27, runMigration27],
   [28, runMigration28],
   [29, runMigration29],
+  [30, runMigration30],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -756,6 +757,21 @@ function runMigration29(db: DatabaseSync): void {
     SET timestamp = CAST(timestamp / 1000 AS INTEGER)
     WHERE timestamp >= 100000000000
   `);
+}
+
+// #1067: per-row IANA timezone for recurring schedules. NULL = UTC (back-compat),
+// so existing rows keep firing on their original UTC cron interpretation.
+function runMigration30(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_messages'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+  const cols = db
+    .prepare("PRAGMA table_info('scheduled_messages')")
+    .all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'timezone')) {
+    db.exec('ALTER TABLE scheduled_messages ADD COLUMN timezone TEXT');
+  }
 }
 
 function runMigration27(db: DatabaseSync): void {
