@@ -486,6 +486,27 @@ describe('OperationTracker', () => {
       tracker.shutdown();
     });
 
+    it('restarting the same toolId does not leak the previous timers (no duplicate slow event)', () => {
+      // A phantom/replayed tool_use event re-invokes onToolStart for a toolId that is
+      // still tracked. The previous op's slow/stall timers must be cleared, otherwise
+      // both fire and the user gets duplicate "Still working…" placeholders.
+      const { callbacks, progressEvents } = makeCallbacks();
+      const tracker = makeTracker(callbacks);
+
+      // read: slow at 9000ms
+      tracker.onToolStart('dup', 'Read', 'reading');
+      vi.advanceTimersByTime(1_000);
+      tracker.onToolStart('dup', 'Read', 'reading'); // re-seen before the first ended
+
+      vi.advanceTimersByTime(9_000);
+
+      const slowEvents = progressEvents.filter((e) => e.type === 'operation_slow');
+      expect(slowEvents).toHaveLength(1);
+      expect(tracker.getActive()).toHaveLength(1);
+
+      tracker.shutdown();
+    });
+
     it('ending one tool does not affect another\'s timers', () => {
       const { callbacks, progressEvents, stalledCalls } = makeCallbacks();
       const tracker = makeTracker(callbacks);
