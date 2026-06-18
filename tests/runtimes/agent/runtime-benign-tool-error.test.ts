@@ -97,6 +97,12 @@ describe('isBenignToolError — alert-safe self-correctable patterns (return tru
     // non-bridged path; never an agent or runtime fault.
     ['AskUserQuestion unanswered (unknown tool)', 'unknown', 'Answer questions?'],
     ['AskUserQuestion unanswered (error-tag wrapped)', 'unknown', '<error>Answer questions?</error>'],
+    // Tool-input schema rejection — agent passed the wrong params; the harness
+    // rejected the call before the handler ran. Self-correctable, never an outage.
+    ['InputValidationError missing required param', 'TaskUpdate',
+      '<tool_use_error>InputValidationError: TaskUpdate failed due to the following issues: The required parameter `taskId` is missing An unexpected parameter `tasks` was provided</tool_use_error>'],
+    ['InputValidationError unexpected param', 'Bash',
+      'InputValidationError: Bash failed due to the following issues: An unexpected parameter `tasks` was provided'],
   ];
 
   for (const [label, tool, content] of benign) {
@@ -243,6 +249,14 @@ describe('maybeEmitToolFailureAlert — benign gate', () => {
   it('does NOT alert on an unanswered AskUserQuestion (tool_name=unknown)', () => {
     rv(makeRuntime()).maybeEmitToolFailureAlert(
       emitArgs('unknown', 'Answer questions?'),
+    );
+    expect(emitAlert).not.toHaveBeenCalled();
+  });
+
+  it('does NOT alert on a tool-input schema rejection (InputValidationError)', () => {
+    rv(makeRuntime()).maybeEmitToolFailureAlert(
+      emitArgs('TaskUpdate',
+        '<tool_use_error>InputValidationError: TaskUpdate failed due to the following issues: The required parameter `taskId` is missing An unexpected parameter `tasks` was provided</tool_use_error>'),
     );
     expect(emitAlert).not.toHaveBeenCalled();
   });

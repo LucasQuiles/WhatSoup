@@ -1182,6 +1182,15 @@ const BENIGN_TOOL_ERROR_PATTERNS: ReadonlyArray<{
   // Agent worktree creation failure (self-correctable: falls back to in-place).
   { match: (l) => l.includes('cannot create agent worktree') || l.includes('worktreecreate hooks'),
     humanized: '_could not make a worktree, working in place_', alertSafe: true },
+  // Tool-input schema rejection (InputValidationError) — the agent supplied
+  // wrong/missing parameters and the harness rejected the call BEFORE the tool
+  // handler ran, so there is no side effect and the agent self-corrects on the
+  // next call. This is a deterministic caller-side schema mismatch, NEVER an
+  // infra/provider outage. (e.g. TaskUpdate called with a `tasks` array instead
+  // of the required `taskId`.) Distinct from tool_handler_exception, which is a
+  // handler that actually threw mid-execution and stays alert-worthy.
+  { match: (l) => l.includes('inputvalidationerror'),
+    humanized: '_that tool call had the wrong inputs, fixing the parameters_', alertSafe: true },
   // Git push / pull errors — ambiguous (could be auth/remote outage); alert.
   { match: (l) => l.includes('rejected') && l.includes('push'),
     humanized: '_push rejected, pulling latest changes first_', alertSafe: false },
