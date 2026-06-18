@@ -103,6 +103,18 @@ def test_malformed_specs_fail_closed():
     assert _err(ag.gate, 123, "y", [{"kind": "simple", "text": "a"}]) == "malformed_input"
 
 
+def test_paired_non_int_max_gap_rejected_when_anchor_otherwise_present():
+    # max_gap validation `not isinstance(gap, int) or gap < 0` (L101): a NON-INT max_gap (e.g. a
+    # float) is malformed EVEN WHEN the anchor is otherwise present and within proximity. The
+    # `-1` case above survives an 'or'->'and' mutation because its absent entity reaches
+    # malformed_spec via a DIFFERENT path; here entity+qualifier ARE present and adjacent, so the
+    # float max_gap is the SOLE defect. Original raises malformed_spec at the type guard; the
+    # mutant would accept the float (proximity works on a float) and return a non-malformed verdict.
+    orig = "the alpha beta gamma"
+    anchors = [{"kind": "paired", "entity": "alpha", "qualifier": "beta", "max_gap": 3.0}]
+    assert _err(ag.gate, orig, orig, anchors) == "malformed_spec"
+
+
 def test_output_is_metadata_only():
     anchors = [{"kind": "simple", "text": "secret token abc123"}]
     r = ag.gate("the secret token abc123 lives here", "the secret token abc123 lives here", anchors)
