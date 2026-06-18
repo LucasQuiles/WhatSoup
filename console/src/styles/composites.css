@@ -734,61 +734,6 @@ body::before {
   min-width: var(--tooltip-min-w);
 }
 
-/* ═══ Button variants — c-btn from design system ═══ */
-.c-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--btn-pad-v) var(--msg-pad-h);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-data);
-  font-weight: var(--fw-medium);
-  border: var(--bw) solid var(--border-subtle);
-  background: var(--btn-neutral-bg);
-  color: var(--text-2);
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-enter), background var(--dur-fast) var(--ease-enter), border-color var(--dur-fast) var(--ease-enter), box-shadow var(--dur-fast) var(--ease-enter), filter var(--dur-fast) var(--ease-enter), opacity var(--dur-fast) var(--ease-enter);
-}
-.c-btn:hover         { filter: brightness(1.1); }
-.c-btn-primary       { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.c-btn-primary:hover { filter: brightness(1.15); }
-.c-btn-danger        { background: transparent; border-color: var(--status-crit-border); color: var(--status-crit-solid); }
-.c-btn-danger:hover  { background: var(--status-crit-wash); }
-.c-btn-success       { background: transparent; border-color: var(--status-ok-border); color: var(--status-ok-solid); }
-.c-btn-success:hover { background: var(--status-ok-wash); }
-.c-btn-ghost         { background: transparent; border-color: transparent; color: var(--text-2); }
-.c-btn-ghost:hover   { background: var(--btn-neutral-bg); color: var(--text-2); }
-.c-btn-warning       { background: transparent; border-color: var(--status-warn-border); color: var(--status-warn-solid); }
-.c-btn-warning:hover { background: var(--status-warn-wash); }
-
-/* Disabled state for all button variants */
-.c-btn:disabled,
-.c-btn[disabled]     { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
-.c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--text-data); }
-.c-btn-xs      { padding: var(--sp-0h) var(--sp-2); font-size: var(--text-xs); }
-.c-btn-nav {
-  padding: var(--sp-1h) var(--sp-2h);
-  gap: 0;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  transition: padding var(--dur-base) var(--ease-enter), gap var(--dur-base) var(--ease-enter), color var(--dur-fast) var(--ease-enter), background var(--dur-fast) var(--ease-enter), border-color var(--dur-fast) var(--ease-enter), filter var(--dur-fast) var(--ease-enter);
-}
-.c-btn-nav .c-btn-nav-label {
-  max-width: 0;
-  opacity: 0;
-  overflow: hidden;
-  transition: max-width var(--dur-base) var(--ease-enter), opacity var(--dur-fast) var(--ease-enter);
-}
-.c-btn-nav:hover {
-  padding: var(--sp-1h) var(--sp-3);
-  gap: var(--sp-2);
-  filter: brightness(1.15);
-}
-.c-btn-nav:hover .c-btn-nav-label {
-  max-width: 60px;
-  opacity: 1;
-}
 /* ═══ Tab button — c-tab from design system ═══ */
 .c-tab {
   padding: var(--sp-2) var(--sp-4);

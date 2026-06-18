@@ -2,10 +2,10 @@
   "generated": "design burndown per-category ceiling (fall-only ratchet)",
   "categories": {
     "accent-law": 0,
-    "half-step": 59,
+    "half-step": 54,
     "legacy-var-css": 0,
     "raw-color-css": 0,
-    "raw-dimension-css": 12,
+    "raw-dimension-css": 11,
     "raw-font-size-css": 0,
     "transition-all-css": 0,
     "utility-smell": 1
