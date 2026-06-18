@@ -891,3 +891,196 @@ describe('TriggerPoller — notification throttle', () => {
     expect(calls).toHaveLength(2);
   });
 });
+
+describe('poller.ts uncovered-branch coverage', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('poll.sqlite spec.binds forwards positional args to the SQL query (toBindArgs path)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'binds', ownerJid: 'mw', actor: 'u' });
+    // probes with a label column so a WHERE label = ? bind can select a row.
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('match')`).run();
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('nope')`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      // binds object whose enumeration order matches the single ? placeholder.
+      spec: { sql: `SELECT id, label FROM probes WHERE label = ?`, binds: { label: 'match' }, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    const processed = await poller.tickOnce();
+
+    expect(processed).toBe(1);
+    expect(calls).toHaveLength(1);
+    // The bind selected exactly the 'match' row, proving binds reached the SQL.
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs[0].status).toBe('ok');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCount: 1, sampleRow: { label: 'match' } });
+  });
+
+  it('dispatchPauseNotification swallows a messenger failure and still records the pause', async () => {
+    const { messenger, calls } = makeFailingMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'pause-fail', ownerJid: 'mw', actor: 'u' });
+    // on_terminal='notify' (default) so dispatchPauseNotification is invoked;
+    // the failing messenger exercises the catch block at line 529.
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM table_that_does_not_exist`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      maxConsecutiveFailures: 2,
+    });
+
+    // First failure: status=failed, retry cooldown — NO dispatch (failed outcomes don't notify).
+    await poller.tickOnce();
+    expect(calls).toHaveLength(0);
+
+    // Second failure trips the circuit breaker; pause is committed and the
+    // pause notification is dispatched via dispatchPauseNotification, whose
+    // catch block (line 529) must absorb the messenger rejection.
+    now = 1_000_000_100;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await expect(poller.tickOnce()).resolves.toBe(1); // does not throw despite pause-dispatch failure
+
+    const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
+    expect(refreshed.status).toBe('paused');
+    expect(refreshed.next_fire_at).toBeNull();
+    // Pause dispatch was attempted (and swallowed) by the failing messenger.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain('consecutive failures');
+  });
+
+  it('expireTrigger swallows an expiry-notification dispatch rejection via .catch (line 548)', async () => {
+    const { messenger, calls } = makeFailingMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'expiry-fail', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    // on_terminal defaults to 'notify', so expiry dispatch is attempted and rejects;
+    // the void ... .catch(...) must absorb it so tickOnce resolves cleanly.
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      requestedTerminalAt: 999_999_999, // past relative to tick's now -> expiry sweep runs
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    // Drain microtasks so the void'd .catch promise settles before the test ends.
+    const processed = await poller.tickOnce();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(processed).toBe(1);
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    // Expiry was committed despite the dispatch failure.
+    const refreshed = db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string };
+    expect(refreshed.status).toBe('expired');
+    const runs = db.raw.prepare(`SELECT status, output_summary FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string }>;
+    expect(runs[0].status).toBe('terminal_fired');
+    expect(runs[0].output_summary).toContain('terminal_at_reached');
+  });
+
+  it('reopenTerminalBead is a no-op when the bead is NOT in a terminal status (line 593 early return)', async () => {
+    const { messenger } = makeMessenger();
+    // Bead stays 'active' (not terminal), so reopen_bead should short-circuit.
+    const bead = createBead(db.raw, { kind: 'watch', title: 'still active', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      requestedTerminalAt: 999_999_999,
+      onTerminal: 'reopen_bead',
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    // Bead was never terminal — status unchanged. The only status_change events
+    // present are from createBead itself; the trigger-poller must not have
+    // written any reopen status_change (line 593 early return).
+    const refreshedBead = db.raw.prepare(`SELECT status FROM beads WHERE id = ?`).get(bead.id) as { status: string };
+    expect(refreshedBead.status).toBe('active');
+    const pollerStatusChanges = db.raw.prepare(
+      `SELECT event_type FROM bead_events WHERE bead_id = ? AND event_type = 'status_change' AND actor = 'trigger-poller'`,
+    ).all(bead.id) as Array<{ event_type: string }>;
+    expect(pollerStatusChanges).toEqual([]);
+    // Trigger still expired.
+    const refreshed = db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string };
+    expect(refreshed.status).toBe('expired');
+  });
+
+  it('tick() runs one cycle and reschedules itself when not stopped (lines 169-176)', async () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'tick-reschedule', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const scheduled: Array<{ ms: number }> = [];
+    // Capture the timer callback AND any promise it returns so we can await it.
+    const pending: Array<() => (void | Promise<void>)> = [];
+    const fakeSetTimeout = ((fn: () => (void | Promise<void>), ms: number) => {
+      scheduled.push({ ms });
+      pending.push(fn);
+      return pending.length as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout;
+    const fakeClearTimeout = ((_id: NodeJS.Timeout) => { /* noop */ }) as typeof clearTimeout;
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      intervalMs: 7_000,
+      setTimeoutImpl: fakeSetTimeout,
+      clearTimeoutImpl: fakeClearTimeout,
+      now: () => 1_000_000_001,
+    });
+
+    poller.start();
+    expect(scheduled).toEqual([{ ms: 7_000 }]);
+
+    // Fire the scheduled timer. tick() is wrapped in `void` inside scheduleNext,
+    // but our fake captures the original closure reference, which we invoke and
+    // then drain the microtask queue so tickOnce + scheduleNext both complete.
+    const fire = pending.shift()!;
+    fire();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(scheduled).toEqual([{ ms: 7_000 }, { ms: 7_000 }]);
+
+    // lastRunAt proves tickOnce actually executed inside tick().
+    expect(poller.lastRunAt).toBe(new Date(1_000_000_001 * 1000).toISOString());
+
+    // After stop(), the poller's reschedule gate (!this.stopped) suppresses a new schedule.
+    poller.stop();
+    scheduled.length = 0;
+    // Manually run any pending tick closure; the stopped flag must prevent rescheduling.
+    if (pending.length > 0) {
+      const fire2 = pending.shift()!;
+      fire2();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(scheduled).toEqual([]);
+  });
+});
