@@ -3760,9 +3760,8 @@ describe('ops.ts uncovered-branch coverage', () => {
     // Emit a connected event so the post-connect startFire branch runs.
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    // The setTimeout(endOnce, 1000) inside the connected branch fires; flush it.
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-    expect(res._ended).toBe(true);
+    // Wait for the connected branch's delayed end to complete the response.
+    await vi.waitFor(() => expect(res._ended).toBe(true), { timeout: 2000 });
   });
 
   // ---- Lines 540, 558, 560: handleConfigUpdate settingsJson + enabledPlugins paths on existing cwd ----
@@ -4377,6 +4376,106 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
+  // ---- Line 969-971: cleanupPartial restores a pre-existing CLAUDE.md from snapshot ----
+  it('handleCreateLine restores a pre-existing CLAUDE.md on create failure (lines 969-970)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-restore-'));
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-restore-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      // Pre-create a regular-file CLAUDE.md as 0o400 (read-only for owner) so:
+      //  - snapshotExtra can read the file (capture priorContents)
+      //  - writePrivateFileSync openSync(O_WRONLY) fails with EACCES
+      const claudeDir = path.join(agentCwd, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+      fs.writeFileSync(claudeMdPath, '# original');
+      fs.chmodSync(claudeMdPath, 0o400);
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'restore-line', type: 'agent',
+          adminPhones: ['15550000001'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          claudeMd: '# new',
+        })),
+        res, deps);
+      // Write fails with EACCES → catch → cleanupPartial restores prior contents.
+      expect(res._status).toBe(500);
+      // Restore the file mode so the afterEach cleanup can rmSync it.
+      fs.chmodSync(claudeMdPath, 0o644);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 941: snapshotExtra rejects a non-regular path; line 951 re-throws non-ENOENT ----
+  it('handleCreateLine fails when pre-existing CLAUDE.md is a directory (lines 941/951 true)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-snap-'));
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-snap-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    const origData = process.env.XDG_DATA_HOME;
+    const origState = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    process.env.XDG_DATA_HOME = path.join(cfgTmp, 'data');
+    process.env.XDG_STATE_HOME = path.join(cfgTmp, 'state');
+    try {
+      // Pre-create CLAUDE.md as a directory so snapshotExtra throws EINVAL.
+      const claudeDir = path.join(agentCwd, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      fs.mkdirSync(path.join(claudeDir, 'CLAUDE.md'));
+      const deps = makeDeps({
+        discovery: {
+          getInstance: vi.fn(() => undefined),
+          getInstances: vi.fn(() => new Map()),
+          scan: vi.fn(),
+        } as any,
+      });
+      const res = mockRes();
+      await handleCreateLine(
+        mockReq(JSON.stringify({
+          name: 'snap-line', type: 'agent',
+          adminPhones: ['15550000001'],
+          agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+          claudeMd: '# fresh',
+        })),
+        res, deps);
+      // snapshotExtra throws EINVAL — propagated to outer catch → 500.
+      expect(res._status).toBe(500);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      if (origData === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = origData;
+      if (origState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = origState;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+    }
+  });
+
   // ---- Line 886: scanHealthPortInventory ENOENT on missing sibling config.json ----
   it('handleCreateLine skips a sibling without a config.json during healthPort inventory (line 886 true)', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-nojson-'));
@@ -4553,7 +4652,6 @@ describe('ops.ts uncovered-branch coverage', () => {
 
     child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected', data: {} }) + '\n'));
     expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-    expect(res._ended).toBe(true);
+    await vi.waitFor(() => expect(res._ended).toBe(true), { timeout: 2000 });
   });
 });
