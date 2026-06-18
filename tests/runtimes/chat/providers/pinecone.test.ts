@@ -1867,3 +1867,271 @@ describe('circuit breaker open — must run last', () => {
     expect(mockUpsertRecords.mock.calls.length).toBe(callsBefore);
   });
 });
+
+// ---------------------------------------------------------------------------
+// pinecone.ts uncovered-branch coverage
+//
+// Targets the 18 uncovered branches in src/runtimes/chat/providers/pinecone.ts
+// (per coverage report: lines 34, 70, 170, 304-313, 344, 445, 525, 555, 574).
+//
+// NOTE on breaker state: the `must run last` block above opens the
+// `search`, `searchEntities`, `rerank`, and `upsert` breakers. To re-use
+// those operations from a fresh `PineconeMemory` instance, the test
+// beforeEach advances `Date.now` past the 30s reset window so `isOpen()`
+// transitions the breaker to half-open and allows one probe.
+// ---------------------------------------------------------------------------
+
+describe('pinecone.ts uncovered-branch coverage', () => {
+  let memory: PineconeMemory;
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+  const mockListIndexes = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The `must run last` block above opened the `search`, `searchEntities`,
+    // and `upsert` breakers (state='open', lastFailureAt=FIXED_NOW_MS).
+    // Advance Date.now() past the 30s reset window so `isOpen()` transitions
+    // the breaker to half-open and allows one probe.
+    dateNowSpy.mockReturnValue(FIXED_NOW_MS + 31_000);
+    // Clear the per-test mock queue on the Pinecone API mocks so leftover
+    // resolved/rejected values from prior tests don't leak into this test.
+    // clearAllMocks() above only clears call history, not the implementation
+    // queue — mockReset() is required for that.
+    mockSearchRecords.mockReset();
+    mockUpsertRecords.mockReset();
+    mockRerank.mockReset();
+    mockListIndexes.mockReset();
+    mutableConfig.pineconeTopK = 20;
+    mutableConfig.pineconeRerank = false;
+    mutableConfig.pineconeRerankTopN = 6;
+    mutableConfig.botName = 'q'; // q does not require a project guard
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+      this.listIndexes = mockListIndexes;
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  afterEach(() => {
+    delete mutableConfig.pineconeTopK;
+    delete mutableConfig.pineconeRerank;
+    delete mutableConfig.pineconeRerankTopN;
+    delete mutableConfig.botName;
+    delete mutableConfig.memory;
+    delete process.env['PINECONE_API_KEY'];
+  });
+
+  // ── errorMessage (line 34): non-Error branch ─────────────────────────────
+
+  it('errorMessage falls back to String(err) when err is not an Error instance (upsert path)', async () => {
+    // Every upsertRecords call throws a non-Error value (string). The retry
+    // also throws a string. trackFailure → errorMessage(err) → String(err)
+    // exercises the `err instanceof Error` false branch on line 34.
+    mockUpsertRecords.mockImplementation(() => {
+      // deliberate non-Error throw to exercise the errorMessage non-Error branch
+      throw 'pinecone_string_error';
+    });
+    const record: MemoryRecord = makeMemoryRecord({ id: 'err-msg-1' });
+    await expect(memory.upsert([record])).rejects.toBeInstanceOf(AppError);
+    // The thrown string is reflected in the warn log via errorMessage → String(err)
+    expect(mockPineconeLogger.warn.mock.calls.some(
+      (args: unknown[]) => {
+        const meta = args[0] as { error?: string } | undefined;
+        return meta?.error === 'pinecone_string_error';
+      },
+    )).toBe(true);
+    // upsertRecords was called exactly twice (initial + retry)
+    expect(mockUpsertRecords.mock.calls.length).toBe(2);
+  });
+
+  // ── trackSuccess (line 70): clear-alerted branch ──────────────────────────
+
+  it('trackSuccess clears a previously alerted operation on a successful search', async () => {
+    // The `must run last` block already pushed `search` into alertedOperations
+    // (3 failures → breaker open → alert fired). The beforeEach advances
+    // time past the 30s reset window so the breaker transitions to half-open
+    // and this single successful call reaches trackSuccess('search'), which
+    // hits `if (alertedOperations.has('search'))` → true → clearAlertSourceChecked.
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+    const details = await memory.searchDetailed('recover', {}, 1);
+    expect(details.status).toBe('ok');
+    expect(details.results).toEqual([]);
+    // Confirm the success path logged completion (proves trackSuccess ran)
+    expect(mockPineconeLogger.info.mock.calls.some(
+      (args: unknown[]) => typeof args[1] === 'string' && args[1].includes('Pinecone search complete'),
+    )).toBe(true);
+  });
+
+  // ── missingRequiredProjectGuardError (line 170): has-guard branch ────────
+
+  it('getPineconeReadiness falls through missingRequiredProjectGuardError when non-q bot has projectId configured', async () => {
+    // botName='mini-bot' → pineconeProjectGuardRequired() returns true.
+    // projectId='proj-x' → hasPineconeProjectGuard(guard) returns true →
+    // missingRequiredProjectGuardError returns null (line 170 true branch).
+    // Then the function continues to listIndexes.
+    mutableConfig.botName = 'mini-bot';
+    mutableConfig.memory = { pinecone: { apiKeyEnv: 'PINECONE_API_KEY', projectId: 'proj-x' } };
+    process.env['PINECONE_API_KEY'] = 'test-key-guard';
+    mockListIndexes.mockResolvedValueOnce({
+      indexes: [{ name: 'test-index', host: 'test-index-proj-x.svc.pinecone.io' }],
+    });
+    const result = await getPineconeReadiness('test-index');
+    // The match for projectId '-proj-x.' inside the host string is satisfied.
+    expect(result).toEqual({ state: 'ready', index: 'test-index' });
+    // Also verify the host-matching code actually ran (so the branch was reached)
+    expect(mockListIndexes).toHaveBeenCalledTimes(1);
+  });
+
+  // ── fromPineconeHit (lines 304-313): default-value branches ──────────────
+
+  it('fromPineconeHit defaults every field when hit.fields is an empty object', async () => {
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          {
+            _id: 'rec-defaults',
+            _score: 0.5,
+            fields: {}, // every field missing → all `??` defaults fire
+          },
+        ],
+      },
+    });
+    const results = await memory.search('anything', {}, 5);
+    expect(results).toEqual([
+      {
+        id: 'rec-defaults',
+        // createdAt defaults to '' → NaN → applyDecay preserves original score (no decay)
+        score: 0.5,
+        record: {
+          id: 'rec-defaults',
+          text: '',
+          chatJid: '',
+          senderJid: '',
+          senderName: '',
+          memoryType: 'user_fact',
+          confidence: 0,
+          createdAt: '',
+          updatedAt: '',
+          superseded: '',
+          sourceMessagePks: '',
+        },
+      },
+    ]);
+  });
+
+  // ── fromPineconeHitEntity (line 344): text default branch ────────────────
+
+  it('fromPineconeHitEntity defaults text to empty string when fields.text is missing', async () => {
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          {
+            _id: 'ent-notxt',
+            _score: 0.42,
+            fields: { entity_type: 'building', source: 'crm' }, // no text field
+          },
+        ],
+      },
+    });
+    const results = await memory.searchEntities('no-text');
+    expect(results).toEqual([
+      {
+        id: 'ent-notxt',
+        score: 0.42,
+        record: {
+          id: 'ent-notxt',
+          text: '',
+          entityType: 'building',
+          source: 'crm',
+          metadata: {},
+        },
+      },
+    ]);
+  });
+
+  // ── _searchCoreDetailed retry success (line 445): hits undefined on retry ─
+
+  it('searchDetailed retry path treats undefined response.result.hits as empty (line 445 default branch)', async () => {
+    mockSearchRecords
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ result: {} }); // hits missing on retry success
+    const details = await memory.searchDetailed('q', {}, 3);
+    expect(details).toMatchObject({
+      results: [],
+      status: 'ok',
+      retried: true,
+    });
+    expect(details.durationMs).toEqual(expect.any(Number));
+    // Two calls: initial fail + retry
+    expect(mockSearchRecords.mock.calls.length).toBe(2);
+  });
+
+  // ── searchEntitiesDetailed (line 525): project_guard_failed branch ───────
+
+  it('searchEntitiesDetailed returns project_guard_failed when guard fails on a non-q bot', async () => {
+    mutableConfig.botName = 'mini-bot';
+    mutableConfig.memory = { pinecone: { apiKeyEnv: 'PINECONE_API_KEY', projectId: 'proj-x' } };
+    process.env['PINECONE_API_KEY'] = 'test-key-ent-guard';
+    // The PineconeMemory's client.listIndexes will be called by
+    // configuredProjectGuardError → pineconeProjectGuardError.
+    // Returning an empty list makes the index "missing" → guard error.
+    mockListIndexes.mockResolvedValueOnce({ indexes: [] });
+    const details = await memory.searchEntitiesDetailed('q');
+    expect(details.status).toBe('project_guard_failed');
+    expect(details.results).toEqual([]);
+    expect(details.projectGuardError).toContain('missing');
+    // The underlying searchRecords call must NOT have happened (we short-circuited)
+    expect(mockSearchRecords).not.toHaveBeenCalled();
+  });
+
+  // ── searchEntitiesDetailed (line 555): hits undefined default branch ──────
+
+  it('searchEntitiesDetailed treats undefined response.result.hits as empty (line 555 default branch)', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: {} }); // hits missing
+    const details = await memory.searchEntitiesDetailed('q');
+    expect(details.status).toBe('ok');
+    expect(details.results).toEqual([]);
+    // rerank is not called when hits is empty
+    expect(mockRerank).not.toHaveBeenCalled();
+  });
+
+  // ── rerank loop (line 574): original undefined branch ───────────────────
+
+  it('searchEntities skips rerank entries that reference a non-existent mapped index (line 574 false branch)', async () => {
+    mutableConfig.pineconeRerank = true;
+    mutableConfig.pineconeRerankTopN = 6;
+    // Two hits, but rerank returns a doc with index=5 (out-of-bounds) AND
+    // a valid index=0. The index=5 entry should be silently dropped.
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          makeEntityHit('ent-A', 0.91),
+          makeEntityHit('ent-B', 0.72),
+        ],
+      },
+    });
+    mockRerank.mockResolvedValueOnce({
+      data: [
+        { index: 5, score: 0.99 }, // out-of-bounds → `original` undefined → skipped
+        { index: 0, score: 0.50 },
+      ],
+    });
+    const results = await memory.searchEntities('rerank-oob');
+    // Only the valid rerank entry should be present; ent-A at score 0.50.
+    expect(results).toEqual([
+      {
+        id: 'ent-A',
+        score: 0.50,
+        record: {
+          id: 'ent-A',
+          text: 'BUILDING: 1240 Westchester Ave',
+          entityType: 'building',
+          source: 'crm',
+          metadata: { address: '1240 Westchester Ave' },
+        },
+      },
+    ]);
+  });
+});
