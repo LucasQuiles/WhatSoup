@@ -102,8 +102,8 @@ body::before {
 }
 
 .typing-dot {
-  width: 5px;
-  height: 5px;
+  width: var(--typing-dot);
+  height: var(--typing-dot);
   border-radius: 50%;
   background: var(--mode-chat-solid);
   animation: typing-bounce 1.2s ease-in-out infinite;
@@ -920,7 +920,7 @@ body::before {
 .c-toggle {
   position: relative;
   display: inline-block;
-  width: 36px;
+  width: var(--toggle-w);
   height: var(--sp-5);
   cursor: pointer;
 }

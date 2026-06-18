@@ -14,6 +14,7 @@ is no longer authoritative.
 |---|---|---|
 | 3.0.0-draft | 2026-06-11 | Initial promotion of the G2-locked v2 (Blend) token set out of the mockup into SSOT. Adds the full legacy disposition table, migration aliases, light-theme AA must-fix values, and the utility-class anti-pattern register (G2 open item 3). |
 | 3.0.0-draft | 2026-06-16 | Records the DD-26 closeout bridge: 8 consumed `--type-*` names and the `--r-1/--r-2/--r-3` aliases are now defined in `tokens.primitive.css`, but the final 12-token type ramp below remains the SSOT and still requires the DD-26/DD-37 visual/spec closure pass. |
+| 3.0.0-draft | 2026-06-18 | Adds 10 off-grid component-geometry tokens to `tokens.component.css` so the remaining raw fixed dimensions move off literal lengths (raw-dimension-css burndown 11→0): `--typing-dot` 5px, `--toggle-w` 36px, `--modal-pad-max` 80px (modal backdrop clamp upper bound), `--skeleton-bar-h` 10px, `--log-lvl-chip-w` 18px, `--tab-underline-h` 2px, and the `--popover-check-{l,t,w,h}` checkmark-glyph geometry (3/2/6/10px). These are component-scoped deviations with no on-grid `--sp-*` equivalent (and deliberately not half-step, a tracked at-ceiling category); values are byte-equivalent to the originals, so no visual change. |
 
 ## 1. Architecture — three layers with must-not-own boundaries
 

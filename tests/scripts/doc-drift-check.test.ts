@@ -482,7 +482,10 @@ describe('doc drift check', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
     const staleDoc = path.join(dir, 'current-design.md');
     const staleTotal = currentDesignBurndownSummary.total - 1;
-    const staleBlocking = currentDesignBurndownSummary.blocking - 1;
+    // +1 (not -1) so the stale fixture stays a parseable non-negative integer even
+    // when the live blocking count is 0; the detector's count regex is \d+, so a
+    // "-1 blocking" fixture would be unmatchable and the test would self-defeat.
+    const staleBlocking = currentDesignBurndownSummary.blocking + 1;
     const text = `The current design-enforcement run has burndown ${staleTotal} total / ${staleBlocking} blocking.`;
     writeFileSync(staleDoc, `${text}\n`, 'utf8');
 
