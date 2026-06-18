@@ -540,24 +540,42 @@ stands; its premise (run-once) was imprecise.
 - **Still deferred for Pattern B:** Part 2 (maintenance-window CLI + dispatcher
   `should_suppress_send` gate, §C6) and launchd/darwin intent parity.
 
+**Wave 3 — landed (2026-06-17, squad orchestration):**
+- **Pattern C — inhibition table** (`bot-errors-dispatcher.py`, commit `9c86739b`).
+  Extended the existing `SUPERSEDED_SOURCES_BY_ALERT_SOURCE` + `stronger_open_incident_for`
+  + `mark_suppressed_by_stronger` machinery (not a reimplementation). Seed edges
+  `whatsapp_device_bond_lost`/`instance_logged_out`/`instance_unreachable` ⇒ `local_health`.
+  `symptom_source_matches` matches the qualified `local_health:<instance>` form via
+  exact-membership + `local_health:` prefix guard. Suppressed symptom tagged
+  `inhibited_by:<root_source>`; auto-release derived at decision time (no persistent
+  state). `close_superseded_incidents` made prefix-aware so a dispatched root actively
+  closes qualified `local_health:<instance>` symptoms in scope. Env
+  `BOT_ERRORS_INHIBITION_ENABLED` (default 1), `BOT_ERRORS_INHIBITION_MAP` (JSON
+  override; malformed → stderr + seed fallback). Fail-open: disabled/exception/unknown
+  never suppress; root never self-suppresses; strictly per machine|instance. 20 tests
+  (`test_bot_errors_inhibition.py`).
+- **Pattern G — benign tool-error classification** (`src/runtimes/agent/runtime.ts`,
+  commit `b7cf0b8f`). Single source of truth `BENIGN_TOOL_ERROR_PATTERNS` with an
+  `alertSafe` flag: `humanizeError` uses all entries (cosmetic); `isBenignToolError`
+  gates the alert in the shared `maybeEmitToolFailureAlert` (before `emitAlertChecked`,
+  both call sites ~4860/~8203) only for `alertSafe` entries. `alertSafe=false` (humanize
+  but STILL alert) for timeout / econn* / rate-limit·overloaded·429 / enospc /
+  enomem·oom·killed / exit-code-N — closes the false-negative of silencing a real outage
+  that merely contains a benign-looking substring. In-chat `enqueueToolUpdate` untouched.
+  Env `BOT_ERRORS_RUNTIME_TOOL_BENIGN_FILTER` (default on). Fail-open: unknown → alert.
+  53 tests (`runtime-benign-tool-error.test.ts`). Both beads cross-model reviewed
+  (sonnet impl → independent code-reviewer + opencode review); each review's one
+  Important finding (superseded-close prefix gap; over-broad allowlist) was fixed
+  before commit.
+
 **Deferred follow-ups (precisely scoped):**
-- **Pattern G — runtime-tool-error benign classification** (NOT landed; TS, own
-  bead). Root cause is `src/runtimes/agent/runtime.ts`: `tool_result` handler at
-  **line ~4860** calls `maybeEmitToolFailureAlert` for **every** `event.isError`,
-  and `emitAlertChecked` defaults severity to critical. `classifyToolError`
-  (line 1311) yields only `cancelled|blocked|error`. Fix: add
-  `isBenignToolError(toolName, content, classification)` and gate the alert call
-  (`if (!isBenign) this.maybeEmitToolFailureAlert(...)`; still enqueue the UI
-  toolUpdate). Benign signatures: category `cancelled`/`blocked`; git
-  nothing-to-commit / gitignored-path / did-not-match; grep/rg exit 1 = no match;
-  bare `Exit code 1` from a probe with no stderr fault. Env
-  `BOT_ERRORS_TOOLERROR_BENIGN_CLASSIFICATION` (default 1). Second call site at
-  line ~8203 takes the same gate. Live impact: a `runtime-tool-error:claude-cli:Bash`
-  critical open since 06-13 with 49 benign dups.
+- **Pattern D — transient-vs-outage tiering** and **Pattern B Part 2 — maintenance
+  window CLI + gate**: next Wave 3 beads (both re-touch `should_suppress_send`, so
+  serialize after C). Specs in §3 Pattern D / §3 Pattern B + §C6.
 - **C2 liveness-gated resolve** for Pattern F (currently time-stable only) and
   **C3 N-of-M slow-flapper** counter — both noted in code comments.
 - **Pattern B Part 2** (maintenance-window CLI + launchd/darwin, §C6) and
-  **Pattern C/D** (inhibition + transient tiering) — Wave 3, untouched.
+  **Pattern D** (transient tiering) — remaining Wave 3 beads. Pattern C landed above.
 
 **Deploy:** changes take effect on the **next natural dispatcher restart** (Lucas
 controls; no self-restart). The SHA-pin (`deploy/bot-errors-runtime-manifest.json`
