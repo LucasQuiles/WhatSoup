@@ -4031,6 +4031,132 @@ describe('ops.ts uncovered-branch coverage', () => {
   // Already covered by the existing "disables the service when creation fails after enabling it"
   // describe block at line 1186 (which makes deps.discovery.scan throw post-enable).
 
+  // ---- Line 503: handleConfigUpdate portInventory.ok=false (sibling config unreadable) ----
+  it('handleConfigUpdate returns 500 when port inventory scan fails closed (line 503 true)', async () => {
+    const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-invf-'));
+    const origConfig = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(cfgTmp, 'config');
+    try {
+      // Seed a sibling with a malformed healthPort so the inventory returns ok:false.
+      const siblingDir = path.join(process.env.XDG_CONFIG_HOME, 'whatsoup', 'instances', 'broken-line');
+      fs.mkdirSync(siblingDir, { recursive: true });
+      fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
+        name: 'broken-line', type: 'chat', healthPort: 'oops', accessMode: 'self_only',
+      }));
+      const configPath = path.join(cfgTmp, 'target.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        name: 'target-line', type: 'chat', healthPort: 9501, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ name: 'target-line', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      // Patching healthPort triggers the inventory scan — which fails closed for the broken sibling.
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ healthPort: 9510 })),
+        res, deps, { name: 'target-line' });
+      expect(res._status).toBe(500);
+      expect(JSON.parse(res._body).error).toMatch(/healthPort inventory/);
+    } finally {
+      if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = origConfig;
+      fs.rmSync(cfgTmp, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 671/675/679: validateNumericBounds upper-bound failure (above-max) ----
+  it('handleConfigUpdate rejects rateLimitPerHour above 10000 (line 671 second clause)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-rlh-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ rateLimitPerHour: 99999 })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/rateLimitPerHour/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('handleConfigUpdate rejects maxTokens above 200000 (line 675 second clause)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-mt-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ maxTokens: 999999 })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/maxTokens/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('handleConfigUpdate rejects tokenBudget above 10000000 (line 679 second clause)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-tb-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'chat', healthPort: 3010, accessMode: 'self_only',
+      }));
+      const inst = fakeInstance({ configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ tokenBudget: 99999999 })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/tokenBudget/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- Line 521 (false branch): pluginDirs patch with valid home-confined path passes ----
+  it('handleConfigUpdate accepts a pluginDirs patch with valid home-confined paths (line 521 false)', async () => {
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    const agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-pd-'));
+    const pluginDir = fs.mkdtempSync(path.join(homeTmp, 'ops-leaf-plugin-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-pd-'));
+    try {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({
+          agentOptions: { pluginDirs: [pluginDir] },
+        })),
+        res, deps, { name: 'test-line' });
+      expect(res._status).toBe(200);
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(written.agentOptions.pluginDirs).toEqual([pluginDir]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(agentCwd, { recursive: true, force: true });
+      fs.rmSync(pluginDir, { recursive: true, force: true });
+    }
+  });
+
   // ---- Line 487 (false branch): valid adminPhones in patch passes validation ----
   it('handleConfigUpdate accepts a valid adminPhones patch (line 487 false)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-admp-'));
