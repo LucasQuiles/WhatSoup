@@ -71,8 +71,10 @@ screenshots, or semantic review for newly introduced color roles.
 - **Light elevates by shadow + hairline.** Raised and overlay surfaces are both `#FFFFFF`;
   elevation is carried by `--shadow-raised`/`--shadow-overlay` plus hairline borders at
   near-constant luminance.
-- **Border alphas are re-derived per theme**: white-alpha in dark (0.07/0.11/0.17), black-alpha in
-  light (0.08/0.13/0.21). Never a shared hex, never reused across themes.
+- **Borders are warm opaque hairlines** matched to the identity showcase (`--hair`/`--hair-2`):
+  dark `#352C20 / #463A2B / #574A38`, light `#D8CBB2 / #C5B69A / #B0A084`. Opaque (not alpha) so
+  edges keep the neutral warmth over the warm surface ramp instead of compositing toward grey.
+  Re-derived per theme — never a shared hex, never reused across themes.
 - **Chroma runs darker and more saturated on white.** Light-theme channel solids are not lightness
   inversions of the dark solids; they are re-engineered (OkLCh, tokens-v3 §2.8) to hold ≥ 4.5:1 on
   white surfaces and on their own washes.

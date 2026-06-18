@@ -176,17 +176,17 @@ per theme. Values marked **(must-fix)** replace the v2 value for AA — see `col
 
 | Token | Dark | Light | Role |
 |---|---|---|---|
-| `--text-1` | `#E8EAEE` | `#221C12` | primary ink |
-| `--text-2` | `#9AA2AD` | `#524833` | secondary ink |
-| `--text-3` | `#6B7480` | `#645849` **(warm-ink; clears AA on the warm-light paper ramp)** | incidental only — lint-banned as sole information carrier |
+| `--text-1` | `#F2EBDC` | `#221C12` | primary ink |
+| `--text-2` | `#BEB29C` | `#524833` | secondary ink |
+| `--text-3` | `#897E6B` **(warm-ink; clears AA on the warm-dark surface ramp)** | `#645849` **(warm-ink; clears AA on the warm-light paper ramp)** | incidental only — lint-banned as sole information carrier |
 
 ### 3.3 Edge ladder
 
 | Token | Dark | Light |
 |---|---|---|
-| `--border-hairline` | `rgba(255,255,255,0.07)` | `rgba(16,18,22,0.08)` |
-| `--border-subtle` | `rgba(255,255,255,0.11)` | `rgba(16,18,22,0.13)` |
-| `--border-strong` | `rgba(255,255,255,0.17)` | `rgba(16,18,22,0.21)` |
+| `--border-hairline` | `#352C20` | `#D8CBB2` |
+| `--border-subtle` | `#463A2B` | `#C5B69A` |
+| `--border-strong` | `#574A38` | `#B0A084` |
 
 ### 3.4 Action accent
 
