@@ -7,7 +7,7 @@ import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
-import { TriggerPoller } from '../../../src/core/substrate/poller.ts';
+import { TriggerPoller, toBindArgs } from '../../../src/core/substrate/poller.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
 
 function tmpFile() { return join(tmpdir(), `poller-${randomBytes(8).toString('hex')}.db`); }
@@ -1082,5 +1082,28 @@ describe('poller.ts uncovered-branch coverage', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     expect(scheduled).toEqual([]);
+  });
+});
+
+describe('toBindArgs — positional bind ordering (#1090)', () => {
+  it('preserves array element order for positional ? placeholders', () => {
+    expect(toBindArgs(['b', 'a'])).toEqual(['b', 'a']);
+    expect(toBindArgs(['x', 'y', 'z'])).toEqual(['x', 'y', 'z']);
+  });
+
+  it('returns an empty list for empty binds', () => {
+    expect(toBindArgs([])).toEqual([]);
+    expect(toBindArgs({})).toEqual([]);
+  });
+
+  it('still accepts a legacy single-value object', () => {
+    expect(toBindArgs({ a: 'only' })).toEqual(['only']);
+  });
+
+  it('array form avoids the integer-key reordering hazard of object binds', () => {
+    // A legacy object with integer-like keys is reordered numerically by Object.values,
+    // regardless of source order — the array form is order-stable and must be used instead.
+    expect(toBindArgs({ '2': 'b', '1': 'a' })).toEqual(['a', 'b']); // documents the legacy hazard
+    expect(toBindArgs(['b', 'a'])).toEqual(['b', 'a']); // array preserves intended order
   });
 });

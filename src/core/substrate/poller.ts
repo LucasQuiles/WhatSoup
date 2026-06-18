@@ -57,7 +57,7 @@ export interface TriggerPollerOptions {
 
 interface SqliteSpec {
   sql: string;
-  binds?: Record<string, unknown>;
+  binds?: unknown[] | Record<string, unknown>;
   fire_when: 'rows_returned' | 'rowcount_changed';
 }
 
@@ -633,11 +633,14 @@ function formatPauseNotification(t: TriggerRow, failureCount: number): string {
   return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with extend_trigger or recreate.`;
 }
 
-function toBindArgs(binds: Record<string, unknown>): SQLInputValue[] {
+export function toBindArgs(binds: unknown[] | Record<string, unknown>): SQLInputValue[] {
   // node:sqlite supports positional binds via .all(...args); named binds are
-  // not part of the public API. Callers must build SQL with positional `?`
-  // and pass a plain object whose enumeration order matches placeholder order.
-  // For watch recipes this is typically empty; binds are reserved for
-  // future use.
+  // not part of the public API. Build SQL with positional `?` placeholders and
+  // pass an ARRAY whose element order matches the placeholders — arrays are the
+  // reliable positional form. A legacy object is still accepted for back-compat,
+  // but `Object.values` reorders integer-like keys ("0","1",…) numerically
+  // regardless of source order, so object binds with 2+ values are unsafe; new
+  // recipes should use an array.
+  if (Array.isArray(binds)) return binds as SQLInputValue[];
   return Object.values(binds) as SQLInputValue[];
 }

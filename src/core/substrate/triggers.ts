@@ -26,7 +26,9 @@ const FileSpec    = z.object({
 });
 const SqliteSpec  = z.object({
   sql: z.string().min(1),
-  binds: z.record(z.unknown()).optional(),
+  // Prefer an array for positional `?` binds (reliable order). A legacy object
+  // is still accepted for back-compat, but is unsafe for 2+ integer-like keys.
+  binds: z.union([z.array(z.unknown()), z.record(z.unknown())]).optional(),
   fire_when: z.enum(['rows_returned','rowcount_changed']),
 });
 const PineconeSpec = z.object({
