@@ -99,4 +99,19 @@
      text) reuse existing --accent / --text-3 — no new colour tokens. */
   --cal-cell: var(--sp-8);     /* day-cell box (32px, on-grid via --sp-8) */
   --cal-gap:  var(--sp-1);     /* gap between day cells (4px, on-grid via --sp-1) */
+
+  /* Off-grid component geometry — small fixed sizes that have no on-grid --sp-*
+     equivalent (3/5/18/36/80px) or would otherwise reach for half-step tokens
+     (an at-ceiling tracked category). Tokenized here so the use sites stay
+     var()-driven and raw-dimension-css clears to 0. Theme-agnostic geometry. */
+  --typing-dot:       5px;     /* typing-indicator bounce dot (composites .typing-dot) */
+  --toggle-w:         36px;    /* toggle switch track width (.c-toggle; height is --sp-5) */
+  --modal-pad-max:    80px;    /* modal backdrop padding-top clamp upper bound */
+  --skeleton-bar-h:   10px;    /* table skeleton shimmer bar height */
+  --log-lvl-chip-w:   18px;    /* log level-tag chip width (.soup-log__lvl; height is --sp-4) */
+  --tab-underline-h:  2px;     /* selected-tab underline thickness (.soup-tab--selected::after) */
+  --popover-check-l:  3px;     /* popover checkmark glyph: left offset */
+  --popover-check-t:  2px;     /* popover checkmark glyph: top offset */
+  --popover-check-w:  6px;     /* popover checkmark glyph: stroke box width */
+  --popover-check-h:  10px;    /* popover checkmark glyph: stroke box height */
 }

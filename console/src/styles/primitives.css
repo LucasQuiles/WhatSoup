@@ -322,7 +322,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: clamp(var(--sp-8), 8dvh, 80px);
+  padding-top: clamp(var(--sp-8), 8dvh, var(--modal-pad-max));
   z-index: var(--z-overlay);
   animation: soup-modal-backdrop-in var(--dur-base) var(--ease-linear) forwards;
 }
@@ -882,7 +882,7 @@ button.soup-pill[aria-disabled="true"] {
 /* Skeleton bar — placeholder geometry */
 .soup-table-skeleton-bar {
   display: block;
-  height: 10px;
+  height: var(--skeleton-bar-h);
   border-radius: var(--radius-xs);
   background: var(--btn-neutral-bg);
   width: 60%;
@@ -1136,7 +1136,7 @@ button.soup-pill[aria-disabled="true"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
+  width: var(--log-lvl-chip-w);
   height: var(--sp-4);
   font: 600 9px/1 var(--font-mono);
   border: var(--bw) solid;
@@ -1607,7 +1607,7 @@ button.soup-pill[aria-disabled="true"] {
   left: var(--sp-2);
   right: var(--sp-2);
   bottom: calc(-1 * var(--bw));  /* flush over the baseline rule */
-  height: 2px;
+  height: var(--tab-underline-h);
   background: var(--accent);
 }
 .soup-tab--disabled { color: var(--text-3); cursor: not-allowed; }
@@ -1736,10 +1736,10 @@ button.soup-pill[aria-disabled="true"] {
 .soup-popover__check::after {
   content: '';
   position: absolute;
-  left: 3px;
-  top: 2px;
-  width: 6px;
-  height: 10px;
+  left: var(--popover-check-l);
+  top: var(--popover-check-t);
+  width: var(--popover-check-w);
+  height: var(--popover-check-h);
   border-right: 2px solid var(--accent);
   border-bottom: 2px solid var(--accent);
   transform: rotate(45deg);
