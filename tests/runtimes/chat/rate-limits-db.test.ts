@@ -9,6 +9,9 @@ import {
   recordResponse,
   getResponseCount,
   cleanupOldRateLimits,
+  recordAttempt,
+  getAttemptCount,
+  cleanupOldAttempts,
 } from '../../../src/runtimes/chat/rate-limits-db.ts';
 
 function tempDbPath(): string {
@@ -31,6 +34,7 @@ afterAll(() => {
 describe('rate-limits', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM rate_limits').run();
+    db.raw.prepare('DELETE FROM llm_attempts').run();
   });
 
   // --- positive tests ---
@@ -92,5 +96,56 @@ describe('rate-limits', () => {
 
     // Recent row must survive
     expect(getResponseCount(db, 'carol@s.whatsapp.net', 60_000)).toBe(1);
+  });
+
+  // --- audit 1065: separate LLM attempt counter ---
+
+  it('recordAttempt + getAttemptCount within window counts correctly', () => {
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    expect(getAttemptCount(db, 'alice@s.whatsapp.net', 60_000)).toBe(3);
+  });
+
+  it('getAttemptCount does NOT count attempts outside the window', () => {
+    db.raw
+      .prepare(
+        `INSERT INTO llm_attempts (sender_jid, attempt_at)
+         VALUES ('alice@s.whatsapp.net', datetime('now', '-3 hours'))`
+      )
+      .run();
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    expect(getAttemptCount(db, 'alice@s.whatsapp.net', 60_000)).toBe(1);
+  });
+
+  it('attempts are tracked SEPARATELY from responses (the #1065 invariant)', () => {
+    // Three LLM attempts, but only one produced a successful response —
+    // the attempt counter reflects cost; the response counter reflects the
+    // user-facing rate limit and must NOT be inflated by failed sends.
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    recordAttempt(db, 'alice@s.whatsapp.net');
+    recordResponse(db, 'alice@s.whatsapp.net');
+
+    expect(getAttemptCount(db, 'alice@s.whatsapp.net', 60_000)).toBe(3);
+    expect(getResponseCount(db, 'alice@s.whatsapp.net', 60_000)).toBe(1);
+    // recordAttempt must not write to rate_limits, and recordResponse must not
+    // write to llm_attempts — the two counters are independent.
+    recordResponse(db, 'bob@s.whatsapp.net');
+    expect(getAttemptCount(db, 'bob@s.whatsapp.net', 60_000)).toBe(0);
+  });
+
+  it('cleanupOldAttempts deletes only rows older than 2 hours', () => {
+    db.raw
+      .prepare(
+        `INSERT INTO llm_attempts (sender_jid, attempt_at)
+         VALUES ('alice@s.whatsapp.net', datetime('now', '-3 hours'))`
+      )
+      .run();
+    recordAttempt(db, 'carol@s.whatsapp.net');
+
+    const deleted = cleanupOldAttempts(db);
+    expect(deleted).toBe(1);
+    expect(getAttemptCount(db, 'carol@s.whatsapp.net', 60_000)).toBe(1);
   });
 });

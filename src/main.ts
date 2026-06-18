@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
-import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
+import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
@@ -654,6 +654,8 @@ const retentionInterval = setInterval(() => {
     if (deleted > 0) log.info({ count: deleted }, 'retention: deleted old messages');
     const rateLimitDeleted = cleanupOldRateLimits(db);
     if (rateLimitDeleted > 0) log.info({ count: rateLimitDeleted }, 'cleaned up old rate limits');
+    const attemptsDeleted = cleanupOldAttempts(db);
+    if (attemptsDeleted > 0) log.info({ count: attemptsDeleted }, 'cleaned up old llm attempts');
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
