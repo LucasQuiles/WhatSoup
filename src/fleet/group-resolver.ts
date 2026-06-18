@@ -147,6 +147,10 @@ async function backfill(
     try {
       const db = new DatabaseSync(instance.dbPath, { open: true });
       try {
+        // The instance process is actively writing the same bot.db. Without a busy
+        // timeout this second writer gets an immediate SQLITE_BUSY under WAL; wait for
+        // the lock instead, matching FleetDbReader.queryWrite (db-reader.ts).
+        db.prepare('PRAGMA busy_timeout = 5000').run();
         db.prepare(`
           INSERT OR REPLACE INTO groups (jid, subject, participant_count, updated_at)
           VALUES (?, ?, ?, datetime('now'))

@@ -135,6 +135,8 @@ describe('group resolver attemptedCache eviction', () => {
     );
     expect(mocks.proxyToInstance).not.toHaveBeenCalled();
     expect(mocks.DatabaseSync).toHaveBeenCalledWith('/tmp/q/bot.db', { open: true });
+    // Concurrent-writer safety: backfill must set busy_timeout before writing the live bot.db.
+    expect(mocks.prepare).toHaveBeenCalledWith('PRAGMA busy_timeout = 5000');
     expect(mocks.run).toHaveBeenCalledWith('1203630@g.us', 'Ops Room', 7);
     expect(mocks.close).toHaveBeenCalled();
     expect(mocks.info).toHaveBeenCalledWith(
