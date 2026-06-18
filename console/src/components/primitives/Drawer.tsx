@@ -22,13 +22,19 @@
  * In jsdom (no stylesheet) the dwell is instant — all existing suites stable
  * (C-B5-1).
  *
- * Background inert exception (C-B5-2, DD-19):
- *   The Drawer does NOT get background inert. It is non-modal by spec (drawer.md
- *   §Accessibility: role="complementary"; squeeze mode keeps table interaction live).
- *   It also renders inline inside #root (not portaled) — inert on #root would inert
- *   the Drawer itself. This is the DD-19-sanctioned documented exception recorded
- *   in the design-debt-register closing row. The drawer's existing containment
- *   (focus trap, Escape stack, scrim in overlay mode) is unchanged.
+ * Background inert exception (C-B5-2, DD-19) — RIGHT placement only:
+ *   The right-anchored Drawer does NOT get background inert. It is non-modal by
+ *   spec (drawer.md §Accessibility: role="complementary"; squeeze mode keeps table
+ *   interaction live), and renders inline inside #root (not portaled) — inert on
+ *   #root would inert the Drawer itself. This is the DD-19-sanctioned documented
+ *   exception recorded in the design-debt-register closing row. The drawer's
+ *   existing containment (focus trap, Escape stack, scrim in overlay mode) is
+ *   unchanged.
+ *   The bottom-sheet placement is the OPPOSITE: it is MODAL (role="dialog"
+ *   aria-modal) and is portaled to document.body so it docks to the VIEWPORT
+ *   bottom over a full-screen scrim (showcase §26), escaping the DrawerLayout's
+ *   `container-type` containing block. The no-portal exception above applies only
+ *   to the non-modal right placement.
  *
  * Content retarget: callers swap children/props while open=true. The Drawer
  * does NOT remount or re-animate on content change — key stability is the
@@ -68,6 +74,7 @@ import {
   useContext,
   useRef,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useDismissable } from '../../hooks/use-dismissable';
 import { useExitPresence } from '../../hooks/use-exit-presence';
@@ -213,7 +220,7 @@ export const Drawer: FC<DrawerProps> = ({
     .filter(Boolean)
     .join(' ');
 
-  return (
+  const overlay = (
     <>
       {/* Scrim. Right placement: visible in overlay mode only (<900px), hidden
           at ≥900px via the container query. Bottom-sheet: always a modal scrim
@@ -255,6 +262,20 @@ export const Drawer: FC<DrawerProps> = ({
       </div>
     </>
   );
+
+  // Bottom-sheet is a MODAL that must dock to the bottom of the SCREEN over a
+  // full-screen scrim (showcase §26: the sheet docks to the phone-screen bottom,
+  // the scrim covers the screen). It is portaled to document.body so it escapes
+  // the DrawerLayout's `container-type: inline-size` — which is the containing
+  // block for even position:fixed descendants — and any framer-motion transform
+  // ancestor. Without this the sheet docks to the inline layout's bottom, which
+  // on a tall/scrolled narrow page lands off-screen (DD-24 regression). The
+  // right placement stays inline: it is non-modal (role="complementary"), so the
+  // DD-19 no-portal exception applies only to it.
+  if (isBottomSheet && typeof document !== 'undefined') {
+    return createPortal(overlay, document.body);
+  }
+  return overlay;
 };
 
 // ---------------------------------------------------------------------------

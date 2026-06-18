@@ -1367,21 +1367,33 @@ button.soup-pill[aria-disabled="true"] {
    beneath. Rounds only its TOP corners and takes the lit-from-above edge.
    -------------------------------------------------------------------------- */
 
-/* Modal scrim — always shown for the bottom-sheet (overrides the right-placement
-   container-query hide). Covers the full layout box; sits below the sheet shell. */
+/* Modal scrim — always shown for the bottom-sheet. The sheet is portaled to
+   document.body, so the scrim is position:fixed and covers the full VIEWPORT
+   (the screen), matching the showcase §26 modal scrim — not the inline
+   DrawerLayout box (which `container-type` would otherwise clip it to). */
 .soup-drawer-scrim--bottom-sheet {
   display: block;
+  position: fixed;
+  inset: 0;
   z-index: calc(var(--z-overlay) - 1);
 }
 
-/* Sheet shell — docked to the bottom edge, full width, top-rounded. */
+/* Sheet shell — a viewport modal docked to the bottom EDGE of the screen, full
+   width, top-rounded. Portaled to document.body (see Drawer.tsx), so it is
+   position:fixed to the viewport at every width — the modal sheet is a placement
+   choice, not a width breakpoint (showcase §26). This escapes the DrawerLayout's
+   `container-type` containing block, which previously docked the sheet to the
+   inline layout's bottom — off-screen on a tall/scrolled narrow page (DD-24). */
 .soup-drawer--bottom-sheet {
+  position: fixed;
   top: auto;
   right: 0;
   left: 0;
   bottom: 0;
   width: auto;
   max-height: 86%;
+  z-index: var(--z-overlay);
+  box-shadow: var(--shadow-overlay);
   border-left: none;
   border-top: var(--bw) solid var(--border-subtle);
   border-top-left-radius: var(--r-3);
@@ -1393,23 +1405,6 @@ button.soup-pill[aria-disabled="true"] {
 /* Closing sheet shell: slide back DOWN off the bottom edge. */
 .soup-drawer--bottom-sheet[data-state="closing"] {
   animation: soup-drawer-sheet-out var(--dur-base) var(--ease-exit) forwards;
-}
-
-/* The bottom-sheet stays bottom-docked even in squeeze mode — the modal sheet
-   is a placement choice, not a width breakpoint, so override the ≥900px flip. */
-@container (min-width: 900px) {
-  .soup-drawer-scrim--bottom-sheet {
-    display: block;
-  }
-
-  .soup-drawer--bottom-sheet {
-    position: absolute;
-    flex: none;
-    box-shadow: var(--shadow-overlay);
-    z-index: var(--z-overlay);
-    border-left: none;
-    border-top: var(--bw) solid var(--border-subtle);
-  }
 }
 
 /* Enter keyframe — translateY 100%→0 (slide up). */
