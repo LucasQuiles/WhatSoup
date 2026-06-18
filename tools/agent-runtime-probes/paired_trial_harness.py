@@ -520,12 +520,11 @@ def evaluate(
     adoption_eligible = not failed
 
     status = "adoption_eligible" if adoption_eligible else "ineligible"
-    if not adoption_eligible and (
-        not canary["canary_pass"] and canary["reason"].startswith("canary_report_")
-        or not handle["handle_present"] and handle["reason"].startswith("handle_report_")
-    ):
-        # Missing/absent canary or handle REPORT (not merely a failing verdict) -> ineligible.
-        status = "ineligible"
+    # A missing/absent canary or handle REPORT (vs a merely failing verdict) already lands as
+    # "ineligible" above, because canary_pass / handle_present are themselves predicates: when
+    # their report is absent those predicates fail, so adoption_eligible is False and the
+    # report-vs-verdict distinction stays visible in failed_predicates. (Removed a dead
+    # status="ineligible" reassignment that was unreachable as a value change.)
 
     return _verdict_report(
         status=status, adoption_eligible=adoption_eligible,
