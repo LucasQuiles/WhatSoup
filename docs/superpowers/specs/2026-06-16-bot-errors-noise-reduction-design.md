@@ -681,3 +681,81 @@ self-restart), same as Patterns A–H. This one lands in the **collector**, not
 the dispatcher — so activating it requires restarting `bot-errors-collector`
 (the daemon that holds the `--best-effort-remote` roster), distinct from the
 dispatcher restart Patterns A–H need.
+
+## Pattern J — Pattern A (open variant): suppress live renotify for non-actionable open incidents (added 2026-06-18)
+
+**Problem (live evidence, 2026-06-18).** Pattern A (stale variant) only fires
+once an incident goes **quiet**. But a `runtime-tool-error:*` bucket re-arms on
+every fresh self-corrected tool failure, so it never goes stale — it stays
+`open`, and the 6h "still open" renotify (`should_suppress_send` open-incident
+branch) plus the age-based escalation re-page it forever with no remediation
+behind it. Live state showed 164 open incidents, **55 tool-error/provider
+buckets, 40 already past their 6h renotify boundary** — the live re-page/escalate
+engine the stale sweep can never reach.
+
+**Root cause.** The open-incident renotify (line ~1860) re-pages every
+`INCIDENT_RENOTIFY_SECONDS` and escalates by age for **any** open incident,
+without asking whether the source is operator-actionable.
+
+**Fix.** A new predicate `open_renotify_is_nonactionable(event, key)` reuses the
+stale-variant's non-actionable classification (`STALE_RENOTIFY_SUPPRESS_SOURCES`
++ `STALE_RENOTIFY_SUPPRESS_PREFIXES` = `provider_fallback_`, `runtime-tool-error:`),
+with `flap_storm` explicitly exempt. Inside the open-incident renotify branch,
+when the cadence boundary is crossed and the source is non-actionable, the
+renotify/escalation is suppressed: `lastNotifiedAt` is **not** advanced (no
+re-page), an audit counter `openRenotifySuppressedCount` increments, and a reason
+string is returned. Fresh occurrences still keep the bucket live; the genuine
+stuck-agent signal (flap-storm intensity, evaluated **earlier** via
+`force_notify_level`) is untouched — so no real signal is lost.
+
+**Gate / fail-open.** `BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY` (default
+on). Any classifier error → send (fail-open). Off → legacy per-cadence renotify.
+
+**Tests.** `deploy/scripts/tests/test_bot_errors_open_renotify_suppression.py`
+(5): tool-error open renotify suppressed (counter +1, `lastNotifiedAt`
+unchanged); actionable open incident (`whatsapp_device_bond_lost`) still
+renotifies; `flap_storm` never suppressed; gate-off renotifies; within-cadence
+hit is a plain duplicate-suppress. Verified read-only against **live** state:
+real `<host>|<instance>|runtime-tool-error:claude-cli:Bash` bucket → suppressed
+with gate on, sends with gate off.
+
+**Commit `2a0bbe53`. Deploy:** dispatcher, live 2026-06-18.
+
+## Pattern K — Pattern A (digest coalescing): coalesce the auto-close summary across sweep runs (added 2026-06-18)
+
+**Problem (live evidence, 2026-06-18).** The §10 C5 auto-close summary was
+consolidated **within** a single sweep run, but the stale sweep ticks every
+~30s. A draining backlog (Patterns A/J closing buckets in bulk) therefore
+emitted one `Auto-closed N` BOT INFO per tick — three in 90s
+(06:23:58 → 06:24:29 → 06:25:00). The digest meant to *replace* per-incident
+noise became a noise stream of its own. These are strictly informational
+(`requested_action: none`).
+
+**Root cause.** The consolidation boundary was per-run, not per-time-window.
+
+**Fix.** Incident **closure stays immediate** (renotify stops, `openIncidents`
+stays bounded) — only the WhatsApp digest is coalesced across runs. Closed keys
+accumulate into a persisted `staleAutocloseDigest` batch
+(`{pendingKeys, pendingCount, firstPendingAt, lastDigestAt}`) in
+`incident-state.json` (added to the `load_incident_state` whitelist, else it
+resets every one-shot run). `should_emit_autoclose_digest` emits at most once per
+window — or sooner if the pending batch reaches the burst cap, so a real flood is
+still reported promptly. First-ever digest (`lastDigestAt==0`) fires immediately
+for prompt notice, then arms the window. A send failure keeps the batch pending
+for the next sweep (no lost digest); the digest reports the exact coalesced total
+even when the key sample is trimmed.
+
+**Gate.** `BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS` (default 3600;
+`0` = legacy per-sweep digest) and `BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_MAX_PENDING`
+(default 50). Fail-open: a malformed accumulator emits.
+
+**Tests.** `deploy/scripts/tests/test_bot_errors_autoclose_digest_coalesce.py`
+(5): trickle within window coalesced (closures happen, no send, count
+accumulates); window-elapsed emits one digest with exact total then resets;
+burst cap emits within an open window; coalescing-disabled emits per sweep;
+send failure keeps the batch pending. Verified live: first post-deploy auto-close
+emitted once (06:38:30Z), accumulator armed (`lastDigestAt` set, `pendingCount`
+0); subsequent in-window closures log `stale_autoclose_digest_coalesced` and send
+nothing.
+
+**Commit `04cc87de`. Deploy:** dispatcher, live 2026-06-18 06:30:25Z.

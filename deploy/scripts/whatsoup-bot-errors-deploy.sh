@@ -21,7 +21,7 @@ ROOT="${2:?missing <root>}"
 FILES=(
   "deploy/scripts/bot-errors-dispatcher.py:7236689bfa0c0cb9fb36b9d4136072c8ee4636ac554c53031ed68cb9a09ab9ac"
   "deploy/scripts/bot-errors-health-check.py:8f12a71bd68ea239ccf27f973b4d45bc66042f35d8ecee19a75cb08e81af7f9d"
-  "deploy/scripts/bot-errors-heartbeat-watchdog.py:c1eb585727dbd1c62cd8efc2e2e09938161d9ca99f89fa3043704c6c84567f3a"
+  "deploy/scripts/bot-errors-heartbeat-watchdog.py:4f2c14e4cd85a386a8fe66dd68f37c1dca7878e442a786673d80e6a784e637e4"
   "deploy/scripts/bot-errors-q-loop.py:de61c690343d334b508d2852bb5dca4558f2f26796bf355af3d582a1c6bba50a"
   "src/lib/bot-errors-outbox.ts:67c7875e3672585e93a2c5221a816199fe08572efd582fff20c3aa787ee26b83"
   "deploy/scripts/bot-errors-collector.py:f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5"
