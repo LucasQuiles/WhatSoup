@@ -63,4 +63,45 @@ describe('HandoffDistillRunner', () => {
     await Promise.all([a, b]);
     expect(distillFor.mock.calls.length).toBeLessThanOrEqual(1);
   });
+
+  describe('residual-branch coverage', () => {
+    it('prune() retains gate state when a conversation is still active (activeKeys contains the key)', async () => {
+      const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 } });
+      await runner.tickConversation('keep'); // distills → 1; per-window call budget now spent
+      expect(persisted).toHaveLength(1);
+
+      // 'keep' is still active → prune must NOT forget its gate state.
+      runner.prune(new Set(['keep']));
+      await runner.tickConversation('keep'); // budget still exhausted → gate denies → still 1
+      expect(persisted).toHaveLength(1);
+    });
+
+    it('serializes per-conversation: a second concurrent tick on the same key early-returns (no extra distill)', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const distillFor = vi.fn(async () => {
+        await gate;
+        return { summary: 's', seededArtifacts: null, tokensUsed: 1 };
+      });
+      const { runner } = harness({ distillFor });
+
+      const a = runner.tickConversation('c1'); // acquires inFlight for 'c1'
+      const b = runner.tickConversation('c1'); // inFlight.has('c1') → early return
+      release();
+      await Promise.all([a, b]);
+      expect(distillFor).toHaveBeenCalledTimes(1);
+    });
+
+    it('invokes onDegraded with the conversation key when distill throws (no artifact persisted)', async () => {
+      const onDegraded = vi.fn();
+      const distillFor = vi.fn(async () => { throw new Error('boom'); });
+      const { runner, persisted } = harness({ distillFor, onDegraded });
+
+      await runner.tickConversation('c1');
+      expect(onDegraded).toHaveBeenCalledTimes(1);
+      expect(onDegraded).toHaveBeenCalledWith('c1', expect.stringContaining('boom'));
+      // The model call threw before persist was reached → no artifact is written.
+      expect(persisted).toHaveLength(0);
+    });
+  });
 });
