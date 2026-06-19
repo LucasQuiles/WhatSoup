@@ -252,4 +252,205 @@ describe('registerAllTools', () => {
 
     db.raw.close();
   });
+
+  it('falls back to an empty profile registry when config.profiles is undefined', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.profiles;
+    (cfgMod.config as { profiles?: unknown }).profiles = undefined; // line 78 `?? {}` fallback
+    try {
+      expect(() => registerAllTools(registry, connection, db)).not.toThrow();
+      expect(registry.listTools({ tier: 'global' }).length).toBe(BASELINE_TOOL_COUNT);
+    } finally {
+      (cfgMod.config as { profiles?: unknown }).profiles = original;
+      db.raw.close();
+    }
+  });
+
+  it('registers knowledge_search when Pinecone is configured', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const knowledgeMod = await import('../../src/mcp/tools/knowledge.ts');
+    vi.spyOn(knowledgeMod, 'registerKnowledgeTools').mockImplementation(
+      ((_indexes: string[], register: (tool: ToolDeclaration) => void) => {
+        register({
+          name: 'knowledge_search',
+          description: 'stub knowledge tool',
+          schema: z.object({}),
+          scope: 'global',
+          replayPolicy: 'reject',
+          handler: async () => ({ ok: true }),
+        } as unknown as ToolDeclaration);
+      }) as never,
+    );
+
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...((original as object | undefined) ?? {}),
+      pinecone: {
+        ...((original as { pinecone?: object } | undefined)?.pinecone ?? {}),
+        allowedIndexes: ['mw-mind'],
+      },
+    };
+    try {
+      registerAllTools(registry, connection, db);
+      const tools = registry.listTools({ tier: 'global' });
+      expect(tools.some((t) => t.name === 'knowledge_search')).toBe(true);
+      expect(tools.length).toBe(BASELINE_TOOL_COUNT + 1);
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
+  });
+
+  it('skips knowledge search when memory.pinecone.knowledgeSearch.enabled is false', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...((original as object | undefined) ?? {}),
+      pinecone: { allowedIndexes: ['mw-mind'], knowledgeSearch: { enabled: false } },
+    };
+    try {
+      registerAllTools(registry, connection, db);
+      const tools = registry.listTools({ tier: 'global' });
+      expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
+      expect(tools.length).toBe(BASELINE_TOOL_COUNT);
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
+  });
+
+  it('skips knowledge search when options.enableKnowledgeSearch is false', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...((original as object | undefined) ?? {}),
+      pinecone: { allowedIndexes: ['mw-mind'] },
+    };
+    try {
+      registerAllTools(registry, connection, db, { enableKnowledgeSearch: false });
+      const tools = registry.listTools({ tier: 'global' });
+      expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
+      expect(tools.length).toBe(BASELINE_TOOL_COUNT);
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
+  });
+
+  it('wraps a non-Error thrown by a core module into the aggregated failure', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const chatMgmt = await import('../../src/mcp/tools/chat-management.ts');
+    vi.spyOn(chatMgmt, 'registerChatManagementTools').mockImplementation(() => {
+      // throw a primitive (non-Error) to drive the `f.err instanceof Error ? ... : new Error(String(f.err))` false arm
+      throw 'synthetic non-error core failure';
+    });
+
+    expect(() => registerAllTools(registry, connection, db)).toThrow(/chat-management/i);
+
+    db.raw.close();
+  });
+
+  it('warns and continues on a per-tool registry failure inside an optional module', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Pre-register the name so the optional module's register(tool) throws a duplicate,
+    // exercising makeRegister's core=false catch (warn-and-continue, line 107).
+    registry.register({
+      name: 'knowledge_search',
+      description: 'pre-existing',
+      schema: z.object({}),
+      scope: 'global',
+      replayPolicy: 'reject',
+      handler: async () => ({ ok: true }),
+    } as unknown as ToolDeclaration);
+
+    const knowledgeMod = await import('../../src/mcp/tools/knowledge.ts');
+    vi.spyOn(knowledgeMod, 'registerKnowledgeTools').mockImplementation(
+      ((_indexes: string[], register: (tool: ToolDeclaration) => void) => {
+        register({
+          name: 'knowledge_search', // duplicate → registry.register throws → optional warn+continue
+          description: 'dup',
+          schema: z.object({}),
+          scope: 'global',
+          replayPolicy: 'reject',
+          handler: async () => ({ ok: true }),
+        } as unknown as ToolDeclaration);
+      }) as never,
+    );
+
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...((original as object | undefined) ?? {}),
+      pinecone: { allowedIndexes: ['mw-mind'] },
+    };
+    try {
+      expect(() => registerAllTools(registry, connection, db)).not.toThrow();
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
+  });
+
+  it('falls back to top-level config.pineconeAllowedIndexes when memory.pinecone is absent', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    const knowledgeMod = await import('../../src/mcp/tools/knowledge.ts');
+    vi.spyOn(knowledgeMod, 'registerKnowledgeTools').mockImplementation(
+      ((_indexes: string[], register: (tool: ToolDeclaration) => void) => {
+        register({
+          name: 'knowledge_search',
+          description: 'stub',
+          schema: z.object({}),
+          scope: 'global',
+          replayPolicy: 'reject',
+          handler: async () => ({ ok: true }),
+        } as unknown as ToolDeclaration);
+      }) as never,
+    );
+
+    const cfgMod = await import('../../src/config.ts');
+    const originalMem = cfgMod.config.memory;
+    const originalTop = (cfgMod.config as { pineconeAllowedIndexes?: string[] }).pineconeAllowedIndexes;
+    (cfgMod.config as { memory?: unknown }).memory = undefined; // outer ternary false
+    (cfgMod.config as { pineconeAllowedIndexes?: string[] }).pineconeAllowedIndexes = ['legacy-index']; // inner ternary true
+    try {
+      registerAllTools(registry, connection, db);
+      expect(registry.listTools({ tier: 'global' }).some((t) => t.name === 'knowledge_search')).toBe(true);
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = originalMem;
+      (cfgMod.config as { pineconeAllowedIndexes?: string[] }).pineconeAllowedIndexes = originalTop;
+      db.raw.close();
+    }
+  });
 });

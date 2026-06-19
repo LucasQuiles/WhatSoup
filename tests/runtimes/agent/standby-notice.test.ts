@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -98,6 +98,65 @@ describe('standby-notice latch', () => {
     }).not.toThrow();
     stashStandbyNotice(db, 'c1', 'x', NOW);
     expect(peekStandbyNotice(db, 'c1')).toBe('x');
+    db.close();
+  });
+
+  it('rolls back and rethrows when the read fails mid-transaction', () => {
+    const { db } = freshDb();
+    stashStandbyNotice(db, 'c1', 'keep me', NOW);
+    const realPrepare = db.raw.prepare.bind(db.raw);
+    vi.spyOn(db.raw as unknown as { prepare: (sql: string) => unknown }, 'prepare').mockImplementation(
+      ((sql: string) => {
+        if (sql.includes('SELECT message_text')) throw new Error('read boom');
+        return realPrepare(sql);
+      }) as never,
+    );
+    // BEGIN IMMEDIATE has run (inTransaction=true), so the catch must ROLLBACK then rethrow.
+    expect(() => consumeStandbyNotice(db, 'c1')).toThrow('read boom');
+    vi.restoreAllMocks();
+    // rolled back: the notice is still pending and consumable.
+    expect(consumeStandbyNotice(db, 'c1')).toBe('keep me');
+    db.close();
+  });
+
+  it('swallows a failing ROLLBACK and still rethrows the original error', () => {
+    const { db } = freshDb();
+    stashStandbyNotice(db, 'c1', 'x', NOW);
+    const realPrepare = db.raw.prepare.bind(db.raw);
+    const realExec = db.raw.exec.bind(db.raw);
+    vi.spyOn(db.raw as unknown as { prepare: (sql: string) => unknown }, 'prepare').mockImplementation(
+      ((sql: string) => {
+        if (sql.includes('SELECT message_text')) throw new Error('read boom');
+        return realPrepare(sql);
+      }) as never,
+    );
+    vi.spyOn(db.raw as unknown as { exec: (sql: string) => unknown }, 'exec').mockImplementation(
+      ((sql: string) => {
+        if (sql === 'ROLLBACK') throw new Error('rollback boom');
+        return realExec(sql);
+      }) as never,
+    );
+    // ROLLBACK throws inside the best-effort inner catch; the original error still propagates.
+    expect(() => consumeStandbyNotice(db, 'c1')).toThrow('read boom');
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  it('rethrows without rolling back when BEGIN itself fails (no open transaction)', () => {
+    const { db } = freshDb();
+    const realExec = db.raw.exec.bind(db.raw);
+    const rollback = vi.fn();
+    vi.spyOn(db.raw as unknown as { exec: (sql: string) => unknown }, 'exec').mockImplementation(
+      ((sql: string) => {
+        if (sql === 'BEGIN IMMEDIATE') throw new Error('begin boom');
+        if (sql === 'ROLLBACK') return rollback();
+        return realExec(sql);
+      }) as never,
+    );
+    // inTransaction is still false, so the catch skips ROLLBACK and just rethrows.
+    expect(() => consumeStandbyNotice(db, 'c1')).toThrow('begin boom');
+    expect(rollback).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
     db.close();
   });
 });
