@@ -6,6 +6,20 @@ import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
 
+/**
+ * Guard for `poll.sqlite` specs. `query_only` blocks writes but not cross-database
+ * reads or runtime knob flips, so reject statements that could exfiltrate beyond
+ * the intended query: ATTACH/DETACH (pull in other DB files), PRAGMA, and
+ * multi-statement bodies. Defense-in-depth for admin-gated specs (#1096).
+ */
+export function isSafeSqliteSql(sql: string): boolean {
+  // Strip one optional trailing semicolon; any remaining ';' implies 2+ statements.
+  const trimmed = sql.trim().replace(/;\s*$/, '');
+  if (trimmed.includes(';')) return false;
+  if (/\b(attach|detach|pragma)\b/i.test(trimmed)) return false;
+  return true;
+}
+
 const CronSpec    = z.object({ expr: z.string().min(1), tz: z.string().optional() });
 const AtTimeSpec  = z.object({ fire_at: z.number().int().positive() });
 const EmailSpec   = z.object({
@@ -25,7 +39,9 @@ const FileSpec    = z.object({
   watch: z.enum(['exists','mtime','content_hash']),
 });
 const SqliteSpec  = z.object({
-  sql: z.string().min(1),
+  sql: z.string().min(1).refine(isSafeSqliteSql, {
+    message: 'sql must be a single statement with no ATTACH/DETACH/PRAGMA',
+  }),
   // Prefer an array for positional `?` binds (reliable order). A legacy object
   // is still accepted for back-compat, but is unsafe for 2+ integer-like keys.
   binds: z.union([z.array(z.unknown()), z.record(z.unknown())]).optional(),
