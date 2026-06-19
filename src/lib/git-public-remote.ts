@@ -1,6 +1,6 @@
 export const DEFAULT_UPDATE_BRANCH = 'main';
 
-export function gitErrorText(err: unknown): string {
+function gitErrorText(err: unknown): string {
   if (!err || typeof err !== 'object') {
     return String(err ?? '');
   }
