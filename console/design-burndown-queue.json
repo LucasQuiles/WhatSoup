@@ -2,11 +2,10 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 79,
-    "blocking": 24,
+    "total": 55,
+    "blocking": 0,
     "byCategory": {
       "accent-law": 0,
-      "eslint:soup/no-raw-field-label": 24,
       "half-step": 54,
       "legacy-var-css": 0,
       "raw-color-css": 0,
@@ -25,51 +24,6 @@
       "files": [],
       "owner": "B4 — F1 accent-law fix + M9 accent-color re-point",
       "source": "css-scan (check-design-burndown.mjs)"
-    },
-    {
-      "id": "burndown:eslint:soup/no-raw-field-label",
-      "category": "eslint:soup/no-raw-field-label",
-      "severity": "blocking",
-      "count": 24,
-      "files": [
-        {
-          "path": "src/components/line-detail/CreateGroupModal.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/GroupDetailModal.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/ScheduleComposerModal.tsx",
-          "count": 5,
-          "lines": null
-        },
-        {
-          "path": "src/components/SaveContactDialog.tsx",
-          "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/components/wizard/ConfigStep.tsx",
-          "count": 6,
-          "lines": null
-        },
-        {
-          "path": "src/components/wizard/IdentityStep.tsx",
-          "count": 3,
-          "lines": null
-        },
-        {
-          "path": "src/components/wizard/ModelAuthStep.tsx",
-          "count": 3,
-          "lines": null
-        }
-      ],
-      "owner": "unclassified — add to adoption-audit.md and CATEGORY_META",
-      "source": "lint-shadow-baseline.json (line detail lives in the ESLint shadow run)"
     },
     {
       "id": "burndown:legacy-var-css",
