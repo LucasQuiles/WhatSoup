@@ -223,6 +223,22 @@ describe('WhatSoupSocketServer', () => {
     expect(response.result).toHaveProperty('capabilities');
   });
 
+  it('treats an explicit id:null as a request (not a notification) and echoes null', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // id:null is not `undefined`, so the notification filter lets it through;
+    // `req.id ?? null` then collapses null → null in the response (line 193 nullish arm).
+    const response = (await sendRawJsonRpcLine(
+      socketPath,
+      JSON.stringify({ jsonrpc: '2.0', id: null, method: 'initialize', params: {} }),
+    )) as { id: null; result: { protocolVersion: string } };
+
+    expect(response.id).toBeNull();
+    expect(response.result.protocolVersion).toBe('2024-11-05');
+  });
+
   // --- tools/list ---
 
   it('tools/list returns registered tools', async () => {
