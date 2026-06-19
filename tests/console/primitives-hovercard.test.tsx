@@ -44,6 +44,17 @@ describe('HoverCard — disclosure wiring', () => {
     // closed → region hidden from the a11y tree
     expect(region.getAttribute('aria-hidden')).toBe('true')
   })
+
+  it('merges a pre-existing aria-controls on the trigger with the card id', () => {
+    render(
+      <HoverCard cardLabel="Detail" card={<span>c</span>}>
+        <button type="button" aria-controls="external-x">tg</button>
+      </HoverCard>,
+    )
+    const t = screen.getByRole('button', { name: 'tg' })
+    // existing value preserved, card id appended
+    expect(t.getAttribute('aria-controls')).toMatch(/^external-x \S/)
+  })
 })
 
 describe('HoverCard — focus path (hover never required)', () => {
@@ -98,6 +109,30 @@ describe('HoverCard — focus path (hover never required)', () => {
     render(<Subject />)
     expect(isOpen()).toBe(false)
     expect(screen.queryByRole('button', { name: 'copy' })).toBeNull()
+  })
+
+  it('resolves a real above/below placement when the anchor has geometry (covers measure())', () => {
+    // jsdom returns an all-zero rect, so the zero-rect guard normally short-circuits
+    // measure(). Stub a real rect so resolveViewportPlacement + setPlacement run and the
+    // panel gets a data-placement (browser proves the visual flip; this covers the logic).
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({
+        width: 120, height: 32, top: 40, left: 40, right: 160, bottom: 72, x: 40, y: 40,
+        toJSON: () => ({}),
+      } as DOMRect)
+    try {
+      render(<Subject />)
+      const t = trigger()
+      act(() => {
+        fireEvent.focus(t)
+      })
+      expect(isOpen()).toBe(true)
+      const panel = document.getElementById(t.getAttribute('aria-controls') as string) as HTMLElement
+      expect(['above', 'below']).toContain(panel.getAttribute('data-placement'))
+    } finally {
+      rectSpy.mockRestore()
+    }
   })
 })
 
@@ -170,5 +205,44 @@ describe('HoverCard — hover debounce + bridge', () => {
       vi.advanceTimersByTime(150)
     })
     expect(isOpen()).toBe(true)
+  })
+
+  it('cancels a pending open when the pointer leaves before openDelay elapses', () => {
+    render(<Subject openDelay={150} closeDelay={180} />)
+    act(() => {
+      fireEvent.mouseEnter(wrapper()) // arms the open timer
+      fireEvent.mouseLeave(wrapper()) // scheduleClose clears the pending open timer
+      vi.advanceTimersByTime(300)
+    })
+    expect(isOpen()).toBe(false) // the open never fired
+  })
+
+  it('closes when focus leaves the whole component (blur to an outside target)', () => {
+    render(<Subject closeDelay={180} />)
+    act(() => {
+      fireEvent.focus(trigger())
+    })
+    expect(isOpen()).toBe(true)
+    act(() => {
+      // relatedTarget = body is NOT inside the wrapper → schedules the close
+      fireEvent.blur(trigger(), { relatedTarget: document.body })
+      vi.advanceTimersByTime(180)
+    })
+    expect(isOpen()).toBe(false)
+  })
+
+  it('does not stack a second close timer on repeated leave (guard)', () => {
+    render(<Subject openDelay={150} closeDelay={180} />)
+    act(() => {
+      fireEvent.mouseEnter(wrapper())
+      vi.advanceTimersByTime(150)
+    })
+    expect(isOpen()).toBe(true)
+    act(() => {
+      fireEvent.mouseLeave(wrapper()) // arms the close timer
+      fireEvent.mouseLeave(wrapper()) // close already pending → early-return guard
+      vi.advanceTimersByTime(180)
+    })
+    expect(isOpen()).toBe(false)
   })
 })
