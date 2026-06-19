@@ -8,6 +8,7 @@ import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { jidPattern } from '../lib/redaction-patterns.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -39,7 +40,6 @@ const ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT = new Set([
   'instance_never_reachable',
   'instance_unreachable',
 ]);
-const WHATSAPP_JID_RE = /\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b/gi;
 const KEYED_PHONE_RE = /\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|\s+)(\+?\d{10,16})\b/gi;
 const CONTEXT_PHONE_RE = /\b(for)(\s+)(\+?\d{10,16})\b/gi;
 const PHONE_LIKE_RE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;
@@ -715,7 +715,7 @@ export class HealthPoller {
   private redactEvidenceString(value: string): string {
     return value
       .replace(PEM_PRIVATE_KEY_RE, '[REDACTED_PRIVATE_KEY]')
-      .replace(WHATSAPP_JID_RE, '[REDACTED_JID]')
+      .replace(jidPattern(), '[REDACTED_JID]')
       .replace(KEYED_PHONE_RE, (_match, key: string, sep: string) => `${key}${sep}[REDACTED_PHONE]`)
       .replace(CONTEXT_PHONE_RE, (_match, key: string, sep: string) => `${key}${sep}[REDACTED_PHONE]`)
       .replace(PHONE_LIKE_RE, (match, prefix: string, candidate: string) => {
