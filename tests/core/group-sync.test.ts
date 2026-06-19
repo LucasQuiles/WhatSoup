@@ -84,6 +84,15 @@ describe('group-sync', () => {
       expect(rows[0].jid).toBe('g1@g.us');
       expect(rows[1].jid).toBe('g2@g.us');
     });
+
+    it('records restrict=true as 1 on upsert (ternary true arm)', () => {
+      handleGroupsUpsert(db, [{ id: 'gr@g.us', subject: 'Restricted', restrict: true }]);
+
+      const row = db.raw
+        .prepare('SELECT restrict_mode FROM groups WHERE jid = ?')
+        .get('gr@g.us') as any;
+      expect(row.restrict_mode).toBe(1);
+    });
   });
 
   // --- handleGroupsUpdate ---
@@ -138,6 +147,74 @@ describe('group-sync', () => {
 
     it('handles empty update array without throwing', () => {
       expect(() => handleGroupsUpdate(db, [])).not.toThrow();
+    });
+
+    it('updates owner, restrict (true), and participant_count when provided', () => {
+      handleGroupsUpdate(db, [
+        { id: 'g1@g.us', owner: '222@s.whatsapp.net', restrict: true, participants: [{}, {}, {}, {}] },
+      ]);
+
+      const row = db.raw
+        .prepare('SELECT owner, restrict_mode, participant_count FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.owner).toBe('222@s.whatsapp.net');
+      expect(row.restrict_mode).toBe(1);
+      expect(row.participant_count).toBe(4);
+    });
+
+    it('updates description when provided', () => {
+      handleGroupsUpdate(db, [{ id: 'g1@g.us', desc: 'Fresh description' }]);
+
+      const row = db.raw
+        .prepare('SELECT description FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.description).toBe('Fresh description');
+    });
+
+    it('records restrict=false and announce=false as 0 (ternary falsy arms)', () => {
+      handleGroupsUpdate(db, [{ id: 'g1@g.us', restrict: false, announce: false }]);
+
+      const row = db.raw
+        .prepare('SELECT restrict_mode, announce_mode FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.restrict_mode).toBe(0);
+      expect(row.announce_mode).toBe(0);
+    });
+
+    it('writes null for explicitly-null subject/desc/owner (?? null arms)', () => {
+      handleGroupsUpdate(db, [
+        {
+          id: 'g1@g.us',
+          subject: null as unknown as string,
+          desc: null as unknown as string,
+          owner: null as unknown as string,
+        },
+      ]);
+
+      const row = db.raw
+        .prepare('SELECT subject, description, owner FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.subject).toBeNull();
+      expect(row.description).toBeNull();
+      expect(row.owner).toBeNull();
+    });
+
+    it('sets participant_count to null when participants is explicitly null', () => {
+      handleGroupsUpdate(db, [{ id: 'g1@g.us', participants: null as unknown as undefined }]);
+
+      const row = db.raw
+        .prepare('SELECT participant_count FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.participant_count).toBeNull();
+    });
+
+    it('leaves existing fields intact when only id is provided (setClauses length === 1)', () => {
+      handleGroupsUpdate(db, [{ id: 'g1@g.us' }]);
+
+      const row = db.raw
+        .prepare('SELECT subject FROM groups WHERE jid = ?')
+        .get('g1@g.us') as any;
+      expect(row.subject).toBe('Original Subject');
     });
   });
 });
