@@ -29,7 +29,6 @@ const ALLOWLIST = new Set<string>([
   'console/src/components/line-detail/CreateGroupModal.tsx',
   'console/src/components/line-detail/GroupDetailModal.tsx',
   'console/src/components/line-detail/ScheduleComposerModal.tsx',
-  'console/src/components/SaveContactDialog.tsx',
   'console/src/components/wizard/ConfigStep.tsx',
   'console/src/components/wizard/IdentityStep.tsx',
   'console/src/components/wizard/ModelAuthStep.tsx',
