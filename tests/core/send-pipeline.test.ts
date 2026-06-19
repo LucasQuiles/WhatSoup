@@ -121,6 +121,66 @@ describe('executeSend outbound audit lifecycle', () => {
     expect(row.count).toBe(0);
     expect(transport).not.toHaveBeenCalled();
   });
+
+  it('throws when an audit writer is configured without a caller', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer }); // no caller
+
+    await expect(pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi' },
+      async () => ({ transportId: 'wamid.x' }),
+    )).rejects.toThrow(/caller is required/i);
+  });
+
+  it('audits a sent row with a null transport id when the transport returns none', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+
+    const result = await pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi' },
+      async () => ({}), // no transportId → extractTransportId returns null
+    );
+
+    expect(result).toEqual({});
+    const row = db.raw
+      .prepare('SELECT status, transport_message_id FROM outbound_sends')
+      .get() as Record<string, unknown>;
+    expect(row).toEqual({ status: 'sent', transport_message_id: null });
+  });
+
+  it('executes without auditing when no audit writer is configured', async () => {
+    const pipeline = createSendPipeline({ resolver: chatResolver }); // no auditWriter → skip audit
+
+    const ok = await pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi' },
+      async () => ({ transportId: 'wamid.noaudit' }),
+    );
+    expect(ok).toEqual({ transportId: 'wamid.noaudit' });
+
+    // A throwing transport still rethrows even though there is no audit row to mark failed.
+    await expect(pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'boom' },
+      async () => { throw new Error('down'); },
+    )).rejects.toThrow('down');
+  });
+
+  it('records a non-Error transport failure via String(err)', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+
+    await expect(pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'x' },
+      async () => { throw 'string failure'; },
+    )).rejects.toBe('string failure');
+
+    const row = db.raw
+      .prepare('SELECT status, error FROM outbound_sends')
+      .get() as Record<string, unknown>;
+    expect(row).toEqual({ status: 'failed', error: 'string failure' });
+  });
 });
 
 describe('prepareTextSend', () => {
@@ -187,6 +247,13 @@ describe('prepareTextSend', () => {
       { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi', profile: 'missing' },
       { chatResolver, profiles: createProfileRegistry({}) },
     )).toThrow(UnknownProfileError);
+  });
+
+  it('rejects an empty-string profile as an invalid request', () => {
+    expect(() => prepareTextSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi', profile: '   ' },
+      { chatResolver },
+    )).toThrow(/profile must be a non-empty string/i);
   });
 
   it('preserves current send preparation when no profile is requested', () => {

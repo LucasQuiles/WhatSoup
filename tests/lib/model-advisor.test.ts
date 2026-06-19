@@ -184,6 +184,13 @@ describe('notifyModelAdvisories', () => {
     expect(emitAlertMock).toHaveBeenCalledTimes(2);
   });
 
+  it('renders a missing recommended model as a placeholder in the summary', () => {
+    notifyModelAdvisories('test-bot', [{ ...advisory, recommended: undefined }]);
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+    // line 232: `a.recommended ?? '?'` (and line 206 dedup key uses `?? ''`)
+    expect(emitAlertMock.mock.calls[0][2]).toContain('claude-opus-4-6 → ?');
+  });
+
   it('clears the alert source once a flagged config comes back clean', () => {
     notifyModelAdvisories('test-bot', [advisory]);
     notifyModelAdvisories('test-bot', []);
