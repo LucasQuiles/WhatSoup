@@ -56,11 +56,14 @@ describe('Nav — navigation links', () => {
     expect(nav.getAttribute('aria-label')).toBe('Main navigation');
   });
 
-  it('renders the SOUP nameplate', () => {
+  it('renders the SOUP wordmark with the accent U', () => {
     renderNav();
-    // SOUP nameplate lockup (brand.md §1): wordmark text + an aria-label on the lockup.
-    expect(screen.getByText('SOUP')).toBeDefined();
-    expect(screen.getByLabelText('SOUP')).toBeDefined();
+    // SOUP brand wordmark (brand.md §1): accessible name on the lockup, full text
+    // content, and the "U" as the accent letter. Markup is SO<U>P, so the wordmark
+    // text is fragmented across elements — assert on the lockup, not a single node.
+    const lockup = screen.getByLabelText('SOUP');
+    expect(lockup.textContent?.replace(/\s+/g, '')).toBe('SOUP');
+    expect(lockup.querySelector('.soup-nameplate__accent')?.textContent).toBe('U');
   });
 });
 

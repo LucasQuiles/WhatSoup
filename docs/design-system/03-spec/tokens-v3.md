@@ -104,7 +104,7 @@ type utilities, never via raw `font:` declarations.
 | `--type-data-lg` | `500 22px/28px var(--font-mono)` | tabular figures |
 | `--type-data` | `400 13px/20px var(--font-mono)` | tabular figures |
 | `--type-data-sm` | `400 12px/16px var(--font-mono)` | tabular figures |
-| `--type-nameplate` | `600 14px/24px var(--font-mono)` | tracking +0.38em, uppercase — **reserved for the SOUP mark**, see `brand.md` |
+| `--type-nameplate` | `800 18px/24px var(--font-display)` | tracking −0.06em, uppercase — **the SOUP Bricolage wordmark** (accent "U"), reserved for the SOUP mark, see `brand.md` |
 
 Implementation status (DD-26/DD-37): `tokens.primitive.css` currently carries a fallback-preserving
 bridge for the 9 consumed type tokens (`--type-heading`, `--type-body`, `--type-body-st`,

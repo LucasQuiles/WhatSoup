@@ -56,14 +56,16 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
       aria-label="Main navigation"
       className="soup-rail bg-surface-raised c-border-r min-w-0"
     >
-      {/* SOUP nameplate — engraved instrument label, docked at the top of the rail
+      {/* SOUP wordmark — Bricolage display brand mark, docked at the top of the rail
           (brand.md §1.1–§1.3). Lockup styled in primitives.css (.soup-nameplate*):
           teal heritage tick (--mode-passive-solid, NOT the action accent), --sp-3 gap,
-          wordmark in --type-nameplate with tracking/optical-centering corrections. */}
+          wordmark in --type-nameplate (Bricolage 800, tight tracking), the "U" in --accent. */}
       <div className="soup-rail__head">
         <span className="soup-nameplate" aria-label="SOUP">
           <span aria-hidden="true" className="soup-nameplate__tick" />
-          <span className="soup-nameplate__wm soup-rail__label">SOUP</span>
+          <span aria-hidden="true" className="soup-nameplate__wm soup-rail__label">
+            SO<span className="soup-nameplate__accent">U</span>P
+          </span>
         </span>
       </div>
 

@@ -3,7 +3,7 @@
  *
  * Real assertions: the hero heading renders with the "fleet." accent, the three
  * value props render with their copy, the CTA navigates to "/", the SOUP nameplate
- * is present (teal tick + spaced-caps mark), and no legacy/raw design tokens leak
+ * is present (teal tick + Bricolage wordmark with accent U), and no legacy/raw design tokens leak
  * into the rendered markup.
  *
  * @vitest-environment jsdom
@@ -96,21 +96,21 @@ describe('Landing — value props', () => {
 })
 
 describe('Landing — nameplate', () => {
-  it('renders the SOUP nameplate wordmark in spaced-caps mono', () => {
+  it('renders the SOUP wordmark in the Bricolage display face with the accent U', () => {
     renderLanding()
-    const mark = screen.getByText('SOUP')
-    expect(mark.className).toContain('font-mono')
-    expect(mark.className).toContain('uppercase')
-    // brand.md §1.2 rule 1 — trailing-tracking cancellation keeps the lockup centred.
-    expect(mark.className).toContain('[margin-inline-end:-0.38em]')
+    // brand.md §1 — shared .soup-nameplate lockup: accessible name, full text, accent "U".
+    const lockup = screen.getByLabelText('SOUP')
+    expect(lockup.textContent?.replace(/\s+/g, '')).toBe('SOUP')
+    expect(lockup.querySelector('.soup-nameplate__wm')).not.toBeNull()
+    expect(lockup.querySelector('.soup-nameplate__accent')?.textContent).toBe('U')
   })
 
   it('renders the heritage-teal tick (mode-passive), never the action accent', () => {
     const { container } = renderLanding()
-    const tick = container.querySelector('.bg-mode-passive-solid')
+    const tick = container.querySelector('.soup-nameplate__tick')
     expect(tick).not.toBeNull()
-    // The tick must not borrow the action accent.
-    expect(tick?.className).not.toContain('bg-accent')
+    // The tick uses --mode-passive-solid (CSS), never the action accent.
+    expect(tick?.className).not.toContain('accent')
   })
 })
 

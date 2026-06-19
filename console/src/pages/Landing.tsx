@@ -26,24 +26,15 @@ import { Card, Button } from '../components/primitives'
 const EASE = [0.22, 1, 0.36, 1] as const
 
 // ---------------------------------------------------------------------------
-// SOUP nameplate (brand.md §1) — inline lockup: teal tick + spaced-caps wordmark.
-// Tick: --mode-passive-solid (heritage teal, deliberately NOT the action accent).
-// Wordmark: IBM Plex Mono 600, uppercase, +0.38em tracking with the mandatory −0.38em
-// trailing-space cancellation (§1.2 rule 1) so the lockup centres on its corrected box.
+// SOUP wordmark (brand.md §1) — the shared .soup-nameplate lockup: teal tick +
+// the Bricolage display brand wordmark with the accent "U" (SO·U·P). Same classes
+// as the Nav rail so the mark stays identical everywhere it appears.
 // ---------------------------------------------------------------------------
 const Nameplate: FC = () => (
-  <span className="flex items-center gap-[var(--sp-3)] select-none">
-    <span
-      aria-hidden="true"
-      className="w-[var(--sp-2)] h-[var(--sp-2)] rounded-[var(--r-1)] bg-mode-passive-solid"
-    />
-    <span
-      // brand.md §1.1 — the wordmark is a fixed 4-glyph mark; nowrap is the locked
-      // lockup geometry, not a truncation risk. title carries the full value (no clip).
-      title="SOUP"
-      className="font-mono font-semibold uppercase text-text-1 text-data whitespace-nowrap tracking-[0.38em] [margin-inline-end:-0.38em]"
-    >
-      SOUP
+  <span className="soup-nameplate" aria-label="SOUP">
+    <span aria-hidden="true" className="soup-nameplate__tick" />
+    <span aria-hidden="true" className="soup-nameplate__wm">
+      SO<span className="soup-nameplate__accent">U</span>P
     </span>
   </span>
 )

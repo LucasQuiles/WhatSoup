@@ -189,12 +189,11 @@
      uses 500 — the definition matches the actual fallback to preserve rendering. */
   --type-overline: 500 10px/16px var(--font-sans);
 
-  /* --type-nameplate: the SOUP nameplate wordmark — mono, semibold, 14/24, uppercase,
-     tracking +0.38em applied at the lockup (brand.md §1.1). RESERVED for the SOUP
-     mark only (lint: nameplate-reserved); see tokens-v3.md §2.6 and brand.md §1.
-     The +0.38em letter-spacing and its compensating −0.38em margin-inline-end live
-     on the nameplate lockup, not in this font shorthand. */
-  --type-nameplate: 600 14px/24px var(--font-mono);
+  /* --type-nameplate: the SOUP wordmark — display face (Bricolage Grotesque),
+     extrabold, 18/24, uppercase, tight tracking applied at the lockup (brand.md §1.1).
+     RESERVED for the SOUP mark only (lint: nameplate-reserved); see tokens-v3.md §2.6
+     and brand.md §1. The negative tracking lives on the lockup, not this shorthand. */
+  --type-nameplate: 800 18px/24px var(--font-display);
 
   /* Motion tokens — §2.5 v3 values */
   --dur-fast: 120ms;

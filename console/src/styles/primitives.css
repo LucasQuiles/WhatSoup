@@ -2366,7 +2366,6 @@ button.soup-pill[aria-disabled="true"] {
   gap: var(--sp-3);
   white-space: nowrap;
   user-select: none;
-  transform: translateY(0.5px);
 }
 
 .soup-nameplate__tick {
@@ -2378,15 +2377,18 @@ button.soup-pill[aria-disabled="true"] {
 }
 
 .soup-nameplate__wm {
-  /* --nameplate-tracking is the single source for the +0.38em wordmark tracking and
-     its compensating negative margin (brand.md §1.2 rule 1: the trailing tracking is
-     cancelled so the lockup centers optically). One value drives both so they cannot drift. */
-  --nameplate-tracking: 0.38em;
+  /* SOUP wordmark — Bricolage display (--type-nameplate), tight display tracking
+     (brand.md §1.1). No trailing-space cancellation: negative tracking has no
+     trailing gap to cancel (unlike the prior mono +0.38em spaced caps). */
   font: var(--type-nameplate);
   text-transform: uppercase;
-  letter-spacing: var(--nameplate-tracking);
-  margin-inline-end: calc(-1 * var(--nameplate-tracking));
+  letter-spacing: var(--tracking-tighter);
   color: var(--text-1);
+}
+
+/* The accent letter (the "U" in SO·U·P) per the showcase brand wordmark. */
+.soup-nameplate__accent {
+  color: var(--accent);
 }
 
 /* --------------------------------------------------------------------------

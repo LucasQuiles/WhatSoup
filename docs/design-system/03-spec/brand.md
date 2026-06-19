@@ -7,44 +7,42 @@ here), research-digest signal 11, inconsistency-register P2-11.
 
 ## 1. The SOUP nameplate
 
-The nameplate is an **engraved instrument label, not a logotype**. It is the single carrier of the
-product's playfulness budget; everything else stays calm.
+The wordmark is the **brand mark** — a round, dense, tightly-spaced display read matched to the
+identity showcase. It is the single carrier of the product's playfulness budget; everything else
+stays calm. (It supersedes the v2 mono "engraved instrument label": the showcase nav brand is the
+Bricolage wordmark, so the console adopts it everywhere the SOUP mark appears.)
 
 ### 1.1 Anatomy
 
 ```
-[tick] SOUP [· context subtitle]
+[tick] SO·U·P [· context subtitle]
 ```
 
-- **Wordmark**: `SOUP` in `--type-nameplate` (IBM Plex Mono 600 14/24), uppercase, letter-spacing
-  +0.38em, ink `--text-1`, `white-space: nowrap`.
+- **Wordmark**: `SOUP` in `--type-nameplate` (Bricolage Grotesque **800 18/24**, the display face),
+  uppercase, tight tracking `--tracking-tighter` (−0.06em ≈ showcase −0.055em), ink `--text-1`,
+  `white-space: nowrap`. The **"U" is rendered in `--accent`** (`.soup-nameplate__accent`) — the one
+  accent letter per the showcase brand wordmark.
 - **Tick**: one 8×8px square, corner radius 1px, fill `--mode-passive-solid` — brand heritage
   teal, deliberately NOT the action accent. Sits before the wordmark at a `--sp-3` (12px) gap.
 - **Subtitle** (optional, context label such as a page or build tag): IBM Plex Mono 400 11/16,
-  +0.18em, `--text-2`; hides first under width pressure.
+  +0.18em, `--text-2`; hides first under width pressure. (The context label stays mono — only the
+  wordmark itself is the display face, mirroring the showcase `.wm` / `.ctx` split.)
 
-### 1.2 Mandatory tuning rules (G2 open item 2 — resolved)
+### 1.2 Mandatory tuning rules (G2 open item 2 — resolved; updated for the display wordmark)
 
-1. **Tracking compensation.** CSS letter-spacing adds the full 0.38em *after every glyph including
-   the last*, so the wordmark's visual right edge is ~0.38em short of its box. The wordmark element
-   MUST cancel the trailing space: `margin-inline-end: -0.38em` (negative margin exactly equal to
-   the tracking value, in the same em units so it scales with any future size change). Without
-   this, centered or right-aligned lockups read off-center. The same rule applies to the subtitle
-   at its own −0.18em. Centering math must use the corrected box.
-2. **Optical centering against bar height.** The wordmark is all-caps mono: no descenders, so the
-   24px line box carries dead space below the baseline. When vertically centering inside chrome
-   (the 56px header bar), align the **cap-height midpoint**, not the line box: flex-center the
-   lockup, then apply `translateY(0.5px)` at the 14px size (half the difference between line-box
-   center and cap-height center for IBM Plex Mono caps). This offset is a declared optical correction
-   (layout-density §1 exception) and re-derives if the nameplate size or face ever changes
-   (the 0.5px was derived for the prior mono cap metrics; re-verify against IBM Plex Mono caps).
-3. **Tick placement/size/color.** Tick is 8×8px (cap-height-scaled: ~0.78× cap height), radius
-   1px, `--mode-passive-solid` in both themes, vertically aligned to the cap-height midline using
-   the same optical offset as rule 2. Gap to wordmark: `--sp-3`. The tick never animates, never
-   glows, never recolors with status.
-4. **Minimum clear space**: 12px (`--sp-3`, ≈ one cap height) on all sides of the lockup; nothing
-   may enter it. Minimum rendering size: the locked 14px style; the nameplate has no smaller
-   variant — where 14px does not fit, the nameplate is omitted, not shrunk.
+1. **Tracking.** The wordmark uses *negative* display tracking (`--tracking-tighter`), so — unlike
+   the prior mono +0.38em spaced caps — there is no trailing letter-space to cancel. The old
+   `margin-inline-end: -0.38em` compensation is removed. The subtitle keeps its mono +0.18em and its
+   own −0.18em trailing-space cancellation.
+2. **Optical centering.** The display face carries descenders and ordinary cap metrics, so the prior
+   `translateY(0.5px)` mono cap-height offset no longer applies and is removed; the lockup
+   flex-centers on its line box. Re-verify centering if the wordmark size/face changes again.
+3. **Tick placement/size/color.** Tick is 8×8px, radius 1px, `--mode-passive-solid` in both themes,
+   flex-centered with the wordmark. Gap to wordmark: `--sp-3`. The tick never animates, never glows,
+   never recolors with status.
+4. **Minimum clear space**: 12px (`--sp-3`) on all sides of the lockup; nothing may enter it.
+   Minimum rendering size: the locked 18px style; the wordmark has no smaller variant — where 18px
+   does not fit, the wordmark is omitted, not shrunk.
 
 ### 1.3 Forbidden treatments
 
