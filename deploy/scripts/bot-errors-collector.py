@@ -987,6 +987,20 @@ def is_transient_unreachable(diagnostics: dict[str, Any]) -> bool:
     return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
 
 
+def best_effort_info_tier_enabled() -> bool:
+    """Pattern I — best-effort remotes are operator-declared expected-flaky hosts.
+
+    A ``--best-effort-remote`` (e.g. a laptop that sleeps) going offline is a
+    planned/expected condition, not a crash. When this gate is on (default), its
+    per-remote failure events (``relay_host_down``, pre-threshold
+    ``remote-claim-failed``) emit at ``info`` instead of ``warning``/``critical``
+    so they surface in the digest without paging. Gate off restores prior
+    behavior (fail-open).
+    """
+    raw = os.environ.get("BOT_ERRORS_BEST_EFFORT_INFO_TIER", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def skip_writefail_after_outbox_failure(diagnostics: dict[str, Any]) -> bool:
     return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
 
@@ -1032,8 +1046,11 @@ def enqueue_meta_alert(
     cooldown: int,
     extra_diagnostics: dict[str, Any] | None = None,
     severity: str = "critical",
+    best_effort: bool = False,
 ) -> None:
     current = int(time.time())
+    # Pattern I: best-effort wins over transient; gate off restores prior behavior.
+    effective_severity = "info" if (best_effort and best_effort_info_tier_enabled()) else severity
     alerts = state.setdefault("alerts", {})
     open_alerts = state.setdefault("openAlerts", {})
     key = alert_key(remote, source)
@@ -1076,7 +1093,7 @@ def enqueue_meta_alert(
                 "schemaVersion": 1,
                 "id": event_id,
                 "eventType": "alert",
-                "severity": severity,
+                "severity": effective_severity,
                 "createdAt": created_at,
                 "machine": socket.gethostname(),
                 "platform": sys.platform,
@@ -1136,7 +1153,7 @@ def enqueue_meta_alert(
         "schemaVersion": 1,
         "id": event_id,
         "eventType": "alert",
-        "severity": severity,
+        "severity": effective_severity,
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
@@ -1737,14 +1754,18 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     return path
 
 
-def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: dict[str, Any]) -> None:
+def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: dict[str, Any], best_effort: bool = False) -> None:
     """Write a relay_host_down or relay_host_recovered outbox event (ENTRY/EXIT only).
 
     Uses atomic_write_json directly — does NOT go through enqueue_meta_alert so that
     it emits unconditionally (no cooldown gate) and contributes no open-alert tracking.
     """
     host, _remote_root = parse_remote(remote)
-    severity = "warning" if kind == "relay_host_down" else "info"
+    # Pattern I: a best-effort host going down is expected, not a crash — info, not a page.
+    if kind == "relay_host_down" and not (best_effort and best_effort_info_tier_enabled()):
+        severity = "warning"
+    else:
+        severity = "info"
     # time_ns + pid keep the id (and thus the outbox filename) unique even when
     # two state events for the same remote/kind land within the same wall second.
     event_id = f"collector-{safe_segment(remote)}-{kind}-{time.time_ns()}-{os.getpid()}"
@@ -1891,6 +1912,7 @@ def run_once(
                             f"collector_log={state_root() / 'logs/collector.jsonl'}"
                         ),
                         state,
+                        best_effort=is_best_effort,
                     )
                 # While host is in down state, do NOT fire per-attempt meta-alerts.
                 # The relay_host_down event replaces them.
@@ -1917,6 +1939,7 @@ def run_once(
                     alert_cooldown,
                     reachability_diagnostics,
                     severity="warning" if is_transient_unreachable(reachability_diagnostics or {}) else "critical",
+                    best_effort=is_best_effort,
                 )
             records = []
 
