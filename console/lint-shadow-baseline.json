@@ -1,7 +1,14 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 1,
+  "total": 25,
   "rules": {
+    "soup/no-raw-field-label :: src/components/line-detail/CreateGroupModal.tsx": 2,
+    "soup/no-raw-field-label :: src/components/line-detail/GroupDetailModal.tsx": 4,
+    "soup/no-raw-field-label :: src/components/line-detail/ScheduleComposerModal.tsx": 5,
+    "soup/no-raw-field-label :: src/components/SaveContactDialog.tsx": 1,
+    "soup/no-raw-field-label :: src/components/wizard/ConfigStep.tsx": 6,
+    "soup/no-raw-field-label :: src/components/wizard/IdentityStep.tsx": 3,
+    "soup/no-raw-field-label :: src/components/wizard/ModelAuthStep.tsx": 3,
     "soup/no-utility-smell :: src/components/line-detail/GroupCard.tsx": 1
   }
 }
