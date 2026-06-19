@@ -1,9 +1,7 @@
 # Console Fonts — Provenance
 
-Self-hosted woff2 files for the SOUP v3 identity typography. The active triad is the
-showcase identity set: **Hanken Grotesk** (body) + **IBM Plex Mono** (data/nameplate);
-**Bricolage Grotesque** (display) arrives with the display tier. **Geist** is retained as
-an inert @font-face during the cutover and is removed once nothing references it.
+Self-hosted woff2 files for the SOUP v3 identity typography — the showcase identity triad:
+**Bricolage Grotesque** (display) + **Hanken Grotesk** (body) + **IBM Plex Mono** (data/nameplate).
 
 ## Sources
 
@@ -25,16 +23,9 @@ an inert @font-face during the cutover and is removed once nothing references it
 - **License:** SIL Open Font License 1.1. Copyright the Bricolage Grotesque Project Authors.
 - **Weights:** 600/700/800 (latin, normal) — editorial display read; falls back to Hanken.
 
-### Geist (inert — retained until removal)
-- **Repository:** https://github.com/vercel/geist-font
-- **Release tag:** v1.7.2 — **License:** SIL Open Font License 1.1
-  Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font)
-- No production token references Geist after the Hanken/IBM Plex swap; the @font-face
-  declarations are kept inert for rollback safety and removed in a follow-up.
-
 ## Weights shipped
 
-No italics. Body/mono (Hanken, IBM Plex Mono, Geist): 400/500/600, matching the
+No italics. Body/mono (Hanken Grotesk, IBM Plex Mono): 400/500/600, matching the
 `--type-*` ramp. Display (Bricolage Grotesque): 600/700/800 for the editorial display read.
 
 ## Files and sha256
@@ -50,12 +41,6 @@ No italics. Body/mono (Hanken, IBM Plex Mono, Geist): 400/500/600, matching the
 | BricolageGrotesque-600.woff2 | 600 | b34fc8c1ef0ac8798455ac2979eae4b4f90f0d327e3584d1032fa77a8a9a66ca |
 | BricolageGrotesque-700.woff2 | 700 | 4c373ce3c1cca41c864eb3e27c059a59fc6310547ab9c9b6cd780d387ba24206 |
 | BricolageGrotesque-800.woff2 | 800 | 3e1b5f0a56ee995b7c1445bc54e6ec98c5dffb585ef5c4baf86731cf68e27c61 |
-| Geist-Regular.woff2 | 400 | d8bce822db092746889bcf3f57350b41f53708b025458fe7af30729ec4ce0df2 |
-| Geist-Medium.woff2 | 500 | b0a0867cda44efef4529a4b13ce37fd9fd6e1597708615287542a51bc7452ab4 |
-| Geist-SemiBold.woff2 | 600 | b1e6a1dd2122485d0a1f3a8d30a45443aa9453224f83018bec35f8266bc77915 |
-| GeistMono-Regular.woff2 | 400 | e4507fb4fb5f832fbbb6c06aea4206274ba3083007f23fa8cbc0e87a10acf95b |
-| GeistMono-Medium.woff2 | 500 | 85b99e603f84a47dc8118b5af058ad8f387d7c507a00faeef1b5b60eb371e844 |
-| GeistMono-SemiBold.woff2 | 600 | 8416445afd947018ffeb31844da808bd7f4356f5dc7d73a084659c32eae26548 |
 
 ## Verification
 

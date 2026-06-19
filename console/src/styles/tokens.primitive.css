@@ -57,7 +57,7 @@
 
   /* Font stacks (§2.1) — showcase identity triad: Bricolage Grotesque (display),
      Hanken Grotesk (body), IBM Plex Mono (data/nameplate). Display falls back to
-     the body face. Geist retained as inert @font-face until its removal. */
+     the body face. */
   --font-display: "Bricolage Grotesque", "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
   --font-sans: "Hanken Grotesk", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;

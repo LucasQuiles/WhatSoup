@@ -28,7 +28,7 @@ const EASE = [0.22, 1, 0.36, 1] as const
 // ---------------------------------------------------------------------------
 // SOUP nameplate (brand.md §1) — inline lockup: teal tick + spaced-caps wordmark.
 // Tick: --mode-passive-solid (heritage teal, deliberately NOT the action accent).
-// Wordmark: Geist Mono 600, uppercase, +0.38em tracking with the mandatory −0.38em
+// Wordmark: IBM Plex Mono 600, uppercase, +0.38em tracking with the mandatory −0.38em
 // trailing-space cancellation (§1.2 rule 1) so the lockup centres on its corrected box.
 // ---------------------------------------------------------------------------
 const Nameplate: FC = () => (

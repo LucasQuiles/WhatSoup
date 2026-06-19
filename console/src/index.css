@@ -1,6 +1,7 @@
-/* Typography: Geist + Geist Mono self-hosted (typography.md §1, DD-4 closed).
-   @font-face declarations in ./styles/fonts.css; woff2 files in console/public/fonts/.
-   Provenance: console/public/fonts/README.md (vercel/geist-font v1.7.2, SIL OFL 1.1). */
+/* Typography: showcase identity triad self-hosted (typography.md §1) —
+   Bricolage Grotesque (display) + Hanken Grotesk (body) + IBM Plex Mono (mono).
+   @font-face in ./styles/fonts.css; woff2 in console/public/fonts/; provenance + sha256
+   in console/public/fonts/README.md (all SIL OFL 1.1). */
 @import "./styles/fonts.css";
 @import "tailwindcss";
 
