@@ -60,4 +60,20 @@ describe('pinecone project guard helpers', () => {
       projectMismatch: (indexName) => `mismatch ${indexName}`,
     })).resolves.toBe('mismatch target');
   });
+
+  it('returns null when the index exists and matches the configured guard', async () => {
+    const client = {
+      listIndexes: vi.fn().mockResolvedValue({
+        indexes: [{ name: 'target', host: 'index-proj123.svc.us-east-1-aws.pinecone.io' }],
+      }),
+    };
+    await expect(pineconeProjectGuardError(client, 'target', {
+      projectId: 'proj123',
+      expectedHostSuffix: '.svc.us-east-1-aws.pinecone.io',
+    }, {
+      missingIndex: (indexName) => `missing ${indexName}`,
+      projectMismatch: (indexName) => `mismatch ${indexName}`,
+    })).resolves.toBeNull();
+    expect(client.listIndexes).toHaveBeenCalledOnce();
+  });
 });
