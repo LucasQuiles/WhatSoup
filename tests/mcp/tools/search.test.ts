@@ -489,4 +489,51 @@ describe('search tools', () => {
       expect(data.messages).toHaveLength(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // residual-branch coverage
+  // -------------------------------------------------------------------------
+  //
+  // search_contacts maps nullable columns (canonical_phone, display_name,
+  // notify_name) through `row.col ?? null`. The existing seed only contains
+  // rows where every column is non-null, so the `??` fallback branches at
+  // src/mcp/tools/search.ts:147-149 are never taken. Inserting a row with
+  // all three columns explicitly NULL exercises the null-side of each `??`.
+
+  describe('residual-branch coverage', () => {
+    it('search_contacts: ?? fallback returns null for null canonical_phone/display_name/notify_name', async () => {
+      db.raw.exec(`
+        INSERT INTO contacts (jid, canonical_phone, display_name, notify_name)
+        VALUES ('333@s.whatsapp.net', NULL, NULL, NULL);
+      `);
+
+      const result = await registry.call(
+        'search_contacts',
+        { query: '333' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        results: Array<{
+          jid: string;
+          canonicalPhone: string | null;
+          displayName: string | null;
+          notifyName: string | null;
+          firstSeenAt: string;
+          lastSeenAt: string;
+        }>;
+      };
+
+      expect(data.results).toHaveLength(1);
+      expect(data.results[0]).toEqual({
+        jid: '333@s.whatsapp.net',
+        canonicalPhone: null,
+        displayName: null,
+        notifyName: null,
+        firstSeenAt: expect.any(String),
+        lastSeenAt: expect.any(String),
+      });
+    });
+  });
 });
