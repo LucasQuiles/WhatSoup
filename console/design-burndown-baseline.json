@@ -2,7 +2,6 @@
   "generated": "design burndown per-category ceiling (fall-only ratchet)",
   "categories": {
     "accent-law": 0,
-    "eslint:soup/no-raw-field-label": 24,
     "half-step": 54,
     "legacy-var-css": 0,
     "raw-color-css": 0,

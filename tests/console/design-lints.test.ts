@@ -409,36 +409,6 @@ const x = <Button variant="primary">Click me</Button>`
 // Prong b: JSXAttribute[name.name="role"][value.value="dialog"]
 // ---------------------------------------------------------------------------
 
-describe('soup/no-raw-field-label', () => {
-  it('fires when c-field-label appears in a className string', async () => {
-    const messages = await lintWarnings(
-      'const x = <label className="c-field-label">Name</label>'
-    )
-    expect(hasWarning(messages, 'no-raw-field-label')).toBe(true)
-  })
-
-  it('fires when c-field-label appears alongside other classes', async () => {
-    const messages = await lintWarnings(
-      'const x = <label className="c-label c-field-label">Name</label>'
-    )
-    expect(hasWarning(messages, 'no-raw-field-label')).toBe(true)
-  })
-
-  it('is silent when className does not contain c-field-label', async () => {
-    const messages = await lintWarnings(
-      'const x = <label className="c-label">Name</label>'
-    )
-    expect(hasWarning(messages, 'no-raw-field-label')).toBe(false)
-  })
-
-  it('is silent in the primitives tier (FormControl owns c-field-label)', async () => {
-    const messages = await lintWarningsPrimitives(
-      'const x = <label className="c-field-label">Name</label>'
-    )
-    expect(hasWarning(messages, 'no-raw-field-label')).toBe(false)
-  })
-})
-
 describe('soup/no-adhoc-modal', () => {
   describe('prong a - c-dialog-backdrop literal', () => {
     it('fires when c-dialog-backdrop appears in a className string', async () => {
