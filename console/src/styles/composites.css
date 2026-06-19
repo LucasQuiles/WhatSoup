@@ -710,6 +710,10 @@ body::before {
   color: var(--status-crit-fg);
 }
 
+.c-optional-marker {
+  color: var(--text-3);
+}
+
 .c-checkbox-row {
   display: flex;
   align-items: center;

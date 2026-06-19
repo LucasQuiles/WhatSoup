@@ -10,7 +10,9 @@ v2.html form-controls spec block.
 **Field** wrapper (grid, gap `--sp-1`, max-width 320px / 480px wide / none full):
 `[label] [control] [hint | error]`.
 
-- Label: `--type-label`, `--text-1`; required marker `*` in `--status-crit-fg`.
+- Label: `--type-label`, `--text-1`; required marker `*` in `--status-crit-fg` (`.c-required-marker`),
+  or a muted `(optional)` marker in `--text-3` (`.c-optional-marker`) — mutually exclusive. `label`
+  accepts a ReactNode so a consumer may inline an additional mark (e.g. a unit pill) when needed.
 - Control: height `--input-h` 32px (compact 28px), padding `0 --sp-3`, `--type-body`, ink
   `--text-1`, background `--surface-inset`, border 1px `--border-strong`, radius `--r-2`,
   placeholder `--text-3`.
@@ -29,8 +31,9 @@ v2.html form-controls spec block.
 
 ## Conceptual props
 
-`label` · `hint` · `error` · `required` · `size` (default/compact) · `disabled` · `value` etc. ·
-search: `onClear`.
+`label` (ReactNode) · `hint` · `error` · `required` · `optional` · `statusAdornment` (custom status
+slot in the control row — spinner/X for async validation, replaces the built-in confirmed Check) ·
+`confirmed` · `size` (default/compact) · `disabled` · `value` etc. · search: `onClear`.
 
 ## States
 

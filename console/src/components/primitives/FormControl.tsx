@@ -48,15 +48,24 @@ function injectFieldControlProps(control: ReactNode, fieldProps: FieldControlPro
 }
 
 export interface FieldProps {
-  label: string;
+  /** Field label. ReactNode so consumers can inline marks (e.g. a unit pill); a plain string is the common case. */
+  label: ReactNode;
   error?: string;
   helper?: string;
   confirmed?: boolean;
   required?: boolean;
+  /** Renders a muted "(optional)" marker after the label (mutually exclusive with `required`). */
+  optional?: boolean;
+  /**
+   * Custom status indicator rendered in the control row, replacing the built-in confirmed Check.
+   * For rich/async validation UI — e.g. a spinner while checking, an X when invalid. When omitted,
+   * the `confirmed` Check is shown as before.
+   */
+  statusAdornment?: ReactNode;
   children: (id: string) => ReactNode;
 }
 
-export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, required, children }) => {
+export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, required, optional, statusAdornment, children }) => {
   const id = useId();
   const errorId = error ? `${id}-error` : undefined;
   const helperId = !error && helper ? `${id}-helper` : undefined;
@@ -72,12 +81,11 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, require
       <div>
         <label htmlFor={id} className="c-heading c-field-label">{label}</label>
         {required && <span aria-hidden="true" className="c-required-marker"> *</span>}
+        {optional && !required && <span aria-hidden="true" className="c-optional-marker"> (optional)</span>}
       </div>
       <div className="flex items-center gap-[var(--sp-2)]">
         <div className="flex-1 min-w-0">{control}</div>
-        {!error && confirmed && (
-          <Check size={16} className="wizard-check" />
-        )}
+        {statusAdornment ?? (!error && confirmed ? <Check size={16} className="wizard-check" /> : null)}
       </div>
       {error && <div id={errorId} className="c-error">{error}</div>}
       {!error && helper && <div id={helperId} className="c-helper">{helper}</div>}

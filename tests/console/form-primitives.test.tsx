@@ -103,6 +103,55 @@ describe('Field', () => {
     expect(input.required).toBe(false)
     expect(screen.getByText('*').getAttribute('aria-hidden')).toBe('true')
   })
+
+  it('renders a muted optional marker, aria-hidden, when optional', () => {
+    const { container } = render(
+      <Field label="Field" optional>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    const marker = container.querySelector('.c-optional-marker') as HTMLElement
+    expect(marker).not.toBeNull()
+    expect(marker.getAttribute('aria-hidden')).toBe('true')
+    expect(marker.textContent).toContain('(optional)')
+  })
+
+  it('suppresses the optional marker when required also set (required wins)', () => {
+    const { container } = render(
+      <Field label="Field" required optional>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    expect(container.querySelector('.c-required-marker')).not.toBeNull()
+    expect(container.querySelector('.c-optional-marker')).toBeNull()
+  })
+
+  it('renders a custom statusAdornment in place of the confirmed Check', () => {
+    const { container } = render(
+      <Field label="Field" confirmed statusAdornment={<span data-testid="status">checking…</span>}>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    expect(screen.getByTestId('status').textContent).toBe('checking…')
+    // statusAdornment replaces the built-in Check even when confirmed is set
+    expect(container.querySelector('.wizard-check')).toBeNull()
+  })
+
+  it('accepts a ReactNode label so consumers can inline marks', () => {
+    render(
+      <Field label={<span>Name <span data-testid="mark">(beta)</span></span>}>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    expect(screen.getByTestId('mark').textContent).toBe('(beta)')
+    // label still associates with the control
+    const input = screen.getByLabelText(/Name/) as HTMLInputElement
+    expect(input.tagName).toBe('INPUT')
+  })
 })
 
 // TextInput
