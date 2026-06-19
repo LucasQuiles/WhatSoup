@@ -4915,7 +4915,8 @@ describe('AgentRuntime', () => {
     });
     await runtime.start();
 
-    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    (runtime as unknown as { fallbackWindow: { activeUntil: number | null } }).fallbackWindow.activeUntil =
+      Date.now() + 60_000;
     await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
 
     expect(mockProvisionWorkspace).toHaveBeenCalledWith(expect.objectContaining({
@@ -4953,7 +4954,8 @@ describe('AgentRuntime', () => {
     });
     await runtime.start();
 
-    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    (runtime as unknown as { fallbackWindow: { activeUntil: number | null } }).fallbackWindow.activeUntil =
+      Date.now() + 60_000;
     await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
 
     const provisionCalls = mockProvisionWorkspace.mock.calls as unknown as Array<[{

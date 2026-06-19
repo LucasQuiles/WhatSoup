@@ -129,7 +129,7 @@ function makeRuntime(): AgentRuntime {
 
 type RuntimeView = {
   effectiveProvider: string;
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   activateProviderFallback(resetAt: Date | null): void;
   handleEventWithContext(
     event: unknown,
@@ -211,7 +211,7 @@ describe('armFallbackWindow — persist-failure alert', () => {
     rv(runtime).activateProviderFallback(null);
 
     // Window is still set.
-    expect(rv(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(rv(runtime).fallbackWindow.activeUntil).not.toBeNull();
     // Provider has flipped to the fallback provider.
     expect(rv(runtime).effectiveProvider).toBe('opencode-cli');
   });
