@@ -23,6 +23,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
 import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
+import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 
 const log = createChildLogger('lid-resolver');
 
@@ -83,17 +84,9 @@ export interface LidWriteResult {
 const HISTORY_MAX_ROWS_PER_LID = 1000;
 const HISTORY_MAX_AGE_SQL = "-90 days";
 
-function timestampToEpochMs(value: string): number | null {
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
-    ? `${value.replace(' ', 'T')}Z`
-    : value;
-  const ms = Date.parse(normalized);
-  return Number.isFinite(ms) ? ms : null;
-}
-
 export function compareLidUpdatedAt(left: string, right: string): number {
-  const leftMs = timestampToEpochMs(left);
-  const rightMs = timestampToEpochMs(right);
+  const leftMs = sqliteUtcToEpochMs(left);
+  const rightMs = sqliteUtcToEpochMs(right);
   if (leftMs !== null && rightMs !== null) return Math.sign(leftMs - rightMs);
   if (leftMs !== null) return 1;
   if (rightMs !== null) return -1;
