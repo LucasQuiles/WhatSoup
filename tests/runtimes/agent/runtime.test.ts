@@ -8467,4 +8467,328 @@ describe('AgentRuntime', () => {
       db.close();
     });
   });
+
+  // ── Admin session commands: /sessions and /kill-session ───────────────────
+  // Covers the `case 'sessions':` and `case 'kill-session':` handler blocks in
+  // _handleMessageInner (single + per_chat scopes, admin guards, token
+  // formatting, invalid-index handling). These responses use sendDirect(...,
+  // bypassEchoGuard=true), so they land in messenger.sendMessage (sentMessages),
+  // not the outbound queue.
+  describe('admin session commands', () => {
+    const adminSender = '15550100001@s.whatsapp.net';
+    const nonAdminSender = '15559998888@s.whatsapp.net';
+
+    /**
+     * Mock Database whose prepared SELECT against agent_sessions returns a
+     * controlled token row. Used to exercise the token-formatting branches in
+     * the /sessions handler (>1000 → "k" suffix vs raw count).
+     */
+    function makeDbWithTokenRow(
+      tokenRow: { total_input_tokens: number | null; total_output_tokens: number | null } | undefined,
+    ): Database {
+      return {
+        raw: {
+          prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => tokenRow) })),
+          exec: vi.fn(),
+        },
+      } as unknown as Database;
+    }
+
+    function makePerChatSession(active: boolean, dbRowId: number | null, startedAt: string | null) {
+      return {
+        ...mockSession,
+        getStatus: vi.fn(() => ({
+          active,
+          pid: active ? 123 : null,
+          sessionId: active ? 'sess-x' : null,
+          startedAt,
+          messageCount: active ? 4 : 0,
+          lastMessageAt: null,
+        })),
+        getDbRowId: vi.fn((): number | null => dbRowId),
+        shutdown: vi.fn(async () => {}),
+      };
+    }
+
+    it('/sessions is ignored for a non-admin sender', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: nonAdminSender }));
+
+      // Non-admin guard returns before any send.
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
+    });
+
+    it('/sessions (single scope) reports an active session with k-suffixed token total', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 1500, total_output_tokens: 700 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        session: typeof mockSession;
+        activeChatJid: string | null;
+      };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 321,
+        sessionId: 'sess-single',
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        messageCount: 5,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      state.session = mockSession;
+      state.activeChatJid = 'owner@s.whatsapp.net';
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const texts = sentMessages.map((m) => m.text);
+      const listText = texts.find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('Active Sessions (1)');
+      // (1500 + 700) / 1000 = 2.2k
+      expect(listText).toContain('2.2k tokens');
+      expect(listText).toContain('owner@s.whatsapp.net');
+    });
+
+    it('/sessions (single scope) reports raw token count when total <= 1000', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 300, total_output_tokens: 200 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        session: typeof mockSession;
+        activeChatJid: string | null;
+      };
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 322,
+        sessionId: 'sess-single-2',
+        startedAt: new Date(Date.now() - 30_000).toISOString(),
+        messageCount: 2,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(7);
+      state.session = mockSession;
+      state.activeChatJid = null; // exercises the `?? 'unknown'` fallback
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('500 tokens');
+      expect(listText).toContain('1. unknown');
+    });
+
+    it('/sessions (single scope) reports no active sessions when session inactive', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+      (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('No active sessions'));
+      expect(text).toBe('_No active sessions._');
+    });
+
+    it('/sessions (per_chat scope) lists DM and Group active sessions, skips inactive, formats tokens', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: 2000, total_output_tokens: 0 });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      const startedAt = new Date(Date.now() - 90_000).toISOString();
+      state.chatSessions.set('15551112222', makePerChatSession(true, 11, startedAt)); // DM
+      state.chatSessions.set('111111100000000100@g.us', makePerChatSession(true, 12, startedAt)); // Group
+      state.chatSessions.set('15553334444', makePerChatSession(false, null, null)); // inactive → skipped
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('Active Sessions (2)');
+      expect(listText).toContain('(DM)');
+      expect(listText).toContain('(Group)');
+      expect(listText).toContain('2.0k tokens');
+      expect(listText).not.toContain('15553334444');
+    });
+
+    it('/sessions (per_chat scope) shows 0 tokens when dbRowId is null', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      state.chatSessions.set('15551112222', makePerChatSession(true, null, new Date().toISOString()));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('0 tokens');
+    });
+
+    it('/sessions (per_chat scope) treats null token columns as 0', async () => {
+      const db = makeDbWithTokenRow({ total_input_tokens: null, total_output_tokens: null });
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      // dbRowId non-null → token query runs; row present but columns null → 0
+      state.chatSessions.set('15551112222', makePerChatSession(true, 11, new Date().toISOString()));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('0 tokens');
+    });
+
+    it('/sessions (per_chat scope) shows ? age when startedAt is null', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      // active but no startedAt → age formatting falls back to '?'
+      state.chatSessions.set('15551112222', makePerChatSession(true, null, null));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/sessions', senderJid: adminSender }));
+
+      const listText = sentMessages.map((m) => m.text).find((t) => t.includes('Active Sessions'));
+      expect(listText).toContain('— ?,');
+    });
+
+    it('/kill-session is ignored for a non-admin sender', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: nonAdminSender }));
+
+      expect(sentMessages.map((m) => m.text)).toEqual([]);
+    });
+
+    it('/kill-session rejects a non-numeric index with usage help', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session abc', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Usage: /kill-session'));
+      expect(text).toContain('Run /sessions first');
+    });
+
+    it('/kill-session rejects index below 1 with usage help', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 0', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Usage: /kill-session'));
+      expect(text).toContain('Run /sessions first');
+    });
+
+    it('/kill-session (single scope) reports no active session to kill', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+      (runtime as unknown as { session: typeof mockSession }).session = mockSession;
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('No active session to kill'));
+      expect(text).toBe('_No active session to kill._');
+    });
+
+    it('/kill-session (per_chat scope) rejects an out-of-range index', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+      };
+      state.chatSessions.set('15551112222', makePerChatSession(true, 11, new Date().toISOString()));
+
+      // Only 1 active session, ask to kill #5
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 5', senderJid: adminSender }));
+
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Invalid session number'));
+      expect(text).toBe('_Invalid session number. 1 active._');
+    });
+
+    it('/kill-session (per_chat scope) kills the targeted Group session and reports it', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const groupKey = '111111100000000100@g.us';
+      const targetSession = makePerChatSession(true, 11, new Date().toISOString());
+      state.chatSessions.set(groupKey, targetSession);
+      const groupQueue = makeQueueMock('group@g.us');
+      state.chatQueues.set(groupKey, groupQueue);
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(groupQueue.abortTurn).toHaveBeenCalledTimes(1);
+      expect(targetSession.shutdown).toHaveBeenCalledWith(false);
+      expect(state.chatSessions.has(groupKey)).toBe(false);
+      expect(state.chatQueues.has(groupKey)).toBe(false);
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      expect(text).toBe(`_Session killed: ${groupKey} (Group)_`);
+    });
+
+    it('/kill-session (per_chat scope) kills the targeted DM session and reports it', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const dmKey = '15551112222';
+      const targetSession = makePerChatSession(true, 11, new Date().toISOString());
+      state.chatSessions.set(dmKey, targetSession);
+      state.chatQueues.set(dmKey, makeQueueMock('dm@s.whatsapp.net'));
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(targetSession.shutdown).toHaveBeenCalledWith(false);
+      const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
+      expect(text).toBe(`_Session killed: ${dmKey} (DM)_`);
+    });
+  });
 });
