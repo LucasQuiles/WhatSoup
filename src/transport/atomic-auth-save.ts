@@ -5,19 +5,15 @@ import { basename, dirname, join } from 'node:path';
 
 import { BufferJSON } from '@whiskeysockets/baileys';
 
-function privateAuthWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
+import { privateWriteError } from '../lib/private-fs.ts';
 
 async function assertPrivateDirectory(path: string): Promise<void> {
   const stat = await lstat(path);
   if (stat.isSymbolicLink()) {
-    throw privateAuthWriteError('refusing to use auth directory through symlink', 'ELOOP');
+    throw privateWriteError('refusing to use auth directory through symlink', 'ELOOP');
   }
   if (!stat.isDirectory()) {
-    throw privateAuthWriteError('refusing to use auth directory over non-directory path', 'EINVAL');
+    throw privateWriteError('refusing to use auth directory over non-directory path', 'EINVAL');
   }
 }
 
@@ -25,10 +21,10 @@ async function assertWritableAuthJsonTarget(path: string): Promise<void> {
   try {
     const stat = await lstat(path);
     if (stat.isSymbolicLink()) {
-      throw privateAuthWriteError('refusing to write auth json through symlink', 'ELOOP');
+      throw privateWriteError('refusing to write auth json through symlink', 'ELOOP');
     }
     if (!stat.isFile()) {
-      throw privateAuthWriteError('refusing to write auth json over non-regular path', 'EINVAL');
+      throw privateWriteError('refusing to write auth json over non-regular path', 'EINVAL');
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;

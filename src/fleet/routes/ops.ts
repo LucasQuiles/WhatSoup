@@ -30,6 +30,7 @@ import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
+import { privateWriteError } from '../../lib/private-fs.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -60,12 +61,6 @@ function deepMergeRecords(
 interface PrivateWriteOptions {
   exclusive?: boolean;
   mode?: number;
-}
-
-function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
 }
 
 function assertPrivateDirectorySync(dirPath: string): void {

@@ -32,6 +32,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { createHash } from 'node:crypto';
 import { shortHash } from '../lib/short-hash.ts';
+import { privateWriteError } from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -52,30 +53,24 @@ import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 
-function connectionWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
-
 function assertWritableMarkerTarget(path: string): void {
   if (!existsSync(path)) return;
   const stat = lstatSync(path);
   if (stat.isSymbolicLink()) {
-    throw connectionWriteError('refusing to write exhaustion marker through symlink', 'ELOOP');
+    throw privateWriteError('refusing to write exhaustion marker through symlink', 'ELOOP');
   }
   if (!stat.isFile()) {
-    throw connectionWriteError('refusing to write exhaustion marker over non-regular path', 'EINVAL');
+    throw privateWriteError('refusing to write exhaustion marker over non-regular path', 'EINVAL');
   }
 }
 
 function assertPrivateMarkerDirectory(path: string): void {
   const stat = lstatSync(path);
   if (stat.isSymbolicLink()) {
-    throw connectionWriteError('refusing to use marker directory through symlink', 'ELOOP');
+    throw privateWriteError('refusing to use marker directory through symlink', 'ELOOP');
   }
   if (!stat.isDirectory()) {
-    throw connectionWriteError('refusing to use marker directory over non-directory path', 'EINVAL');
+    throw privateWriteError('refusing to use marker directory over non-directory path', 'EINVAL');
   }
 }
 

@@ -21,6 +21,7 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { xdgDir } from './paths.ts';
 import { safeStringEqual } from './safe-compare.ts';
+import { privateWriteError } from '../lib/private-fs.ts';
 
 /** Maximum number of rotated-out tokens that remain valid. */
 export const MAX_ACCEPT_ENTRIES = 4;
@@ -57,19 +58,13 @@ function isFleetTokensFile(value: unknown): value is FleetTokensFile {
   return true;
 }
 
-function tokenStorageError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
-
 function assertPrivateTokenDirectory(dir: string): void {
   const stat = fs.lstatSync(dir);
   if (stat.isSymbolicLink()) {
-    throw tokenStorageError('refusing to use fleet token directory through symlink', 'ELOOP');
+    throw privateWriteError('refusing to use fleet token directory through symlink', 'ELOOP');
   }
   if (!stat.isDirectory()) {
-    throw tokenStorageError('refusing to use fleet token directory over non-directory path', 'EINVAL');
+    throw privateWriteError('refusing to use fleet token directory over non-directory path', 'EINVAL');
   }
 }
 
@@ -77,10 +72,10 @@ function assertReadableTokenFile(filePath: string, label: string): boolean {
   try {
     const stat = fs.lstatSync(filePath);
     if (stat.isSymbolicLink()) {
-      throw tokenStorageError(`refusing to read ${label} through symlink`, 'ELOOP');
+      throw privateWriteError(`refusing to read ${label} through symlink`, 'ELOOP');
     }
     if (!stat.isFile()) {
-      throw tokenStorageError(`refusing to read ${label} from non-regular path`, 'EINVAL');
+      throw privateWriteError(`refusing to read ${label} from non-regular path`, 'EINVAL');
     }
     return true;
   } catch (err) {
