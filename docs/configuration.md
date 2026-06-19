@@ -478,6 +478,8 @@ On operator workstations, WhatSoup should consume the tracked cross-runtime cont
 surface and local runtime standard as operator policy through compact instructions or
 project pointers, not by copying the full doctrine into `config.json`.
 
+ARC binding pointer: `bindings/whatsoup.arc.json` in the private ARC repository.
+
 Claims about live WhatSoup behavior still require WhatSoup-specific source, tests,
 health output, logs, or probes. Q-host current-state rows are not production-fleet
 proof unless a WhatSoup-specific proof artifact says so.
