@@ -40,7 +40,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `invariant.seq-locality` | mechanical | warn | guard | Keep user inbound sequence and system-result state mutation in one owner module. |
 | `invariant.fail-closed-scanner` | ast | warn | eslint, sdlc | Ensure scanner parse failures raise findings instead of returning clean results. |
 | `invariant.outbox-env-gated` | ast | warn | eslint | Bot-errors outbox writes must derive their path from `resolveBotErrorsOutbox()` so the test-redirect applies; a hardcoded outbox path literal lands in the PROD outbox even under VITEST. |
-| `invariant.timer-rearm-without-clear` | ast | warn | eslint | A Map that stores a timer handle in its value must clear the previous entry before re-arming the same key, or the old timer is orphaned and keeps firing (the OperationTracker.onToolStart duplicate-placeholder bug class). |
+| `invariant.timer-rearm-without-clear` | ast | warn | eslint | Forward-looking guard against writing a timer handle INLINE in a `Map.set` value literal and re-arming without a clear. Catches only the inline shape (zero findings today — the codebase uses build-then-set); the field-assigned OperationTracker variant is covered by its regression test, not this lexical rule. |
 | `invariant.fail-closed-gate` | mechanical | block | guard, hook | Prevent shell gates from masking command failures as successful readiness checks. |
 | `invariant.no-unsafe-type-escapes` | ast | warn | eslint | `any` and TypeScript suppressions erase compiler feedback that autonomous agents depend on as operating boundaries. |
 

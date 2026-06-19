@@ -852,12 +852,14 @@ export class AgentRuntime implements Runtime {
    * empty-turn notices for bystander chats).
    */
   private clearToolScopeFor(mapKey: string): void {
+    // Scope keys are always `${mapKey}#${ordinal}` (createToolScopeKey), so a prefix
+    // match on `${mapKey}#` is exact — `chat#…` never matches `chat2#…`.
     const prefix = `${mapKey}#`;
     for (const key of this.activeToolNames.keys()) {
-      if (key === mapKey || key.startsWith(prefix)) this.activeToolNames.delete(key);
+      if (key.startsWith(prefix)) this.activeToolNames.delete(key);
     }
     for (const key of this.turnHadToolActivity) {
-      if (key === mapKey || key.startsWith(prefix)) this.turnHadToolActivity.delete(key);
+      if (key.startsWith(prefix)) this.turnHadToolActivity.delete(key);
     }
   }
 
@@ -907,11 +909,7 @@ export class AgentRuntime implements Runtime {
 
     if (this.recentToolFailureAlerts.has(fingerprint)) return;
     this.recentToolFailureAlerts.set(fingerprint, now);
-    while (this.recentToolFailureAlerts.size > MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS) {
-      const oldest = this.recentToolFailureAlerts.keys().next().value;
-      if (oldest === undefined) break;
-      this.recentToolFailureAlerts.delete(oldest);
-    }
+    this.capDedupeMap(this.recentToolFailureAlerts);
 
     const evidence = [
       'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
