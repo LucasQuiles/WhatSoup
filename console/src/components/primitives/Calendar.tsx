@@ -28,7 +28,9 @@ import {
   type FC,
   type KeyboardEvent,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
@@ -147,10 +149,25 @@ export const Calendar: FC<CalendarProps> = ({
   // an in-month gridIndex — so no post-render clamp effect is needed, and grid reads
   // are guarded at the use sites.
 
+  // Roving-tabindex DOM focus: the ref tracks the currently-focused cell's button so
+  // the effect below can move REAL focus (document.activeElement + :focus-visible + SR
+  // position) when focusIndex changes via keyboard. pendingFocusRef gates it to keyboard
+  // navigation only — never on mount/value-change — preserving the "no focus steal on
+  // mount" contract (docstring) and the C-B2-1 trigger-keeps-focus model.
+  const focusedCellRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef(false);
+
+  useEffect(() => {
+    if (!pendingFocusRef.current) return;
+    pendingFocusRef.current = false;
+    focusedCellRef.current?.focus();
+  }, [focusIndex]);
+
   // Move helper — clamps to grid bounds (no wrap on boundaries per grid pattern).
   const moveFocus = useCallback(
     (next: number) => {
       const clamped = Math.max(0, Math.min(grid.length - 1, next));
+      pendingFocusRef.current = true;
       setFocusIndex(clamped);
     },
     [grid.length],
@@ -172,7 +189,10 @@ export const Calendar: FC<CalendarProps> = ({
       const fallback = targetGrid.find((c) => c.inMonth);
       const targetCell = preserved ?? fallback;
       setDisplayed(targetMonth);
-      if (targetCell) setFocusIndex(targetCell.gridIndex);
+      if (targetCell) {
+        pendingFocusRef.current = true;
+        setFocusIndex(targetCell.gridIndex);
+      }
     },
     [grid, focusIndex, displayed],
   );
@@ -291,6 +311,7 @@ export const Calendar: FC<CalendarProps> = ({
               return (
                 <button
                   key={cell.key}
+                  ref={isFocused ? focusedCellRef : null}
                   type="button"
                   role="gridcell"
                   tabIndex={tabIndex}
