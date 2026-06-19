@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { homedir as osHomedir } from 'node:os';
 import * as path from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -2122,5 +2123,201 @@ describe('config — pinecone env var overrides', () => {
     }));
     const { config } = await import('../src/config.ts');
     expect(config.memory.pinecone.projectId).toBe('instance-proj-id');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Residual reachable branches — cover_ HOME-unset tilde fallback, XDG path
+// resolution, webhook publicBaseUrl default, toolThresholds non-number override,
+// profileRecordProp non-object/duplicate, mergeKnowledgeProfile non-default index.
+// ---------------------------------------------------------------------------
+
+describe('config — expandTilde HOME-unset fallback to os.homedir', () => {
+  let savedHome: string | undefined;
+
+  beforeEach(() => {
+    savedHome = process.env.HOME;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = savedHome;
+    }
+  });
+
+  it('expands "~/" using os.homedir() when HOME is unset', async () => {
+    delete process.env.HOME;
+    // WHATSOUP_*_DIR are set by the outer beforeEach, so resolveDir uses the
+    // explicit arm and never touches the real home directory.
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { vaultPath: '~/Documents/Obsidian/test-vault' },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe(`${osHomedir()}/Documents/Obsidian/test-vault`);
+  });
+
+  it('expands standalone "~" using os.homedir() when HOME is unset', async () => {
+    delete process.env.HOME;
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { vaultPath: '~' },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe(osHomedir());
+  });
+
+  it('uses os.homedir() in the default vaultPath template when vaultPath and HOME are unset', async () => {
+    delete process.env.HOME;
+    // memory block present but no vaultPath → default template runs the
+    // `process.env.HOME ?? homedir()` fallback (homedir arm).
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: { conversation: { recent: 5 } },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe(`${osHomedir()}/Documents/Obsidian/whatsoup-memory`);
+  });
+});
+
+describe('config — resolveDir XDG and homedir resolution', () => {
+  let savedHome: string | undefined;
+  let savedXdg: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedHome = process.env.HOME;
+    savedXdg = {
+      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+    };
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    for (const [k, v] of Object.entries(savedXdg)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('resolves roots under XDG base dirs when WHATSOUP_*_DIR are unset', async () => {
+    const xdgConfig = path.join(tmpDir, 'xdg-config');
+    const xdgData = path.join(tmpDir, 'xdg-data');
+    const xdgState = path.join(tmpDir, 'xdg-state');
+    delete process.env.WHATSOUP_CONFIG_DIR;
+    delete process.env.WHATSOUP_DATA_DIR;
+    delete process.env.WHATSOUP_STATE_DIR;
+    process.env.XDG_CONFIG_HOME = xdgConfig;
+    process.env.XDG_DATA_HOME = xdgData;
+    process.env.XDG_STATE_HOME = xdgState;
+    delete process.env.INSTANCE_CONFIG;
+
+    const { config } = await import('../src/config.ts');
+    expect(config.configRoot).toBe(path.join(xdgConfig, 'whatsoup'));
+    expect(config.dataRoot).toBe(path.join(xdgData, 'whatsoup'));
+    expect(config.stateRoot).toBe(path.join(xdgState, 'whatsoup'));
+  });
+
+  it('resolves roots under homedir defaults when neither WHATSOUP_*_DIR nor XDG base dirs are set', async () => {
+    // Point HOME at the test temp dir so os.homedir() resolves there and
+    // mkdirSync never touches the real user home.
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    process.env.HOME = fakeHome;
+    delete process.env.WHATSOUP_CONFIG_DIR;
+    delete process.env.WHATSOUP_DATA_DIR;
+    delete process.env.WHATSOUP_STATE_DIR;
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.XDG_DATA_HOME;
+    delete process.env.XDG_STATE_HOME;
+    delete process.env.INSTANCE_CONFIG;
+
+    const { config } = await import('../src/config.ts');
+    expect(config.configRoot).toBe(path.join(fakeHome, '.config', 'whatsoup'));
+    expect(config.dataRoot).toBe(path.join(fakeHome, '.local/share', 'whatsoup'));
+    expect(config.stateRoot).toBe(path.join(fakeHome, '.local/state', 'whatsoup'));
+  });
+});
+
+describe('config — resolveTwilioSmsConfig webhook publicBaseUrl default', () => {
+  it('defaults publicBaseUrl to empty string when webhook block omits it', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'ml-bot',
+      accountSid: 'AC00000000000000000000000000000000',
+      authTokenService: 'twilio-ml-bot',
+      phoneNumber: '+15550000002',
+      inboundMode: 'webhook',
+      webhook: { listenPort: 8443 },
+    });
+    expect(result?.webhook?.publicBaseUrl).toBe('');
+    expect(result?.webhook?.listenPort).toBe(8443);
+  });
+});
+
+describe('config — mergeToolThresholds non-number override fallback', () => {
+  it('keeps base threshold fields when overrides supply non-number values', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      operationTracker: {
+        toolThresholds: {
+          // non-number values must fall back to the agent base threshold fields
+          agent: { expectedMs: 'fast', slowMultiplier: null, stallMultiplier: 'huge' },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker.toolThresholds.agent).toEqual({
+      expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,
+    });
+  });
+});
+
+describe('config — profileRecordProp non-object and duplicate-after-trim', () => {
+  it('rejects profiles when the entire profiles value is not an object', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: 'not-an-object',
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /profiles must be an object of profile names to profile objects/,
+    );
+  });
+
+  it('rejects profiles with duplicate names after trimming whitespace', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        bot: { prefix: 'a' },
+        'bot ': { prefix: 'b' },
+      },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /profiles contains duplicate profile after trimming: bot/,
+    );
+  });
+});
+
+describe('config — mergeKnowledgeProfile non-default index base creation', () => {
+  it('builds a fresh base profile for an index not present in defaults', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        pinecone: {
+          index: 'custom-idx',
+          knowledgeProfiles: {
+            'custom-idx': {
+              namespace: 'custom-ns',
+              searchMode: 'text',
+              rerank: true,
+              topK: 11,
+            },
+          },
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+    const profile = config.memory.pinecone.knowledgeProfiles['custom-idx'];
+    expect(profile.namespace).toBe('custom-ns');
+    expect(profile.searchMode).toBe('text');
+    expect(profile.rerank).toBe(true);
+    expect(profile.topK).toBe(11);
+    expect(profile.description).toBe('custom-idx');
   });
 });
