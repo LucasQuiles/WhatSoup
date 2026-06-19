@@ -82,10 +82,10 @@ const plugins = {
 // disable directives entirely (`reportUnusedDisableDirectives: 'off'`).
 const linterOptions = { reportUnusedDisableDirectives: 'off' };
 
-export default [
+const config = [
   {
     // src + scripts: file-size, god-class, fail-closed-scanner, outbox-direct-write,
-    // ring-boundaries, unsafe-type-escape.
+    // ring-boundaries, unsafe-type-escape, timer-rearm-without-clear.
     files: ['src/**/*.ts', 'scripts/**/*.ts'],
     linterOptions,
     languageOptions: {
@@ -100,6 +100,7 @@ export default [
       ...ruleEntriesFor('invariant.outbox-env-gated'),
       ...ruleEntriesFor('arch.ring-boundaries'),
       ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
+      ...ruleEntriesFor('invariant.timer-rearm-without-clear'),
     },
   },
   {
@@ -130,3 +131,19 @@ export default [
     },
   },
 ];
+
+export default config;
+
+// Plugin/builtin rule names actually ENABLED across all blocks of this config. The
+// drift test asserts every eslint-ring rule's mapped name appears here — catching the
+// gap where a rule is added to ruleEntriesFor/the registry but never spread into a
+// `files` block (so it silently never runs). The id-list export alone could not.
+export const enabledFitnessRuleNames = [
+  ...new Set(config.flatMap((block) => Object.keys(block.rules ?? {}))),
+].sort();
+
+// The rule names the eslint ring is SUPPOSED to enforce (registry eslint-ring rules
+// mapped through ruleEntriesFor). Compared against enabledFitnessRuleNames in the test.
+export const eslintRingRuleNames = [
+  ...new Set(ESLINT_RING.flatMap((r) => Object.keys(ruleEntriesFor(r.id)))),
+].sort();
