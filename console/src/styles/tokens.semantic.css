@@ -104,6 +104,7 @@
   --focus-ring:   #6BA6FF;
   --scrim:        rgba(4,6,9,0.62);
   --chrome-glass: color-mix(in srgb, var(--surface-base) 86%, transparent);
+  --grain:        0.045; /* atmospheric noise overlay strength, matched to the showcase (F-TEX-1) */
   --shadow-raised:  none;
   --shadow-overlay: 0 16px 48px rgba(0,0,0,0.5);
   --shadow-xs:      none;
@@ -210,6 +211,7 @@
   --focus-ring:   #2563EB;
   --scrim:        rgba(23,26,31,0.45);
   --chrome-glass: color-mix(in srgb, var(--surface-base) 86%, transparent);
+  --grain:        0.030; /* lighter grain on paper (F-TEX-1) */
   /* Warm lifted-paper shadows matched to the identity showcase (warm
      rgba(60,46,20) drop + white top highlight). Since light base/raised/overlay
      share the lightest paper, the shadow — not a tonal step — carries elevation,

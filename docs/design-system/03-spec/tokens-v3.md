@@ -268,13 +268,14 @@ The mockup used short channel names; v3 namespaces them. Disposition of every re
 
 All other v2 properties keep their names (§2, §3.1–3.5, §3.7–3.8).
 
-### 3.7 Focus, scrim, chrome glass, shadows
+### 3.7 Focus, scrim, chrome glass, grain, shadows
 
 | Token | Dark | Light |
 |---|---|---|
 | `--focus-ring` | `#6BA6FF` | `#2563EB` |
 | `--scrim` | `rgba(4,6,9,0.62)` | `rgba(23,26,31,0.45)` |
 | `--chrome-glass` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` |
+| `--grain` | `0.045` | `0.030` | atmospheric noise-overlay strength (`body::before`), matched to the identity showcase
 | `--shadow-raised` | `none` | `0 1px 0 rgba(255,255,255,0.55), 0 2px 6px -1px rgba(60,46,20,0.13), 0 8px 20px -6px rgba(60,46,20,0.12)` |
 | `--shadow-overlay` | `0 16px 48px rgba(0,0,0,0.5)` | `0 1px 0 rgba(255,255,255,0.55), 0 8px 24px -6px rgba(60,46,20,0.18), 0 24px 56px -18px rgba(60,46,20,0.30)` |
 | `--shadow-xs` | `none` | `0 1px 2px rgba(60,46,20,0.10)` |
