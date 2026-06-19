@@ -36,7 +36,8 @@ vi.mock('../../src/core/image-resize.ts', () => ({
   resizeImageIfNeeded: (...args: any[]) => mockResizeImageIfNeeded(...args),
 }));
 
-import { downloadMedia, detectMime } from '../../src/core/media-download.ts';
+import { unlinkSync } from 'node:fs';
+import { downloadMedia, detectMime, cleanupTempFile } from '../../src/core/media-download.ts';
 
 const MB = 1024 * 1024;
 
@@ -175,5 +176,48 @@ describe('detectMime', () => {
     expect(detectMime(Buffer.from([0xff, 0xd8, 0xff]))).toBe('image/jpeg');
     expect(detectMime(Buffer.from([0x4f, 0x67, 0x67, 0x53]))).toBe('audio/ogg');
     expect(detectMime(Buffer.from([0x25, 0x50, 0x44, 0x46]))).toBe('application/pdf');
+  });
+});
+
+describe('downloadMedia — MIME mismatch warning', () => {
+  it('warns (and still returns) when magic bytes disagree with the declared type', async () => {
+    // PNG magic bytes declared as a PDF → detectMime !== mimeType → mismatch branch (line 68 true).
+    // Non-image declared type so it returns directly without the resize path.
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const downloadFn = vi.fn().mockResolvedValue(pngBytes);
+
+    const result = await downloadMedia(downloadFn, 'application/pdf');
+
+    expect(result).not.toBeNull();
+    expect(result!.mimeType).toBe('application/pdf');
+    expect(result!.buffer).toBe(pngBytes);
+  });
+
+  it('does not warn when magic bytes match the declared type', async () => {
+    // PNG magic declared as image/png → detected === declared → mismatch `!==` false arm.
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const downloadFn = vi.fn().mockResolvedValue(pngBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+  });
+});
+
+describe('cleanupTempFile', () => {
+  beforeEach(() => {
+    vi.mocked(unlinkSync).mockReset();
+  });
+
+  it('unlinks the file on the happy path', () => {
+    expect(() => cleanupTempFile('/tmp/whatsoup-media/x.ogg')).not.toThrow();
+    expect(unlinkSync).toHaveBeenCalledWith('/tmp/whatsoup-media/x.ogg');
+  });
+
+  it('swallows errors when unlink fails (best-effort)', () => {
+    vi.mocked(unlinkSync).mockImplementationOnce(() => {
+      throw new Error('ENOENT: file already gone');
+    });
+    expect(() => cleanupTempFile('/tmp/whatsoup-media/missing.ogg')).not.toThrow();
   });
 });
