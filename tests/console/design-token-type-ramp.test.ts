@@ -61,10 +61,10 @@ describe('design-token type-ramp definitions (DD-26)', () => {
     '--type-heading': '600 13px/20px var(--font-sans)',
     '--type-label': '500 11px/16px var(--font-sans)',
     '--type-overline': '500 10px/16px var(--font-sans)',
-    // Promoted from pending → bridge: the SOUP nameplate (brand.md §1) is now a
-    // consumed token (Nav lockup), so it must resolve through the token. Value
-    // matches tokens-v3.md §2.6 (600 14/24 mono); tracking/margin live at the lockup.
-    '--type-nameplate': '600 14px/24px var(--font-mono)',
+    // The SOUP wordmark (brand.md §1) is a consumed token (Nav lockup), resolving
+    // through the token. Value matches tokens-v3.md §2.6 (800 18/24 Bricolage
+    // display — the showcase brand wordmark); tight tracking lives at the lockup.
+    '--type-nameplate': '800 18px/24px var(--font-display)',
   } as const
 
   const PENDING_SPEC_TOKENS = [
