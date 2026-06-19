@@ -2,7 +2,7 @@
 arc_version = "0.1.0"
 consumer = "whatsoup"
 modules = ["app-runtime", "telemetry", "verification"]
-emits = ["fallback-event", "health-record", "verification-record", "redaction-report"]
+emits = []
 
 [boundary]
 owns = ["per-instance-config", "provider-fallback-state", "runtime-health", "generated-workspace", "plugin-scope", "mcp-tool-scope", "sandbox-policy"]
@@ -10,5 +10,5 @@ does_not_own = ["global-doctrine", "worker-dispatch", "host-global-proof", "fina
 
 [source]
 binding = "bindings/whatsoup.arc.json"
-payload_sha = "sha256:4fef459d3570388f7f628ce3630ac8922d15f4e25e34627ccb401daca730914f"
+payload_sha = "sha256:a85e5c499312342a8618548f785b4536b21ff957755f5e78d5e43584bc4cbf5b"
 generated_by = "arc adopt"
