@@ -20,7 +20,10 @@ const SIGNATURES: Array<[string, Buffer]> = [
   ['image/gif', Buffer.from([0x47, 0x49, 0x46])],
   ['image/webp', Buffer.from([0x52, 0x49, 0x46, 0x46])], // RIFF
   ['application/pdf', Buffer.from([0x25, 0x50, 0x44, 0x46])],
-  ['video/mp4', Buffer.from([0x00, 0x00, 0x00])], // ftyp at offset 4
+  // No mp4/ftyp entry: a 3-null-byte prefix matched the ftyp box-size of every
+  // M4A voice note (audio/mp4), firing a false MIME-mismatch warning, and the
+  // ftyp container cannot distinguish audio/mp4 from video/mp4 anyway. Anomaly
+  // detection for mp4 is unreliable — rely on the declared MIME type (#1072).
   ['audio/ogg', Buffer.from([0x4f, 0x67, 0x67, 0x53])],
 ];
 

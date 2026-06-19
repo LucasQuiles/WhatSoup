@@ -36,7 +36,7 @@ vi.mock('../../src/core/image-resize.ts', () => ({
   resizeImageIfNeeded: (...args: any[]) => mockResizeImageIfNeeded(...args),
 }));
 
-import { downloadMedia } from '../../src/core/media-download.ts';
+import { downloadMedia, detectMime } from '../../src/core/media-download.ts';
 
 const MB = 1024 * 1024;
 
@@ -158,5 +158,22 @@ describe('downloadMedia — image resize integration', () => {
     expect(result).not.toBeNull();
     expect(result!.buffer).toBe(fakeBuffer);
     expect(result!.mimeType).toBe('image/jpeg');
+  });
+});
+
+describe('detectMime', () => {
+  // Regression guard for #1072: an M4A voice note (audio/mp4) begins with the
+  // ftyp box whose first 3 bytes are 0x00 0x00 0x00. The old 3-null-byte
+  // video/mp4 signature matched it, producing a false MIME-mismatch warning.
+  it('does not misdetect an M4A/ftyp buffer as video/mp4', () => {
+    const m4a = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]);
+    expect(detectMime(m4a)).not.toBe('video/mp4');
+  });
+
+  it('still detects the unambiguous signatures', () => {
+    expect(detectMime(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe('image/png');
+    expect(detectMime(Buffer.from([0xff, 0xd8, 0xff]))).toBe('image/jpeg');
+    expect(detectMime(Buffer.from([0x4f, 0x67, 0x67, 0x53]))).toBe('audio/ogg');
+    expect(detectMime(Buffer.from([0x25, 0x50, 0x44, 0x46]))).toBe('application/pdf');
   });
 });
