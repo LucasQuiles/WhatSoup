@@ -590,6 +590,7 @@ body::before {
      Bricolage Grotesque 600 19/24) so the editorial face reaches in-app titles,
      not just the Landing hero. */
   font: var(--type-title);
+  letter-spacing: var(--tracking-tight);
   color: var(--text-1);
 }
 

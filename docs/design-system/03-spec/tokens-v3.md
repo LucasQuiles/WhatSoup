@@ -93,8 +93,8 @@ type utilities, never via raw `font:` declarations.
 
 | Token | Value | Extras |
 |---|---|---|
-| `--type-display` | `600 26px/32px var(--font-display)` | tracking −0.02em |
-| `--type-title` | `600 19px/24px var(--font-display)` | tracking −0.01em |
+| `--type-display` | `700 26px/32px var(--font-display)` | tracking −0.04em (`--tracking-tight`) |
+| `--type-title` | `700 19px/24px var(--font-display)` | tracking −0.04em (`--tracking-tight`) |
 | `--type-heading` | `600 15px/20px var(--font-sans)` | |
 | `--type-body` | `400 14px/20px var(--font-sans)` | |
 | `--type-body-st` | `500 14px/20px var(--font-sans)` | |

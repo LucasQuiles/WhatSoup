@@ -1462,7 +1462,8 @@ button.soup-pill[aria-disabled="true"] {
 }
 
 .soup-drawer-head__title {
-  font: var(--type-title, 600 19px/24px var(--font-display));
+  font: var(--type-title, 700 19px/24px var(--font-display));
+  letter-spacing: var(--tracking-tight);
   color: var(--text-1);
   white-space: nowrap;
   overflow: hidden;

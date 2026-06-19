@@ -51,8 +51,8 @@ describe('design-token type-ramp definitions (DD-26)', () => {
   const BRIDGE_TYPE_VALUES = {
     // Promoted from pending → bridge: the display tier (--type-display / --type-title)
     // is now implemented at its tokens-v3.md §2.6 spec value (F-TYPE-3 display-tier slice).
-    '--type-display': '600 26px/32px var(--font-display)',
-    '--type-title': '600 19px/24px var(--font-display)',
+    '--type-display': '700 26px/32px var(--font-display)',
+    '--type-title': '700 19px/24px var(--font-display)',
     '--type-body': '400 13px/20px var(--font-sans)',
     '--type-body-st': '500 13px/20px var(--font-sans)',
     '--type-caption': '400 11px/16px var(--font-sans)',
