@@ -9,6 +9,7 @@ structure, counts, hashes, and a scalar-redacted config tree.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import subprocess
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from probelib import redact, sha256_16 as sha256_16_text
+from probelib import SECRET_VALUE, redact, sha256_16 as sha256_16_text
 
 
 SCHEMA = "opencode-resolved-config-redacted"
@@ -117,6 +118,51 @@ def command_shape(cmd: list[str]) -> dict[str, Any]:
     }
 
 
+def captured_at() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def safe_version_text(value: str) -> str | None:
+    text = value.strip().splitlines()[0][:80] if value.strip() else ""
+    if not text or any(char in text for char in "{}[]\"'`$\\"):
+        return None
+    return text
+
+
+def opencode_version_metadata(timeout: int, cwd: Path) -> dict[str, Any]:
+    cmd = ["opencode", "--version"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=min(timeout, 5),
+            check=False,
+        )
+    except FileNotFoundError:
+        return {"command_shape": command_shape(cmd), "status": "error", "error_type": "FileNotFoundError", "rc": 127}
+    except subprocess.TimeoutExpired:
+        return {"command_shape": command_shape(cmd), "status": "error", "error_type": "TimeoutExpired", "rc": 124}
+
+    stdout_bytes = proc.stdout.encode("utf-8", errors="replace")
+    stderr_bytes = proc.stderr.encode("utf-8", errors="replace")
+    metadata: dict[str, Any] = {
+        "command_shape": command_shape(cmd),
+        "rc": proc.returncode,
+        "stdout_bytes": len(stdout_bytes),
+        "stderr_bytes": len(stderr_bytes),
+        "stdout_sha256_16": sha256_16_bytes(stdout_bytes),
+        "stderr_sha256_16": sha256_16_bytes(stderr_bytes),
+    }
+    if proc.returncode != 0:
+        return metadata | {"status": "error", "error_type": "nonzero_exit"}
+    version = safe_version_text(proc.stdout)
+    if version is None:
+        return metadata | {"status": "unrecognized"}
+    return metadata | {"status": "parsed", "value": version}
+
+
 def sanitize_metadata(value: Any, cwd: Path, key: str = "") -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
@@ -148,6 +194,14 @@ def placeholder(value: Any, reason: str) -> str:
     return f"<redacted:{reason}:{kind}>"
 
 
+def safe_structural_key(key: Any) -> str:
+    text = str(key)
+    redacted = redact(text, text)
+    if redacted != text:
+        return f"<redacted-key:{sha256_16_text(text)}>"
+    return text
+
+
 def redact_config_tree(value: Any, key: str = "", stats: RedactionStats | None = None) -> Any:
     """Preserve structure while redacting every scalar leaf.
 
@@ -159,7 +213,7 @@ def redact_config_tree(value: Any, key: str = "", stats: RedactionStats | None =
         stats = RedactionStats()
 
     if isinstance(value, dict):
-        return {str(k): redact_config_tree(v, str(k), stats) for k, v in value.items()}
+        return {safe_structural_key(k): redact_config_tree(v, str(k), stats) for k, v in value.items()}
     if isinstance(value, list):
         return [redact_config_tree(v, key, stats) for v in value]
     if value is None:
@@ -183,9 +237,9 @@ def inventory_paths(value: Any, prefix: str = "$", max_paths: int = 5000) -> lis
         if len(rows) >= max_paths:
             return
         if isinstance(node, dict):
-            rows.append({"path": path, "type": "object", "keys": sorted(map(str, node.keys()))})
+            rows.append({"path": path, "type": "object", "keys": sorted(safe_structural_key(key) for key in node.keys())})
             for key, child in node.items():
-                walk(child, f"{path}.{key}")
+                walk(child, f"{path}.{safe_structural_key(key)}")
         elif isinstance(node, list):
             rows.append({"path": path, "type": "array", "length": len(node)})
             for idx, child in enumerate(node[:50]):
@@ -200,6 +254,71 @@ def inventory_paths(value: Any, prefix: str = "$", max_paths: int = 5000) -> lis
     if len(rows) >= max_paths:
         rows.append({"path": "$", "type": "inventory_truncated", "max_paths": max_paths})
     return rows
+
+
+REDACTION_CANARIES = {
+    "scalar_value": "arda049_scalar_value_canary",
+    "key_name": "secretCanaryKey",
+    "path_value": "/Users/q/.config/secrets/arda049-canary.env",
+    "env_marker": "{env:ARDA049_CANARY_TOKEN}",
+    "url_value": "https://arda049.example.invalid/token",
+    "token_like_value": "sk-ARDA049CANARY000000000000000000000000",
+}
+
+
+def redaction_canary_fixture() -> dict[str, Any]:
+    return {
+        "model": REDACTION_CANARIES["scalar_value"],
+        REDACTION_CANARIES["key_name"]: "value-under-sensitive-key",
+        "mcp": {
+            "canary": {
+                "command": ["node", REDACTION_CANARIES["path_value"]],
+                "environment": {
+                    "ARDA049_TOKEN": REDACTION_CANARIES["token_like_value"],
+                    "ARDA049_FROM_ENV": REDACTION_CANARIES["env_marker"],
+                    "ARDA049_URL": REDACTION_CANARIES["url_value"],
+                },
+            }
+        },
+    }
+
+
+def scan_redaction_integrity(report: dict[str, Any]) -> dict[str, Any]:
+    rendered = canonical_json(report)
+    canary_hits = [
+        {"id": key, "sha256_16": sha256_16_text(value)}
+        for key, value in REDACTION_CANARIES.items()
+        if value in rendered
+    ]
+    leak_scan_hits = []
+    if SECRET_VALUE.search(rendered):
+        leak_scan_hits.append({"id": "secret_value_shape", "sha256_16": sha256_16_text("secret_value_shape")})
+    return {
+        "fixture": "arda049_opencode_config_redactor",
+        "canary_count": len(REDACTION_CANARIES),
+        "canary_hits": len(canary_hits),
+        "canary_hit_ids": [row["id"] for row in canary_hits],
+        "canary_hit_hashes": canary_hits,
+        "leak_scan_hits": len(leak_scan_hits),
+        "leak_scan_hit_ids": [row["id"] for row in leak_scan_hits],
+    }
+
+
+def redaction_integrity_check(cwd: Path) -> dict[str, Any]:
+    fixture_report = build_report(
+        redaction_canary_fixture(),
+        "fixture",
+        {"path": str(cwd / "opencode-arda049-canary.json"), "status": "synthetic_fixture"},
+        cwd,
+        include_integrity=False,
+    )
+    scan = scan_redaction_integrity(fixture_report)
+    return scan | {
+        "redacted_count": fixture_report["redaction"]["redacted_count"],
+        "scalar_leaf_count": fixture_report["redaction"]["redacted_by_reason"].get("scalar_leaf", 0),
+        "sensitive_leaf_count": fixture_report["redaction"]["redacted_by_reason"].get("probelib_sensitive_key_or_value", 0),
+        "verdict": "pass" if scan["canary_hits"] == 0 and scan["leak_scan_hits"] == 0 else "fail",
+    }
 
 
 def count_substitution_markers(value: Any) -> dict[str, int]:
@@ -307,11 +426,19 @@ def candidate_sources(cwd: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_report(config: Any | None, source: str, source_metadata: dict[str, Any], cwd: Path) -> dict[str, Any]:
+def build_report(
+    config: Any | None,
+    source: str,
+    source_metadata: dict[str, Any],
+    cwd: Path,
+    include_integrity: bool = True,
+) -> dict[str, Any]:
     redaction_stats = RedactionStats()
     report: dict[str, Any] = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
+        "captured_at": captured_at(),
+        "probe_schema_version": SCHEMA_VERSION,
         "risk": "high",
         "redaction_required": True,
         "source": source,
@@ -336,6 +463,7 @@ def build_report(config: Any | None, source: str, source_metadata: dict[str, Any
         },
         "config_sha256_16": None,
         "redacted_config_sha256_16": None,
+        "redaction_integrity": None,
         "config_inventory": None,
         "config": None,
     }
@@ -354,7 +482,51 @@ def build_report(config: Any | None, source: str, source_metadata: dict[str, Any
     report["redaction"]["redacted_count"] = redaction_stats.total
     report["redaction"]["redacted_by_reason"] = dict(redaction_stats.by_reason)
     report["redaction"]["leaf_types"] = dict(redaction_stats.leaf_types)
+    if include_integrity:
+        report["redaction_integrity"] = redaction_integrity_check(cwd)
     return report
+
+
+def build_summary(report: dict[str, Any]) -> dict[str, Any]:
+    inventory = report.get("config_inventory") or []
+    top_level_keys: list[str] = []
+    if isinstance(inventory, list):
+        for row in inventory:
+            if isinstance(row, dict) and row.get("path") == "$" and isinstance(row.get("keys"), list):
+                top_level_keys = sorted(str(key) for key in row["keys"])
+                break
+    redaction = report.get("redaction") if isinstance(report.get("redaction"), dict) else {}
+    by_reason = redaction.get("redacted_by_reason") if isinstance(redaction.get("redacted_by_reason"), dict) else {}
+    scalar_count = int(by_reason.get("scalar_leaf", 0) or 0)
+    sensitive_count = int(by_reason.get("probelib_sensitive_key_or_value", 0) or 0)
+    resolution = report.get("resolution") if isinstance(report.get("resolution"), dict) else {}
+    source_metadata = report.get("source_metadata") if isinstance(report.get("source_metadata"), dict) else {}
+    version_metadata = source_metadata.get("opencode_version") if isinstance(source_metadata.get("opencode_version"), dict) else {}
+    return {
+        "schema": f"{SCHEMA}-summary",
+        "schema_version": SCHEMA_VERSION,
+        "captured_at": report.get("captured_at"),
+        "probe_schema_version": report.get("probe_schema_version"),
+        "parse_status": report.get("parse_status"),
+        "source": report.get("source"),
+        "source_stdout_sha256_16": source_metadata.get("stdout_sha256_16"),
+        "source_stderr_sha256_16": source_metadata.get("stderr_sha256_16"),
+        "opencode_version_status": version_metadata.get("status"),
+        "opencode_version": version_metadata.get("value"),
+        "source_count": resolution.get("source_count"),
+        "candidate_source_count": len(resolution.get("candidate_sources") or []),
+        "redacted_count": redaction.get("redacted_count", 0),
+        "scalar_leaf_count": scalar_count,
+        "sensitive_leaf_count": sensitive_count,
+        "canary_hits": (report.get("redaction_integrity") or {}).get("canary_hits"),
+        "leak_scan_hits": (report.get("redaction_integrity") or {}).get("leak_scan_hits"),
+        "integrity_verdict": (report.get("redaction_integrity") or {}).get("verdict"),
+        "top_level_key_count": len(top_level_keys),
+        "top_level_keys": ",".join(top_level_keys),
+        "config_sha256_16": report.get("config_sha256_16"),
+        "redacted_config_sha256_16": report.get("redacted_config_sha256_16"),
+        "limitations": "Counts are scalar leaves, not secret counts; summary suppresses raw values and paths.",
+    }
 
 
 def main() -> int:
@@ -364,6 +536,7 @@ def main() -> int:
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--pure", action="store_true", help="pass --pure to opencode debug config")
+    parser.add_argument("--summary", action="store_true", help="emit a concise human-safe summary instead of the full redacted tree")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
@@ -385,9 +558,12 @@ def main() -> int:
         config, source_metadata = run_debug_config(args.timeout, args.pure, args.cwd.expanduser())
         if config is None:
             exit_code = 1
+        else:
+            source_metadata["opencode_version"] = opencode_version_metadata(args.timeout, args.cwd.expanduser())
 
     report = build_report(config, args.source, source_metadata, args.cwd.expanduser())
-    json.dump(report, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
+    output = build_summary(report) if args.summary else report
+    json.dump(output, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
     sys.stdout.write("\n")
     return exit_code
 
