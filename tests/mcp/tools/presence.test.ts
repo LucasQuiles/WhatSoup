@@ -154,4 +154,34 @@ describe('presence tools', () => {
       expect(data.stale).toBe(false);
     });
   });
+
+  // --- residual-branch coverage ---
+
+  describe('residual-branch coverage', () => {
+    it('coerces undefined lastSeen to null in get_presence', async () => {
+      // update() without lastSeen yields entry.lastSeen === undefined,
+      // exercising the nullish side of the `entry.lastSeen ?? null` fallback.
+      presenceCache.update('222@s.whatsapp.net', { status: 'available' });
+
+      const result = await registry.call(
+        'get_presence',
+        { jid: '222@s.whatsapp.net' },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        jid: string;
+        status: string;
+        lastSeen: number | null;
+        stale: boolean;
+      };
+      expect(data).toEqual({
+        jid: '222@s.whatsapp.net',
+        status: 'available',
+        lastSeen: null,
+        stale: false,
+      });
+    });
+  });
 });
