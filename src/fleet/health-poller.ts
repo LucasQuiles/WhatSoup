@@ -4,6 +4,7 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
 import { asRecord } from '../lib/type-guards.ts';
+import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
@@ -1195,12 +1196,7 @@ export class HealthPoller {
 
   private readTimestampMs(value: unknown): number | null {
     if (typeof value !== 'string' || value.trim() === '') return null;
-    const trimmed = value.trim();
-    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(trimmed)
-      ? `${trimmed.replace(' ', 'T')}Z`
-      : trimmed;
-    const ms = Date.parse(normalized);
-    return Number.isFinite(ms) ? ms : null;
+    return sqliteUtcToEpochMs(value.trim());
   }
 
   private trackActiveAlertSource(name: string, source: string, emitted: boolean): void {
