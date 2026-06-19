@@ -150,7 +150,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 }
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   restorePersistedFallbackWindow(): void;
@@ -206,7 +206,7 @@ describe('armFallbackWindow — credential pre-flight', () => {
 
     fbView(runtime).activateProviderFallback(null);
 
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -289,7 +289,7 @@ describe('armFallbackWindow — credential pre-flight', () => {
     }, { interval: 0 });
 
     // Window must survive regardless of probe result.
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -326,7 +326,7 @@ describe('armFallbackWindow — credential pre-flight', () => {
     fbView(runtime).activateProviderFallback(null);
     await Promise.resolve();
 
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 

@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { fitnessRules } from '../../scripts/lib/fitness/registry.ts';
 // @ts-expect-error -- flat config is a .mjs module with no type declarations; expires 2026-12-31
-import { eslintRingRuleIds as eslintRingRuleIdsRaw } from '../../eslint.config.fitness.mjs';
+import { eslintRingRuleIds as eslintRingRuleIdsRaw, enabledFitnessRuleNames as enabledFitnessRuleNamesRaw, eslintRingRuleNames as eslintRingRuleNamesRaw } from '../../eslint.config.fitness.mjs';
 
 const eslintRingRuleIds = eslintRingRuleIdsRaw as string[];
+const enabledFitnessRuleNames = enabledFitnessRuleNamesRaw as string[];
+const eslintRingRuleNames = eslintRingRuleNamesRaw as string[];
 
 describe('eslint fitness config — registry drift', () => {
   it('enforces exactly the registry rules whose rings include eslint', () => {
@@ -16,6 +18,15 @@ describe('eslint fitness config — registry drift', () => {
     // If a rule gains/loses the eslint ring in the registry, this fails until the
     // config is updated — the registry stays the single source of truth.
     expect(eslintRingRuleIds).toEqual(expected);
+  });
+
+  it('actually ENABLES every eslint-ring rule in a files block (not just lists its id)', () => {
+    // Regression guard: an eslint-ring rule mapped in ruleEntriesFor but never spread
+    // into a `files` block silently never runs (the timer-rearm-without-clear gap). The
+    // id-list assertion above passed over that dead rule; this checks real enablement.
+    const enabled = new Set(enabledFitnessRuleNames);
+    const missing = eslintRingRuleNames.filter((name) => !enabled.has(name));
+    expect(missing).toEqual([]);
   });
 
   it('covers the nine known eslint-ring rules', () => {

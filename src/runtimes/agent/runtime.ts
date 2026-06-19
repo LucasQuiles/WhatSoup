@@ -88,6 +88,7 @@ import { ImageCoalescer } from './image-coalescer.ts';
 import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
+import { FallbackWindowState } from './fallback-window-state.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
 import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import { PendingPollStore } from './pending-poll-store.ts';
@@ -657,26 +658,18 @@ export class AgentRuntime implements Runtime {
   // config readers, which stay on AgentRuntime for the health/context callers).
   private readonly handoffDistill: HandoffDistillCoordinator;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
-  // Provider-fallback window: epoch ms until which new sessions route to the
-  // fallback provider, or null when the primary provider is active.
-  private fallbackActiveUntil: number | null = null;
-  // Epoch ms when the current fallback window was first activated. Preserved
-  // across extensions so the original engagement time is never overwritten.
-  private fallbackActivatedAt: number | null = null;
-  // The ORIGINAL cause that first armed the current window. Set once on first
-  // activation and preserved across extensions and restores so the root cause
-  // is never overwritten by a later extension or restart. Cleared alongside
-  // fallbackActivatedAt on deactivation and shutdown.
-  private fallbackArmReason: string | null = null;
-  private fallbackResetAt: number | null = null;
-  private fallbackRecoveryProbeRequired = false;
+  // Provider-fallback window lifecycle scalars (active-until / activated-at /
+  // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
+  // collaborator; the arm / activate / deactivate / revert / probe orchestration
+  // stays in AgentRuntime and pokes these fields directly. isActive() carries the
+  // only read logic. Pure field-relocation — no behavior change.
+  private readonly fallbackWindow = new FallbackWindowState();
   // Process-local fallback-window telemetry (turns served/empty + arm-time
   // snapshots, lifetime activation/revert/replay totals, and window USD cost).
   // Increment/snapshot/delta logic lives in the collaborator; the orchestration
   // (window-active gate on cost, served-vs-empty decision + alerting, and the
   // arm/deactivate/replay call sites) stays in AgentRuntime.
   private readonly fallbackMetrics = new FallbackWindowMetrics();
-  private activeFallbackEntry: AgentFallbackEntry | null = null;
   // Per-window fallback-chain state (failed-entry keys + last-selection
   // eligibility + entry-key/snapshot/exhausted queries). The selection DECISION
   // (selectFallbackEntryForWindow / markActiveFallbackFailed) stays in AgentRuntime
@@ -4604,11 +4597,11 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
-    this.fallbackActiveUntil = null;
-    this.fallbackActivatedAt = null;
-    this.fallbackArmReason = null;
-    this.fallbackResetAt = null;
-    this.fallbackRecoveryProbeRequired = false;
+    this.fallbackWindow.activeUntil = null;
+    this.fallbackWindow.activatedAt = null;
+    this.fallbackWindow.armReason = null;
+    this.fallbackWindow.resetAt = null;
+    this.fallbackWindow.recoveryProbeRequired = false;
     this.fallbackEmptyAdvance.reset();
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
@@ -4886,12 +4879,12 @@ export class AgentRuntime implements Runtime {
 
   /** True while a fallback window is armed and not yet expired. */
   private get isFallbackWindowActive(): boolean {
-    return this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+    return this.fallbackWindow.isActive();
   }
 
   private get effectiveFallbackEntry(): AgentFallbackEntry | null {
     if (!this.isFallbackWindowActive) return null;
-    return this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
   }
 
   private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
@@ -4960,23 +4953,23 @@ export class AgentRuntime implements Runtime {
     reason: ProviderFallbackReason,
     evidenceText?: string,
   ): string | null {
-    if (!this.isFallbackWindowActive || !this.activeFallbackEntry || !session) return null;
+    if (!this.isFallbackWindowActive || !this.fallbackWindow.activeEntry || !session) return null;
     const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (sessionProvider !== null) {
-      if (sessionProvider !== this.activeFallbackEntry.provider) return null;
+      if (sessionProvider !== this.fallbackWindow.activeEntry.provider) return null;
     } else {
       const sessionId = session.getStatus().sessionId;
-      if (!sessionId?.startsWith(`${this.activeFallbackEntry.provider}-`)) return null;
+      if (!sessionId?.startsWith(`${this.fallbackWindow.activeEntry.provider}-`)) return null;
     }
 
-    const key = this.fallbackChain.entryKey(this.activeFallbackEntry);
+    const key = this.fallbackChain.entryKey(this.fallbackWindow.activeEntry);
     if (!this.fallbackChain.failedKeys.has(key)) {
       this.fallbackChain.failedKeys.add(key);
       emitAlertChecked(
         this.instanceName,
         'fallback_provider_failed',
         'Active fallback provider failed during fallback window',
-        `provider=${this.activeFallbackEntry.provider} model=${this.activeFallbackEntry.model ?? 'default'}`
+        `provider=${this.fallbackWindow.activeEntry.provider} model=${this.fallbackWindow.activeEntry.model ?? 'default'}`
           + ` reason=${reason}`
           + (evidenceText ? ` evidence=${evidenceText.slice(0, 160)}` : ''),
       );
@@ -5149,11 +5142,11 @@ export class AgentRuntime implements Runtime {
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
     return {
       effectiveProvider: this.effectiveProvider,
-      fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
-      fallbackReason: active ? this.fallbackArmReason : null,
+      fallbackActiveUntil: active ? this.fallbackWindow.activeUntil : null,
+      fallbackReason: active ? this.fallbackWindow.armReason : null,
       fallbackModel: fallbackEntry?.model ?? null,
-      fallbackResetAt: active ? this.fallbackResetAt : null,
-      fallbackRecoveryProbeRequired: active ? this.fallbackRecoveryProbeRequired : false,
+      fallbackResetAt: active ? this.fallbackWindow.resetAt : null,
+      fallbackRecoveryProbeRequired: active ? this.fallbackWindow.recoveryProbeRequired : false,
       fallbackTurnsServed: this.fallbackMetrics.turnsServed,
       fallbackTurnsEmpty: this.fallbackMetrics.turnsEmpty,
       lastFallbackTurnAt: this.fallbackMetrics.lastTurnAt,
@@ -5255,7 +5248,7 @@ export class AgentRuntime implements Runtime {
     const until = Date.now() + dur;
     // Reset reason so armFallbackWindow stores 'admin-forced' as the new
     // original cause, replacing any prior reason (e.g. 'usage-limit').
-    this.fallbackArmReason = null;
+    this.fallbackWindow.armReason = null;
     this.fallbackChain.failedKeys.clear();
     this.fallbackEmptyAdvance.reset();
     this.armFallbackWindow(until, 'admin-forced');
@@ -5355,7 +5348,7 @@ export class AgentRuntime implements Runtime {
     }
     this.fallbackMetrics.recordEmptyTurn();
     this.fallbackEmptyAdvance.recordEmpty();
-    const entry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    const entry = this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
       fallbackProvider: entry?.provider,
@@ -5402,10 +5395,10 @@ export class AgentRuntime implements Runtime {
       entryKey !== null &&
       this.fallbackEmptyAdvance.shouldAttemptAdvance(entryKey, EMPTY_OUTPUT_FALLBACK_THRESHOLD)
     ) {
-      const advanceReason = isProviderFallbackReason(this.fallbackArmReason)
-        ? this.fallbackArmReason
+      const advanceReason = isProviderFallbackReason(this.fallbackWindow.armReason)
+        ? this.fallbackWindow.armReason
         : 'auth-required';
-      const resetAt = this.fallbackResetAt !== null ? new Date(this.fallbackResetAt) : null;
+      const resetAt = this.fallbackWindow.resetAt !== null ? new Date(this.fallbackWindow.resetAt) : null;
       const activation = this.activateProviderFallbackAfterTerminalResult(
         resetAt,
         advanceReason,
@@ -5421,8 +5414,8 @@ export class AgentRuntime implements Runtime {
           chatJid: queue.targetChatJid,
           deadProvider: entry?.provider,
           deadModel: entry?.model,
-          advancedTo: this.activeFallbackEntry?.provider,
-          advancedModel: this.activeFallbackEntry?.model,
+          advancedTo: this.fallbackWindow.activeEntry?.provider,
+          advancedModel: this.fallbackWindow.activeEntry?.model,
         }, 'advanced fallback chain past structurally-empty entry');
       }
     }
@@ -5436,9 +5429,9 @@ export class AgentRuntime implements Runtime {
     const selection = this.selectFallbackEntryForWindow(reason);
     if (!selection) return false;
     const fallbackEntry = selection.entry;
-    this.activeFallbackEntry = fallbackEntry;
-    this.fallbackActiveUntil = until;
-    this.fallbackActivatedAt = activatedAt;
+    this.fallbackWindow.activeEntry = fallbackEntry;
+    this.fallbackWindow.activeUntil = until;
+    this.fallbackWindow.activatedAt = activatedAt;
     // First-arm discriminator, captured before the guard below consumes it:
     // null means this call is the window's first arm in this process (a fresh
     // activation or a post-restart restore), non-null means an extension of
@@ -5446,7 +5439,7 @@ export class AgentRuntime implements Runtime {
     // extension re-arm re-spawning the credential/binary/catalog probes and
     // re-firing their alerts on every per-turn usage-limit is an unthrottled
     // storm, and nothing about the target entry's environment changed.
-    const firstArm = this.fallbackArmReason === null;
+    const firstArm = this.fallbackWindow.armReason === null;
     // Preserve original cause: only set on first arm; extensions and restores
     // must pass the original reason so it is not overwritten. The activation
     // alert + counter fire exactly once per window, never on extensions. A
@@ -5455,7 +5448,7 @@ export class AgentRuntime implements Runtime {
     // every restart would re-count and re-alert the activation that already
     // fired before the restart.
     if (firstArm) {
-      this.fallbackArmReason = reason;
+      this.fallbackWindow.armReason = reason;
       // Snapshot the lifetime turn counters at the first arm of every window
       // (the null-guard skips extensions; restores hit it too because the
       // guard is per-process, which is correct — the counters are also
@@ -5496,8 +5489,8 @@ export class AgentRuntime implements Runtime {
     // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
     // after the set-when-null guard above) so the DB can never diverge from the
     // in-memory value even if a caller passes an incorrect reason directly.
-    const persistReason = this.fallbackArmReason ?? reason;
-    this.fallbackRecoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
+    const persistReason = this.fallbackWindow.armReason ?? reason;
+    this.fallbackWindow.recoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
     this.scheduleFallbackPrimaryProbe();
     try {
       saveFallbackState(this.db, {
@@ -5686,25 +5679,25 @@ export class AgentRuntime implements Runtime {
       Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
     );
     // Extend rather than shorten an already-active window.
-    const until = this.fallbackActiveUntil
-      ? Math.max(this.fallbackActiveUntil, clampedUntil)
+    const until = this.fallbackWindow.activeUntil
+      ? Math.max(this.fallbackWindow.activeUntil, clampedUntil)
       : clampedUntil;
 
-    const wasActive = this.fallbackActiveUntil !== null;
+    const wasActive = this.fallbackWindow.activeUntil !== null;
     // Preserve the original first-engagement time across extensions so the
     // persisted record always reflects when the fallback was first triggered,
     // not when it was last extended.
-    const activatedAt = wasActive && this.fallbackActivatedAt !== null
-      ? this.fallbackActivatedAt
+    const activatedAt = wasActive && this.fallbackWindow.activatedAt !== null
+      ? this.fallbackWindow.activatedAt
       : now;
     // Pass the original cause on extension so the root cause is preserved;
     // on first activation fallbackArmReason is null so armFallbackWindow
     // stores 'usage-limit' as the original cause.
-    const persistedReason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : reason;
-    this.fallbackResetAt = resetAt?.getTime() ?? null;
+    const persistedReason = wasActive && this.fallbackWindow.armReason !== null ? this.fallbackWindow.armReason : reason;
+    this.fallbackWindow.resetAt = resetAt?.getTime() ?? null;
     const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
     if (!armed) return null;
-    const fallbackEntry = this.activeFallbackEntry;
+    const fallbackEntry = this.fallbackWindow.activeEntry;
     if (!fallbackEntry) return null;
     const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
 
@@ -5718,7 +5711,7 @@ export class AgentRuntime implements Runtime {
       activeUntil: new Date(until).toISOString(),
       extended: wasActive,
       keyPresent,
-      recoveryProbeRequired: this.fallbackRecoveryProbeRequired,
+      recoveryProbeRequired: this.fallbackWindow.recoveryProbeRequired,
       reason,
     }, 'activating provider fallback after primary provider failure');
 
@@ -5731,7 +5724,7 @@ export class AgentRuntime implements Runtime {
       activeUntil: until,
       extended: wasActive,
       keyPresent,
-      recoveryProbeRequired: this.fallbackRecoveryProbeRequired,
+      recoveryProbeRequired: this.fallbackWindow.recoveryProbeRequired,
     };
   }
 
@@ -5745,21 +5738,21 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
-    if (this.fallbackActiveUntil === null) return;
+    if (this.fallbackWindow.activeUntil === null) return;
     // Capture before clearing: the revert alert reports how long the window
     // ran. The idempotency guard above means this fires once per window.
-    const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
+    const windowMs = this.fallbackWindow.activatedAt !== null ? Date.now() - this.fallbackWindow.activatedAt : null;
     // Per-window deltas against the arm-time snapshots — the lifetime counters
     // are NOT reset here (getFallbackState keeps reporting process totals).
     const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
-    this.fallbackActiveUntil = null;
-    this.fallbackActivatedAt = null;
-    this.fallbackArmReason = null;
-    this.activeFallbackEntry = null;
+    this.fallbackWindow.activeUntil = null;
+    this.fallbackWindow.activatedAt = null;
+    this.fallbackWindow.armReason = null;
+    this.fallbackWindow.activeEntry = null;
     this.fallbackChain.failedKeys.clear();
     this.fallbackEmptyAdvance.reset();
-    this.fallbackResetAt = null;
-    this.fallbackRecoveryProbeRequired = false;
+    this.fallbackWindow.resetAt = null;
+    this.fallbackWindow.recoveryProbeRequired = false;
     // End of the stall episode (covers both successful-probe reverts and
     // manual/elapsed deactivations) — the next episode counts from zero and
     // may alert again at the threshold. fallbackLastProbeAt is kept as
@@ -5786,8 +5779,8 @@ export class AgentRuntime implements Runtime {
   }
 
   private handleFallbackRevertTimer(): void {
-    if (this.fallbackActiveUntil === null) return;
-    if (!this.fallbackRecoveryProbeRequired) {
+    if (this.fallbackWindow.activeUntil === null) return;
+    if (!this.fallbackWindow.recoveryProbeRequired) {
       this.deactivateProviderFallback('window-elapsed');
       return;
     }
@@ -5797,7 +5790,7 @@ export class AgentRuntime implements Runtime {
     // flight (≤5 s) the window shows expired — acceptable: the previous
     // spawnSync froze the WHOLE event loop for the same duration, forever on
     // a dead auth primary.
-    const windowAtProbe = this.fallbackActiveUntil;
+    const windowAtProbe = this.fallbackWindow.activeUntil;
     void Promise.resolve()
       .then(() => this.probePrimaryProviderRecovered())
       .catch((err) => {
@@ -5810,7 +5803,7 @@ export class AgentRuntime implements Runtime {
         // Stale-result guards: drop the probe outcome if the window was
         // deactivated or re-armed while the probe was in flight (a stale
         // extend would shorten a fresh window; the next cadence re-probes).
-        if (this.fallbackActiveUntil === null || this.fallbackActiveUntil !== windowAtProbe) return;
+        if (this.fallbackWindow.activeUntil === null || this.fallbackWindow.activeUntil !== windowAtProbe) return;
         if (recovered) {
           this.deactivateProviderFallback('primary-probe-ok');
           return;
@@ -5818,7 +5811,7 @@ export class AgentRuntime implements Runtime {
         this.fallbackProbeAttempts += 1;
         const now = Date.now();
         const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-        this.fallbackActiveUntil = until;
+        this.fallbackWindow.activeUntil = until;
         this.revertTimer = setTimeout(() => {
           this.handleFallbackRevertTimer();
         }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
@@ -5826,8 +5819,8 @@ export class AgentRuntime implements Runtime {
         try {
           saveFallbackState(this.db, {
             activeUntil: until,
-            activatedAt: this.fallbackActivatedAt ?? now,
-            reason: this.fallbackArmReason ?? 'auth-required',
+            activatedAt: this.fallbackWindow.activatedAt ?? now,
+            reason: this.fallbackWindow.armReason ?? 'auth-required',
             // Persist the stall clock with the window so a restart mid-stall
             // resumes the count instead of resetting it.
             probeAttempts: this.fallbackProbeAttempts,
@@ -5847,7 +5840,7 @@ export class AgentRuntime implements Runtime {
             this.instanceName,
             'fallback_recovery_stalled',
             'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${atts} `
+            `reason=${this.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} `
               + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
           );
         }
@@ -5858,8 +5851,8 @@ export class AgentRuntime implements Runtime {
         log.warn({
           instanceName: this.instanceName,
           primaryProvider: this.agentProvider,
-          fallbackProvider: this.activeFallbackEntry?.provider,
-          reason: this.fallbackArmReason,
+          fallbackProvider: this.fallbackWindow.activeEntry?.provider,
+          reason: this.fallbackWindow.armReason,
           probeAttempts: this.fallbackProbeAttempts,
         }, 'primary provider recovery probe still failing; keeping fallback armed');
       });
@@ -5877,16 +5870,16 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
-    if (!this.fallbackRecoveryProbeRequired) return;
+    if (!this.fallbackWindow.recoveryProbeRequired) return;
     if (
-      this.fallbackActiveUntil === null
-      || this.fallbackActiveUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
+      this.fallbackWindow.activeUntil === null
+      || this.fallbackWindow.activeUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
     ) {
       return;
     }
     this.fallbackPrimaryProbeTimer = setTimeout(() => {
       this.fallbackPrimaryProbeTimer = null;
-      if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+      if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
       void Promise.resolve()
         .then(() => this.probePrimaryProviderRecovered())
@@ -5896,7 +5889,7 @@ export class AgentRuntime implements Runtime {
         })
         .then((recovered) => {
           // The window may have been deactivated while the probe ran.
-          if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+          if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
           if (recovered) {
             this.deactivateProviderFallback('primary-probe-ok');
             return;

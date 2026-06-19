@@ -131,7 +131,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 
 /** Bracket-access view of the private fallback state. */
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;
@@ -163,7 +163,7 @@ describe('AgentRuntime.forceFallback', () => {
     const runtime = makeRuntime();
     const result = runtime.forceFallback();
     expect(result).toEqual({ ok: false, reason: 'no fallback provider or chain configured for this instance' });
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
   });
 
   it('sets the window EXACTLY to the requested duration (30m)', () => {
@@ -174,24 +174,24 @@ describe('AgentRuntime.forceFallback', () => {
     if (result.ok) {
       expect(result.activeUntil).toBe(Date.now() + thirtyMin);
     }
-    expect(view(runtime).fallbackActiveUntil).toBe(Date.now() + thirtyMin);
+    expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + thirtyMin);
   });
 
   it('may SHORTEN an active 5h window down to 30m (operator intent wins)', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     // First arm a full 5h window via normal activation
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).toBe(Date.now() + DEFAULT_FALLBACK_WINDOW_MS);
+    expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + DEFAULT_FALLBACK_WINDOW_MS);
 
     // Now force 30m -- must replace the 5h window
     const thirtyMin = 30 * 60_000;
     const result = runtime.forceFallback(thirtyMin);
     expect(result).toMatchObject({ ok: true, clamped: false });
-    expect(view(runtime).fallbackActiveUntil).toBe(Date.now() + thirtyMin);
+    expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + thirtyMin);
 
     // Advance 31m -- window should have elapsed and been cleared
     vi.advanceTimersByTime(thirtyMin + 1);
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
@@ -255,22 +255,22 @@ describe('AgentRuntime.disableFallback', () => {
   it('ends an active window and reverts to primary provider', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
 
     const result = runtime.disableFallback();
     expect(result).toEqual({ ok: true });
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
   it('is idempotent when no window is active', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     // Should not throw
     const result = runtime.disableFallback();
     expect(result).toEqual({ ok: true });
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
   });
 
   it('is idempotent when called twice in a row', () => {
@@ -278,7 +278,7 @@ describe('AgentRuntime.disableFallback', () => {
     view(runtime).activateProviderFallback(null);
     runtime.disableFallback();
     expect(() => runtime.disableFallback()).not.toThrow();
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
   });
 
   it('also works when called without a fallbackProvider configured', () => {

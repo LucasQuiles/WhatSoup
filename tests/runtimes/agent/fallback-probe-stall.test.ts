@@ -138,7 +138,7 @@ function makeRuntime(): AgentRuntime {
 
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackProbeAttempts: number;
   fallbackLastProbeAt: number | null;
   fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
@@ -276,7 +276,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
 
     probe.mockReturnValue(true);
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(v.fallbackProbeAttempts).toBe(0);
     expect(stallAlerts()).toHaveLength(0);
@@ -312,8 +312,8 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
       await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(v.fallbackProbeAttempts).toBe(STALL_THRESHOLD + 3);
-    expect(v.fallbackActiveUntil).not.toBeNull();
-    expect(v.fallbackActiveUntil!).toBeGreaterThan(Date.now());
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
+    expect(v.fallbackWindow.activeUntil!).toBeGreaterThan(Date.now());
     expect(v.effectiveProvider).toBe('opencode-cli');
   });
 
@@ -366,7 +366,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     // probe must fire, succeed, and revert to the primary early.
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(probe).toHaveBeenCalledTimes(1);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(stallAlerts()).toHaveLength(0);
   });
@@ -401,7 +401,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // revert timer fires → async probe fails
 
     expect(probe).toHaveBeenCalledTimes(1);
-    expect(v.fallbackActiveUntil).not.toBeNull();
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
     expect(v.effectiveProvider).toBe('opencode-cli');
     expect(v.fallbackProbeAttempts).toBe(1);
 
@@ -409,7 +409,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     // the port too).
     probe.mockImplementation(async () => true);
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(v.fallbackProbeAttempts).toBe(0);
   });

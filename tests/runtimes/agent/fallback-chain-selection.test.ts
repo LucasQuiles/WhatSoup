@@ -113,7 +113,7 @@ function makeRuntime(overrides: {
 }
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   effectiveModel: string | undefined;
   activateProviderFallback(
@@ -270,7 +270,7 @@ describe('fallback chain selection', () => {
     const activation = view(runtime).activateProviderFallback(null, 'auth-required');
 
     expect(activation).toBeNull();
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
     expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([
@@ -387,7 +387,7 @@ describe('fallback chain selection — restore path', () => {
     expect(clearSpy).toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([]);
   });
@@ -421,7 +421,7 @@ describe('fallback chain selection — restore path', () => {
     expect(clearSpy).toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([
       { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: false },
