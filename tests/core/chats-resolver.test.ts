@@ -19,7 +19,7 @@
 // Vitest's suite collection fails because the module doesn't exist; all 15
 // declared cases are unreached.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import {
   createChatResolver,
@@ -288,5 +288,44 @@ describe('seedChatAliases', () => {
 
     expect(createChatResolver({ db }).resolve({ to: 'ops' })).toBe('15555550101@s.whatsapp.net');
     db.close();
+  });
+});
+
+// --- Residual branch coverage ---------------------------------------------
+// Targets the single uncovered branch in src/core/chats-resolver.ts:
+//   line 134: `changes += result.changes ?? 0;`
+// node:sqlite's StatementSync.run() always returns a { changes: N } object,
+// so reaching the `?? 0` fallback requires a mock where the upsert run()
+// omits the .changes field. Pattern mirrors tests/core/label-sync.test.ts
+// "cleanupOrphanedAssociations returns 0 when result.changes is undefined".
+
+describe('residual-branch coverage', () => {
+  it('seedChatAliases falls back to 0 when result.changes is undefined (line 134 ?? 0 branch)', () => {
+    const db = makeDb();
+    const originalPrepare = db.prepare.bind(db);
+    const prepareSpy = vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+      // Intercept only the upsert INSERT into chat_aliases so its .run()
+      // returns an object with no `changes` field, forcing the `?? 0`
+      // fallback on line 134.
+      if (sql.includes('INSERT INTO chat_aliases')) {
+        return {
+          run: () => ({}),
+        } as unknown as ReturnType<typeof originalPrepare>;
+      }
+      return originalPrepare(sql);
+    });
+
+    try {
+      const result = seedChatAliases(db, {
+        foo: '12036300001@g.us',
+        bar: '1555XXXXXXX@s.whatsapp.net',
+      });
+      // Each upsert.run() returned {} (no .changes) -> 0 + 0 = 0.
+      // Concrete terminal assertion locks the `?? 0` fallback branch.
+      expect(result).toBe(0);
+    } finally {
+      prepareSpy.mockRestore();
+      db.close();
+    }
   });
 });
