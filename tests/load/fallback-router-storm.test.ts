@@ -128,7 +128,7 @@ type Activation = {
 };
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackProbeAttempts: number;
   effectiveProvider: string;
   pendingTurnText: Map<string, string>;
@@ -222,7 +222,7 @@ describe('fallback router storm harness', () => {
     expect(active.fallbackReplays).toBe(1);
     expect(active.fallbackReverts).toBe(0);
 
-    vi.advanceTimersByTime(v.fallbackActiveUntil! - Date.now() + 1);
+    vi.advanceTimersByTime(v.fallbackWindow.activeUntil! - Date.now() + 1);
     const elapsed = v.getFallbackState();
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(1);
     expect(elapsed.fallbackActivations).toBe(1);
@@ -254,8 +254,8 @@ describe('fallback router storm harness', () => {
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(expectedStallAlerts);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
     expect(v.effectiveProvider).toBe('opencode-cli');
-    expect(v.fallbackActiveUntil).not.toBeNull();
-    expect(v.fallbackActiveUntil!).toBeGreaterThan(Date.now());
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
+    expect(v.fallbackWindow.activeUntil!).toBeGreaterThan(Date.now());
   });
 
   it('recovers cleanly after a failed-probe storm and leaves no stale cadence running', async () => {

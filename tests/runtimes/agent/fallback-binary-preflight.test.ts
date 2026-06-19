@@ -149,7 +149,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 }
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   restorePersistedFallbackWindow(): void;
@@ -216,7 +216,7 @@ describe('armFallbackWindow — binary pre-flight', () => {
       );
     }, { interval: 0 });
 
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -249,7 +249,7 @@ describe('armFallbackWindow — binary pre-flight', () => {
     fbView(runtime).activateProviderFallback(null);
     await Promise.resolve();
 
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -325,7 +325,7 @@ describe('armFallbackWindow — binary pre-flight', () => {
     // Deliberately NO await / waitFor / microtask drain before these asserts —
     // the synchronous return of activateProviderFallback must already have
     // armed the window while the probe is still pending.
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
     expect(probeFallbackBinaryMock).toHaveBeenCalledWith('opencode');
   });

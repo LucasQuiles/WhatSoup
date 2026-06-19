@@ -152,7 +152,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 }
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
 };
@@ -255,7 +255,7 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
       );
     }, { interval: 0 });
 
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -405,7 +405,7 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     // Deliberately NO await / waitFor / microtask drain before these asserts —
     // the synchronous return of activateProviderFallback must already have
     // armed the window while the probes are still pending.
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
 
     // The window must remain active after the binary probe resolves and the
@@ -413,7 +413,7 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     await vi.waitFor(() => {
       expect(probeModelCatalogMock).toHaveBeenCalledWith('opencode', 'minimax/minimax-m2');
     }, { interval: 0 });
-    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
     const alertSources = vi.mocked(emitAlert).mock.calls.map((c) => c[1]);
     expect(alertSources).not.toContain('fallback_model_unknown');

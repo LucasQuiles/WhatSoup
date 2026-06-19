@@ -154,7 +154,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   revertTimer: ReturnType<typeof setTimeout> | null;
   effectiveProvider: string;
@@ -311,7 +311,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
   it('does NOT activate when no fallback provider is configured', () => {
     const runtime = makeRuntime();
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
@@ -324,7 +324,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(view(runtime).effectiveModel).toBe('claude-opus-4-8[1m]');
 
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
     expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2.7');
   });
@@ -333,7 +333,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     const before = Date.now();
     view(runtime).activateProviderFallback(null);
-    const until = view(runtime).fallbackActiveUntil!;
+    const until = view(runtime).fallbackWindow.activeUntil!;
     expect(until - before).toBe(5 * 60 * 60 * 1000);
   });
 
@@ -344,7 +344,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
 
     // Advance past the 5h default window.
     vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
@@ -429,11 +429,11 @@ describe('AgentRuntime — provider fallback state machine', () => {
 
     await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
     expect(v.effectiveProvider).toBe('opencode-cli');
-    expect(v.fallbackActiveUntil).not.toBeNull();
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
 
     v.probePrimaryProviderRecovered = vi.fn(() => true);
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
   });
 
@@ -491,27 +491,27 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     // resetAt in the past → clamped to now + MIN (1 minute).
     view(runtime).activateProviderFallback(new Date(Date.now() - 1000));
-    const until = view(runtime).fallbackActiveUntil!;
+    const until = view(runtime).fallbackWindow.activeUntil!;
     expect(until - Date.now()).toBe(60 * 1000);
   });
 
   it('clamps an absurdly distant reset time to the maximum window', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     view(runtime).activateProviderFallback(new Date(Date.now() + 999 * 60 * 60 * 1000));
-    const until = view(runtime).fallbackActiveUntil!;
+    const until = view(runtime).fallbackWindow.activeUntil!;
     expect(until - Date.now()).toBe(24 * 60 * 60 * 1000);
   });
 
   it('extends the window to the later of the two on re-activation (idempotent)', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     view(runtime).activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000)); // +1h
-    const firstUntil = view(runtime).fallbackActiveUntil!;
+    const firstUntil = view(runtime).fallbackWindow.activeUntil!;
     // A second activation with a shorter window must not shorten the active one.
     view(runtime).activateProviderFallback(new Date(Date.now() + 30 * 60 * 1000)); // +30m
-    expect(view(runtime).fallbackActiveUntil).toBe(firstUntil);
+    expect(view(runtime).fallbackWindow.activeUntil).toBe(firstUntil);
     // A longer one extends it.
     view(runtime).activateProviderFallback(new Date(Date.now() + 3 * 60 * 60 * 1000)); // +3h
-    expect(view(runtime).fallbackActiveUntil!).toBeGreaterThan(firstUntil);
+    expect(view(runtime).fallbackWindow.activeUntil!).toBeGreaterThan(firstUntil);
   });
 
   it('deactivate clears state and timer immediately', () => {
@@ -519,7 +519,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     view(runtime).activateProviderFallback(null);
     expect(view(runtime).revertTimer).not.toBeNull();
     view(runtime).deactivateProviderFallback('manual');
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).revertTimer).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
@@ -527,9 +527,9 @@ describe('AgentRuntime — provider fallback state machine', () => {
   it('shutdown clears the revert timer and fallback window', async () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     await runtime.shutdown();
-    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).revertTimer).toBeNull();
   });
 });
@@ -613,7 +613,7 @@ describe('AgentRuntime — fallback key-presence guard', () => {
     });
     lookupCredentialMock.mockReturnValue(null);
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
@@ -624,7 +624,7 @@ describe('AgentRuntime — fallback key-presence guard', () => {
     });
     lookupCredentialMock.mockImplementation((svc) => (svc === 'minimax' ? 'mm-key' : null));
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 });
@@ -648,7 +648,7 @@ function makeFakeQueue() {
 }
 
 type EventDriveView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   handleEventWithContext(
     event: unknown,
     queue: unknown,
@@ -666,7 +666,7 @@ function driveView(runtime: AgentRuntime): EventDriveView {
 /** Extended drive view that exposes the full 8-arg handleEventWithContext
  *  signature plus the process-local fallback telemetry counters. */
 type FullEventDriveView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackTurnsServed: number;
   fallbackTurnsEmpty: number;
   lastFallbackTurnAt: number | null;
@@ -714,7 +714,7 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
       queue,
       null,
     );
-    expect(driveView(runtime).fallbackActiveUntil).toBeNull();
+    expect(driveView(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
@@ -729,7 +729,7 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
       queue,
       null,
     );
-    expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(driveView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
     expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2.7');
   });
@@ -787,13 +787,13 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
       queue,
       null,
     );
-    expect(driveView(runtime).fallbackActiveUntil).toBeNull();
+    expect(driveView(runtime).fallbackWindow.activeUntil).toBeNull();
     driveView(runtime).handleEventWithContext(
       { type: 'result', text: USAGE_LIMIT_TEXT },
       queue,
       null,
     );
-    expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(driveView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 });
@@ -879,7 +879,7 @@ describe('usage-limit user notice', () => {
 // ─── Persistence hooks ────────────────────────────────────────────────────────
 
 type PersistenceView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;

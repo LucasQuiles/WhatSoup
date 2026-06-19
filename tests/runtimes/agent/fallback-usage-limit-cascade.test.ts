@@ -144,7 +144,7 @@ type CascadeView = {
   effectiveProvider: string;
   effectiveModel: string | undefined;
   fallbackChain: { failedKeys: Set<string> };
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   activateProviderFallback(
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
@@ -207,7 +207,7 @@ describe('fallback-provider usage-limit cascade', () => {
     // Arm window at T=0.
     cv(runtime).activateProviderFallback(null);
 
-    const initialUntil = cv(runtime).fallbackActiveUntil as number;
+    const initialUntil = cv(runtime).fallbackWindow.activeUntil as number;
     expect(initialUntil).toBeGreaterThan(0);
 
     // Advance 1 hour.

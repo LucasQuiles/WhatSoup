@@ -144,7 +144,7 @@ function makeFakeQueue() {
 
 /** Bracket-access view exposing private fallback telemetry and handlers. */
 type RuntimeView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   queue: unknown;
   turnHadVisibleOutput: boolean;
   activateProviderFallback(resetAt: Date | null): void;

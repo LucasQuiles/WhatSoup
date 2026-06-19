@@ -163,7 +163,7 @@ type Activation = {
 
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackMetrics: { turnsServed: number; turnsEmpty: number };
   effectiveProvider: string;
   pendingTurnText: Map<string, string>;
@@ -245,7 +245,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     v.fallbackMetrics.turnsEmpty = 1;
 
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
     const [instance, , , evidence] = reverted[0];
@@ -507,7 +507,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     v.restorePersistedFallbackWindow();
 
     // The window IS restored and armed...
-    expect(v.fallbackActiveUntil).toBe(until);
+    expect(v.fallbackWindow.activeUntil).toBe(until);
     // ...but the activation alert + counter belong to the pre-restart arm:
     // "exactly once per window" spans restarts.
     expect(alertsFor('provider_fallback_activated')).toHaveLength(0);
@@ -584,7 +584,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
 
     // Restored window expires → reverts (and clears fallbackArmReason).
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
-    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.fallbackWindow.activeUntil).toBeNull();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
     expect(reverted[0][3]).toContain('turnsServed=2');

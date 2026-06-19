@@ -111,7 +111,7 @@ function makeRuntime(db: Database): AgentRuntime {
 }
 
 type FallbackView = {
-  fallbackActiveUntil: number | null;
+  fallbackWindow: { activeUntil: number | null };
   fallbackProbeAttempts: number;
   effectiveProvider: string;
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
@@ -175,7 +175,7 @@ describe('fallback persistence — real-DB integration', () => {
     // the DB row must be deleted.
     vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
     expect(fbView(runtimeB).effectiveProvider).toBe('claude-cli');
-    expect(fbView(runtimeB).fallbackActiveUntil).toBeNull();
+    expect(fbView(runtimeB).fallbackWindow.activeUntil).toBeNull();
 
     // The DB row must be gone: count is the behavioral claim, not existence.
     const rowCount = (
