@@ -448,8 +448,9 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 
 | Legacy | Disposition | v3 target |
 |---|---|---|
-| `--font-sans` | formalized | `--font-sans` (value: Outfit → Geist → Hanken Grotesk, showcase identity) |
-| `--font-mono` | formalized | `--font-mono` (value: IBM Plex Mono → Geist Mono → IBM Plex Mono, showcase identity) |
+| `--font-display` | formalized | `--font-display` (Bricolage Grotesque, showcase display tier) |
+| `--font-sans` | formalized | `--font-sans` (value: Outfit → Geist → Hanken Grotesk; Geist woff2 removed) |
+| `--font-mono` | formalized | `--font-mono` (value: IBM Plex Mono → Geist Mono → IBM Plex Mono; Geist woff2 removed) |
 | `--fw-normal` / `--fw-medium` / `--fw-semibold` | rejected-superseded | weights are baked into the named ramp |
 
 ### 6.10 Shadows / overlays / motion (10)

@@ -74,7 +74,8 @@ hierarchy is wrong; restructure instead of adding size.
 
 ## 8. Migration notes (from the inventory)
 
-- Outfit and IBM Plex Mono are replaced by the Geist pair (census §9; digest shortlist #1).
+- The interim Geist pair is replaced by the showcase identity triad: Bricolage Grotesque (display) +
+  Hanken Grotesk (body) + IBM Plex Mono (mono) (census §9; digest shortlist #1; showcase SSOT).
 - The legacy 9-size scale (census §5) collapses onto the ramp; `--text-heading`/`--text-body`
   0.5px near-twins merge (P3-5); `--text-xs` (9.6px) dies below the 12px floor.
 - Legacy `c-*` typography utilities (`c-label`, `c-data`, `c-heading` … census §16) map 1:1 onto
