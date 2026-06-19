@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from '../../src/core/label-sync.ts';
 
@@ -327,6 +327,63 @@ describe('label-sync', () => {
     it('returns 0 and does not throw when tables are empty', () => {
       expect(() => cleanupOrphanedAssociations(db)).not.toThrow();
       expect(cleanupOrphanedAssociations(db)).toBe(0);
+    });
+  });
+
+  // ─── residual-branch coverage ──────────────────────────────────────────────
+  // Closes 2 uncovered branches flagged by vitest at label-sync.ts lines 69, 102:
+  //   • line 69 — `data.chatJid ?? ''` (no existing test omits chatJid)
+  //   • line 102 — `(result.changes as number) ?? 0` (SQLite always returns a number)
+  describe('residual-branch coverage', () => {
+    it('defaults chatJid to empty string when omitted (line 69 ?? "" fallback)', () => {
+      handleLabelsEdit(db, [{ id: 'lbl-1', name: 'Work' }]);
+
+      // chatJid intentionally omitted — exercises `data.chatJid ?? ''`.
+      handleLabelsAssociation(db, {
+        labelId: 'lbl-1',
+        type: 'message',
+        messageId: 'msg-xyz',
+        operation: 'add',
+      });
+
+      const row = db.raw
+        .prepare(
+          "SELECT chat_jid, message_id FROM label_associations WHERE label_id = ? AND type = 'message'",
+        )
+        .get('lbl-1') as { chat_jid: string; message_id: string };
+      expect(row).toEqual({
+        chat_jid: '',
+        message_id: 'msg-xyz',
+      });
+    });
+
+    it('cleanupOrphanedAssociations returns 0 when result.changes is undefined (line 102 ?? 0 fallback)', () => {
+      const originalPrepare = db.raw.prepare.bind(db.raw);
+      const prepareSpy = vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+        // Intercept only the orphan-cleanup DELETE so its .run() omits `.changes`,
+        // forcing the `?? 0` fallback in cleanupOrphanedAssociations.
+        if (sql.includes('DELETE FROM label_associations') && sql.includes('NOT IN')) {
+          return {
+            run: () => ({}),
+          } as unknown as ReturnType<typeof originalPrepare>;
+        }
+        return originalPrepare(sql);
+      });
+
+      // Seed an orphan so the DELETE statement actually runs under the spy.
+      handleLabelsEdit(db, [{ id: 'orphan-lbl', name: 'Orphan' }]);
+      handleLabelsAssociation(db, {
+        labelId: 'orphan-lbl',
+        type: 'chat',
+        chatJid: '111@s.whatsapp.net',
+        operation: 'add',
+      });
+      db.raw.prepare("DELETE FROM labels WHERE id = 'orphan-lbl'").run();
+
+      const deleted = cleanupOrphanedAssociations(db);
+      expect(deleted).toBe(0);
+
+      prepareSpy.mockRestore();
     });
   });
 });
