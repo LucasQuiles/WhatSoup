@@ -586,9 +586,10 @@ body::before {
 }
 
 @utility c-heading-lg {
-  font-family: var(--font-sans);
-  font-weight: var(--fw-semibold);
-  font-size: var(--text-lg);
+  /* Section / panel-group titles consume the display tier (--type-title:
+     Bricolage Grotesque 600 19/24) so the editorial face reaches in-app titles,
+     not just the Landing hero. */
+  font: var(--type-title);
   color: var(--text-1);
 }
 
