@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -81,5 +81,33 @@ describe('handoff-artifact store', () => {
     // Table still usable after re-ensuring.
     upsertHandoffArtifact(db, artifact({ conversationKey: 'after-reensure' }));
     expect(getHandoffArtifact(db, 'after-reensure')?.tokenBaseline).toBe(1234);
+  });
+});
+
+describe('residual-branch coverage', () => {
+  // handoff-artifact.ts line 45 — `tokenBaseline: Number(row['token_baseline'] ?? 0)`
+  // The NOT NULL DEFAULT 0 column in the schema means a real SQLite row never
+  // surfaces `null`, so we feed `rowToArtifact` directly via a mock prepare/get
+  // chain to exercise the `?? 0` fallback path.
+  it('falls back to 0 when stored token_baseline is null', () => {
+    const getFn = vi.fn().mockReturnValue({
+      conversation_key: 'null-baseline',
+      summary: null,
+      seeded_artifacts: null,
+      updated_at: 1_781_000_000_000,
+      source_provider: 'claude-cli',
+      source_model: null,
+      token_baseline: null,
+    });
+    const prepareFn = vi.fn().mockReturnValue({ get: getFn });
+    const mockDb = { raw: { prepare: prepareFn } } as unknown as Database;
+
+    const result = getHandoffArtifact(mockDb, 'null-baseline');
+
+    expect(prepareFn).toHaveBeenCalledWith(
+      'SELECT * FROM agent_handoff_artifacts WHERE conversation_key = ?',
+    );
+    expect(getFn).toHaveBeenCalledWith('null-baseline');
+    expect(result?.tokenBaseline).toBe(0);
   });
 });
