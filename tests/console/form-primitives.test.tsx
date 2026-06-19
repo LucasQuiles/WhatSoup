@@ -179,6 +179,8 @@ describe('NumberInput', () => {
 
     const input = screen.getByLabelText('Retries') as HTMLInputElement
     expect(input.type).toBe('number')
+    // Default numeric soft-keyboard (input.md:22); consumer-overridable.
+    expect(input.getAttribute('inputmode')).toBe('decimal')
     expect(input.value).toBe('5')
     expect(input.min).toBe('0')
     expect(input.max).toBe('10')
@@ -469,14 +471,37 @@ describe('CheckboxField', () => {
 
     const checkbox = screen.getByRole('checkbox', { name: 'Enable feature' }) as HTMLInputElement
     expect(checkbox.checked).toBe(true)
-    expect(screen.getByText('Only applies to new messages')).toBeDefined()
+    const helper = screen.getByText('Only applies to new messages')
+    expect(helper).toBeDefined()
+    // Helper must be programmatically associated so screen readers announce it (parity with Field).
+    expect(helper.id).toBeTruthy()
+    expect(checkbox.getAttribute('aria-describedby')).toBe(helper.id)
   })
 
   it('omits helper text when helper is not provided', () => {
     render(<CheckboxField label="Enable feature" checked={false} onChange={() => {}} />)
 
-    expect(screen.getByRole('checkbox', { name: 'Enable feature' })).toBeDefined()
+    const checkbox = screen.getByRole('checkbox', { name: 'Enable feature' })
+    expect(checkbox).toBeDefined()
     expect(screen.queryByText('Only applies to new messages')).toBeNull()
+    // No helper → no dangling aria-describedby
+    expect(checkbox.getAttribute('aria-describedby')).toBeNull()
+  })
+
+  it('merges consumer aria-describedby with the auto-wired helper id', () => {
+    render(
+      <CheckboxField
+        label="Enable feature"
+        checked
+        helper="Only applies to new messages"
+        aria-describedby="external-note"
+        onChange={() => {}}
+      />,
+    )
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Enable feature' })
+    const helper = screen.getByText('Only applies to new messages')
+    expect(checkbox.getAttribute('aria-describedby')).toBe(`external-note ${helper.id}`)
   })
 
   it('supports disabled state, input class, row class, label class, and suffix content', () => {

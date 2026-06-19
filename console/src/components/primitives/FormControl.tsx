@@ -110,6 +110,9 @@ export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className,
   <input
     ref={ref}
     type="number"
+    // Default the numeric soft-keyboard per input.md:22; consumers may override
+    // (e.g. inputMode="numeric" for integer-only fields like ports).
+    inputMode="decimal"
     {...props}
     className={`c-input c-input-number font-mono ${className ?? ''}`}
     style={{ borderColor: borderColor(error, confirmed) }}
@@ -254,22 +257,30 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({
   suffix,
   'aria-describedby': ariaDescribedBy,
   'aria-invalid': ariaInvalid,
-}) => (
-  <div>
-    <label className={`c-checkbox-row ${className ?? ''}`}>
-      <input
-        id={id}
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={event => onChange(event.target.checked)}
-        className={inputClassName}
-        aria-describedby={ariaDescribedBy}
-        aria-invalid={ariaInvalid}
-      />
-      <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
-      {suffix && <span aria-hidden="true">{suffix}</span>}
-    </label>
-    {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}
-  </div>
-);
+}) => {
+  // Auto-wire the helper to the control so screen readers announce it (parity with
+  // Field, which does the same). Without this the helper text was visually present
+  // but programmatically orphaned. Consumer-supplied aria-describedby is preserved.
+  const generatedId = useId();
+  const helperId = helper ? generatedId : undefined;
+  const describedBy = joinIds(ariaDescribedBy, helperId);
+  return (
+    <div>
+      <label className={`c-checkbox-row ${className ?? ''}`}>
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={event => onChange(event.target.checked)}
+          className={inputClassName}
+          aria-describedby={describedBy}
+          aria-invalid={ariaInvalid}
+        />
+        <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
+        {suffix && <span aria-hidden="true">{suffix}</span>}
+      </label>
+      {helper && <div id={helperId} className="c-helper ml-[var(--sp-5)]">{helper}</div>}
+    </div>
+  );
+};
