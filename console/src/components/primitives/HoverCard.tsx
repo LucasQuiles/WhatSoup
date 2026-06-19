@@ -31,6 +31,7 @@ import {
   type ReactNode,
   type ReactElement,
   type KeyboardEvent as ReactKeyboardEvent,
+  type FocusEvent as ReactFocusEvent,
   cloneElement,
   isValidElement,
   useCallback,
@@ -84,6 +85,9 @@ export const HoverCard: FC<HoverCardProps> = ({
   const anchorRef = useRef<HTMLSpanElement>(null);
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set when Escape explicitly dismisses the card; suppresses focus-reopen while focus
+  // stays on the trigger. Cleared once the pointer/focus leaves and a fresh hover begins.
+  const dismissedRef = useRef(false);
 
   const clearTimers = useCallback(() => {
     if (openTimer.current) clearTimeout(openTimer.current);
@@ -114,6 +118,8 @@ export const HoverCard: FC<HoverCardProps> = ({
   }, []);
 
   const scheduleOpen = useCallback(() => {
+    // A fresh hover clears a prior Escape-dismissal so the card can open again.
+    dismissedRef.current = false;
     if (closeTimer.current) {
       clearTimeout(closeTimer.current);
       closeTimer.current = null;
@@ -138,23 +144,35 @@ export const HoverCard: FC<HoverCardProps> = ({
     }, closeDelay);
   }, [closeDelay]);
 
-  // Focus opens immediately (hover never sole carrier); blur closes via the same
-  // debounce so focus moving INTO the card (which lives in the wrapper) doesn't collapse it.
+  // Focus opens immediately (hover never sole carrier) — unless the card was just
+  // Escape-dismissed while the trigger keeps focus (don't resurrect it).
   const onFocus = useCallback(() => {
+    if (dismissedRef.current) return;
     clearTimers();
     measure();
     setOpen(true);
   }, [clearTimers, measure]);
 
-  const onBlur = useCallback(() => {
-    scheduleClose();
-  }, [scheduleClose]);
+  // Close only when focus leaves the WHOLE wrapper. Focus moving from the trigger into
+  // interactive card content keeps relatedTarget inside the wrapper → the card stays open
+  // (a containment check, not event-ordering luck). Focus leaving the component schedules
+  // the close and clears the dismissed latch.
+  const onBlur = useCallback(
+    (event: ReactFocusEvent) => {
+      const next = event.relatedTarget as Node | null;
+      if (next && anchorRef.current?.contains(next)) return;
+      dismissedRef.current = false;
+      scheduleClose();
+    },
+    [scheduleClose],
+  );
 
   const onKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
       if (event.key === 'Escape' && open) {
         event.stopPropagation();
         clearTimers();
+        dismissedRef.current = true;
         setOpen(false);
       }
     },
@@ -198,7 +216,9 @@ export const HoverCard: FC<HoverCardProps> = ({
         aria-hidden={open ? undefined : true}
         className={panelClass}
       >
-        {card}
+        {/* Render interactive card content only while open: a closed card must not hold
+            focusable descendants (they'd sit under aria-hidden and be a keyboard trap). */}
+        {open ? card : null}
       </span>
     </span>
   );

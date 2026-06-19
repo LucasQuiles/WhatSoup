@@ -62,6 +62,43 @@ describe('HoverCard — focus path (hover never required)', () => {
     expect(isOpen()).toBe(false)
     // Escape must not move focus off the trigger (we never called blur)
   })
+
+  it('stays open when focus moves from the trigger into interactive card content', () => {
+    render(<Subject />)
+    act(() => {
+      fireEvent.focus(trigger())
+    })
+    expect(isOpen()).toBe(true)
+    const copy = screen.getByRole('button', { name: 'copy' })
+    // focus trigger -> card button: relatedTarget stays inside the wrapper → no close
+    act(() => {
+      fireEvent.blur(trigger(), { relatedTarget: copy })
+      fireEvent.focus(copy)
+    })
+    expect(isOpen()).toBe(true)
+  })
+
+  it('stays dismissed when the trigger is refocused after Escape (no resurrect)', () => {
+    render(<Subject />)
+    act(() => {
+      fireEvent.focus(trigger())
+    })
+    act(() => {
+      fireEvent.keyDown(wrapper(), { key: 'Escape' })
+    })
+    expect(isOpen()).toBe(false)
+    // trigger still holds focus; a focusin must NOT reopen the explicitly-dismissed card
+    act(() => {
+      fireEvent.focus(trigger())
+    })
+    expect(isOpen()).toBe(false)
+  })
+
+  it('renders no card content while closed (no focusable descendant under aria-hidden)', () => {
+    render(<Subject />)
+    expect(isOpen()).toBe(false)
+    expect(screen.queryByRole('button', { name: 'copy' })).toBeNull()
+  })
 })
 
 describe('HoverCard — hover debounce + bridge', () => {
@@ -115,5 +152,23 @@ describe('HoverCard — hover debounce + bridge', () => {
       vi.advanceTimersByTime(180)
     })
     expect(isOpen()).toBe(false)
+  })
+
+  it('reopens on a fresh hover after Escape (the dismissed latch clears on mouseenter)', () => {
+    render(<Subject openDelay={150} />)
+    act(() => {
+      fireEvent.focus(wrapper())
+    })
+    expect(isOpen()).toBe(true)
+    act(() => {
+      fireEvent.keyDown(wrapper(), { key: 'Escape' })
+    })
+    expect(isOpen()).toBe(false)
+    // a new hover clears the dismissal and opens again
+    act(() => {
+      fireEvent.mouseEnter(wrapper())
+      vi.advanceTimersByTime(150)
+    })
+    expect(isOpen()).toBe(true)
   })
 })
