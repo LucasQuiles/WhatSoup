@@ -49,8 +49,15 @@ SAFE_KEY_NAMES = {
 }
 
 # Secret VALUE shapes — matched regardless of key name (defense against the fail-open hole).
+# Un-anchored for recall (catch secrets abutting an alphanumeric char, e.g. xsk-..., data1AKIA...).
+# The sk- alternative additionally requires a digit OR uppercase via (?=[A-Za-z0-9]*[0-9A-Z]) so it
+# skips lowercase English words like "ri{sk-c}lassification"/"ta{sk-c}ompletion" while still catching
+# real keys (mixed-case/digit base62 — e.g. sk-ABCDEFGHIJKLMNOPQRST or sk-abcd1234...). A "has a digit"
+# test alone missed all-uppercase keys. The other prefixes (pcsk_/gh*/AKIA/xox*/AIza/eyJ) are
+# distinctive enough not to collide with prose. Precision on benign keys is handled by the key-name
+# allowlist, never by narrowing this value regex. Kept byte-identical with the live estate copy.
 SECRET_VALUE = re.compile(
-    r"sk-[A-Za-z0-9]{8,}"                       # OpenAI-style
+    r"sk-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{8,}"  # OpenAI-style (digit-or-uppercase: skip lowercase words)
     r"|pcsk_[A-Za-z0-9_]{8,}"                   # Pinecone
     r"|gh[pousr]_[A-Za-z0-9]{20,}"              # GitHub PAT/OAuth
     r"|AKIA[0-9A-Z]{12,}"                       # AWS access key id
@@ -70,6 +77,13 @@ def _is_safe_key(lowered: str) -> bool:
 def redact(value: Any, key: str = "") -> Any:
     """Fail-closed redaction. Redact when the key name is sensitive OR the value looks
     like a secret. Structure (dict/list containers, key names) is preserved."""
+    # A bool is categorically never a credential, and the value-shape scan only inspects
+    # strings, so preserving it weakens nothing. Guard before the key-name check so a falsy
+    # attestation/telemetry flag under a sensitive-named key is not clobbered into the truthy
+    # string "<redacted>" (M1c boolean-clobber fix). Note: isinstance(True, int) is True, so
+    # this must precede any int handling; non-bool ints still fall through to fail-closed redaction.
+    if isinstance(value, bool):
+        return value
     lowered = key.lower()
     if any(part in lowered for part in SENSITIVE_PARTS) and not _is_safe_key(lowered):
         return value if value in (None, "", [], {}) else "<redacted>"

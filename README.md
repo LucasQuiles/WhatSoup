@@ -140,7 +140,7 @@ For development:
 
 ```bash
 npm run typecheck         # tsc --noEmit
-npm test                  # ~3900 tests, ~23s, real SQLite, no mocks
+npm test                  # ~13k vitest tests; real SQLite + sockets at integration boundaries
 cd console && npm run dev # Vite dev server with hot reload + API proxy
 ```
 
@@ -328,12 +328,12 @@ The fleet server's health poller probes each instance every 5 seconds and tracks
 ## Testing
 
 ```bash
-npm test              # ~3900 tests, ~23s
+npm test              # ~13k vitest tests (+ ~3k pytest in tools/)
 npm run test:watch    # watch mode
 npm run typecheck     # tsc --noEmit
 ```
 
-Tests use real SQLite (`:memory:` or temp files) and real Unix sockets. No infrastructure mocks. If the test passes, it works. If it doesn't, the mock was lying to you — which is why there aren't any.
+Integration tests favor real infrastructure — real SQLite (`:memory:` or temp files) and real Unix sockets — rather than faking the layer under test, so a passing integration test reflects real behavior. Unit tests do mock at module boundaries (e.g. the WhatsApp/Baileys transport and some DB modules) where the real dependency isn't what's being exercised.
 
 Coverage includes: ingest backpressure (semaphore + overflow queue), relay guardrails (config gate + payload size cap), mark-read API (health handler + fleet proxy), realtime event poller (log mtime tracking, snapshot-diff), and design system compliance (14 regression tests + 40+ ESLint rules).
 

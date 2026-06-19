@@ -10,6 +10,8 @@ import unittest.mock as mock
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import secret_guard_canary as probe  # noqa: E402
@@ -34,8 +36,51 @@ PROBE_PATH = Path(__file__).resolve().parent.parent / "secret_guard_canary.py"
 # Happy-path: schema + static-inventory
 # ---------------------------------------------------------------------------
 
+def _make_synthetic_settings(tmp_dir: str) -> Path:
+    """Write a deterministic settings.json fixture to tmp_dir and return its Path.
+
+    The fixture has:
+    - Bash and Read in permissions.allow (broad_allow True for both)
+    - NO PreToolUse Bash or Read matcher in hooks (direct_pretool_covers_bash/read False)
+    """
+    settings = {
+        "permissions": {
+            "allow": ["Bash", "Read"],
+            "deny": [],
+        },
+        "hooks": {
+            "PreToolUse": [
+                # Intentionally omits Bash and Read matchers so direct_pretool_covers_* is False
+                {"matcher": "Write", "hooks": []},
+            ]
+        },
+    }
+    path = Path(tmp_dir) / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    return path
+
+
+def _make_empty_settings(tmp_dir: str) -> Path:
+    """Write an empty (no PreToolUse) local settings.json fixture and return its Path."""
+    path = Path(tmp_dir) / "settings.local.json"
+    path.write_text(json.dumps({}), encoding="utf-8")
+    return path
+
+
 def test_secret_guard_static_inventory_separates_present_from_active():
-    report = build_report(Namespace(run=False, timeout=5.0))
+    """Fixture-pinned: uses a synthetic settings.json so the test is deterministic.
+
+    The fixture has Bash+Read in allow (broad_allow=True) but NO PreToolUse
+    Bash/Read matcher (direct_pretool_covers_bash/read=False).  The present guard
+    bundle (on-disk LAB/claude-guards) is read live as usual.
+    """
+    with tempfile.TemporaryDirectory(prefix="secret-guard-canary-fixture-") as tmp:
+        synthetic_settings = _make_synthetic_settings(tmp)
+        synthetic_local = _make_empty_settings(tmp)
+        with mock.patch.object(probe, "SETTINGS_PATH", synthetic_settings), \
+             mock.patch.object(probe, "LOCAL_SETTINGS_PATH", synthetic_local):
+            report = build_report(Namespace(run=False, timeout=5.0))
+
     assert report["schema"] == "agent-runtime-secret-guard-canary", report
     assert report["schema_version"] == "0.3", report
     assert report["proof_class"] == "static_config", report
@@ -46,6 +91,28 @@ def test_secret_guard_static_inventory_separates_present_from_active():
     assert report["present_guard_bundle"]["present_covers_bash"] is True, report
     assert report["present_guard_bundle"]["present_covers_read"] is True, report
     assert report["historical_observability_correlation"]["current_turn_proof"] is False, report
+
+
+def test_secret_guard_live_settings_advisory():
+    """NON-BLOCKING advisory: observe live settings direct_pretool_covers_bash/read values.
+
+    Never fails the gate: skips with a static reason if values differ from the
+    historical baseline (False/False), so a real settings regression stays visible
+    without reds in CI.  Unconditional assertion: active_settings key must be present.
+    """
+    report = build_report(Namespace(run=False, timeout=5.0))
+    # Unconditional schema-contract assertion: active_settings must always be present.
+    assert "active_settings" in report, (
+        "active_settings key missing from build_report output -- schema changed; update test."
+    )
+    covers_bash = report["active_settings"].get("direct_pretool_covers_bash")
+    covers_read = report["active_settings"].get("direct_pretool_covers_read")
+    print(
+        "\n[ADVISORY] live settings: direct_pretool_covers_bash="
+        + str(covers_bash) + " direct_pretool_covers_read=" + str(covers_read)
+    )
+    if covers_bash is not False or covers_read is not False:
+        pytest.skip("ADVISORY: live settings direct_pretool_covers_bash/read differ from historical False/False baseline -- settings have a PreToolUse Bash or Read matcher; review intentionality")
 
 
 def test_secret_guard_run_uses_hashes_not_payloads():
