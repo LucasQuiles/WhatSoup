@@ -399,4 +399,116 @@ describe('chat-operations tools', () => {
       expect(result.content[0].text).toContain('not connected');
     });
   });
+
+  // --- Residual-branch coverage ---
+  // Hits the four uncovered branches reported by v8 coverage:
+  //   - line 148  description ?? ''            (binary-expr null/undefined arm)
+  //   - line 152  if (location) event.location (truthy arm)
+  //   - line 153  if (call_link) event.callLink (truthy arm)
+  //   - line 25   if (!row) throw ...          (truthy arm in assertMessageConversationAccess)
+
+  describe('residual-branch coverage', () => {
+    it('send_event_message defaults description to empty string when omitted', async () => {
+      const result = await registry.call(
+        'send_event_message',
+        {
+          chatJid: '111@s.whatsapp.net',
+          name: 'Quick Sync',
+          start_time: 1700000000,
+          end_time: 1700003600,
+        },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '111@s.whatsapp.net',
+        expect.objectContaining({
+          event: expect.objectContaining({
+            name: 'Quick Sync',
+            description: '',
+          }),
+        }),
+      );
+      // When neither location nor call_link is provided, neither property is set on the event.
+      const lastCall = (mockSock.sendMessage as any).mock.calls.at(-1)!;
+      const event = lastCall[1].event;
+      expect(event.location).toBeUndefined();
+      expect(event.callLink).toBeUndefined();
+      // Concrete terminal: the event carries exactly the provided fields and the
+      // defaulted empty description, with no location/callLink keys.
+      expect(event).toMatchObject({ name: 'Quick Sync', description: '' });
+    });
+
+    it('send_event_message attaches location when provided', async () => {
+      const result = await registry.call(
+        'send_event_message',
+        {
+          chatJid: '111@s.whatsapp.net',
+          name: 'Office Meeting',
+          start_time: 1700000000,
+          end_time: 1700003600,
+          location: 'Conference Room 42',
+        },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '111@s.whatsapp.net',
+        expect.objectContaining({
+          event: expect.objectContaining({
+            name: 'Office Meeting',
+            location: 'Conference Room 42',
+          }),
+        }),
+      );
+    });
+
+    it('send_event_message attaches callLink when call_link is provided', async () => {
+      const result = await registry.call(
+        'send_event_message',
+        {
+          chatJid: '111@s.whatsapp.net',
+          name: 'Standup',
+          start_time: 1700000000,
+          end_time: 1700003600,
+          call_link: 'https://meet.example.org/standup-123',
+        },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '111@s.whatsapp.net',
+        expect.objectContaining({
+          event: expect.objectContaining({
+            name: 'Standup',
+            callLink: 'https://meet.example.org/standup-123',
+          }),
+        }),
+      );
+    });
+
+    it('get_reactions throws when a bound session references an unknown message_id', async () => {
+      const result = await registry.call(
+        'get_reactions',
+        { message_id: 'missing-msg-id' },
+        { tier: 'global', conversationKey: '111' },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Message reactions');
+      expect(result.content[0].text).toContain('missing-msg-id');
+      expect(result.content[0].text).toContain('not found');
+    });
+
+    it('get_message_receipts throws when a bound session references an unknown message_id', async () => {
+      const result = await registry.call(
+        'get_message_receipts',
+        { message_id: 'missing-msg-id' },
+        { tier: 'global', conversationKey: '111' },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Message receipts');
+      expect(result.content[0].text).toContain('missing-msg-id');
+      expect(result.content[0].text).toContain('not found');
+    });
+  });
 });

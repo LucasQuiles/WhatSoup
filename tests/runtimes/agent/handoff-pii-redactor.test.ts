@@ -109,3 +109,32 @@ describe('neutralizeHandoffForgery', () => {
     expect(neutralizeHandoffForgery(text)).toBe(text);
   });
 });
+
+describe('residual-branch coverage', () => {
+  // The two ternary false-branches in redactHandoffPii are reachable only via
+  // PHONE_RE alt 2 (separator-bearing runs), because alt 1 (+ prefix) is
+  // strictly bounded to 8-15 digits and alt 3 (bare digits) to 10-15 — so
+  // the digitCount guard on lines 104/106 short-circuits to true for both.
+  // Alt 2 has no upper bound, so an over-long separator-bearing run lands a
+  // 16+ digit match; its lower bound (3 groups of 2 digits = 6 digits) lets
+  // us also land a sub-10 digit match. Together these exercise the line 106
+  // ternary's false arm. The line 104 ternary's false arm is unreachable
+  // through any caller-visible input — see the report for the derivation.
+  it('leaves a separator-bearing match under 10 digits unchanged', () => {
+    // PHONE_RE alt 2 matches `12-34-56` as a 6-digit run (3 groups of 2).
+    // The digitCount guard on line 106 (`digits >= 10 && digits <= 15`)
+    // evaluates to false, so the ternary returns the original match —
+    // exercising the cond-expr's false side (the `: match` arm).
+    expect(redactHandoffPii('see 12-34-56 here')).toBe('see 12-34-56 here');
+  });
+
+  it('leaves a separator-bearing match over 15 digits unchanged', () => {
+    // Alt 2 has no upper digit-count cap (unlike alt 1's 8-15 and alt 3's
+    // 10-15), so a sufficiently long separator-bearing run lands an 18-digit
+    // match. The line 106 guard's `<= 15` arm evaluates to false, again
+    // taking the ternary's false side.
+    expect(redactHandoffPii('long 12-34-56-78-90-12-34-56-78 end')).toBe(
+      'long 12-34-56-78-90-12-34-56-78 end',
+    );
+  });
+});
