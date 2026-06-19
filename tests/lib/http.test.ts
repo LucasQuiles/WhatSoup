@@ -10,8 +10,12 @@ import {
   parseRoute,
   parseQueryString,
   asyncHandler,
+  extractBearer,
+  requireInstance,
+  parseIntParam,
 } from '../../src/lib/http.ts';
 import { mockReq as mockRequest, mockRes as mockResponse } from '../helpers/http-mocks.ts';
+import type { PassThrough } from 'node:stream';
 
 // ---------------------------------------------------------------------------
 // readBody
@@ -165,5 +169,106 @@ describe('asyncHandler', () => {
     });
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body)).toEqual({ error: 'not found' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readBody — stream error path
+// ---------------------------------------------------------------------------
+
+describe('readBody error path', () => {
+  it('rejects when the request stream emits an error', async () => {
+    const req = mockRequest();
+    const promise = readBody(req);
+    (req as unknown as PassThrough).emit('error', new Error('socket reset'));
+    await expect(promise).rejects.toThrow('socket reset');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractBearer
+// ---------------------------------------------------------------------------
+
+describe('extractBearer', () => {
+  it('returns the credential from a Bearer authorization header', () => {
+    const req = mockRequest({ headers: { authorization: 'Bearer secret-xyz' } });
+    expect(extractBearer(req)).toBe('secret-xyz');
+  });
+
+  it('returns null when the authorization header is absent', () => {
+    expect(extractBearer(mockRequest())).toBeNull();
+  });
+
+  it('returns null for a non-Bearer scheme', () => {
+    const req = mockRequest({ headers: { authorization: 'Basic abc123' } });
+    expect(extractBearer(req)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// requireInstance
+// ---------------------------------------------------------------------------
+
+describe('requireInstance', () => {
+  it('returns the instance when discovery finds it', () => {
+    const instance = { name: 'alpha' };
+    const discovery = { getInstance: () => instance } as unknown as Parameters<typeof requireInstance>[0];
+    const res = mockResponse();
+    expect(requireInstance(discovery, 'alpha', res)).toBe(instance);
+    expect(res._status).toBe(0); // no error response written
+  });
+
+  it('writes 404 and returns null when the instance is missing', () => {
+    const discovery = { getInstance: () => undefined } as unknown as Parameters<typeof requireInstance>[0];
+    const res = mockResponse();
+    expect(requireInstance(discovery, 'ghost', res)).toBeNull();
+    expect(res._status).toBe(404);
+    expect(JSON.parse(res._body)).toEqual({ error: "instance 'ghost' not found" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseIntParam
+// ---------------------------------------------------------------------------
+
+describe('parseIntParam', () => {
+  it('parses a valid in-bounds integer', () => {
+    expect(parseIntParam({ limit: '50' }, 'limit', 10, 1, 100)).toBe(50);
+  });
+
+  it('clamps above the max', () => {
+    expect(parseIntParam({ limit: '999' }, 'limit', 10, 1, 100)).toBe(100);
+  });
+
+  it('clamps below the min', () => {
+    // parseInt('-5') is truthy-negative so it reaches Math.max, which clamps to min.
+    expect(parseIntParam({ limit: '-5' }, 'limit', 10, 1, 100)).toBe(1);
+  });
+
+  it('falls back to the default for a missing or non-numeric value', () => {
+    expect(parseIntParam({}, 'limit', 10, 1, 100)).toBe(10);
+    expect(parseIntParam({ limit: 'abc' }, 'limit', 10, 1, 100)).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseRoute & asyncHandler edges
+// ---------------------------------------------------------------------------
+
+describe('parseRoute & asyncHandler edges', () => {
+  it('parseRoute treats an undefined url as an empty path', () => {
+    expect(parseRoute('GET', undefined as unknown as string, { method: 'GET', path: /^\/x$/ })).toBeNull();
+  });
+
+  it('asyncHandler falls back to a generic message when the error has none', async () => {
+    const fn = vi.fn().mockRejectedValue({}); // no message, no statusCode
+    const handler = asyncHandler(fn);
+    const res = mockResponse();
+    handler(
+      mockRequest() as unknown as Parameters<typeof handler>[0],
+      res as unknown as Parameters<typeof handler>[1],
+    );
+    await vi.waitFor(() => expect(res._status).toBe(500));
+    expect(JSON.parse(res._body)).toEqual({ error: 'internal error' });
   });
 });
