@@ -162,8 +162,7 @@ describe('outbound_sends audit writer', () => {
     const row = db.raw
       .prepare('SELECT status, transport_message_id FROM outbound_sends WHERE id = ?')
       .get(id) as { status: string; transport_message_id: string | null };
-    expect(row.status).toBe('sent');
-    expect(row.transport_message_id).toBeNull();
+    expect(row).toEqual({ status: 'sent', transport_message_id: null });
   });
 
   it('listRecent surfaces error_text for a failed row (spread true arm)', () => {

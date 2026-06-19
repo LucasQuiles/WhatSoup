@@ -194,9 +194,7 @@ describe('group-sync', () => {
       const row = db.raw
         .prepare('SELECT subject, description, owner FROM groups WHERE jid = ?')
         .get('g1@g.us') as any;
-      expect(row.subject).toBeNull();
-      expect(row.description).toBeNull();
-      expect(row.owner).toBeNull();
+      expect(row).toEqual({ subject: null, description: null, owner: null });
     });
 
     it('sets participant_count to null when participants is explicitly null', () => {
@@ -205,7 +203,7 @@ describe('group-sync', () => {
       const row = db.raw
         .prepare('SELECT participant_count FROM groups WHERE jid = ?')
         .get('g1@g.us') as any;
-      expect(row.participant_count).toBeNull();
+      expect(row).toEqual({ participant_count: null });
     });
 
     it('leaves existing fields intact when only id is provided (setClauses length === 1)', () => {
