@@ -118,7 +118,12 @@ def test_secret_guard_live_settings_advisory():
 def test_secret_guard_run_uses_hashes_not_payloads():
     report = build_report(Namespace(run=True, timeout=5.0))
     rendered = json.dumps(report, sort_keys=True)
-    assert report["proof_class"] == "static_config_plus_synthetic_hook_execution", report
+    assert report["proof_class"] == "static_config_plus_direct_script_synthetic_execution", report
+    # HIGH-security additions upstreamed from the live estate: explicit guard-path classification +
+    # coverage decision so the canary cannot misrepresent offline (direct-script) proof as runtime
+    # PreToolUse hook coverage. Presence/shape coverage (values depend on live guard-bundle state).
+    assert isinstance(report["guard_path_classification"], list) and report["guard_path_classification"], report
+    assert isinstance(report["coverage_decision"], dict) and report["coverage_decision"], report
     assert report["canary_run"]["count"] >= 17, report
     assert report["policy_signals"]["project_env_variant_count"] == 6, report
     assert report["policy_signals"]["project_env_allowed_count"] == 6, report

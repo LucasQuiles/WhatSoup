@@ -492,6 +492,134 @@ def policy_signal_summary(canaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def canary_scope_status(canaries: list[dict[str, Any]], hook: str) -> dict[str, Any]:
+    rows = [row for row in canaries if row.get("hook") == hook]
+    failing = [row["id"] for row in rows if not row.get("pass")]
+    return {
+        "executed": bool(rows),
+        "count": len(rows),
+        "pass_count": len(rows) - len(failing),
+        "fail_count": len(failing),
+        "failing_ids": failing,
+        "all_passed": bool(rows) and not failing,
+    }
+
+
+def guard_path_classification(
+    active: dict[str, Any],
+    bundle: dict[str, Any],
+    observability: dict[str, Any],
+    canaries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    bash_canaries = canary_scope_status(canaries, "bash")
+    read_canaries = canary_scope_status(canaries, "read")
+    return [
+        {
+            "id": "visible_settings_bash_pretool",
+            "surface": "Claude active settings",
+            "access_path": "Bash",
+            "proof_class": "Active" if active.get("direct_pretool_covers_bash") else "Absent",
+            "runtime_hook_proof": bool(active.get("direct_pretool_covers_bash")),
+            "decision": "direct Bash PreToolUse hook wired" if active.get("direct_pretool_covers_bash") else "accepted_gap_pending_runtime_hook_event_or_direct_wiring",
+        },
+        {
+            "id": "visible_settings_read_pretool",
+            "surface": "Claude active settings",
+            "access_path": "Read",
+            "proof_class": "Active" if active.get("direct_pretool_covers_read") else "Absent",
+            "runtime_hook_proof": bool(active.get("direct_pretool_covers_read")),
+            "decision": "direct Read PreToolUse hook wired" if active.get("direct_pretool_covers_read") else "accepted_gap_pending_runtime_hook_event_or_direct_wiring",
+        },
+        {
+            "id": "present_bundle_bash_guard",
+            "surface": "claude-guards hook bundle",
+            "access_path": "Bash",
+            "proof_class": "Present" if bundle.get("present_covers_bash") else "Absent",
+            "runtime_hook_proof": False,
+            "decision": "present-only until settings wiring or hook event proof exists",
+        },
+        {
+            "id": "present_bundle_read_guard",
+            "surface": "claude-guards hook bundle",
+            "access_path": "Read",
+            "proof_class": "Present" if bundle.get("present_covers_read") else "Absent",
+            "runtime_hook_proof": False,
+            "decision": "present-only until settings wiring or hook event proof exists",
+        },
+        {
+            "id": "synthetic_bash_guard_execution",
+            "surface": "direct local guard script",
+            "access_path": "Bash",
+            "proof_class": "Executed" if bash_canaries["executed"] else "NotRun",
+            "runtime_hook_proof": False,
+            "decision": "offline guard-script canary passed" if bash_canaries["all_passed"] else "offline guard-script canary not clean",
+            "canary_status": bash_canaries,
+        },
+        {
+            "id": "synthetic_read_guard_execution",
+            "surface": "direct local guard script",
+            "access_path": "Read",
+            "proof_class": "Executed" if read_canaries["executed"] else "NotRun",
+            "runtime_hook_proof": False,
+            "decision": "offline guard-script canary passed" if read_canaries["all_passed"] else "offline guard-script canary not clean",
+            "canary_status": read_canaries,
+        },
+        {
+            "id": "historical_bash_pretool_events",
+            "surface": "historical observability",
+            "access_path": "Bash",
+            "proof_class": "Executed" if observability.get("pretool_bash_event_count", 0) else "Absent",
+            "runtime_hook_proof": False,
+            "decision": "historical event only; not current-turn guard proof",
+            "event_count": observability.get("pretool_bash_event_count", 0),
+        },
+        {
+            "id": "historical_read_pretool_events",
+            "surface": "historical observability",
+            "access_path": "Read",
+            "proof_class": "Executed" if observability.get("pretool_read_event_count", 0) else "Absent",
+            "runtime_hook_proof": False,
+            "decision": "historical event only; not current-turn guard proof",
+            "event_count": observability.get("pretool_read_event_count", 0),
+        },
+    ]
+
+
+def coverage_decision(classifications: list[dict[str, Any]], canaries: list[dict[str, Any]], policy_signals: dict[str, Any]) -> dict[str, Any]:
+    active_runtime_paths = {
+        row["access_path"]
+        for row in classifications
+        if row.get("runtime_hook_proof") and row.get("access_path") in {"Bash", "Read"}
+    }
+    offline_rows = [
+        row for row in classifications
+        if row.get("id") in {"synthetic_bash_guard_execution", "synthetic_read_guard_execution"}
+    ]
+    offline_clean = bool(offline_rows) and all(row.get("canary_status", {}).get("all_passed") for row in offline_rows)
+    if not canaries:
+        offline_status = "not_run"
+    elif offline_clean:
+        offline_status = "passed"
+    else:
+        offline_status = "failed_or_incomplete"
+    runtime_gap = {"Bash", "Read"} - active_runtime_paths
+    return {
+        "runtime_boundary_claim_allowed": not runtime_gap,
+        "runtime_gap_access_paths": sorted(runtime_gap),
+        "bash_read_runtime_gap_status": (
+            "covered_by_visible_settings" if not runtime_gap
+            else "accepted_gap_pending_runtime_hook_event_or_direct_wiring"
+        ),
+        "offline_guard_script_claim_allowed": offline_status == "passed",
+        "offline_guard_script_status": offline_status,
+        "project_env_policy_status": policy_signals.get("project_env_policy_status"),
+        "accepted_policy_gaps": (
+            sorted(runtime_gap)
+            + (["generic_project_env_allowed"] if policy_signals.get("project_env_allowed_count", 0) else [])
+        ),
+    }
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     active = settings_summary(SETTINGS_PATH)
     local = settings_summary(LOCAL_SETTINGS_PATH)
@@ -504,17 +632,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     canaries = run_canaries(args.timeout) if args.run else []
     failing = [row["id"] for row in canaries if not row.get("pass")]
     policy_signals = policy_signal_summary(canaries)
+    classifications = guard_path_classification(active, bundle, observability, canaries)
+    decision = coverage_decision(classifications, canaries, policy_signals)
     report = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "redaction": "metadata-only; synthetic inputs are hashed; no real secret files are read; hook deny reasons are hash/size only",
-        "proof_class": "static_config" if not args.run else "static_config_plus_synthetic_hook_execution",
+        "proof_class": "static_config" if not args.run else "static_config_plus_direct_script_synthetic_execution",
         "active_settings": active,
         "local_settings": local,
         "present_guard_bundle": bundle,
         "historical_observability_correlation": observability,
         "canary_run": {
             "executed": bool(args.run),
+            "invocation_surface": "direct_subprocess_not_claude_pretooluse" if args.run else "not_run",
+            "runtime_hook_proof": False,
+            "proves": "direct guard script decision logic only; not Claude PreToolUse runtime dispatch",
             "count": len(canaries),
             "pass_count": sum(1 for row in canaries if row.get("pass")),
             "fail_count": len(failing),
@@ -523,6 +656,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         },
         "canaries": canaries,
         "policy_signals": policy_signals,
+        "guard_path_classification": classifications,
+        "coverage_decision": decision,
         "interpretation": {
             "visible_active_bash_read_pretool_hooks": active.get("direct_pretool_covers_bash") or active.get("direct_pretool_covers_read"),
             "present_bundle_bash_read_hooks": bundle.get("present_covers_bash") and bundle.get("present_covers_read"),
@@ -535,6 +670,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 observability.get("pretool_bash_event_count", 0) > 0
                 or observability.get("pretool_read_event_count", 0) > 0
             ),
+            "canary_pass_implies_runtime_hook_active": False,
+            "runtime_proof_status": "not_established_without_current_turn_hook_event",
         },
         "limitations": [
             "This does not invoke Claude Code tools or prove current-turn hook execution.",
