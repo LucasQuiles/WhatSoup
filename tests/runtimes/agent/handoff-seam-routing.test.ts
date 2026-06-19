@@ -19,4 +19,9 @@ describe('handoff-seam-routing', () => {
     delete partial['opencode-cli'];
     expect(() => assertSeamRoutingConsistency(partial)).toThrow(/opencode-cli/);
   });
+  it('falls back to first-turn (never lose context) for an unmapped provider', () => {
+    // An unmapped/drifted provider hits the `?? 'first-turn'` safe default rather
+    // than returning undefined and silently dropping handoff context.
+    expect(seamForProvider('drifted-unknown-provider' as (typeof AGENT_PROVIDERS)[number])).toBe('first-turn');
+  });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   createAuditedReplyGuaranteeSender,
   DEFAULT_REPLY_GUARANTEE_TEXT,
+  DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
   type ReplyGuaranteeDurability,
 } from '../../src/core/reply-guarantee.ts';
@@ -163,6 +164,53 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  it('ignores an undefined inbound seq on arm/disarm and a disarm of an unknown seq', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: undefined, chatJid: 'x@s.whatsapp.net' }); // arm early-return
+    manager.disarm(undefined); // disarm early-return
+    manager.disarm(424_242); // disarm of an unarmed seq → no active entry
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  it('onTimeout returns early when no durability is wired', async () => {
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability: undefined,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 15, chatJid: 'x@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).not.toHaveBeenCalled(); // !this.durability → return before send
+  });
+
+  it('falls back to defaults for an omitted timeout and an invalid rate limit', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => undefined);
+    // timeoutMs omitted → DEFAULT (value===undefined arm); rateLimitMs=0 → invalid → fallback arm.
+    const manager = new ReplyGuaranteeManager({ durability, sendFallback, rateLimitMs: 0 });
+
+    manager.arm({ inboundSeq: 16, chatJid: 'x@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendFallback).not.toHaveBeenCalled(); // default 10-min window not yet elapsed
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS);
+    expect(sendFallback).toHaveBeenCalledOnce();
   });
 });
 

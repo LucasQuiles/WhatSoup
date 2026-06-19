@@ -150,6 +150,25 @@ describe('TwilioConnection bridge', () => {
       expect(msg.timestamp).toBe(0);                   // new Date(0) / 1000 = 0s
     });
 
+    it('drops an inbound message silently when no onMessage handler is set', async () => {
+      vi.useFakeTimers({ now: 0 });
+      const { bridge, port } = makeBridge();
+      // bridge.onMessage left at its default null → the `onMessage !== null` guard is false.
+
+      port.injectInbound(makeInboundSms({
+        sid: 'SMnohandler',
+        from: '+14155550100',
+        body: 'no handler',
+        sentAt: new Date(0),
+      }));
+
+      await bridge.connect();
+      await vi.advanceTimersByTimeAsync(1000); // message arrives, guard false → dropped, no throw
+
+      // Bridge stays healthy after silently dropping the unhandled message.
+      expect(bridge.getConnectionState?.()?.connected).toBe(true);
+    });
+
     it('inbound message not delivered after shutdown', async () => {
       vi.useFakeTimers({ now: 0 });
       const { bridge, port } = makeBridge();

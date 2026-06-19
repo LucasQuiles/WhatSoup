@@ -77,6 +77,20 @@ describe('buildHandoffPrelude — cost-compression', () => {
     expect(p.firstTurnBlock).toContain('m19');
     expect(p.firstTurnBlock).not.toContain('m16');
   });
+
+  it('verbatimN <= 0 suppresses the verbatim block (first turn, larger window)', () => {
+    const p = buildHandoffPrelude(args({ verbatimN: 0 }));
+    expect(p.firstTurnBlock).toBeNull();
+    expect(p.systemBlock).toContain('User is debugging');
+  });
+
+  it('labels a non-self message with a blank sender name as User', () => {
+    const p = buildHandoffPrelude(
+      args({ recentMessages: [msg('anon hello', false, null), msg('whitespace name', false, '   ')] }),
+    );
+    expect(p.firstTurnBlock).toContain('User: anon hello');
+    expect(p.firstTurnBlock).toContain('User: whitespace name');
+  });
 });
 
 describe('buildHandoffPrelude — staleness & degradation', () => {

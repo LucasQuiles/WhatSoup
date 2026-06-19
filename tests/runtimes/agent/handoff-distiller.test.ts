@@ -75,6 +75,13 @@ describe('runHandoffDistill', () => {
     expect(d.degraded[0]).toContain('handoff distill failed');
   });
 
+  it('folds a non-Error distill throw via String(err)', async () => {
+    const d = deps({ distill: async () => { throw 'string-only blowup'; } });
+    const r = await runHandoffDistill(d);
+    expect(r).toMatchObject({ ran: false, denied: null, failed: true });
+    expect(d.degraded[0]).toContain('string-only blowup');
+  });
+
   it('advances the breaker to open after the consecutive-failure threshold', async () => {
     let state = initialDistillState(NOW);
     const failing = async () => { throw new Error('boom'); };
