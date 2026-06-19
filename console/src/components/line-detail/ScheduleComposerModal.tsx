@@ -38,6 +38,7 @@ import {
   ModalHeader,
   ModalBody,
   ModalFooter,
+  Field,
   TextArea,
   TextInput,
   DateTimePicker,
@@ -258,57 +259,45 @@ export function ScheduleComposerModal({
 
         {/* Composer area */}
         {contentType === 'text' ? (
-          <div>
-            <label
-              htmlFor="composer-text"
-              className="c-field-label"
-            >
-              Message text
-            </label>
-            <TextArea
-              id="composer-text"
-              value={text}
-              onChange={e => setText(e.target.value)}
-              placeholder="Type your message..."
-              rows={4}
-              minHeight={96}
-              className="text-text-2 h-auto"
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col gap-[var(--sp-3)]">
-            <div>
-              <label
-                htmlFor="composer-path"
-                className="c-field-label"
-              >
-                File path
-              </label>
-              <TextInput
-                id="composer-path"
-                type="text"
-                value={mediaPath}
-                onChange={e => setMediaPath(e.target.value)}
-                placeholder="/path/to/file.jpg"
-                className="text-text-2"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="composer-caption"
-                className="c-field-label"
-              >
-                Caption (optional)
-              </label>
+          <Field label="Message text">
+            {(id) => (
               <TextArea
-                id="composer-caption"
-                value={caption}
-                onChange={e => setCaption(e.target.value)}
-                placeholder="Optional caption..."
-                rows={2}
+                id={id}
+                value={text}
+                onChange={e => setText(e.target.value)}
+                placeholder="Type your message..."
+                rows={4}
+                minHeight={96}
                 className="text-text-2 h-auto"
               />
-            </div>
+            )}
+          </Field>
+        ) : (
+          <div className="flex flex-col gap-[var(--sp-3)]">
+            <Field label="File path">
+              {(id) => (
+                <TextInput
+                  id={id}
+                  type="text"
+                  value={mediaPath}
+                  onChange={e => setMediaPath(e.target.value)}
+                  placeholder="/path/to/file.jpg"
+                  className="text-text-2"
+                />
+              )}
+            </Field>
+            <Field label="Caption (optional)">
+              {(id) => (
+                <TextArea
+                  id={id}
+                  value={caption}
+                  onChange={e => setCaption(e.target.value)}
+                  placeholder="Optional caption..."
+                  rows={2}
+                  className="text-text-2 h-auto"
+                />
+              )}
+            </Field>
           </div>
         )}
 
