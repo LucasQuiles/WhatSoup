@@ -20,7 +20,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import { ContactSearchPicker } from '../shared/ContactSearchPicker.js'
-import { Button, Modal, ModalHeader, ModalBody, ModalFooter, TextInput } from '../primitives'
+import { Button, Modal, ModalHeader, ModalBody, ModalFooter, TextInput, Field } from '../primitives'
 import type { ContactResult } from '../../types.js'
 
 interface CreateGroupModalProps {
@@ -79,23 +79,19 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
     >
       <ModalHeader title="Create Group" onClose={onClose} />
       <ModalBody>
-        <div>
-          <label
-            htmlFor="create-group-subject"
-            className="c-field-label"
-          >
-            Group subject <span className="text-s-crit">*</span>
-          </label>
-          <TextInput
-            ref={subjectInputRef}
-            id="create-group-subject"
-            type="text"
-            value={subject}
-            onChange={e => setSubject(e.target.value)}
-            placeholder="Enter group name..."
-            className="text-text-2"
-          />
-        </div>
+        <Field label="Group subject" required>
+          {(id) => (
+            <TextInput
+              ref={subjectInputRef}
+              id={id}
+              type="text"
+              value={subject}
+              onChange={e => setSubject(e.target.value)}
+              placeholder="Enter group name..."
+              className="text-text-2"
+            />
+          )}
+        </Field>
 
         <div>
           <label className="c-field-label">
