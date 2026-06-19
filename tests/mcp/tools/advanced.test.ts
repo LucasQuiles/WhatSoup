@@ -745,6 +745,49 @@ describe('advanced tools', () => {
       expect((mockSock as any).relayMessage).toHaveBeenCalledWith('12345@lid', proto, {});
     });
   });
+
+  // -------------------------------------------------------------------------
+  // residual-branch coverage
+  // -------------------------------------------------------------------------
+
+  describe('residual-branch coverage', () => {
+    it('rejects resync_app_state when config.advanced.enableResync is false', async () => {
+      const { config } = await import('../../../src/config.ts');
+      const original = config.advanced.enableResync;
+      (config.advanced as any).enableResync = false;
+      try {
+        const result = await registry.call(
+          'resync_app_state',
+          { collections: ['critical_block'], isInitialSync: false },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/disabled/i);
+      } finally {
+        (config.advanced as any).enableResync = original;
+      }
+    });
+
+    it('relay_message returns result: null when sock.relayMessage resolves to undefined', async () => {
+      (mockSock as any).relayMessage = vi.fn().mockResolvedValueOnce(undefined);
+      const result = await registry.call(
+        'relay_message',
+        { jid: '111@s.whatsapp.net', proto: { conversation: 'hello' } },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        relayed: boolean;
+        jid: string;
+        result: unknown;
+      };
+      expect(data).toEqual({
+        relayed: true,
+        jid: '111@s.whatsapp.net',
+        result: null,
+      });
+    });
+  });
 });
 
 // ===========================================================================
