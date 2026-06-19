@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   detectContradictions,
   detectContradictionsDetailed,
@@ -164,5 +164,149 @@ describe('detectContradictions', () => {
     );
 
     expect(results).toEqual([]);
+  });
+});
+
+describe('residual-branch coverage', () => {
+  it('strips markdown JSON fences from the LLM response', async () => {
+    const fenced = '```json\n' + JSON.stringify([
+      { index: 0, relationship: 'contradiction', explanation: 'fenced' },
+    ]) + '\n```';
+    const mockProvider = providerWithContent(fenced);
+
+    const results = await detectContradictions(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: 'fenced' },
+    ]);
+  });
+
+  it('falls back to newFact.text when newFact.claim is missing', async () => {
+    const mockProvider = providerWithContent(JSON.stringify([
+      { index: 0, relationship: 'contradiction', explanation: 'no-claim-new' },
+    ]));
+
+    const results = await detectContradictions(
+      mockProvider,
+      { text: 'fallback-text' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: 'no-claim-new' },
+    ]);
+  });
+
+  it('falls back to existingFact.text when existingFact.claim is missing', async () => {
+    const mockProvider = providerWithContent(JSON.stringify([
+      { index: 0, relationship: 'contradiction', explanation: 'no-claim-existing' },
+    ]));
+
+    const results = await detectContradictions(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', text: 'fallback-existing', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: 'no-claim-existing' },
+    ]);
+  });
+
+  it('handles the LLM rejecting with a non-Error value (String(err) fallback)', async () => {
+    const mockProvider: LLMProvider = {
+      name: 'test-provider',
+      generate: () => Promise.reject('string-error'),
+    };
+
+    const details = await detectContradictionsDetailed(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(details).toEqual({
+      results: [],
+      status: 'llm_failed',
+      error: 'string-error',
+    });
+  });
+
+  it('handles JSON.parse rejecting with a non-Error value (String(err) fallback)', async () => {
+    const mockProvider = providerWithContent('not json at all');
+    const spy = vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
+      throw 'fake-parse-error';
+    });
+    try {
+      const details = await detectContradictionsDetailed(
+        mockProvider,
+        { claim: 'x', text: 'x' },
+        [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+      );
+      expect(details).toEqual({
+        results: [],
+        status: 'parse_failed',
+        error: 'fake-parse-error',
+        rawLength: 'not json at all'.length,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('skips array items that are null or non-objects', async () => {
+    const mockProvider = providerWithContent(JSON.stringify([
+      null,
+      'string-item',
+      42,
+      { index: 0, relationship: 'contradiction', explanation: 'real' },
+    ]));
+
+    const results = await detectContradictions(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: 'real' },
+    ]);
+  });
+
+  it('skips array items with a non-numeric index (typed as string)', async () => {
+    const mockProvider = providerWithContent(JSON.stringify([
+      { index: 'zero', relationship: 'contradiction', explanation: 'bad-index' },
+      { index: 0, relationship: 'contradiction', explanation: 'real' },
+    ]));
+
+    const results = await detectContradictions(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: 'real' },
+    ]);
+  });
+
+  it('falls back to empty string when explanation is not a string', async () => {
+    const mockProvider = providerWithContent(JSON.stringify([
+      { index: 0, relationship: 'contradiction', explanation: 42 },
+    ]));
+
+    const results = await detectContradictions(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(results).toEqual([
+      { existingId: 'f1', relationship: 'contradiction', explanation: '' },
+    ]);
   });
 });
