@@ -31,8 +31,17 @@ export function validateBase64Image(input: string): string {
     throw new Error('Invalid base64 content');
   }
 
-  // Suppress unused-variable warning — buffer length was the real check.
-  void buffer;
+  // Reject non-canonical base64: the alphabet regex permits strings whose
+  // length is not a multiple of 4 (e.g. "AB"), which Buffer.from decodes by
+  // silently discarding trailing bits. Require the input to round-trip through
+  // a strict re-encode so the returned string is always canonically decodable.
+  // Reject non-canonical base64: the alphabet regex permits strings whose
+  // length is not a multiple of 4 (e.g. "AB"), which Buffer.from decodes by
+  // silently discarding trailing bits. Require the input to round-trip through
+  // a strict re-encode so the returned string is always canonically decodable.
+  if (buffer.toString('base64') !== content) {
+    throw new Error('Invalid base64 content: not canonically encoded');
+  }
 
   return content;
 }
