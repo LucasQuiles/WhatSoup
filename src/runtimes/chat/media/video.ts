@@ -25,6 +25,7 @@ export type VideoFrameExtractionStatus =
   | 'fallback_ok'
   | 'fallback_no_frames'
   | 'fallback_failed'
+  | 'dependency_missing'
   | 'failed';
 
 export interface VideoFrameExtractionDetails {
@@ -105,6 +106,25 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
         ], opts);
       } catch (fallbackErr) {
         const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        // ENOENT means the ffmpeg binary itself is absent — a missing system
+        // dependency, not a bad video. Surface it distinctly so a host without
+        // ffmpeg is alertable instead of looking like generic frame failure (#1075).
+        // ENOENT means the ffmpeg binary itself is absent — a missing system
+        // dependency, not a bad video. Surface it distinctly so a host without
+        // ffmpeg is alertable instead of looking like generic frame failure (#1075).
+        if ((fallbackErr as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          log.warn(
+            { dependency: 'ffmpeg', status: 'missing' },
+            'ffmpeg not found — video frame extraction unavailable on this host',
+          );
+          return {
+            frames: [],
+            status: 'dependency_missing',
+            fallbackUsed: true,
+            durationSeconds: duration,
+            error: 'ffmpeg not found (ENOENT)',
+          };
+        }
         log.error({ err: message }, 'ffmpeg single frame fallback also failed');
         return {
           frames: [],
