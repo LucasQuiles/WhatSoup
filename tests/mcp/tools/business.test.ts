@@ -581,4 +581,62 @@ describe('business tools', () => {
       expect(result.content[0].text).toMatch(/not connected/);
     });
   });
+
+  // ─── residual-branch coverage ────────────────────────────────────────────
+  // Closes the 5 `if (!args.X) throw` true-branches that the action-targeted
+  // tests above never reach (each "errors when X is missing" test in
+  // manage_labels covers only the X it explicitly omits — the OTHER fields'
+  // guard-throw branches are short-circuited). These cases were reported
+  // uncovered by the coverage ratchet: lines 247, 253, 254, 267, 268.
+  describe('residual-branch coverage', () => {
+    it('remove_chat_label throws when chat_jid is missing (line 247)', async () => {
+      const result = await registry.call(
+        'manage_labels',
+        { action: 'remove_chat_label', label_id: 'lbl-1' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/remove_chat_label requires chat_jid/);
+    });
+
+    it('add_message_label throws when label_id is missing (line 253)', async () => {
+      const result = await registry.call(
+        'manage_labels',
+        { action: 'add_message_label', chat_jid: '111@s.whatsapp.net', message_id: 'msg-1' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/add_message_label requires label_id/);
+    });
+
+    it('add_message_label throws when chat_jid is missing (line 254)', async () => {
+      const result = await registry.call(
+        'manage_labels',
+        { action: 'add_message_label', label_id: 'lbl-1', message_id: 'msg-1' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/add_message_label requires chat_jid/);
+    });
+
+    it('remove_message_label throws when label_id is missing (line 267)', async () => {
+      const result = await registry.call(
+        'manage_labels',
+        { action: 'remove_message_label', chat_jid: '111@s.whatsapp.net', message_id: 'msg-1' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/remove_message_label requires label_id/);
+    });
+
+    it('remove_message_label throws when chat_jid is missing (line 268)', async () => {
+      const result = await registry.call(
+        'manage_labels',
+        { action: 'remove_message_label', label_id: 'lbl-1', message_id: 'msg-1' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/remove_message_label requires chat_jid/);
+    });
+  });
 });
