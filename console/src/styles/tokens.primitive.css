@@ -142,13 +142,14 @@
      All leadings are on the 4px grid (typography.md §2).
      -------------------------------------------------------------------------- */
 
-  /* --type-display: page-level / hero titles — display face, semibold, 26/32.
-     Spec value (tokens-v3.md §2.6); tracking −0.02em applied at the consumer. */
-  --type-display:  600 26px/32px var(--font-display);
+  /* --type-display: page-level / hero titles — display face, bold, 26/32.
+     Spec value (tokens-v3.md §2.6); tight tracking (--tracking-tight) at the
+     consumer for the showcase editorial read. */
+  --type-display:  700 26px/32px var(--font-display);
 
-  /* --type-title: section / panel-group titles — display face, semibold, 19/24.
-     Spec value (tokens-v3.md §2.6); tracking −0.01em applied at the consumer. */
-  --type-title:    600 19px/24px var(--font-display);
+  /* --type-title: section / panel-group titles — display face, bold, 19/24.
+     Spec value (tokens-v3.md §2.6); tight tracking (--tracking-tight) at the consumer. */
+  --type-title:    700 19px/24px var(--font-display);
 
   /* --type-body: prose and UI body copy — sans, regular weight, 13/20
      Evidence: 4 call sites in primitives.css all use 400 13px/20px var(--font-sans) */
