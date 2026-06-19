@@ -7,7 +7,7 @@ import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger,
-  validateTriggerSpec, dueTriggers,
+  validateTriggerSpec, dueTriggers, isSafeSqliteSql,
 } from '../../../src/core/substrate/triggers.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
@@ -93,5 +93,28 @@ describe('triggers core', () => {
     const due = dueTriggers(db.raw, now, 10);
     expect(due.map(d => d.id)).toContain(t1.id);
     expect(due).toHaveLength(1);
+  });
+});
+
+describe('poll.sqlite SQL safety guard (#1096)', () => {
+  it('isSafeSqliteSql accepts a single read query and rejects ATTACH/PRAGMA/multi-statement', () => {
+    expect(isSafeSqliteSql('SELECT * FROM messages WHERE id > ?')).toBe(true);
+    expect(isSafeSqliteSql('SELECT 1;')).toBe(true); // single trailing semicolon ok
+    expect(isSafeSqliteSql("ATTACH DATABASE '/etc/passwd' AS x")).toBe(false);
+    expect(isSafeSqliteSql('PRAGMA query_only = OFF')).toBe(false);
+    expect(isSafeSqliteSql('SELECT 1; SELECT 2')).toBe(false); // multi-statement
+  });
+
+  it('validateTriggerSpec rejects a poll.sqlite spec with ATTACH', () => {
+    expect(() =>
+      validateTriggerSpec('poll.sqlite', {
+        sql: "ATTACH DATABASE '/tmp/x.db' AS y", fire_when: 'rows_returned',
+      }),
+    ).toThrow();
+    expect(() =>
+      validateTriggerSpec('poll.sqlite', {
+        sql: 'SELECT count(*) FROM messages', fire_when: 'rows_returned',
+      }),
+    ).not.toThrow();
   });
 });

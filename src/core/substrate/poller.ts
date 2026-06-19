@@ -18,7 +18,7 @@
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { nowUnixSec } from './time.ts';
-import { dueTriggers, validateTriggerSpec } from './triggers.ts';
+import { dueTriggers, validateTriggerSpec, isSafeSqliteSql } from './triggers.ts';
 import { TERMINAL } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
@@ -305,6 +305,18 @@ export class TriggerPoller {
   }
 
   private executeSqlite(t: TriggerRow, spec: SqliteSpec): ExecuteOutcome {
+    // Runtime guard for specs persisted before validation existed (#1096):
+    // query_only does not block ATTACH/cross-DB reads, so reject them here too.
+    if (!isSafeSqliteSql(spec.sql)) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'unsafe SQL rejected',
+        outputJson: { reason: 'unsafe_sql' },
+        errorKind: 'unsafe_sql',
+        errorMessage: 'poll.sqlite rejects ATTACH/DETACH/PRAGMA and multi-statement SQL',
+      };
+    }
     let rows: Record<string, unknown>[];
     try {
       // Operator-stored SQL runs against the live bot.db. Bound the blast
