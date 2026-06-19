@@ -141,6 +141,46 @@ describe('outbound_sends audit writer', () => {
     expect(() => writer.markSuccess(sentId, 'wamid.second')).toThrow(/already finalized/i);
   });
 
+  it('outcome markers throw when the audit row does not exist', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    // No row with this id was ever inserted → UPDATE affects 0 rows and the
+    // status lookup returns undefined → the `!row` not-found branch.
+    expect(() => writer.markSuccess(999_999, 'wamid.ghost')).toThrow(/not found/i);
+    expect(() => writer.markFailure(999_998, 'ghost failure')).toThrow(/not found/i);
+  });
+
+  it('markSuccess without a transport id stores null (?? null arm)', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const id = writer.writeIntent({
+      caller: 'mcp',
+      chatJid: '15550100009@s.whatsapp.net',
+      targetKind: 'chatJid',
+      text: 'no transport id',
+    });
+    writer.markSuccess(id); // transportMessageId omitted → `transportMessageId ?? null`
+
+    const row = db.raw
+      .prepare('SELECT status, transport_message_id FROM outbound_sends WHERE id = ?')
+      .get(id) as { status: string; transport_message_id: string | null };
+    expect(row.status).toBe('sent');
+    expect(row.transport_message_id).toBeNull();
+  });
+
+  it('listRecent surfaces error_text for a failed row (spread true arm)', () => {
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const id = writer.writeIntent({
+      caller: 'mcp',
+      chatJid: '222@s.whatsapp.net',
+      targetKind: 'chatJid',
+      text: 'will fail',
+    });
+    writer.markFailure(id, 'delivery rejected');
+
+    const failed = writer.listRecent({ limit: 10 }).find((r) => r.id === id)!;
+    expect(failed.status).toBe('failed');
+    expect(failed.error_text).toContain('delivery rejected');
+  });
+
   it('listRecent returns bounded rows without message text', () => {
     const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
     const id = writer.writeIntent({
