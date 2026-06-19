@@ -169,4 +169,33 @@ describe('Calendar — keyboard navigation (WAI-ARIA grid)', () => {
       .filter((c) => c.getAttribute('aria-selected') === 'true');
     expect(selected).toHaveLength(0);
   });
+
+  // Roving-tabindex DOM focus: prior to this fix the arrow keys moved focusIndex (state)
+  // but never moved document.activeElement, so the :focus-visible ring and SR reading
+  // position stayed on the old cell. These assert REAL focus follows the keyboard.
+  const cellByDay = (grid: HTMLElement, day: string) =>
+    within(grid).getAllByRole('gridcell').find((c) => c.textContent?.trim() === day) as HTMLButtonElement
+
+  it('moves real DOM focus to the next cell on ArrowRight (not just state)', () => {
+    const { grid } = setup()
+    const day15 = cellByDay(grid, '15')
+    day15.focus()
+    expect(document.activeElement).toBe(day15)
+    fireEvent.keyDown(grid, { key: 'ArrowRight' })
+    const day16 = cellByDay(grid, '16')
+    expect(document.activeElement).toBe(day16)
+    expect(day16.getAttribute('tabindex')).toBe('0')
+  })
+
+  it('moves real DOM focus one week down on ArrowDown', () => {
+    const { grid } = setup()
+    cellByDay(grid, '15').focus()
+    fireEvent.keyDown(grid, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(cellByDay(grid, '22'))
+  })
+
+  it('does NOT steal focus on mount (trigger keeps focus until the user navigates)', () => {
+    render(<Calendar value={FUTURE} onSelect={() => {}} />)
+    expect((document.activeElement as HTMLElement | null)?.getAttribute('role')).not.toBe('gridcell')
+  })
 });
