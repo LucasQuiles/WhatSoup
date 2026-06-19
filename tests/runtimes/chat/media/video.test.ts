@@ -592,3 +592,15 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     });
   });
 });
+
+describe('extractFramesDetailed — ffmpeg dependency missing (#1075)', () => {
+  it('reports dependency_missing (not fallback_failed) when ffmpeg is absent (ENOENT)', async () => {
+    const enoent = Object.assign(new Error('spawn ffmpeg ENOENT'), { code: 'ENOENT' });
+    failWith(enoent);
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details.status).toBe('dependency_missing');
+    expect(details.frames).toEqual([]);
+  });
+});
