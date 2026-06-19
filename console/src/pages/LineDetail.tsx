@@ -185,7 +185,7 @@ export default function LineDetail() {
         {/* Identity */}
         <div className="flex-1 min-w-[var(--header-identity-min)]">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <h1 title={line.name} className="text-text-1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
+            <h1 title={line.name} className="text-text-1 font-extrabold font-[family-name:var(--font-display)] tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />

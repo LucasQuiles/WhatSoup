@@ -169,7 +169,7 @@ const Landing: FC = () => {
                 <span className="font-mono uppercase text-accent text-sm tracking-[var(--tracking-label)]">
                   {vp.index}
                 </span>
-                <h2 className="font-sans font-semibold text-text-1 text-xl tracking-[var(--tracking-tight)]">
+                <h2 className="font-[family-name:var(--font-display)] font-semibold text-text-1 text-xl tracking-[var(--tracking-tight)]">
                   {vp.title}
                 </h2>
                 <p className="font-sans text-text-2 text-body leading-relaxed">{vp.copy}</p>
