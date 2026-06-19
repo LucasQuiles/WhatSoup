@@ -222,3 +222,96 @@ describe('response-registry behavior-preserving seed values', () => {
     }
   });
 });
+
+describe('response-registry residual-branch coverage', () => {
+  // The three throw branches of assertRegistryConsistency (lines 348, 357,
+  // and 365 in src/runtimes/agent/response-registry.ts) are reached only when
+  // the registry drifts from the taxonomy SSOTs. The existing tests above
+  // cover the "happy" arms; this block mutates the imported RESPONSE_WORKFLOWS
+  // object, asserts the throw, and restores in try/finally so a failed
+  // assertion does not leak the mutation into subsequent tests.
+
+  it("throws when a registry key's errorClass field does not self-match", () => {
+    const target = RESPONSE_WORKFLOWS.provider_usage_limit;
+    const original = target.errorClass;
+    target.errorClass = 'provider_rate_limit';
+    try {
+      expect(() => assertRegistryConsistency()).toThrow(
+        /response-registry: key provider_usage_limit maps to errorClass provider_rate_limit/,
+      );
+    } finally {
+      target.errorClass = original;
+    }
+  });
+
+  it('throws when fallback.arms disagrees with providerFailureArmsFallback (providerKind path)', () => {
+    const target = RESPONSE_WORKFLOWS.provider_context_overflow;
+    const original = target.fallback.arms;
+    // provider_context_overflow is non-arming by spec; flipping arms=true
+    // forces a mismatch with providerFailureArmsFallback('context-overflow').
+    target.fallback.arms = true;
+    try {
+      expect(() => assertRegistryConsistency()).toThrow(
+        /provider_context_overflow fallback\.arms=true disagrees with eligibility SSOT \(false\); update the registry or the gate\./,
+      );
+    } finally {
+      target.fallback.arms = original;
+    }
+  });
+
+  it('throws when fallback.arms disagrees with isFallbackEligibleForFailureClass (class-only path)', () => {
+    const target = RESPONSE_WORKFLOWS.provider_binary_missing;
+    const original = target.fallback.arms;
+    // provider_binary_missing is a class-only non-arming failure; flipping
+    // arms=true forces a mismatch with isFallbackEligibleForFailureClass.
+    target.fallback.arms = true;
+    try {
+      expect(() => assertRegistryConsistency()).toThrow(
+        /provider_binary_missing fallback\.arms=true disagrees with eligibility SSOT \(false\); update the registry or the gate\./,
+      );
+    } finally {
+      target.fallback.arms = original;
+    }
+  });
+
+  it('throws when a non-arming class advertises carriesContextHandoff', () => {
+    const target = RESPONSE_WORKFLOWS.provider_policy_block;
+    const original = target.fallback.carriesContextHandoff;
+    target.fallback.carriesContextHandoff = true;
+    try {
+      expect(() => assertRegistryConsistency()).toThrow(
+        /response-registry: provider_policy_block is non-arming but advertises arming-only fallback flags/,
+      );
+    } finally {
+      target.fallback.carriesContextHandoff = original;
+    }
+  });
+
+  it('throws when a non-arming class advertises markActiveEntryFailedOnTrigger', () => {
+    const target = RESPONSE_WORKFLOWS.provider_policy_block;
+    const original = target.fallback.markActiveEntryFailedOnTrigger;
+    target.fallback.markActiveEntryFailedOnTrigger = true;
+    try {
+      expect(() => assertRegistryConsistency()).toThrow(
+        /response-registry: provider_policy_block is non-arming but advertises arming-only fallback flags/,
+      );
+    } finally {
+      target.fallback.markActiveEntryFailedOnTrigger = original;
+    }
+  });
+
+  it('prior mutations were restored: assertRegistryConsistency passes again', () => {
+    // Cleanup invariant: every test in this describe block restores the
+    // field it mutated in its finally clause. If any of them leaked a
+    // mutation, this call would throw. Captures the outcome as a value so
+    // the assertion is concrete (not a lone not-toThrow).
+    let result: 'ok' | string = 'unset';
+    try {
+      assertRegistryConsistency();
+      result = 'ok';
+    } catch (e) {
+      result = e instanceof Error ? e.message : String(e);
+    }
+    expect(result).toBe('ok');
+  });
+});
