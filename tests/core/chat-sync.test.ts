@@ -199,6 +199,17 @@ describe('chat-sync', () => {
       expect(row.conversation_key).toBe('111');
     });
 
+    it('persists a chat with no name as null (c.name nullish arm)', () => {
+      handleChatsUpsert(db, [
+        { id: '222@s.whatsapp.net', conversationTimestamp: 3000, unreadCount: 7 }, // no name
+      ]);
+
+      const row = db.raw
+        .prepare('SELECT name, unread_count FROM chats WHERE jid = ?')
+        .get('222@s.whatsapp.net') as any;
+      expect(row).toEqual({ name: null, unread_count: 7 });
+    });
+
     it('replaces existing chat on conflict', () => {
       handleChatsUpsert(db, [
         { id: '111@s.whatsapp.net', conversationTimestamp: 1000, name: 'Alice' },
