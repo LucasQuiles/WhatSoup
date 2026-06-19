@@ -79,6 +79,28 @@ describe('runDiagnosticBundle', () => {
     }
   });
 
+  it('summarizes a probe that throws a non-Error value via String()', async () => {
+    // errorSummary uses `err instanceof Error ? err.message : String(err)` — a
+    // non-Error throw exercises the String(err) arm.
+    const throwString: DiagnosticProbe = async () => {
+      throw 'plain string failure';
+    };
+    const probes: DiagnosticProbeMap = {
+      'health-snapshot': throwString,
+      'primary-recovery-probe': okProbe('recovered'),
+    };
+    const bundle = await runDiagnosticBundle({
+      workflow: RESPONSE_WORKFLOWS.provider_rate_limit,
+      probes,
+      now: NOW,
+    });
+
+    const health = bundle.findings.find((f) => f.id === 'health-snapshot')!;
+    expect(health.ok).toBe(false);
+    expect(health.confidence).toBe('suspected');
+    expect(health.summary).toContain('plain string failure');
+  });
+
   it('degrades an unregistered named probe', async () => {
     const bundle = await runDiagnosticBundle({
       workflow: RESPONSE_WORKFLOWS.provider_rate_limit,
