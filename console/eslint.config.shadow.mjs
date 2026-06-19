@@ -59,6 +59,24 @@ import baseConfig from './eslint.config.js'
 // ---------------------------------------------------------------------------
 
 const shadowSyntaxRules = [
+  // ── no-raw-field-label (field-label adoption ratchet, 2026-06-19) ──
+  // Scope: console/src TS/TSX except components/primitives/** (FormControl owns
+  // `c-field-label` via the Field wrapper). Warn-only shadow selector: existing
+  // violations are frozen in lint-shadow-baseline.json and burn down as consumers
+  // migrate to <Field label=…>. Fall-only ratchet — the count may only decrease.
+  {
+    selector: 'Literal[value=/\\bc-field-label\\b/]',
+    message:
+      '[soup/no-raw-field-label] Raw "c-field-label" class outside the FormControl primitive. ' +
+      'FIX: render the label through the Field wrapper (components/primitives/FormControl.tsx) — ' +
+      '<Field label="…">…</Field> — instead of a hand-rolled <label className="c-field-label">.',
+  },
+  {
+    selector: 'TemplateLiteral:has(TemplateElement[value.raw=/\\bc-field-label\\b/])',
+    message:
+      '[soup/no-raw-field-label] Raw "c-field-label" class (template literal) outside the FormControl primitive. ' +
+      'FIX: render the label through the Field wrapper (components/primitives/FormControl.tsx).',
+  },
 
   // NOTE: The following selectors are intentionally ABSENT from this array.
   // They were promoted to scoped-error (or console-wide error) in eslint.config.js
