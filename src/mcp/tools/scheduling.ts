@@ -255,7 +255,7 @@ export interface ListScheduledMessagesParams {
   status?: 'pending' | 'processing' | 'failed' | 'cancelled' | 'sent';
 }
 
-export function listScheduledMessages(
+function listScheduledMessages(
   db: Database,
   params: ListScheduledMessagesParams,
   session: SessionContext,
