@@ -47,6 +47,13 @@ const ALLOWLIST = new Map<string, string>([
       'the draft, staying on the same control — it is not an overlay/global dismissal and moves ' +
       'no focus, so useDismissable (focus-trap + stack) would be wrong here.',
   ],
+  [
+    'console/src/components/primitives/HoverCard.tsx',
+    'Local hover/focus disclosure onKeyDown with stopPropagation (one-layer law §2); ' +
+      'Esc closes the anchored card without moving focus off the trigger (showcase §43, DD-43) — ' +
+      'a non-modal disclosure with no focus-trap, so useDismissable (focus-trap + stack) would ' +
+      'be wrong here, same as the Tooltip case above.',
+  ],
 ])
 
 function tsxFiles(dir: string): string[] {
