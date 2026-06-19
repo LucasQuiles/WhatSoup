@@ -82,6 +82,23 @@ describe('proxyToInstance', () => {
     expect(parsed.url).toBe('/health');
   });
 
+  // Regression guard for #1056: a 3xx must abort rather than forward the bearer
+  // health token to the redirect target.
+  it("sets redirect: 'error' so a 3xx never forwards the bearer health token", async () => {
+    let capturedInit: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      capturedInit = init;
+      return { status: 200, text: async () => '{}' };
+    }));
+
+    await proxyToInstance(port, '/health', 'GET', null, 'health-token-secret');
+
+    expect(capturedInit?.redirect).toBe('error');
+    expect((capturedInit?.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer health-token-secret',
+    );
+  });
+
   it('proxies a POST request with body forwarded', async () => {
     const payload = JSON.stringify({ chatJid: '123@s.whatsapp.net', text: 'hello' });
     const result = await proxyToInstance(port, '/send', 'POST', payload, null);

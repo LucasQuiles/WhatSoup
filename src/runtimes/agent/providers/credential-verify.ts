@@ -42,6 +42,9 @@ export async function verifyFallbackCredential(
   try {
     const res = await fetchImpl(url, {
       headers: { Authorization: `Bearer ${key}` },
+      // A 3xx must abort, not forward the bearer header to the redirect target
+      // (#1056); matches the convention in fleet/routes/credentials.ts.
+      redirect: 'error',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
     if (res.status === 401 || res.status === 403) return 'invalid';
