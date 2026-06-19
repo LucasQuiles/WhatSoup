@@ -1,3 +1,5 @@
+import { jidPattern } from '../lib/redaction-patterns.ts';
+
 type ConsoleMethodName = 'debug' | 'error' | 'info' | 'log' | 'warn';
 
 type ConsolePatchTarget = Record<ConsoleMethodName, (...args: unknown[]) => void> & {
@@ -34,7 +36,7 @@ function constructorName(value: object): string {
 export function redactThirdPartyConsoleString(value: string): string {
   return value
     .replace(/<Buffer(?:\s+[0-9a-f]{2})+>/gi, '<Buffer redacted>')
-    .replace(/\b\d{5,}(?::\d+)?@(s\.whatsapp\.net|lid|g\.us)\b/g, '<jid:redacted>')
+    .replace(jidPattern(), '<jid:redacted>')
     .replace(
       /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization|bearer)\b\s*[:=]\s*[^\s"',}]+/gi,
       '$1=<redacted>',

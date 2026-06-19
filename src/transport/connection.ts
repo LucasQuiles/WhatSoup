@@ -51,6 +51,7 @@ import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
+import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 
 function assertWritableMarkerTarget(path: string): void {
@@ -340,7 +341,7 @@ function isSensitiveDiagnosticKey(key: string): boolean {
 
 function redactDiagnosticString(value: string): string {
   return value
-    .replace(/\b\d{5,}(?::\d+)?@(s\.whatsapp\.net|lid|g\.us)\b/g, (match) => `<jid:${shortHash(match, 20)}>`)
+    .replace(jidPattern(), (match) => `<jid:${shortHash(match, 20)}>`)
     .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortHash(match, 20)}>`);
 }
 

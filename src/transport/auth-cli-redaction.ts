@@ -1,7 +1,8 @@
+import { jidPattern } from '../lib/redaction-patterns.ts';
+
 const SECRETISH_ASSIGNMENT = /\b(token|secret|api[_-]?key|password|passwd|pat|private[_-]?key|client[_-]?secret)(\s*[:=]\s*|["']?\s*:\s*["']?)([^\s"',}]+)/gi;
 const AUTHORIZATION_BEARER = /\bAuthorization:\s*Bearer\s+[^\s"',}]+/gi;
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
-const WHATSAPP_JID = /\b\d{5,}(?:-\d+)?(?::\d+)?@(s\.whatsapp\.net|g\.us|lid)\b/gi;
 const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 // The optional leading path prefix uses a single flat character-class star anchored at a
 // path boundary (`~` or `/`) rather than a nested `(?:~|/[^...]+)*` quantifier. The old form
@@ -12,7 +13,7 @@ const CREDENTIAL_PATH = /(?:[~/][^\s"',}]*)?(?:\.config\/whatsoup\/[^\s"',}]+|\.
 export function redactAuthCliText(value: unknown): string {
   return String(value ?? '')
     .replace(CREDENTIAL_PATH, '[REDACTED CREDENTIAL PATH]')
-    .replace(WHATSAPP_JID, '[REDACTED WHATSAPP JID]')
+    .replace(jidPattern(), '[REDACTED WHATSAPP JID]')
     .replace(URL_USERINFO, '$1[REDACTED]@')
     .replace(AUTHORIZATION_BEARER, 'Authorization: Bearer [REDACTED]')
     .replace(SECRETISH_ASSIGNMENT, (_match, key: string, sep: string) => `${key}${sep}[REDACTED]`)
