@@ -699,3 +699,40 @@ describe('validateInstanceConfig — webhook inbound (stage 2 unlock)', () => {
     expect(err?.message).toBe('voice requires phoneNumber (calls cannot originate from a messagingServiceSid)');
   });
 });
+
+describe('validateInstanceConfig — residual twilio branch coverage', () => {
+  it('rejects a webhook block whose publicBaseUrl is an empty string', () => {
+    const raw = baseRaw({
+      transport: 'twilio',
+      twilioConfig: validTwilioConfig({
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: '', listenPort: 8443 },
+      }),
+    });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+    expect(err?.message).toBe('twilioConfig.webhook.publicBaseUrl must be a non-empty string');
+  });
+
+  it('accepts a voice block with enabled:false without applying the webhook coherence rule', () => {
+    // voiceEnabled !== true takes the else path: the inboundMode/phoneNumber
+    // coherence checks are skipped and a poll-mode config stays valid.
+    const raw = baseRaw({
+      transport: 'twilio',
+      twilioConfig: validTwilioConfig({
+        inboundMode: 'poll',
+        voice: { enabled: false, voicemailMaxLengthSec: 120 },
+      }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('accepts a rateLimit object that omits smsPerMinute', () => {
+    // rateLimit present but smsPerMinute undefined: the bounds check is skipped.
+    const raw = baseRaw({
+      transport: 'twilio',
+      twilioConfig: validTwilioConfig({ rateLimit: {} }),
+    });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+});
