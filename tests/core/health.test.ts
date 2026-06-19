@@ -3334,12 +3334,39 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
   //     (so the base status computes to 'healthy') plus a runtime reporting
   //     'degraded'.
   it('GET /health downgrades a healthy connection to degraded when the runtime snapshot is degraded (line 1006)', async () => {
+    // Base status must compute to 'healthy' (connected socket + migrated db) so
+    // that the line-1006 `&& status === 'healthy'` guard is satisfied and the
+    // degraded runtime snapshot is what flips the overall status.
+    // A 'chat' instance: agentRuntimeStatus is null (agent-only), so a degraded
+    // runtime snapshot is NOT folded into the status during the main status
+    // computation. The base status therefore stays 'healthy' until line 1006,
+    // where snap.status === 'degraded' downgrades it.
     const deps = makeDeps(db, {
-      instanceType: 'agent',
+      instanceType: 'chat',
+      connectionManager: {
+        botJid: '15555550123@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-04-05T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+        }),
+      } as unknown as ConnectionManager,
       runtime: {
         getHealthSnapshot: vi.fn().mockReturnValue({
           status: 'degraded',
-          details: {},
+          details: { queue: { activeChats: 0, queuedChats: 0 } },
         }),
         getFallbackState: () => null,
       } as any,
@@ -3350,9 +3377,34 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     // 'degraded' is a 200, not a 503.
     expect(status).toBe(200);
     const json = JSON.parse(body);
+    // The connection itself is healthy; only the degraded runtime snapshot
+    // downgrades the overall status via line 1006.
+    expect(json.whatsapp.connected).toBe(true);
     expect(json.status).toBe('degraded');
-    // Concrete: agent runtime block still populated via the line-1020 branch.
-    expect(json.runtime).toMatchObject({ agent: {} });
+    // Concrete: chat runtime block still populated via the line-1011 branch.
+    expect(json.runtime).toMatchObject({ chat: { queueDepth: 0 } });
+  });
+
+  // --- line 1020 else: a runtime snapshot present but instanceType is none of
+  //     passive/chat/agent leaves runtimeBlock as {} (no runtime block emitted).
+  it('GET /health leaves runtimeBlock empty for an unrecognized instanceType (line 1020 else)', async () => {
+    const deps = makeDeps(db, {
+      instanceType: 'primary-line',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: { socket: 'ready' },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // None of passive/chat/agent matched, so runtime stays an empty object.
+    expect(json.runtime).toEqual({});
   });
 });
 

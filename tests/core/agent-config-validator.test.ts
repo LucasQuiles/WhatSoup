@@ -1196,3 +1196,60 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 });
+
+describe('residual branch coverage — model/pinecone/healthPort/pluginDirs/numeric bounds', () => {
+  it('treats a whitespace-only top-level model as unset (no consistency error)', () => {
+    // normalizedModelString trims "   " to '' and returns null, so the
+    // consistency check sees a single configured source and passes.
+    const raw = baseAgent({ model: '   ', models: { conversation: 'sonnet' } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('falls back to ctx.name for the pinecone project-guard when raw omits name (patch)', () => {
+    // raw has no `name` key, so the guard reads the instance name from ctx.name
+    // ('alpha', a non-q instance) and still enforces the project-guard rule.
+    const raw: Record<string, unknown> = {
+      type: 'chat',
+      accessMode: 'self_only',
+      adminPhones: ['15551234567'],
+      memory: { pinecone: { apiKeyEnv: 'PINECONE_MINI3_KEY', index: 'whatsapp-bot' } },
+    };
+    const result = validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }));
+    expect(result?.field).toBe('memory.pinecone.projectId');
+  });
+
+  it('accepts a healthPort that does not collide with a different existing port', () => {
+    // existing map holds a non-matching port for another instance: the dup loop
+    // iterates, finds otherPort !== port, and returns null.
+    const raw = baseAgent({ healthPort: 9001 });
+    const existing = new Map([['beta', 9002]]);
+    expect(validateInstanceConfig(raw, ctx('create', { existingHealthPorts: existing }))).toBeNull();
+  });
+
+  it('rejects pluginDirs that is an array containing a non-string element', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', pluginDirs: ['/ok', 42] } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.pluginDirs');
+  });
+
+  it('accepts pluginDirs that is an array of all strings', () => {
+    const raw = baseAgent({
+      agentOptions: { sessionScope: 'single', pluginDirs: ['/plugins/a', '/plugins/b'] },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it('rejects maxTokens above the 200,000 upper bound', () => {
+    const raw = baseAgent({ maxTokens: 200001 });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('maxTokens');
+    expect(result?.message).toBe('maxTokens must be between 256 and 200,000');
+  });
+
+  it('rejects tokenBudget above the 10,000,000 upper bound', () => {
+    const raw = baseAgent({ tokenBudget: 10000001 });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('tokenBudget');
+    expect(result?.message).toBe('tokenBudget must be between 1,000 and 10,000,000');
+  });
+});

@@ -625,3 +625,46 @@ describe('canonical structured error-token classification', () => {
     expect(isRateLimitResultMessage('Discussing the rate limit policy for the docs.')).toBe(false);
   });
 });
+
+describe('isUsageLimitMessage — residual terminal-credit/quota branch shapes', () => {
+  it('classifies a "% of your" plan-usage warning as a usage limit', () => {
+    // hasApproachingLimitWarning short-circuits on "% of your" before the
+    // anchored-name loop, but isProviderCreditBalanceLimitMessage runs first and
+    // this phrasing alone is not credit-limit terminal — so the message stays a
+    // non-terminal warning. The "% of your" detector itself returns true here.
+    expect(isUsageLimitMessage("You've used 85% of your weekly limit.")).toBe(false);
+  });
+
+  it('treats a model-policy usage-credit gate as terminal usage-limit', () => {
+    expect(
+      isUsageLimitMessage('Model policy only allows a model that needs a usage credit.'),
+    ).toBe(true);
+  });
+
+  it('treats "out of usage" with each org/admin co-word as a credit limit', () => {
+    expect(isUsageLimitMessage('You are out of usage; please contact your admin.')).toBe(true);
+    expect(isUsageLimitMessage('Out of usage — your org has no remaining allocation.')).toBe(true);
+    expect(isUsageLimitMessage('Out of usage because the org is over its cap.')).toBe(true);
+    expect(isUsageLimitMessage('Out of usage for the group allocation this cycle.')).toBe(true);
+  });
+
+  it('treats "account balance" with each exhaustion co-word as a credit limit', () => {
+    expect(isUsageLimitMessage('The provider account balance is too low.')).toBe(true);
+    expect(isUsageLimitMessage('Provider account balance is insufficient to continue.')).toBe(true);
+    expect(isUsageLimitMessage('API account balance is exhausted for this billing cycle.')).toBe(true);
+  });
+});
+
+describe('isTransientProviderConnectionMessage — ETIMEDOUT socket-context co-words', () => {
+  it('matches ETIMEDOUT in a socket context', () => {
+    expect(isTransientProviderConnectionMessage('socket ETIMEDOUT while reading')).toBe(true);
+  });
+
+  it('matches ETIMEDOUT in a peer context', () => {
+    expect(isTransientProviderConnectionMessage('ETIMEDOUT from the upstream peer')).toBe(true);
+  });
+
+  it('does not match a bare ETIMEDOUT without socket/connect/peer context', () => {
+    expect(isTransientProviderConnectionMessage('request failed: ETIMEDOUT')).toBe(false);
+  });
+});
