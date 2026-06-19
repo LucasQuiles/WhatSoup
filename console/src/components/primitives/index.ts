@@ -160,6 +160,9 @@ export type { InlineEditProps } from './InlineEdit';
 export { Tooltip } from './Tooltip';
 export type { TooltipProps } from './Tooltip';
 
+export { HoverCard } from './HoverCard';
+export type { HoverCardProps } from './HoverCard';
+
 export { Stepper } from './Stepper';
 export type { StepperProps } from './Stepper';
 

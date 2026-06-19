@@ -2672,3 +2672,60 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
   font-family: var(--font-sans);
   color: var(--status-crit-fg);
 }
+
+/* HoverCard (§43, DD-43) — interactive hover/focus disclosure. Mirrors the tooltip
+   positioning recipe but the panel is INTERACTIVE: pointer-events stay auto while shown
+   so the hover-bridge works (pointer can travel onto the card). Wider card box. */
+.soup-hovercard {
+  position: relative;
+  display: inline-flex;
+}
+
+.soup-hovercard__panel {
+  position: absolute;
+  left: 50%;
+  min-width: var(--tooltip-min-w);
+  max-width: calc(var(--tooltip-min-w) + var(--sp-12));
+  padding: var(--sp-3);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text-1);
+  font-size: var(--text-data);
+  line-height: var(--text-sm--line-height);
+  z-index: var(--z-toast);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(var(--sp-1));
+  transition: opacity var(--dur-fast) var(--ease-enter),
+    transform var(--dur-fast) var(--ease-enter);
+}
+
+.soup-hovercard__panel--top {
+  bottom: 100%;
+  margin-bottom: var(--sp-2);
+}
+
+.soup-hovercard__panel--bottom {
+  top: 100%;
+  margin-top: var(--sp-2);
+  transform: translateX(-50%) translateY(calc(-1 * var(--sp-1)));
+}
+
+.soup-hovercard__panel--show {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(var(--sp-0));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-hovercard__panel {
+    transition: none;
+    transform: translateX(-50%);
+  }
+  .soup-hovercard__panel--bottom,
+  .soup-hovercard__panel--show {
+    transform: translateX(-50%);
+  }
+}
