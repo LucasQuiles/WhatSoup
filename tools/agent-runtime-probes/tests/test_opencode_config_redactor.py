@@ -29,8 +29,13 @@ from opencode_config_redactor import (  # noqa: E402
     placeholder,
     read_file_source,
     redact_config_tree,
+    redaction_canary_fixture,
+    redaction_integrity_check,
     run_debug_config,
     sanitize_metadata,
+    safe_structural_key,
+    scan_redaction_integrity,
+    build_summary,
 )
 
 PROBE_PATH = Path(__file__).resolve().parent.parent / "opencode_config_redactor.py"
@@ -74,7 +79,7 @@ def test_resolved_config_tree_redacts_all_scalar_leaves():
 
 def test_report_contains_hashes_and_inventory_but_not_values():
     tmp_path = Path(tempfile.mkdtemp(prefix="opencode-redactor-test-"))
-    cfg = {"model": "provider/model-name", "mcp": {"x": {"command": ["node", "/Users/testuser/private/tool.js"]}}}
+    cfg = {"model": "provider/model-name", "mcp": {"x": {"command": ["node", "/Users/q/private/tool.js"]}}}
     report = build_report(cfg, "file", {"path": str(tmp_path / "opencode.json"), "status": "parsed"}, tmp_path)
     rendered = str(report)
     assert report["parse_status"] == "parsed"
@@ -82,10 +87,79 @@ def test_report_contains_hashes_and_inventory_but_not_values():
     assert report["redacted_config_sha256_16"]
     assert "$.mcp.x.command[1]" in {row["path"] for row in report["config_inventory"]}
     assert "provider/model-name" not in rendered, report
-    assert "/Users/testuser/private/tool.js" not in rendered, report
+    assert "/Users/q/private/tool.js" not in rendered, report
     assert str(tmp_path) not in rendered, report
     assert "path_metadata" in report["source_metadata"], report["source_metadata"]
     assert report["source_metadata"]["path_metadata"]["path_sha256_16"], report["source_metadata"]
+
+
+def test_build_summary_explains_redacted_scalar_leaves_without_raw_tree():
+    tmp_path = Path(tempfile.mkdtemp(prefix="opencode-redactor-summary-"))
+    cfg = {
+        "model": "provider/model-name",
+        "mcp": {"pinecone": {"environment": {"PINECONE_API_KEY": "pcsk_aaaaaaaaaaaaaaaa"}}},
+        "provider": {"openai": {"options": {"baseURL": "https://example.com/api"}}},
+    }
+    report = build_report(cfg, "file", {"path": str(tmp_path / "opencode.json"), "status": "parsed"}, tmp_path)
+    summary = build_summary(report)
+    rendered = json.dumps(summary, sort_keys=True)
+
+    assert summary["schema"] == "opencode-resolved-config-redacted-summary", summary
+    assert summary["captured_at"], summary
+    assert summary["probe_schema_version"] == probe.SCHEMA_VERSION, summary
+    assert summary["parse_status"] == "parsed", summary
+    assert summary["redacted_count"] == 3, summary
+    assert summary["sensitive_leaf_count"] == 2, summary
+    assert summary["scalar_leaf_count"] == 1, summary
+    assert summary["canary_hits"] == 0, summary
+    assert summary["leak_scan_hits"] == 0, summary
+    assert summary["integrity_verdict"] == "pass", summary
+    assert summary["top_level_key_count"] == 3, summary
+    assert summary["top_level_keys"] == "mcp,model,provider", summary
+    assert "provider/model-name" not in rendered, rendered
+    assert "pcsk_aaaaaaaaaaaaaaaa" not in rendered, rendered
+    assert str(tmp_path) not in rendered, rendered
+
+
+def test_sensitive_structural_keys_are_redacted_in_tree_and_inventory():
+    tmp_path = Path(tempfile.mkdtemp(prefix="opencode-redactor-key-canary-"))
+    cfg = {
+        "secretCanaryKey": "under-sensitive-key",
+        "provider": {"glm": {"options": {"apiKey": "sk-ARDA049CANARY000000000000000000000000"}}},
+    }
+    report = build_report(cfg, "file", {"path": str(tmp_path / "opencode.json"), "status": "parsed"}, tmp_path)
+    rendered = json.dumps(report, sort_keys=True)
+
+    assert "secretCanaryKey" not in rendered, rendered
+    assert "apiKey" not in rendered, rendered
+    assert "sk-ARDA049CANARY000000000000000000000000" not in rendered, rendered
+    assert safe_structural_key("secretCanaryKey").startswith("<redacted-key:"), report
+    assert any("<redacted-key:" in row["path"] for row in report["config_inventory"]), report["config_inventory"]
+
+
+def test_redaction_integrity_fixture_reports_zero_canary_and_leak_hits():
+    tmp_path = Path(tempfile.mkdtemp(prefix="opencode-redactor-integrity-"))
+    integrity = redaction_integrity_check(tmp_path)
+
+    assert redaction_canary_fixture(), "fixture should be non-empty"
+    assert integrity["canary_count"] >= 6, integrity
+    assert integrity["canary_hits"] == 0, integrity
+    assert integrity["leak_scan_hits"] == 0, integrity
+    assert integrity["verdict"] == "pass", integrity
+    assert integrity["redacted_count"] > 0, integrity
+
+
+def test_redaction_integrity_scan_detects_planted_leaks():
+    leaked = {
+        "value": "sk-ARDA049CANARY000000000000000000000000",
+        "nested": {"key": "secretCanaryKey"},
+    }
+    scan = scan_redaction_integrity(leaked)
+
+    assert scan["canary_hits"] >= 2, scan
+    assert "token_like_value" in scan["canary_hit_ids"], scan
+    assert "key_name" in scan["canary_hit_ids"], scan
+    assert scan["leak_scan_hits"] >= 1, scan
 
 
 def test_candidate_sources_do_not_emit_raw_paths():
@@ -177,7 +251,7 @@ def test_command_shape_identifies_debug_config_and_flags():
 
 
 def test_command_shape_marks_other_commands():
-    shape = command_shape(["node", "/Users/testuser/private/server.js", "--port", "8080"])
+    shape = command_shape(["node", "/Users/q/private/server.js", "--port", "8080"])
     assert shape["command_id"] == "other"
     assert shape["executable_basename"] == "node"
     assert shape["flags"] == ["--port"]
@@ -188,18 +262,18 @@ def test_command_shape_marks_other_commands():
 def test_sanitize_metadata_replaces_command_with_shape_and_suppresses_path():
     cwd = Path(tempfile.mkdtemp(prefix="opencode-sanitize-"))
     meta = {
-        "command": ["node", "/Users/testuser/private/secret-server.js"],
-        "nested": [{"config_path": "/Users/testuser/private/opencode.json"}],
+        "command": ["node", "/Users/q/private/secret-server.js"],
+        "nested": [{"config_path": "/Users/q/private/opencode.json"}],
         "label": "plain-value",
     }
     out = sanitize_metadata(meta, cwd)
     rendered = str(out)
     # The raw command path must be gone; only command_shape remains.
     assert "command_shape" in out, out
-    assert "/Users/testuser/private/secret-server.js" not in rendered, out
+    assert "/Users/q/private/secret-server.js" not in rendered, out
     assert out["command_shape"]["command_id"] == "other", out
     # The *_path key inside a list element is converted to <name>_metadata, raw path gone.
-    assert "/Users/testuser/private/opencode.json" not in rendered, out
+    assert "/Users/q/private/opencode.json" not in rendered, out
     assert out["nested"][0]["config_path_metadata"]["path_sha256_16"], out
     assert "config_path" not in out["nested"][0], out
 
@@ -500,6 +574,42 @@ def test_main_debug_source_success_pretty_with_mocked_subprocess():
     assert "\n  " in rendered, "pretty output should be indented"
     # The secret apiKey value must be suppressed in the emitted report.
     assert "sk-abcdefghij1234567890" not in rendered, report
+
+
+def test_main_debug_source_summary_includes_sanitized_capture_and_version_metadata():
+    tmp = Path(tempfile.mkdtemp(prefix="opencode-main-summary-ok-"))
+    calls = []
+
+    def fake(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if cmd == ["opencode", "--version"]:
+            return _FakeProc(stdout="opencode 1.2.3\n", returncode=0)
+        return _FakeProc(stdout='{"model":"provider/m","mcp":{}}', returncode=0)
+
+    argv = ["prog", "--source", "debug", "--cwd", str(tmp), "--summary"]
+    orig_argv = sys.argv
+    orig_run = probe.subprocess.run
+    sys.argv = argv
+    probe.subprocess.run = fake
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            rc = probe.main()
+    finally:
+        sys.argv = orig_argv
+        probe.subprocess.run = orig_run
+
+    summary = json.loads(buf.getvalue())
+    assert rc == 0
+    assert ["opencode", "debug", "config"] in calls, calls
+    assert ["opencode", "--version"] in calls, calls
+    assert summary["schema"] == "opencode-resolved-config-redacted-summary", summary
+    assert summary["captured_at"], summary
+    assert summary["probe_schema_version"] == probe.SCHEMA_VERSION, summary
+    assert summary["source_stdout_sha256_16"], summary
+    assert summary["opencode_version_status"] == "parsed", summary
+    assert summary["opencode_version"] == "opencode 1.2.3", summary
+    assert summary["limitations"] == "Counts are scalar leaves, not secret counts; summary suppresses raw values and paths.", summary
 
 
 # --- CLI e2e subprocess: opencode unavailable -> typed error, nonzero exit ----
