@@ -36,7 +36,10 @@ const ALLOWLIST = new Set<string>([
   // as="section">, so it no longer uses the raw recipe.
   // ProvidersKeysCard MIGRATED (W2-S4): its sole c-card surface now renders via the Card
   // primitive (the motion wrapper is kept outside), so it no longer uses the raw recipe.
-  'console/src/components/line-detail/SummaryTab.tsx',
+  // SummaryTab MIGRATED (W2-S4): its 4 c-card cards now render via <Card variant="base">
+  // (the motion.div stays as the outer animated wrapper owning position/size; flex-row
+  // cards keep h-full so the inner Card fills the stretched slot), so it no longer uses
+  // the raw recipe.
   'console/src/pages/SoupKitchen.tsx',
   // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx,
   // line-detail/AccessTab.tsx, line-detail/ScheduledMessageRow.tsx, Inbox.tsx

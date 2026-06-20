@@ -10,7 +10,7 @@ import { getProvider, getProviderColor, DEFAULT_PROVIDER_ID } from '../../lib/pr
 import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { Button } from '../primitives/Button'
-import { InlineEdit } from '../primitives'
+import { Card, InlineEdit } from '../primitives'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
 import {
@@ -158,8 +158,8 @@ export function SummaryTab({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: i * 0.04, ease: [0.22, 1, 0.36, 1] }}
-            className="c-card py-[var(--sp-3)] px-[var(--sp-4)]"
           >
+            <Card variant="base" className="py-[var(--sp-3)] px-[var(--sp-4)] h-full">
             <div className="c-col-header text-text-2 mb-[var(--sp-1)]">
               {card.label}
             </div>
@@ -169,6 +169,7 @@ export function SummaryTab({
             >
               {card.value}
             </div>
+            </Card>
           </motion.div>
         ))}
       </div>
@@ -178,8 +179,8 @@ export function SummaryTab({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
-        className="c-card flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)]"
       >
+        <Card variant="base" className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)]">
         <div className="c-col-header text-text-2 flex-shrink-0 mr-[var(--sp-5)]">
           Pipeline
         </div>
@@ -191,6 +192,7 @@ export function SummaryTab({
             </span>
           ))}
         </div>
+        </Card>
       </motion.div>
 
       {/* Row 3: Config + Actions side-by-side */}
@@ -200,8 +202,9 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
-          className="c-card flex-1 overflow-hidden"
+          className="flex-1"
         >
+          <Card variant="base" className="overflow-hidden h-full">
           <div className="flex items-center justify-between c-toolbar bg-surface-raised c-border-b">
             <span className="c-col-header text-text-2">{line.mode} Configuration</span>
             {config && (
@@ -247,6 +250,7 @@ export function SummaryTab({
               Passive mode — no configuration required.
             </div>
           )}
+          </Card>
         </motion.div>
 
         {/* Actions / Controls panel */}
@@ -254,8 +258,9 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="c-card overflow-hidden w-[var(--panel-actions)] flex-shrink-0"
+          className="w-[var(--panel-actions)] flex-shrink-0"
         >
+          <Card variant="base" className="overflow-hidden h-full">
           <div className="c-toolbar bg-surface-raised c-border-b">
             <span className="c-col-header text-text-2">Actions</span>
           </div>
@@ -297,6 +302,7 @@ export function SummaryTab({
               </Button>
             </div>
           </div>
+          </Card>
         </motion.div>
       </div>
 
