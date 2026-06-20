@@ -179,7 +179,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'create_watch',
-    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours.',
+    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. NOTE: only poll.sqlite currently fires; poll.email/url/file/pinecone/shell and event.message are accepted and persisted but no-op (the poller logs a warn and bumps next_fire_at so the row does not hot-loop) until their executors are wired.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
       title: z.string().optional(),
