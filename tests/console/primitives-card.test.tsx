@@ -59,6 +59,25 @@ describe('Card primitive (DD-38)', () => {
     expect((btn as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("base with as='section' renders a semantic <section> carrying .c-card (no button/role)", () => {
+    const { container } = render(<Card variant="base" as="section">body</Card>);
+    const el = container.querySelector('section.c-card');
+    expect(el).not.toBeNull();
+    expect(el!.tagName).toBe('SECTION');
+    expect(el!.textContent).toContain('body');
+    // as='section' must never force an interactive/button path.
+    expect(el!.getAttribute('type')).toBeNull();
+    expect(el!.getAttribute('role')).toBeNull();
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it("interactive-card-is-button wins: variant='interactive' renders a <button> even when as='section'", () => {
+    render(<Card variant="interactive" as="section" onClick={() => {}}>go</Card>);
+    const btn = screen.getByRole('button', { name: 'go' });
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.getAttribute('type')).toBe('button');
+  });
+
   it('renders header/footer slots and forwards arbitrary rest props', () => {
     const { container } = render(
       <Card header={<div>H</div>} footer={<div>F</div>} data-testid="panel">mid</Card>,
