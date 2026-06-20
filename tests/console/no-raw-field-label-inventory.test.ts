@@ -31,7 +31,9 @@ const ALLOWLIST = new Set<string>([
   'console/src/components/line-detail/ScheduleComposerModal.tsx',
   'console/src/components/wizard/ConfigStep.tsx',
   'console/src/components/wizard/IdentityStep.tsx',
-  'console/src/components/wizard/ModelAuthStep.tsx',
+  // ModelAuthStep.tsx migrated onto <Field> (W2-S5): all 3 raw c-field-label
+  // labels (2 previously-unassociated Anthropic/OpenAI role selects + the API
+  // key input) now route through the <Field> primitive's htmlFor wiring.
 ])
 
 const FIELD_LABEL_RECIPE = /\bc-field-label\b/
