@@ -2,7 +2,7 @@ import { Users, Shield } from 'lucide-react'
 import type { GroupInfo } from '../../types.js'
 import { avatarColor, roleLabel, roleBadgeStyle } from './groups-utils.js'
 import { getInitials } from '../../lib/text-utils.js'
-import { Button } from '../primitives/Button'
+import { Card } from '../primitives'
 
 interface GroupCardProps {
   group: GroupInfo
@@ -21,9 +21,9 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
   const color = avatarColor(group.id)
 
   return (
-    <Button
-      variant="ghost"
-      className="c-card w-full flex items-center gap-3 c-hover text-left py-[var(--sp-3)] px-[var(--sp-4)]"
+    <Card
+      variant="interactive"
+      className="flex items-center gap-3 py-[var(--sp-3)] px-[var(--sp-4)]"
       onClick={() => onSelect(group)}
     >
       {/* Avatar */}
@@ -61,6 +61,6 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}
         </div>
       </div>
-    </Button>
+    </Card>
   )
 }

@@ -70,7 +70,11 @@ describe('design system compliance — round 2 shared search inputs', () => {
     expect(groupDetail).toContain('<Tabs')
     expect(groupDetail).not.toContain('className="c-tab"')
     expect(groupDetail).toContain('<SearchInput')
-    expect(groupCard).toContain('className="c-card')
+    // GroupCard migrated to the Card primitive (W2-S4): interactive card IS <Card variant="interactive">,
+    // not the raw c-card recipe (kept consistent with the no-card-recipe-inventory ratchet).
+    expect(groupCard).toContain('<Card')
+    expect(groupCard).toContain('variant="interactive"')
+    expect(groupCard).not.toContain('className="c-card')
     // ScheduledMessageRow migrated onto the <Card> primitive (DD-38).
     expect(scheduledRow).toContain('<Card')
   })
