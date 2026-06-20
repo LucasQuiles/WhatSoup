@@ -247,6 +247,66 @@ describe('HoverCard — hover debounce + bridge', () => {
   })
 })
 
+describe('HoverCard — hover+focus OR semantics (close only when both leave)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('keeps the card open when the pointer leaves while the trigger still has focus', () => {
+    render(<Subject />)
+    act(() => {
+      fireEvent.focus(trigger()) // focus opens immediately
+      fireEvent.mouseEnter(wrapper()) // pointer also inside
+    })
+    expect(isOpen()).toBe(true)
+    // pointer leaves the whole wrapper, but focus still holds it open
+    act(() => {
+      fireEvent.mouseLeave(wrapper())
+      vi.advanceTimersByTime(300) // well past closeDelay
+    })
+    expect(isOpen()).toBe(true)
+  })
+
+  it('keeps the card open when focus leaves while the pointer is still hovering', () => {
+    render(<Subject />)
+    act(() => {
+      fireEvent.mouseEnter(wrapper())
+      vi.advanceTimersByTime(150) // hover opens
+    })
+    act(() => {
+      fireEvent.focus(trigger()) // focus also inside
+    })
+    expect(isOpen()).toBe(true)
+    // focus leaves to an outside target, but the pointer still holds it open
+    act(() => {
+      fireEvent.blur(trigger(), { relatedTarget: document.body })
+      vi.advanceTimersByTime(300)
+    })
+    expect(isOpen()).toBe(true)
+  })
+
+  it('closes only once BOTH the pointer and focus have left', () => {
+    render(<Subject />)
+    act(() => {
+      fireEvent.mouseEnter(wrapper())
+      vi.advanceTimersByTime(150)
+      fireEvent.focus(trigger())
+    })
+    expect(isOpen()).toBe(true)
+    // drop hover first — focus still holds the card
+    act(() => {
+      fireEvent.mouseLeave(wrapper())
+      vi.advanceTimersByTime(300)
+    })
+    expect(isOpen()).toBe(true)
+    // now drop focus too — the card finally closes after closeDelay
+    act(() => {
+      fireEvent.blur(trigger(), { relatedTarget: document.body })
+      vi.advanceTimersByTime(180)
+    })
+    expect(isOpen()).toBe(false)
+  })
+})
+
 describe('HoverCard — horizontal anchoring (anchorX / rightAnchored)', () => {
   // Stub a real anchor rect at a given left so resolveViewportPlacement decides
   // rightAnchored = (left + 260 > innerWidth[1024]). left 40 → left-anchored; 900 → right.

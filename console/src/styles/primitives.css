@@ -2691,6 +2691,8 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
   left: 50%;
   min-width: var(--tooltip-min-w);
   max-width: calc(var(--tooltip-min-w) + var(--sp-12));
+  /* §43 .tip-bub chrome (10px/12px): horizontal = sp-3; vertical tokenizes up to sp-3
+     too — 10px is the off-scale sp-2h half-step the design system is burning down. */
   padding: var(--sp-3);
   border: var(--bw) solid var(--border-hairline);
   border-radius: var(--radius-md);

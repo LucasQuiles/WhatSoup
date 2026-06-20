@@ -97,6 +97,12 @@ export const HoverCard: FC<HoverCardProps> = ({
   // Set when Escape explicitly dismisses the card; suppresses focus-reopen while focus
   // stays on the trigger. Cleared once the pointer/focus leaves and a fresh hover begins.
   const dismissedRef = useRef(false);
+  // Independent pointer/focus presence (OR-semantics): the card stays open while EITHER
+  // the pointer or keyboard focus is within the wrapper, and closes only once BOTH have
+  // left — a keyboard user keeps the card as incidental mouse motion comes and goes, and
+  // a hovering user keeps it across focus changes (the model MessageBubble's DD-18r §6.9).
+  const pointerInsideRef = useRef(false);
+  const focusInsideRef = useRef(false);
 
   const clearTimers = useCallback(() => {
     if (openTimer.current) clearTimeout(openTimer.current);
@@ -154,9 +160,27 @@ export const HoverCard: FC<HoverCardProps> = ({
     }, closeDelay);
   }, [closeDelay]);
 
+  // Schedule the close only when the wrapper holds NEITHER pointer nor focus. A leave on
+  // one channel while the other is still inside is a no-op (the OR-semantics gate).
+  const maybeScheduleClose = useCallback(() => {
+    if (pointerInsideRef.current || focusInsideRef.current) return;
+    scheduleClose();
+  }, [scheduleClose]);
+
+  const handleMouseEnter = useCallback(() => {
+    pointerInsideRef.current = true;
+    scheduleOpen();
+  }, [scheduleOpen]);
+
+  const handleMouseLeave = useCallback(() => {
+    pointerInsideRef.current = false;
+    maybeScheduleClose();
+  }, [maybeScheduleClose]);
+
   // Focus opens immediately (hover never sole carrier) — unless the card was just
   // Escape-dismissed while the trigger keeps focus (don't resurrect it).
   const onFocus = useCallback(() => {
+    focusInsideRef.current = true;
     if (dismissedRef.current) return;
     clearTimers();
     measure();
@@ -165,16 +189,17 @@ export const HoverCard: FC<HoverCardProps> = ({
 
   // Close only when focus leaves the WHOLE wrapper. Focus moving from the trigger into
   // interactive card content keeps relatedTarget inside the wrapper → the card stays open
-  // (a containment check, not event-ordering luck). Focus leaving the component schedules
-  // the close and clears the dismissed latch.
+  // (a containment check, not event-ordering luck). Focus leaving the component clears the
+  // dismissed latch and schedules the close only if the pointer is also gone (OR-semantics).
   const onBlur = useCallback(
     (event: ReactFocusEvent) => {
       const next = event.relatedTarget as Node | null;
       if (next && anchorRef.current?.contains(next)) return;
+      focusInsideRef.current = false;
       dismissedRef.current = false;
-      scheduleClose();
+      maybeScheduleClose();
     },
-    [scheduleClose],
+    [maybeScheduleClose],
   );
 
   const onKeyDown = useCallback(
@@ -217,8 +242,8 @@ export const HoverCard: FC<HoverCardProps> = ({
       // Wrapper-level pointer handlers cover BOTH the trigger and the card (both live
       // inside this span), so a single enter/leave pair implements the hover-bridge:
       // leaving the trigger toward the card stays "inside" → no leave event fires.
-      onMouseEnter={scheduleOpen}
-      onMouseLeave={scheduleClose}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       onFocus={onFocus}
       onBlur={onBlur}
       onKeyDown={onKeyDown}
