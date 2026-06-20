@@ -21,7 +21,7 @@ export interface ToolUpdate {
   detail: string;
 }
 
-export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
+const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
   reading:   { label: 'Reading',   emoji: '📖' },
   searching: { label: 'Searching', emoji: '🔎' },
   modifying: { label: 'Modifying', emoji: '✏️' },
@@ -75,7 +75,7 @@ export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
  */
 export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
 /** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
-export const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
+const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
 interface TerminalTextDedupeEntry {
   lastSeenAt: number;

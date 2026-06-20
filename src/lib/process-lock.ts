@@ -40,7 +40,7 @@ export function isProcessLockError(err: unknown): err is ProcessLockError {
   return err instanceof ProcessLockError;
 }
 
-export function createProcessLockPayload(options: AcquireProcessLockOptions = {}): ProcessLockPayload {
+function createProcessLockPayload(options: AcquireProcessLockOptions = {}): ProcessLockPayload {
   return {
     pid: options.pid ?? process.pid,
     token: options.token ?? randomUUID(),

@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile);
 export type Platform = 'docker' | 'linux-systemd' | 'macos-launchd' | 'linux-no-systemd';
 
 /** Env var name set by the Dockerfile and docker-compose.yml to signal the container runtime. */
-export const WHATSOUP_DOCKER_ENV = 'WHATSOUP_DOCKER';
+const WHATSOUP_DOCKER_ENV = 'WHATSOUP_DOCKER';
 
 let _cachedPlatform: Platform | undefined;
 
