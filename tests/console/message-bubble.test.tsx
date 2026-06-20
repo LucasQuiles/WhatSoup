@@ -35,7 +35,7 @@ describe('MessageBubble timestamp rendering', () => {
     const bubbleTime = screen.getByText('\u2014')
     expect(bubbleTime).toBeDefined()
 
-    fireEvent.mouseEnter(screen.getByText('Hello').closest('.relative')!)
+    fireEvent.mouseEnter(screen.getByText('Hello').closest('.soup-hovercard')!)
     act(() => {
       vi.advanceTimersByTime(500)
     })

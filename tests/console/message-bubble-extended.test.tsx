@@ -354,7 +354,7 @@ describe('optimistic message (pk < 0, senderName: You)', () => {
     // DetailCard now shows "sending" for pk<0 and "failed" only for pk===-1.
     vi.useFakeTimers()
     render(<MessageBubble msg={outgoing({ pk: -2 })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('sending')).toBeDefined()
     expect(screen.queryByText('pending')).toBeNull()
@@ -365,7 +365,7 @@ describe('optimistic message (pk < 0, senderName: You)', () => {
     // DetailCard shows "failed" for pk===-1, matching the retry-button gate.
     vi.useFakeTimers()
     render(<MessageBubble msg={outgoing({ pk: -1 })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('failed')).toBeDefined()
     expect(screen.queryByText('sending')).toBeNull()
@@ -375,7 +375,7 @@ describe('optimistic message (pk < 0, senderName: You)', () => {
   it('detail card shows "pk:N" for persisted positive pk', () => {
     vi.useFakeTimers()
     render(<MessageBubble msg={outgoing({ pk: 42 })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('pk:42')).toBeDefined()
   })
@@ -482,28 +482,31 @@ describe('hover detail card', () => {
     expect(screen.queryByText('Sender')).toBeNull()
   })
 
-  it('shows detail card after 500ms hover on .relative', () => {
+  it('shows detail card after the 500ms hover reveal on the bubble', () => {
     render(<MessageBubble msg={msg({ senderJid: '155501230001@s.whatsapp.net' })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(499) })
     expect(screen.queryByText('Sender')).toBeNull()
     act(() => { vi.advanceTimersByTime(1) })
     expect(screen.getByText('Sender')).toBeDefined()
   })
 
-  it('hides detail card after mouse leave', () => {
+  it('hides detail card after mouse leave (once the close debounce elapses)', () => {
     render(<MessageBubble msg={msg()} />)
-    const rel = document.querySelector('.relative')!
+    const rel = document.querySelector('.soup-hovercard')!
     fireEvent.mouseEnter(rel)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('Sender')).toBeDefined()
-    fireEvent.mouseLeave(rel)
+    act(() => {
+      fireEvent.mouseLeave(rel)
+      vi.advanceTimersByTime(180)
+    })
     expect(screen.queryByText('Sender')).toBeNull()
   })
 
   it('detail card shows JID row when senderJid is provided', () => {
     render(<MessageBubble msg={msg({ senderJid: '155501230001@s.whatsapp.net' })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('JID')).toBeDefined()
     expect(screen.getByText('155501230001@s.whatsapp.net')).toBeDefined()
@@ -511,21 +514,21 @@ describe('hover detail card', () => {
 
   it('detail card shows Direction as Inbound for incoming', () => {
     render(<MessageBubble msg={msg({ fromMe: false })} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('Inbound')).toBeDefined()
   })
 
   it('detail card shows Direction as Outbound for outgoing', () => {
     render(<MessageBubble msg={outgoing()} />)
-    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    fireEvent.mouseEnter(document.querySelector('.soup-hovercard')!)
     act(() => { vi.advanceTimersByTime(500) })
     expect(screen.getByText('Outbound')).toBeDefined()
   })
 
   it('cancels hover timer on quick mouse leave before 500ms', () => {
     render(<MessageBubble msg={msg()} />)
-    const rel = document.querySelector('.relative')!
+    const rel = document.querySelector('.soup-hovercard')!
     fireEvent.mouseEnter(rel)
     act(() => { vi.advanceTimersByTime(300) })
     fireEvent.mouseLeave(rel)
@@ -578,38 +581,46 @@ describe('media vs text padding', () => {
 // tests above pass). These cases cover the additive keyboard/focus contract.
 
 describe('keyboard alternative — focus reveal (DD-18r)', () => {
-  it('wrapper is focusable (tabIndex=0)', () => {
+  // Fake timers: HoverCard debounces its close (closeDelay), so blur-to-close
+  // resolves after the timer rather than synchronously like the old state machine.
+  beforeEach(() => { vi.useFakeTimers() })
+
+  it('trigger bubble is focusable (tabIndex=0)', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
-    expect(wrapper.getAttribute('tabIndex')).toBe('0')
+    // The bubble itself is the HoverCard trigger now, so it carries tabIndex.
+    const trigger = document.querySelector('.c-msg-bubble') as HTMLElement
+    expect(trigger.getAttribute('tabIndex')).toBe('0')
   })
 
-  it('wrapper carries accessible name "Message detail"', () => {
+  it('trigger bubble carries accessible name "Message detail"', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
-    expect(wrapper.getAttribute('aria-label')).toBe('Message detail')
+    const trigger = document.querySelector('.c-msg-bubble') as HTMLElement
+    expect(trigger.getAttribute('aria-label')).toBe('Message detail')
   })
 
   it('focus reveals the detail card with no timer advance', () => {
     render(<MessageBubble msg={msg({ senderJid: '155501230001@s.whatsapp.net' })} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     fireEvent.focus(wrapper)
     // No act + timer advance needed — focus reveal is instant
     expect(screen.getByText('Sender')).toBeDefined()
   })
 
-  it('blur hides the detail card', () => {
+  it('blur hides the detail card (after the close debounce)', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
-    fireEvent.focus(wrapper)
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
+    act(() => { fireEvent.focus(wrapper) })
     expect(screen.getByText('Sender')).toBeDefined()
-    fireEvent.blur(wrapper)
+    act(() => {
+      fireEvent.blur(wrapper)
+      vi.advanceTimersByTime(180)
+    })
     expect(screen.queryByText('Sender')).toBeNull()
   })
 
   it('Escape hides the card when shown via focus', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     fireEvent.focus(wrapper)
     expect(screen.getByText('Sender')).toBeDefined()
     fireEvent.keyDown(wrapper, { key: 'Escape' })
@@ -623,7 +634,7 @@ describe('keyboard alternative — focus reveal (DD-18r)', () => {
         <MessageBubble msg={msg()} />
       </div>,
     )
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     fireEvent.focus(wrapper)
     fireEvent.keyDown(wrapper, { key: 'Escape' })
     // Escape consumed by the card; outer handler must not fire
@@ -637,7 +648,7 @@ describe('keyboard alternative — focus reveal (DD-18r)', () => {
         <MessageBubble msg={msg()} />
       </div>,
     )
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Do NOT focus — card is hidden
     fireEvent.keyDown(wrapper, { key: 'Escape' })
     expect(outerHandler).toHaveBeenCalledOnce()
@@ -651,7 +662,7 @@ describe('hover + focus OR semantics (§6.9)', () => {
 
   it('mouse leave while focused keeps the card visible', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Focus first — card shows instantly
     fireEvent.focus(wrapper)
     expect(screen.getByText('Sender')).toBeDefined()
@@ -662,7 +673,7 @@ describe('hover + focus OR semantics (§6.9)', () => {
 
   it('blur while hovered keeps the card visible', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Hover to show card
     fireEvent.mouseEnter(wrapper)
     act(() => { vi.advanceTimersByTime(500) })
@@ -674,7 +685,7 @@ describe('hover + focus OR semantics (§6.9)', () => {
 
   it('both cleared — card hides', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Hover and focus both active
     fireEvent.mouseEnter(wrapper)
     act(() => { vi.advanceTimersByTime(500) })
@@ -683,8 +694,11 @@ describe('hover + focus OR semantics (§6.9)', () => {
     // Clear hover first — card stays
     fireEvent.mouseLeave(wrapper)
     expect(screen.getByText('Sender')).toBeDefined()
-    // Clear focus — card hides
-    fireEvent.blur(wrapper)
+    // Clear focus too — the card hides once the close debounce elapses
+    act(() => {
+      fireEvent.blur(wrapper)
+      vi.advanceTimersByTime(180)
+    })
     expect(screen.queryByText('Sender')).toBeNull()
   })
 })
@@ -699,7 +713,7 @@ describe('edge placement — data-placement attribute', () => {
   it('defaults to data-placement="above" with jsdom zero rects', () => {
     vi.useFakeTimers()
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     fireEvent.mouseEnter(wrapper)
     act(() => { vi.advanceTimersByTime(500) })
     const card = document.querySelector('[data-placement]') as HTMLElement
@@ -708,7 +722,7 @@ describe('edge placement — data-placement attribute', () => {
 
   it('flips to data-placement="below" when card would clip the viewport top', () => {
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Stub: wrapper is near the top — card height (160px) exceeds rect.top
     vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue({
       top: 50,
@@ -730,7 +744,7 @@ describe('edge placement — data-placement attribute', () => {
     // Default jsdom window.innerWidth is 1024 in most env; override to a known value
     Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 800 })
     render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     // Stub: wrapper starts at left=700; card width 220 → 700+220=920 > 800
     vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue({
       top: 400,
@@ -745,15 +759,16 @@ describe('edge placement — data-placement attribute', () => {
     })
     fireEvent.focus(wrapper)
     const card = document.querySelector('[data-placement]') as HTMLElement
-    // Right-anchored: card element should have right:0 style
-    expect(card.style.right).toBe('0px')
+    // Right-anchored: HoverCard pins the panel via data-align + the --align-right CSS
+    // class (right:0 lives in the stylesheet, not as an inline style).
+    expect(card.getAttribute('data-align')).toBe('right')
     // Restore
     Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 1024 })
   })
 
   it('unmount while focused leaves no card and does not throw (§6.3)', () => {
     const { unmount } = render(<MessageBubble msg={msg()} />)
-    const wrapper = document.querySelector('.relative') as HTMLElement
+    const wrapper = document.querySelector('.soup-hovercard') as HTMLElement
     fireEvent.focus(wrapper)
     expect(screen.getByText('Sender')).toBeDefined()
     // Unmount — should not throw; card disappears with the component

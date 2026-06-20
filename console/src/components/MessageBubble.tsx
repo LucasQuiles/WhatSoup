@@ -1,11 +1,10 @@
-import { type FC, useState, useRef, useCallback } from 'react'
+import { type FC, type ReactNode } from 'react'
 import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatFullTime, formatTime } from '../lib/format-time'
-import { resolveViewportPlacement, type ViewportPlacement } from '../hooks/useViewportPlacement'
 import MessageContent from './MessageContent'
 import { Button } from './primitives/Button'
-import { Card } from './primitives'
+import { HoverCard } from './primitives'
 import type { Message } from '../types'
 
 interface MessageBubbleProps {
@@ -21,51 +20,40 @@ interface MessageBubbleProps {
 
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 
-/** Styled hover/focus detail card — shown on hover or focus. */
-const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored: boolean }> = ({
-  msg,
-  placement,
-  rightAnchored,
-}) => {
+/**
+ * The hover/focus detail rows shown inside the HoverCard panel (showcase §43).
+ * Time / Sender / JID? / Type / Direction, then a rule-separated ID row. The panel
+ * itself (surface, border, shadow, placement, hover-bridge, Escape, edge-anchoring)
+ * is owned by the HoverCard primitive — these are only the rows.
+ */
+const detailRows = (msg: Message): ReactNode => {
   const fullTime = formatFullTime(msg.timestamp)
   const senderDisplayName = resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—')
-
-  const style: React.CSSProperties =
-    placement === 'below'
-      ? { top: '100%', left: rightAnchored ? undefined : 0, right: rightAnchored ? 0 : undefined }
-      : { bottom: '100%', left: rightAnchored ? undefined : 0, right: rightAnchored ? 0 : undefined }
+  const idValue = msg.pk === -1 ? 'failed' : msg.pk < 0 ? 'sending' : `pk:${msg.pk}`
 
   return (
-    <Card
-      data-placement={placement}
-      className="absolute z-[var(--z-float)] pointer-events-none c-card--detail mb-[var(--sp-2)]"
-      style={style}
-    >
-      <div className="flex flex-col gap-[var(--sp-2)]">
-        {[
-          { label: 'Time', value: fullTime },
-          { label: 'Sender', value: senderDisplayName },
-          ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
-          { label: 'Type', value: msg.type },
-          { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
-        ].map(({ label, value, muted }) => (
-          <div key={label} className="flex justify-between gap-[var(--sp-4)]">
-            <span className="c-label flex-shrink-0">{label}</span>
-            <span title={value} className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-text-3' : ''}`}>
-              {value}
-            </span>
-          </div>
-        ))}
-        <div className="pt-[var(--sp-2)] mt-[var(--sp-1)] c-border-t-b2">
-          <div className="flex justify-between">
-            <span className="c-label">ID</span>
-            <span className="c-data text-text-3">
-              {msg.pk === -1 ? 'failed' : msg.pk < 0 ? 'sending' : `pk:${msg.pk}`}
-            </span>
-          </div>
+    <div className="flex flex-col gap-[var(--sp-2)]">
+      {[
+        { label: 'Time', value: fullTime },
+        { label: 'Sender', value: senderDisplayName },
+        ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
+        { label: 'Type', value: msg.type },
+        { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
+      ].map(({ label, value, muted }) => (
+        <div key={label} className="flex justify-between gap-[var(--sp-4)]">
+          <span className="c-label flex-shrink-0">{label}</span>
+          <span title={value} className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-text-3' : ''}`}>
+            {value}
+          </span>
+        </div>
+      ))}
+      <div className="pt-[var(--sp-2)] mt-[var(--sp-1)] c-border-t-b2">
+        <div className="flex justify-between">
+          <span className="c-label">ID</span>
+          <span className="c-data text-text-3">{idValue}</span>
         </div>
       </div>
-    </Card>
+    </div>
   )
 }
 
@@ -104,80 +92,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
 
 const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry }) => {
   const isMedia = msg.type !== 'text'
-  const [showByHover, setShowByHover] = useState(false)
-  const [showByFocus, setShowByFocus] = useState(false)
-  const [placement, setPlacement] = useState<ViewportPlacement>('above')
-  const [rightAnchored, setRightAnchored] = useState(false)
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const wrapperRef = useRef<HTMLDivElement>(null)
-
-  const showDetail = showByHover || showByFocus
   const senderDisplayName = resolveDisplayName(msg.senderName)
-
-  /**
-   * Measure the wrapper position and resolve card placement + right-anchor.
-   * Card is absolutely positioned relative to the wrapper. We estimate card
-   * height (160px) and width (220px) to detect viewport clipping.
-   *
-   * Zero-rect guard: when width, height, and all coordinates are zero (jsdom
-   * default), the measurement is uninformative — keep the default 'above'/
-   * left-anchored placement so tests that do not stub rects run unchanged.
-   */
-  const measureAndSetPlacement = useCallback(() => {
-    if (!wrapperRef.current) return
-    const rect = wrapperRef.current.getBoundingClientRect()
-    // Uninformative zero-rect (jsdom default) — keep defaults
-    if (rect.width === 0 && rect.height === 0 && rect.top === 0 && rect.left === 0) return
-    const estimatedCardHeight = 160
-    const estimatedCardWidth = 220
-    const nextPlacement = resolveViewportPlacement({
-      anchorRect: rect,
-      estimatedCardHeight,
-      estimatedCardWidth,
-    })
-    setPlacement(nextPlacement.placement)
-    setRightAnchored(nextPlacement.rightAnchored)
-  }, [])
-
-  // ── Hover path (500ms delay — byte-identical to original semantics) ────────
-  const onEnter = useCallback(() => {
-    hoverTimer.current = setTimeout(() => {
-      measureAndSetPlacement()
-      setShowByHover(true)
-    }, 500)
-  }, [measureAndSetPlacement])
-
-  const onLeave = useCallback(() => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current)
-    hoverTimer.current = null
-    setShowByHover(false)
-  }, [])
-
-  // ── Focus path (instant reveal per motion law §7) ─────────────────────────
-  const onFocus = useCallback(() => {
-    measureAndSetPlacement()
-    setShowByFocus(true)
-  }, [measureAndSetPlacement])
-
-  const onBlur = useCallback(() => {
-    setShowByFocus(false)
-  }, [])
-
-  // ── Escape dismiss (one-layer law §2 — stopPropagation) ───────────────────
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === 'Escape' && showDetail) {
-        e.stopPropagation()
-        setShowByHover(false)
-        setShowByFocus(false)
-        if (hoverTimer.current) {
-          clearTimeout(hoverTimer.current)
-          hoverTimer.current = null
-        }
-      }
-    },
-    [showDetail],
-  )
 
   return (
     <div
@@ -201,20 +116,18 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
         </div>
       )}
 
-      {/* Message bubble — with hover/focus detail card */}
-      <div
-        ref={wrapperRef}
-        className="relative"
-        tabIndex={0}
-        aria-label="Message detail"
-        onMouseEnter={onEnter}
-        onMouseLeave={onLeave}
-        onFocus={onFocus}
-        onBlur={onBlur}
-        onKeyDown={onKeyDown}
+      {/* Message bubble — the trigger; HoverCard owns the hover/focus detail panel
+          (hover-bridge, 500ms reveal, Escape, edge-anchoring, OR-semantics). */}
+      <HoverCard
+        anchorX="edge"
+        cardLabel="Message detail"
+        openDelay={500}
+        className="soup-hovercard--block"
+        card={detailRows(msg)}
       >
-        {showDetail && <DetailCard msg={msg} placement={placement} rightAnchored={rightAnchored} />}
         <div
+          tabIndex={0}
+          aria-label="Message detail"
           className={`text-body c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-surface-raised'}`}
           style={{
             padding: isMedia ? 'var(--sp-2) var(--sp-3)' : 'var(--sp-2h) var(--msg-pad-h)',
@@ -227,7 +140,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
             <MessageContent msg={msg} highlightQuery={highlightQuery} />
           </div>
         </div>
-      </div>
+      </HoverCard>
 
       {/* Timestamp + delivery status + type badge */}
       <div
