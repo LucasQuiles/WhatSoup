@@ -24,6 +24,17 @@ before the process starts. They are never written to disk.
 
 > **Instance-type summary:** `chat` instances require **all three** keys (Anthropic, OpenAI, Pinecone) — startup aborts otherwise. `agent` instances require none at the launcher level; OpenAI and Pinecone are loaded best-effort and used only when the corresponding feature is exercised. `passive` instances require none.
 
+### Audio Transcription (local providers)
+
+These tune the optional on-device voice-note transcription backends. They are read once at module load. The OpenAI Whisper path uses `OPENAI_API_KEY` (above) and needs no extra env vars.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_FASTER_WHISPER_MODEL` | string | `large-v3-turbo` | faster-whisper model name passed to the Python wrapper (`src/runtimes/chat/providers/transcription/faster-whisper.ts:13`). Models are loaded from `~/.local/share/whatsoup/models/faster-whisper`. |
+| `WHATSOUP_FASTER_WHISPER_PYTHON` | path | (unset) | Explicit path to the faster-whisper Python interpreter (`src/runtimes/chat/providers/transcription/faster-whisper.ts:17`). When unset, the resolver probes the managed venv at `~/.local/share/whatsoup/transcription-venv/bin/{python3.12,python3,python}` and falls back to "runtime not installed" if none exists. |
+| `WHATSOUP_WHISPER_CPP_MODEL` | path | `~/.local/share/whatsoup/models/whisper.cpp/ggml-small.bin` | Path to the whisper.cpp GGML model file (`src/runtimes/chat/providers/transcription/whisper-cpp.ts:9`). Transcription throws if the file is missing. |
+| `WHATSOUP_WHISPER_CPP_BIN` | string | `whisper-cli` | whisper.cpp CLI binary to invoke (`src/runtimes/chat/providers/transcription/whisper-cpp.ts:12`). When unset, the resolver looks up `whisper-cli` on `PATH`; when set, the configured value is resolved via `resolveBinaryPath`. |
+
 ### Models
 
 | Variable | Type | Default | Description |
@@ -95,6 +106,19 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Default local embed endpoint for vector knowledge profiles that do not override `embedUrl`. |
 | `RECENCY_HALF_LIFE_DAYS` | integer | `14` | Positive day-count half-life for memory-search recency decay. Smaller values forget faster; zero/negative/malformed values fall back to `14`. |
 | `MAX_AGE_DAYS` | integer | `90` | Positive day-count cutoff for memory search; records older than this are filtered out. Zero/negative/malformed values fall back to `90`. |
+
+### Transport (Baileys connection)
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_BAILEYS_VERSION` | string | (unset → fetch latest) | Pin the Baileys WhatsApp Web protocol version as a dotted three-part tuple, e.g. `2.3000.1021` (`src/transport/baileys-version.ts:15`). When unset/empty the version is resolved live via `fetchLatestBaileysVersion()`. The value is strictly validated: it must be exactly three numeric, safe, non-negative integer parts or startup throws. |
+| `WHATSOUP_AUTH_BOND_AUTO_RESTORE` | boolean (`0` disables) | enabled | Controls the auth-bond guard's automatic restore of WhatsApp credentials from the most recent backup (`src/transport/auth-bond.ts:432`). Auto-restore is on unless the value is exactly `0`; any other value (including unset) leaves it enabled. An explicit `autoRestore` option in code overrides this env var. |
+
+### Credential Storage
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `REQUIRE_OS_KEYRING` | string (presence) | (unset) | When set to any non-empty value, an **errored** OS keyring backend probe (e.g. `secret-tool` timeout/EACCES, not a genuinely-absent keyring) becomes fatal instead of silently downgrading to plaintext file credential storage (`src/lib/keyring.ts:66`). A genuinely-absent keyring (ENOENT) is still allowed to fall back to env-only lookup. macOS always uses the Keychain backend, so this guard applies to the Linux/WSL `secret-tool` probe path. |
 
 ### Health Server
 
@@ -169,6 +193,7 @@ The `config` volume is critical — losing it requires re-scanning the QR code f
 | Variable | Type | Description |
 |----------|------|-------------|
 | `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `config.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
+| `WHATSOUP_NODE` | path | Optional Node binary path propagated into the generated macOS launchd plist's `EnvironmentVariables` (`src/fleet/platform.ts:105`). When set in the generating process's environment, a `WHATSOUP_NODE` key with this value is emitted into the plist so the launched instance uses the chosen Node runtime; when unset the key is omitted entirely. |
 
 ---
 
