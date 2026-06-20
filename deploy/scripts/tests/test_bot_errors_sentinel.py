@@ -1957,3 +1957,192 @@ def test_run_once_prunes_outbox_and_reports_depth(tmp_path: Path):
     surviving = list(outbox.glob("*.json"))
     assert len(surviving) == 2, [p.name for p in surviving]
     assert result["actionOutboxDepth"] == 2
+
+
+# --- F1/T1: Tier-2 remediation token single-use enforcement -------------------
+
+
+def _issue_tier2_token(tmp_path: Path, monkeypatch, *, token: str = "fixed-token", ttl: int = 900):
+    """Drive run_once to issue a real Tier-2 q-remediation token and return
+    (config, remediation_payload, state_dict). The qRemediation record carries
+    an authentic tokenHash bound to the raw token + host + actionHash + requestId."""
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    q_hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, klass="healthy", mtime=995.0)
+    hosts = _hosts_file(
+        tmp_path,
+        [
+            {"host": "host-q", "heartbeatPath": str(hb)},
+            {"host": "q-agent-host", "heartbeatPath": str(q_hb)},
+        ],
+    )
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, tier2_token_ttl_seconds=ttl, q_host="q-agent-host")
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: token)
+    result = _mod.run_once(
+        config,
+        _deps(
+            1000.0,
+            {
+                "host-q": {"reachable": True, "healthy": False, "class": "permission_denied"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    return config, payload["remediation"], state
+
+
+def test_fresh_token_redeems_once_and_stamps_redeemed_at(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    state = _mod.load_state(config)
+    outcome = _mod.redeem_q_remediation(state, 1500.0, remediation["requestId"], remediation["token"])
+    assert outcome["redeemed"] is True
+    assert outcome["reason"] == "redeemed"
+    assert outcome["requestId"] == remediation["requestId"]
+    assert outcome["host"] == "host-q"
+    assert outcome["redeemedAt"] == _mod.now_iso(1500.0)
+    # redeemedAt is stamped on the in-memory record.
+    assert state["qRemediation"]["redeemedAt"] == _mod.now_iso(1500.0)
+    # A redeemed record is honored by both consumption sites → no longer active.
+    assert _mod.active_q_remediation(state, 1500.0) is None
+
+
+def test_redeemed_token_replay_is_rejected(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    state = _mod.load_state(config)
+    first = _mod.redeem_q_remediation(state, 1500.0, remediation["requestId"], remediation["token"])
+    assert first["redeemed"] is True
+    # Replay the SAME token against the SAME record → denied (single-use).
+    replay = _mod.redeem_q_remediation(state, 1501.0, remediation["requestId"], remediation["token"])
+    assert replay["redeemed"] is False
+    assert replay["reason"] == "already_redeemed"
+    assert replay["redeemedAt"] == first["redeemedAt"]
+
+
+def test_redeem_is_idempotent_does_not_advance_redeemed_at(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    state = _mod.load_state(config)
+    first = _mod.redeem_q_remediation(state, 1500.0, remediation["requestId"], remediation["token"])
+    second = _mod.redeem_q_remediation(state, 9999.0, remediation["requestId"], remediation["token"])
+    # The stamp is not overwritten by a later replay; first redemption wins.
+    assert second["redeemed"] is False
+    assert state["qRemediation"]["redeemedAt"] == first["redeemedAt"] == _mod.now_iso(1500.0)
+
+
+def test_redeem_rejects_wrong_token_and_does_not_stamp(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    state = _mod.load_state(config)
+    outcome = _mod.redeem_q_remediation(state, 1500.0, remediation["requestId"], "not-the-token")
+    assert outcome["redeemed"] is False
+    assert outcome["reason"] == "token_mismatch"
+    assert "redeemedAt" not in state["qRemediation"]
+    # The genuine token still works afterward (a forged attempt must not consume it).
+    good = _mod.redeem_q_remediation(state, 1500.0, remediation["requestId"], remediation["token"])
+    assert good["redeemed"] is True
+
+
+def test_redeem_rejects_request_id_mismatch(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    state = _mod.load_state(config)
+    outcome = _mod.redeem_q_remediation(state, 1500.0, "wrong-request-id", remediation["token"])
+    assert outcome["redeemed"] is False
+    assert outcome["reason"] == "request_id_mismatch"
+    assert "redeemedAt" not in state["qRemediation"]
+
+
+def test_redeem_fail_closed_on_missing_record():
+    assert _mod.redeem_q_remediation({}, 1500.0, "rid", "tok") == {
+        "redeemed": False,
+        "reason": "no_active_remediation",
+    }
+    assert _mod.redeem_q_remediation({"qRemediation": {}}, 1500.0, "rid", "tok")["reason"] == "no_active_remediation"
+
+
+def test_redeem_fail_closed_on_corrupt_record():
+    state = {"qRemediation": ["corrupt"]}
+    outcome = _mod.redeem_q_remediation(state, 1500.0, "rid", "tok")
+    assert outcome == {"redeemed": False, "reason": "no_active_remediation"}
+    # Structurally-corrupt slot is dropped (mirrors active_q_remediation).
+    assert "qRemediation" not in state
+
+
+def test_redeem_fail_closed_on_corrupt_token_hash():
+    state = {
+        "qRemediation": {
+            "requestId": "rid",
+            "host": "host-q",
+            "actionHash": "ah",
+            "expiresAtEpoch": 9000.0,
+        }
+    }
+    outcome = _mod.redeem_q_remediation(state, 1500.0, "rid", "tok")
+    assert outcome == {"redeemed": False, "reason": "corrupt_token_hash"}
+
+
+def test_redeem_rejects_expired_token(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch, ttl=900)
+    state = _mod.load_state(config)
+    # now is past expiresAtEpoch (issued at 1000.0 + 900 = 1900.0).
+    outcome = _mod.redeem_q_remediation(state, 5000.0, remediation["requestId"], remediation["token"])
+    assert outcome["redeemed"] is False
+    assert outcome["reason"] == "expired"
+    assert "redeemedAt" not in state["qRemediation"]
+
+
+def test_run_redeem_persists_only_on_success(tmp_path: Path, monkeypatch):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    monkeypatch.setattr(_mod.time, "time", lambda: 1500.0)
+    # Rejection path: state file is NOT mutated.
+    before = _mod.state_path(config).read_text(encoding="utf-8")
+    rej = _mod.run_redeem(config, remediation["requestId"], "wrong-token")
+    assert rej["redeemed"] is False
+    assert _mod.state_path(config).read_text(encoding="utf-8") == before
+    # Success path: redeemedAt is durably persisted.
+    ok = _mod.run_redeem(config, remediation["requestId"], remediation["token"])
+    assert ok["redeemed"] is True
+    assert ok["redeemedAt"] == _mod.now_iso(1500.0)
+    persisted = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert persisted["qRemediation"]["redeemedAt"] == _mod.now_iso(1500.0)
+
+
+def test_main_redeem_cli_accepts_then_rejects_replay(tmp_path: Path, monkeypatch, capsys):
+    config, remediation, _ = _issue_tier2_token(tmp_path, monkeypatch)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(tmp_path / "sentinel-instance.lock"))
+    # Redemption happens inside the token TTL (issued at 1000.0, ttl 900 → 1900.0).
+    monkeypatch.setattr(_mod.time, "time", lambda: 1500.0)
+    state_dir = str(config.state_dir)
+    hosts = str(config.hosts_path)
+    argv = [
+        "--hosts", hosts,
+        "--state-dir", state_dir,
+        "--redeem-token", remediation["token"],
+        "--redeem-request-id", remediation["requestId"],
+    ]
+    rc_first = _mod.main(argv)
+    out_first = json.loads(capsys.readouterr().out)
+    assert rc_first == 0
+    assert out_first["redeemed"] is True
+    assert out_first["kind"] == "bot-errors-sentinel-redeem"
+    # Replay through the CLI is rejected with a non-zero exit.
+    rc_second = _mod.main(argv)
+    out_second = json.loads(capsys.readouterr().out)
+    assert rc_second == 1
+    assert out_second["redeemed"] is False
+    assert out_second["reason"] == "already_redeemed"
+
+
+def test_main_redeem_requires_both_token_and_request_id(tmp_path: Path, capsys):
+    rc = _mod.main(["--state-dir", str(tmp_path / "state"), "--redeem-token", "tok"])
+    err = json.loads(capsys.readouterr().err)
+    assert rc == 2
+    assert err["reason"] == "redeem_requires_token_and_request_id"
+    assert err["redeemed"] is False
+
+
+def test_parse_args_redeem_flags_default_none():
+    args = _mod.parse_args([])
+    assert args.redeem_token is None
+    assert args.redeem_request_id is None
+    parsed = _mod.parse_args(["--redeem-token", "t", "--redeem-request-id", "r"])
+    assert parsed.redeem_token == "t"
+    assert parsed.redeem_request_id == "r"
