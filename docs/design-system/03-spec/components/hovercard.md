@@ -3,7 +3,12 @@
 `v3.0.0-draft · G2-locked direction · pending G3`
 
 Interactive hover/focus disclosure card (showcase §43, DD-43). Retires the hand-rolled
-detail cards in `MessageBubble.tsx` and `PipelineTab.tsx`.
+**hover/focus** detail card in `MessageBubble.tsx` (the one genuine hover-card).
+
+> Scope note: `PipelineTab.tsx`'s `NodeDetailCard` is **NOT** a HoverCard target — it is
+> a **click/selection** detail panel (`toggleNode` on click, `selectedNode` state,
+> `{details && …}`), not a hover-triggered card. It is out of DD-43 hover-card scope; a
+> primitive migration there (if ever) would be onto a click-overlay, not HoverCard.
 
 ## Distinct from Tooltip
 
@@ -53,5 +58,10 @@ region) · `children` (the focusable trigger) · `id?` · `openDelay?` (default 
 
 ## Enforcement hooks
 
-- After both consumers migrate (B3): a `no-raw-hover-card` inventory ratchet (fall-only
-  allowlist + honesty test + firing negative fixture) freezes the debt closed.
+- After `MessageBubble` migrates (HC-05): a `no-raw-hover-card` inventory ratchet (fall-only
+  allowlist + honesty test + firing negative fixture) freezes the one genuine hover-card
+  pattern. (PipelineTab is excluded by the scope note above — it is not a hover-card.)
+- HC-05 prerequisite: MessageBubble's DetailCard uses horizontal **right-anchoring** near the
+  viewport edge (`resolveViewportPlacement().rightAnchored`); HoverCard B1 paints a centered
+  panel and ignores that signal, so a faithful migration first extends HoverCard to consume
+  `rightAnchored` (the placement owner already returns it). Tracked with HC-05.
