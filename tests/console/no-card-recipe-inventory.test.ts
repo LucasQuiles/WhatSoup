@@ -25,7 +25,8 @@ const CARD_RECIPE = /\bc-card\b/
 // migration. Every OTHER entry is a raw-recipe consumer still owed a migration onto <Card>.
 const ALLOWLIST = new Set<string>([
   'console/src/components/primitives/Card.tsx',
-  'console/src/components/ActiveHoursHeatmap.tsx',
+  // ActiveHoursHeatmap MIGRATED (W2-S4): its 3 c-card sections now render via
+  // <Card variant="base" as="section">; dropped redundant bg-surface-raised.
   // MessageBubble MIGRATED off the recipe (DD-43): its detail panel now renders via the
   // HoverCard primitive and the `.c-card--detail` modifier was deleted, so it is no
   // longer a raw `c-card` consumer (removed from this allowlist per the honesty test).

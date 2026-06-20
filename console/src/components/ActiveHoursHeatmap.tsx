@@ -1,6 +1,7 @@
 import React from 'react';
 import type { MetricsRange } from './line-detail/types';
 import { formatShortDate } from '../lib/format-time';
+import { Card } from './primitives';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -58,9 +59,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
     const max = Math.max(...hourly, 1);
 
     return (
-      <section
-        className="c-card font-mono p-[var(--sp-4)] bg-surface-raised"
-      >
+      <Card variant="base" as="section" className="font-mono p-[var(--sp-4)]">
         <div
           className="font-mono text-text-2 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-xs"
         >
@@ -96,7 +95,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
             </div>
           ))}
         </div>
-      </section>
+      </Card>
     );
   }
 
@@ -108,7 +107,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
     const dateLabels = byDate.map(d => formatShortDate(`${d.date}T00:00:00`));
 
     return (
-      <section className="c-card font-mono p-[var(--sp-4)] bg-surface-raised">
+      <Card variant="base" as="section" className="font-mono p-[var(--sp-4)]">
         <div className="font-mono text-text-2 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-xs">
           Active Hours ({byDate.length} days)
         </div>
@@ -150,7 +149,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
         </div>
 
         <HeatmapLegend max={max} />
-      </section>
+      </Card>
     );
   }
 
@@ -158,9 +157,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
   const max = Math.max(...data.flat(), 1);
 
   return (
-    <section
-      className="c-card font-mono p-[var(--sp-4)] bg-surface-raised"
-    >
+    <Card variant="base" as="section" className="font-mono p-[var(--sp-4)]">
       <div
         className="font-mono text-text-2 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-xs"
       >
@@ -256,6 +253,6 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
       )}
 
       <HeatmapLegend max={max} />
-    </section>
+    </Card>
   );
 }
