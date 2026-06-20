@@ -47,6 +47,33 @@ export function insertAllowed(db: Database, subjectType: SubjectType, subjectId:
   ).run(subjectType, subjectId);
 }
 
+/**
+ * Seed a declared set of group JIDs as auto-respond ('allowed') access entries.
+ *
+ * This is the durable, config-driven equivalent of the admin-phone seed in
+ * `main.ts`: instead of relying on a hand-inserted `access_list` row per
+ * instance (imperative, lost on a DB rebuild, invisible to source), the operator
+ * declares `autoRespondGroups` in instance config and the grant is reconstructed
+ * from that list at every startup.
+ *
+ * Insert-only-when-absent: a group that already has ANY row (allowed, blocked, or
+ * pending) is left untouched, so a deliberate block or a pending review is never
+ * silently overridden by the seed. Returns the number of NEW rows inserted.
+ */
+export function seedAutoRespondGroups(db: Database, jids: Iterable<string>): number {
+  let seeded = 0;
+  const seen = new Set<string>();
+  for (const raw of jids) {
+    const jid = typeof raw === 'string' ? raw.trim() : '';
+    if (!jid || seen.has(jid)) continue;
+    seen.add(jid);
+    if (lookupAccess(db, 'group', jid)) continue; // preserve any explicit decision
+    insertAllowed(db, 'group', jid);
+    seeded += 1;
+  }
+  return seeded;
+}
+
 export function updateAccess(db: Database, subjectType: SubjectType, subjectId: string, status: 'allowed' | 'blocked'): void {
   db.raw.prepare(
     `UPDATE access_list SET status = ?, decided_at = datetime('now') WHERE subject_type = ? AND subject_id = ?`

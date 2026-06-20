@@ -311,6 +311,7 @@ async function importMainWithMocks(options: {
     lookupAccess: vi.fn((): { status: string } | null => null),
     updateAccess: vi.fn(),
     insertAllowed: vi.fn(),
+    seedAutoRespondGroups: vi.fn(() => 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
     hydrateLidMappings: vi.fn(() => 0),
     upsertLidMapping: vi.fn(),
@@ -399,7 +400,8 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/blocklist-sync.ts', () => ({ handleBlocklistSet: mocks.handleBlocklistSet, handleBlocklistUpdate: mocks.handleBlocklistUpdate }));
   vi.doMock('../src/core/access-list.ts', () => ({
     lookupAccess: mocks.lookupAccess, updateAccess: mocks.updateAccess,
-    insertAllowed: mocks.insertAllowed, resolvePhoneFromJid: mocks.resolvePhoneFromJid,
+    insertAllowed: mocks.insertAllowed, seedAutoRespondGroups: mocks.seedAutoRespondGroups,
+    resolvePhoneFromJid: mocks.resolvePhoneFromJid,
   }));
   vi.doMock('../src/core/lid-resolver.ts', () => ({
     hydrateLidMappings: mocks.hydrateLidMappings, upsertLidMapping: mocks.upsertLidMapping,

@@ -40,7 +40,7 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
-import { lookupAccess, updateAccess, insertAllowed, resolvePhoneFromJid } from './core/access-list.ts';
+import { lookupAccess, updateAccess, insertAllowed, seedAutoRespondGroups, resolvePhoneFromJid } from './core/access-list.ts';
 import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
@@ -148,6 +148,19 @@ const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config
 if (config.accessMode !== 'self_only') {
   for (const phone of config.adminPhones) {
     insertAllowed(db, 'phone', phone);
+  }
+}
+
+// 2a-1. Seed declared auto-respond groups into access_list (durable, config-driven
+// group grants). Insert-only-when-absent: a deliberate block or pending review is
+// never overridden. Makes the auto-respond topology reproducible from source/config
+// instead of a per-instance hand-inserted DB row. Gated identically to the
+// admin-phone seed: self_only mode rejects all group messages at the policy layer,
+// so seeding group rows there is inert state pollution.
+if (config.accessMode !== 'self_only') {
+  const seededGroups = seedAutoRespondGroups(db, config.autoRespondGroups);
+  if (seededGroups > 0) {
+    log.info({ count: seededGroups }, 'seeded auto-respond groups');
   }
 }
 
