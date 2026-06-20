@@ -149,6 +149,7 @@ export function registerAllTools(
     db: db.raw,
     dbWrapper: db,
     adminPhones: config.adminPhones,
+    enableUrlWatch: config.advanced?.enableUrlWatch ?? false,
     memory: config.memory,
   }));
 

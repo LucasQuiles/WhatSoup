@@ -213,6 +213,7 @@ async function importMainWithMocks(options: {
     profiles: null,
     authDir: '/tmp/ws-helpers-auth',
     memory: { consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false }, pinecone: { allowedIndexes: [] }, fileWatch: { allowedRoots: [] } },
+    advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
     controlPeers: new Set<string>(),
     configRoot: '/tmp/ws-helpers-config-root',
     adminReplayMax: 5,

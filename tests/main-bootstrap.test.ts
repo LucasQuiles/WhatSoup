@@ -147,6 +147,7 @@ async function importMainWithMocks(options: {
       pinecone: { allowedIndexes: [] },
       fileWatch: { allowedRoots: [] },
     },
+    advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
     controlPeers: new Set(['q']),
     configRoot: '/tmp/whatsoup-main-config-root',
     adminReplayMax: 5,

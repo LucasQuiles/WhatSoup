@@ -535,12 +535,15 @@ describe('TriggerPoller — not-yet-implemented kinds', () => {
   beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
   afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
 
-  it('poll.shell records noop with not_implemented reason and bumps next_fire_at by 1h cooldown', async () => {
+  it('poll.email records noop with not_implemented reason and bumps next_fire_at by 1h cooldown', async () => {
+    // poll.email remains deferred (no executor); it is the canonical
+    // still-not-implemented kind now that poll.shell is removed and
+    // poll.url/file/pinecone are wired.
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
     const t = createTrigger(db.raw, {
-      beadId: bead.id, kind: 'poll.shell',
-      spec: { argv: ['/bin/true'], fire_when: 'exit_zero' },
+      beadId: bead.id, kind: 'poll.email',
+      spec: { source: 'gmail', sender: 'invoices-sender-invalid' },
       reportChatJid: 'admin@s.whatsapp.net',
       intervalSeconds: 60, nextFireAt: 1_000_000_000,
       actor: 'u',
@@ -1537,6 +1540,178 @@ describe('poller.ts uncovered-branch coverage', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     expect(scheduled).toEqual([]);
+  });
+});
+
+describe('TriggerPoller — poll.url (gated, default-OFF)', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  function makeUrlTrigger(spec: Record<string, unknown>, nextFireAt = 1_000_000_000) {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    return createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.url',
+      spec,
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt,
+      actor: 'u',
+    });
+  }
+
+  it('fails closed with url_watch_disabled when the flag is OFF, even for a valid spec', async () => {
+    const { messenger, calls } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: 'hello' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/feed', hash_mode: 'text' });
+
+    // enableUrlWatch defaults OFF — no flag passed.
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('url_watch_disabled');
+  });
+
+  it('fires on first run (hash recorded) and stores no body in output_json', async () => {
+    const { messenger, calls } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: { etag: 'abc' }, body: '<html>secret-body</html>' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/feed', hash_mode: 'text' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs[0].status).toBe('ok');
+    const oj = JSON.parse(runs[0].output_json);
+    // The fetched body must never appear in output_json — only scalars.
+    expect(oj.body).toBeUndefined();
+    expect(JSON.stringify(oj)).not.toContain('secret-body');
+    // output_json carries exactly the scalar change-detection fields: a boolean
+    // hashChanged, an opaque 64-char sha256 digest, and the hash mode.
+    expect(oj).toMatchObject({ hashChanged: true, hashMode: 'text' });
+    expect(oj.urlHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('hash-change detection: fires when body changes, noops when unchanged', async () => {
+    const { messenger } = makeMessenger();
+    let bodyText = 'v1';
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: bodyText }));
+    const t = makeUrlTrigger({ url: 'https://example.com/feed', hash_mode: 'text' });
+
+    // Run 1: first run fires.
+    let poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+    // Run 2: same body → noop.
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_100, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_101, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+    // Run 3: body changes → fires.
+    bodyText = 'v2-changed';
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_200, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_201, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC`).all(t.id) as Array<{ status: string }>;
+    expect(runs.map((r) => r.status)).toEqual(['ok', 'noop', 'ok']);
+  });
+
+  it('selector hash_mode hashes only the selected subtree', async () => {
+    const { messenger } = makeMessenger();
+    let body = '<html><div id="price">10</div><div id="other">A</div></html>';
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body }));
+    const t = makeUrlTrigger({ url: 'https://example.com/p', hash_mode: 'selector', selector: '#price' });
+
+    let poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+    // Change only the non-selected subtree → selector hash unchanged → noop.
+    body = '<html><div id="price">10</div><div id="other">B-changed</div></html>';
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_100, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_101, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC`).all(t.id) as Array<{ status: string }>;
+    expect(runs.map((r) => r.status)).toEqual(['ok', 'noop']);
+  });
+
+  it('rejects a non-https url with ssrf_blocked at exec time', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: 'x' }));
+    // Persist a non-https spec directly (bypass create_watch zod) to exercise the exec-time re-guard.
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    const t = db.raw.prepare(
+      `INSERT INTO bead_triggers (bead_id, kind, spec_json, spec_version, status, interval_seconds, next_fire_at, terminal_at, on_terminal, report_chat_jid, created_at, updated_at)
+       VALUES (?, 'poll.url', ?, 1, 'active', 60, 1000000000, NULL, 'notify', 'admin@s.whatsapp.net', 1, 1)`,
+    ).run(bead.id, JSON.stringify({ url: 'http://example.com/x', hash_mode: 'text' }));
+    const triggerId = Number(t.lastInsertRowid);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(triggerId) as Array<{ status: string; error_kind: string | null }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('ssrf_blocked');
+  });
+
+  it('rejects a non-default port with ssrf_blocked', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: 'x' }));
+    const t = makeUrlTrigger({ url: 'https://example.com:8443/x', hash_mode: 'text' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('ssrf_blocked');
+  });
+
+  it('maps a SsrfBlockedError from the fetcher (private/metadata host) to ssrf_blocked, fail-closed', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => {
+      const { SsrfBlockedError } = await import('../../../src/runtimes/chat/media/links.ts');
+      throw new SsrfBlockedError('private_ip', 'host resolves to 169.254.169.254');
+    });
+    const t = makeUrlTrigger({ url: 'https://metadata.example/latest', hash_mode: 'text' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('ssrf_blocked');
+  });
+});
+
+describe('TriggerPoller — poll.shell removed (fail closed)', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('a legacy persisted poll.shell row fails closed with shell_watch_removed (no crash, no noop hot-loop)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    // A row that could only have been persisted before removal. Insert directly,
+    // since create_watch no longer accepts poll.shell.
+    const info = db.raw.prepare(
+      `INSERT INTO bead_triggers (bead_id, kind, spec_json, spec_version, status, interval_seconds, next_fire_at, terminal_at, on_terminal, report_chat_jid, created_at, updated_at)
+       VALUES (?, 'poll.shell', ?, 1, 'active', 60, 1000000000, NULL, 'notify', 'admin@s.whatsapp.net', 1, 1)`,
+    ).run(bead.id, JSON.stringify({ argv: ['/bin/true'], fire_when: 'exit_zero' }));
+    const triggerId = Number(info.lastInsertRowid);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(triggerId) as Array<{ status: string; error_kind: string | null }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('shell_watch_removed');
   });
 });
 

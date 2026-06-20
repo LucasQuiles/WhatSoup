@@ -39,8 +39,9 @@ TriggerPoller (src/core/substrate/poller.ts)   ← wired in main.ts since PR #67
   │
   ├─ expiry sweep: status='active' AND terminal_at <= now → expireTrigger
   ├─ dueTriggers(db, now, batchSize) → process each
-  ├─ per-kind executor (poll.sqlite + poll.pinecone + poll.file + schedule.*
-  │     implemented; poll.url / poll.shell / poll.email / event.message no-op)
+  ├─ per-kind executor (poll.sqlite + poll.pinecone + poll.file +
+  │     poll.url[gated] + schedule.* implemented; poll.email no-op;
+  │     poll.shell REMOVED → fails closed; event.message re-homed to ingest)
   ├─ writes trigger_runs row (status: running → ok/noop/failed/terminal_fired)
   └─ on fire, sends notification to report_chat_jid via Messenger
 ```
@@ -66,11 +67,11 @@ Defined in `src/core/substrate/triggers.ts` (`SPEC_REGISTRY`):
 | `schedule.cron` | `expr`, `tz?` | Cron-based scheduling |
 | `schedule.at_time` | `fire_at` (unix epoch) | One-shot at a specific time |
 | `poll.email` | `source` (gmail/m365), `sender?`, `subject_regex?`, `label?`, `body_regex?` | Email polling |
-| `poll.url` | `url`, `hash_mode` (text/selector/headers), `selector?` | URL change detection |
+| `poll.url` | `url`, `hash_mode` (text/selector/headers), `selector?` | URL change detection — **wired, GATED default-OFF**. Requires `advanced.enableUrlWatch: true`; otherwise `create_watch` rejects `source:'poll.url'` at creation (never persists) and the poller fails closed (`url_watch_disabled`) for any persisted row. Reuses the link-preview SSRF stack (`fetchUrlGuarded`: per-hop resolved-IP revalidation, body cap, timeout). Tighter than the preview path: **https-only**, **default-port-only** (443/bare), and a blocked private/loopback/metadata host → `failed` / `ssrf_blocked` (fail-CLOSED, not the soft fallback link-preview uses). Fires on a change in the body / selected subtree (`selector`) / header subset hash. `output_json` carries only `{hashChanged, urlHash, hashMode}` — never the fetched body. |
 | `poll.file` | `path`, `watch` (exists/mtime/content_hash) | Local file monitoring — **wired**. Fail-closed path policy: the resolved path must be under `memory.fileWatch.allowed_roots` (empty allowlist = deny-all; the poller runs unsandboxed in the main process), `/proc` `/dev` `/sys` are rejected, symlink targets are realpath-rechecked against the allowlist (symlink-escape defense), and only regular files are accepted. Disallowed → `failed` / `path_not_allowed`. `content_hash` reads are size-bounded (16 MiB cap). |
 | `poll.sqlite` | `sql`, `fire_when` (rows_returned/rowcount_changed), `binds?` | SQLite query polling — the workhorse for personal-line watches |
 | `poll.pinecone` | `index`, `namespace`, `query`, `top_k?`, `threshold?` | Pinecone similarity search — **wired**. Reuses the `knowledge_search` Pinecone client + `memory.pinecone.allowedIndexes` allowlist (fail-closed `index_not_allowed`; empty allowlist denies all). Fires when `topScore >= threshold` (or any result when no threshold). `output_json` carries only `{matchCount, topScore}` — no record bodies. |
-| `poll.shell` | `argv[]`, `fire_when` (exit_zero/stdout_nonempty/stdout_regex), `cwd?`, `regex?` | Shell command polling |
+| ~~`poll.shell`~~ | — | **REMOVED** (F2 Slice B). No executor ever existed; dropped from the `create_watch` `source` enum, so creation fails loudly via Zod. A legacy persisted row fails closed in the poller (`failed` / `shell_watch_removed`) rather than crashing. |
 | `event.message` | `match` (sender_jid/regex/mention), `value`, `chat_jid?` | Inbound message matching (poller recognises but does not yet execute — see §6) |
 
 ## 4. Personal-line watch recipe
@@ -85,7 +86,7 @@ source.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `source` | enum: one of `poll.email`, `poll.url`, `poll.file`, `poll.sqlite`, `poll.pinecone`, `poll.shell`, `event.message` | yes | Trigger kind. The `schedule.*` kinds in §3 are valid `bead_triggers.kind` values but are reachable via `create_agent_job`, not `create_watch`. |
+| `source` | enum: one of `poll.email`, `poll.url`, `poll.file`, `poll.sqlite`, `poll.pinecone`, `event.message` | yes | Trigger kind. `poll.shell` has been REMOVED from this enum (creation fails). `poll.url` additionally requires `advanced.enableUrlWatch: true` or creation is rejected. The `schedule.*` kinds in §3 are valid `bead_triggers.kind` values but are reachable via `create_agent_job`, not `create_watch`. |
 | `criteria` | object | yes | Kind-specific spec (must pass Zod validation) |
 | `report_chat` | string | yes | Conversation key to send notifications to |
 | `title` | string | no | Human-readable description |
@@ -175,10 +176,10 @@ the first cut shipped only the kinds needed for personal-line watches.
 | `poll.file` | yes | **yes** | exists/mtime/content_hash; fail-closed path policy against `memory.fileWatch.allowed_roots` (empty = deny-all), `/proc` `/dev` `/sys` and non-regular files rejected, symlink-escape realpath recheck, 16 MiB hash cap; disallowed → `failed` / `path_not_allowed` |
 | `schedule.cron` | yes | **yes** | Fires on cron expression; `next_fire_at` advanced via `nextCronRun` |
 | `schedule.at_time` | yes | **yes** | One-shot at `fire_at`, then transitions to `status='expired'` |
-| `poll.shell` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (owner-gated — see F2 closure doc) |
-| `poll.url` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (owner-gated — see F2 closure doc) |
+| `poll.url` | yes (gated) | **yes** (gated) | **GATED default-OFF** behind `advanced.enableUrlWatch`. When OFF: `create_watch` rejects at creation; a persisted row fails closed (`failed` / `url_watch_disabled`). When ON: fetches via the link-preview SSRF stack (`fetchUrlGuarded`), **https-only + default-port-only**, blocked host → `failed` / `ssrf_blocked` (fail-CLOSED); fires on a body/selector/header hash change; `output_json` = `{hashChanged, urlHash, hashMode}` only (no body) |
+| ~~`poll.shell`~~ | n/a | n/a | **REMOVED** (F2 Slice B). Dropped from the `create_watch` enum (creation fails via Zod). A legacy persisted row fails closed: `failed` / `shell_watch_removed` (no executor, no crash) |
 | `poll.email` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (deferred — no credential substrate) |
-| `event.message` | yes | no | Event-driven; needs message-bus integration, not a poller |
+| `event.message` | yes | no | Event-driven; re-homed to the ingest path, not the interval poller |
 
 **Terminal expiry is handled** by a separate sweep at the start of each
 tick — the `dueTriggers` query filters out rows past `terminal_at`, so
@@ -214,9 +215,13 @@ and operator tuning (e.g. `maxConsecutiveFailures`,
 
 ### Remaining work
 
-Each not-yet-implemented kind needs its executor wired in
-`poller.ts:executeTrigger()` and a per-kind branch in `scheduleNextFire`
-where appropriate. Tracked separately in the substrate roadmap.
+After F2 Slice A (`poll.pinecone`, `poll.file`) and Slice B (`poll.url`
+gated, `poll.shell` removed), the only remaining not-implemented kind is
+`poll.email` — deferred because no Gmail/M365 credential substrate exists
+(see the F2 closure doc). `event.message` is intentionally NOT a poller
+concern: it is event-driven and belongs in the ingest path, tracked as a
+separate slice. Any new executor is wired in `poller.ts:executeTrigger()`
+with a per-kind branch in `scheduleNextFire` where appropriate.
 
 ## 7. Workaround: direct DB insertion
 
