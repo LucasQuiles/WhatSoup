@@ -734,13 +734,8 @@ body::before {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-raised);
 }
-.c-card--detail {
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--surface-overlay);
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-overlay);
-  min-width: var(--tooltip-min-w);
-}
+/* The card detail modifier was deleted (DD-43): its sole consumer, MessageBubble's
+   hand-rolled detail card, migrated onto the HoverCard primitive that owns this chrome. */
 
 /* ═══ Tab button — c-tab from design system ═══ */
 .c-tab {

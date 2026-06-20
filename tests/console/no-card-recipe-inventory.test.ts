@@ -26,9 +26,9 @@ const CARD_RECIPE = /\bc-card\b/
 const ALLOWLIST = new Set<string>([
   'console/src/components/primitives/Card.tsx',
   'console/src/components/ActiveHoursHeatmap.tsx',
-  // MessageBubble's hover panel renders via <Card>; only the `c-card--detail` modifier
-  // (a recipe-class match) remains on the surface, so it stays a tracked consumer.
-  'console/src/components/MessageBubble.tsx',
+  // MessageBubble MIGRATED off the recipe (DD-43): its detail panel now renders via the
+  // HoverCard primitive and the `.c-card--detail` modifier was deleted, so it is no
+  // longer a raw `c-card` consumer (removed from this allowlist per the honesty test).
   'console/src/components/line-detail/GroupCard.tsx',
   'console/src/components/line-detail/MetricsTab.tsx',
   'console/src/components/line-detail/ProvidersKeysCard.tsx',

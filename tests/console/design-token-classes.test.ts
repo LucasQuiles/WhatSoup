@@ -34,10 +34,12 @@ describe('design token component classes', () => {
       '.c-input',
       '.c-input-search',
       '.c-card',
-      '.c-card--detail',
     ]) {
       expect(css).toContain(selector)
     }
+    // DD-43: MessageBubble's detail card migrated onto the HoverCard primitive; the
+    // `.c-card--detail` modifier had no other consumer and was deleted (composites.css).
+    expect(css).not.toContain('.c-card--detail')
     // B3W4: .c-dialog-backdrop deleted — last consumer (AddLineWizard) migrated to Modal
     expect(css).not.toContain('.c-dialog-backdrop')
   })
@@ -54,14 +56,16 @@ describe('design token component classes', () => {
     expect(inbox).not.toContain('c-input c-input-search')
   })
 
-  it('uses detail card classes for message bubble hover metadata', () => {
+  it('renders message-bubble hover metadata via the HoverCard primitive (DD-43)', () => {
     const messageBubble = read('console/src/components/MessageBubble.tsx')
 
-    // The hover panel renders via the <Card> primitive (which supplies `c-card`); the
-    // detail-only modifier and the float z-index stay on the surface, never a raw `z-50`.
-    expect(messageBubble).toContain('<Card')
-    expect(messageBubble).toContain('c-card--detail')
-    expect(messageBubble).toContain('z-[var(--z-float)]')
+    // DD-43: the hand-rolled detail Card migrated onto the canonical HoverCard primitive
+    // (edge-anchored, the panel owns its surface/z-index). No raw Card recipe, no float
+    // z-index, and never a raw `z-50` on the surface.
+    expect(messageBubble).toContain('<HoverCard')
+    expect(messageBubble).toContain('anchorX="edge"')
+    expect(messageBubble).toContain('cardLabel="Message detail"')
+    expect(messageBubble).not.toContain('c-card--detail')
     expect(messageBubble).not.toContain('z-50')
   })
 

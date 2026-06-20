@@ -154,7 +154,7 @@
           "path": "src/components/MessageBubble.tsx",
           "count": 1,
           "lines": [
-            220
+            133
           ]
         },
         {
@@ -230,8 +230,8 @@
             621,
             628,
             666,
-            767,
-            852
+            762,
+            847
           ]
         },
         {

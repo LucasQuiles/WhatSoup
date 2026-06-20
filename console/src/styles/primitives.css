@@ -2681,6 +2681,13 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
   display: inline-flex;
 }
 
+/* Block-anchor modifier: the trigger fills the anchor's inline size (used by
+   MessageBubble, whose bubble must stretch to the chat column like its former
+   block wrapper, rather than shrink-wrap as the default inline-flex anchor does). */
+.soup-hovercard--block {
+  display: block;
+}
+
 /* --hc-tx is the horizontal-centering translate; default centers the panel
    (translateX(-50%) over left:50%). The edge-anchor modifiers zero it and pin the
    panel to the trigger's left or right edge instead (anchorX="edge", driven by

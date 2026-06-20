@@ -30,11 +30,9 @@ const CANONICAL_OWNER = 'console/src/hooks/use-dismissable.ts'
 // Explicitly-justified local handlers (NOT global dismissal → not useDismissable's job).
 // Each entry is a tracked exception, visible here rather than hidden in a syntax gap.
 const ALLOWLIST = new Map<string, string>([
-  [
-    'console/src/components/MessageBubble.tsx',
-    'Local hover/focus-detail onKeyDown with stopPropagation (one-layer law §2); ' +
-      'scoped to the bubble, not a global overlay — intentionally not useDismissable.',
-  ],
+  // MessageBubble removed (DD-43): its detail card migrated onto the HoverCard primitive,
+  // which now owns the Escape handler (see the HoverCard.tsx entry below) — MessageBubble
+  // no longer rolls its own Escape, so keeping it here would be a stale exception.
   [
     'console/src/components/primitives/Tooltip.tsx',
     'Local hover/focus tooltip onKeyDown with stopPropagation (one-layer law §2); ' +
