@@ -159,6 +159,96 @@ function formatTextResults(hits: ParsedHit[]): string {
   }).join('\n\n');
 }
 
+/**
+ * Build a Pinecone search function for the substrate `poll.file`/`poll.pinecone`
+ * trigger poller, REUSING the same client, project guard, and index/namespace
+ * allowlist as `knowledge_search` (no second Pinecone client). Returns null when
+ * Pinecone is unavailable (no API key, client init failure, or no valid
+ * allowlisted indexes) — the poller then fails closed with `pinecone_unavailable`.
+ *
+ * The returned function takes `{ index, namespace, query, topK }` and resolves to
+ * `{ matches: [{ score }] }` — ONLY scores cross the boundary, so record bodies
+ * never enter the poller (redaction-by-construction).
+ */
+export function createPineconeWatchSearch(
+  allowedIndexes: string[],
+): {
+  allowedIndexes: string[];
+  search: (args: { index: string; namespace: string; query: string; topK: number }) => Promise<{ matches: Array<{ score: number }> }>;
+} | null {
+  if (allowedIndexes.length === 0) return null;
+
+  const memoryConfig = pineconeMemoryConfig();
+  const apiKey = process.env[memoryConfig.apiKeyEnv] ?? '';
+  if (!apiKey) {
+    log.warn('Pinecone API key env var not set — poll.pinecone watches disabled');
+    return null;
+  }
+
+  let pc: Pinecone;
+  try {
+    pc = new Pinecone({ apiKey });
+  } catch (err) {
+    log.error({ err }, 'Failed to initialize Pinecone client — poll.pinecone watches disabled');
+    return null;
+  }
+
+  const validIndexes = allowedIndexes.filter((name) => {
+    if (memoryConfig.knowledgeProfiles[name]) return true;
+    log.warn({ index: name }, 'Unknown index in allowedIndexes — poll.pinecone disabled for it');
+    return false;
+  });
+  if (validIndexes.length === 0) return null;
+
+  const search = async (args: { index: string; namespace: string; query: string; topK: number }): Promise<{ matches: Array<{ score: number }> }> => {
+    const { index: indexName, namespace, query, topK } = args;
+    const profile = memoryConfig.knowledgeProfiles[indexName];
+    if (!profile) {
+      // Re-guard at call time even though the poller also checks its allowlist.
+      throw new Error(`index "${indexName}" is not an allowlisted knowledge profile`);
+    }
+    const projectError = await validatePineconeProject(pc, indexName, {
+      projectId: memoryConfig.projectId,
+      expectedHostSuffix: memoryConfig.expectedHostSuffix,
+    });
+    if (projectError) throw new Error(projectError);
+
+    const index = pc.index(indexName);
+    const scores: number[] = [];
+
+    if (profile.searchMode === 'vector') {
+      const embedUrl = profile.embedUrl;
+      if (!embedUrl) throw new Error(`vector index "${indexName}" missing embedUrl`);
+      const embedResp = await fetch(embedUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texts: [query], input_type: 'query' }),
+      });
+      if (!embedResp.ok) throw new Error(`embed service HTTP ${embedResp.status}`);
+      const embedJson = (await embedResp.json()) as { vectors: number[][] };
+      const vec = embedJson.vectors?.[0];
+      if (!Array.isArray(vec)) throw new Error('embed service returned no vectors');
+      const resp = await index.namespace(namespace).query({ topK, vector: vec, includeMetadata: false });
+      for (const m of resp.matches ?? []) {
+        if (typeof m.score === 'number') scores.push(m.score);
+      }
+    } else {
+      const resp = await index.searchRecords({
+        namespace,
+        query: { topK, inputs: { text: query } },
+        fields: [],
+      });
+      for (const hit of resp.result?.hits ?? []) {
+        if (typeof hit._score === 'number') scores.push(hit._score);
+      }
+    }
+
+    return { matches: scores.map((score) => ({ score })) };
+  };
+
+  return { allowedIndexes: validIndexes, search };
+}
+
 export function registerKnowledgeTools(
   allowedIndexes: string[],
   register: (tool: ToolDeclaration) => void,
