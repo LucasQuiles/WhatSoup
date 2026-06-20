@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  collectNodePinReadings,
   findNodePinDrift,
   run,
 } from '../../scripts/check-node-pin-consistency.ts';
@@ -28,6 +29,7 @@ function makeFixture(opts: {
     | 'deploy/whatsoup-fleet'
     | 'scripts/run-with-pinned-node.sh'
     | 'scripts/run-with-pinned-npm.sh'
+    | 'deploy/templates/watchdog-script.sh'
   )[];
 }): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-node-pin-'));
@@ -42,6 +44,7 @@ function makeFixture(opts: {
     'deploy/whatsoup-fleet',
     'scripts/run-with-pinned-node.sh',
     'scripts/run-with-pinned-npm.sh',
+    'deploy/templates/watchdog-script.sh',
   ];
 
   writeFileSync(path.join(dir, '.nvmrc'), `${nvmrc}\n`, 'utf8');
@@ -94,6 +97,19 @@ describe('node-pin consistency check', () => {
     expect(drift.missing).toEqual([]);
   });
 
+  it('scans the watchdog template and reads its hardcoded node-path pin (#F6)', () => {
+    // The watchdog template hardcodes __HOME__/.nvm/.../v<version>/bin/node and
+    // never reads .nvmrc; the guard must extract that version so a bump fails CI.
+    const readings = collectNodePinReadings({ cwd: repoRoot });
+    const watchdog = readings.find(
+      (r) => r.source === 'deploy/templates/watchdog-script.sh',
+    );
+    expect(watchdog).toBeDefined();
+    expect(watchdog?.version).toMatch(/^\d+\.\d+\.\d+$/);
+    const canonical = readings.find((r) => r.source === '.nvmrc')?.version;
+    expect(watchdog?.version).toBe(canonical);
+  });
+
   it('pins the package manager to a concrete npm version (supply-chain drift guard)', () => {
     // #1111: packageManager must be present and pin npm (not yarn/pnpm) to a
     // concrete version — the npm bundled with the volta-pinned Node, so no
@@ -118,7 +134,7 @@ describe('node-pin consistency check', () => {
     const dir = makeFixture({ wrapperVersion: '24.13.0' });
     const drift = findNodePinDrift({ cwd: dir });
     expect(drift.canonical).toBe('24.15.0');
-    expect(drift.mismatches).toHaveLength(5);
+    expect(drift.mismatches).toHaveLength(6);
     for (const m of drift.mismatches) {
       expect(m.version).toBe('24.13.0');
       expect([
@@ -127,6 +143,7 @@ describe('node-pin consistency check', () => {
         'deploy/whatsoup-fleet',
         'scripts/run-with-pinned-node.sh',
         'scripts/run-with-pinned-npm.sh',
+        'deploy/templates/watchdog-script.sh',
       ]).toContain(m.source);
     }
   });
