@@ -247,7 +247,7 @@ describe('design system compliance — Shannon slice', () => {
     expect(inbox).toContain('aria-label="Clear search"')
   })
 
-  it('Operator panels adopt the <Card> primitive; SoupKitchen panels use c-card and label the search input', () => {
+  it('Operator and SoupKitchen panels adopt the <Card> primitive and label the search input', () => {
     const ops = read('console/src/pages/Operator.tsx')
     const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
 
@@ -260,9 +260,14 @@ describe('design system compliance — Shannon slice', () => {
     expect(ops).toContain('variant="base"')
     expect(ops).toContain('variant="interactive"')
     expect(ops).not.toMatch(/className="[^"]*\bc-card\b/)
-    // SoupKitchen is still a raw-recipe consumer (tracked in the Card-migration
-    // allowlist) — its panels keep the `.c-card` recipe for now.
-    expect((soupKitchen.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    // SoupKitchen MIGRATED off the raw `.c-card` recipe onto the <Card> primitive
+    // (DD-38, W2-S4 — the LAST raw-recipe page): its 4 surfaces are <Card variant="base">
+    // (one motion-nested, three plain-div 1:1 swaps). Assert the primitive is used and the
+    // raw recipe is gone (no bypass).
+    expect(soupKitchen).toContain('<Card')
+    expect((soupKitchen.match(/<Card\b/g) ?? []).length).toBeGreaterThanOrEqual(4)
+    expect(soupKitchen).toContain('variant="base"')
+    expect(soupKitchen).not.toMatch(/className="[^"]*\bc-card\b/)
     // C2.3: ToolbarSearch primitive generates aria-label from the label prop.
     expect(soupKitchen).toContain('label="Search lines"')
   })

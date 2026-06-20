@@ -40,7 +40,10 @@ const ALLOWLIST = new Set<string>([
   // (the motion.div stays as the outer animated wrapper owning position/size; flex-row
   // cards keep h-full so the inner Card fills the stretched slot), so it no longer uses
   // the raw recipe.
-  'console/src/pages/SoupKitchen.tsx',
+  // SoupKitchen MIGRATED (W2-S4): its 4 c-card surfaces now render via <Card variant="base">
+  // (1 motion-nested — the motion.div keeps the external flex-shrink-0 class and wraps the
+  // Card; 3 plain-div 1:1 swaps), so it is no longer a raw `c-card` consumer. This was the
+  // LAST raw-recipe page — only Card.tsx (the primitive home) stays allowlisted now.
   // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx,
   // line-detail/AccessTab.tsx, line-detail/ScheduledMessageRow.tsx, Inbox.tsx
 ])
