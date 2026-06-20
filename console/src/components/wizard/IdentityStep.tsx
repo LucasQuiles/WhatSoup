@@ -5,7 +5,7 @@ import TagInput from '../TagInput'
 import { api } from '../../lib/api'
 import { slugAgentWorkspaceName } from '../../lib/agent-cwd.ts'
 import { validatePhone } from '../../lib/validation'
-import { TextInput } from '../primitives'
+import { Field, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface IdentityStepProps {
@@ -50,7 +50,6 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const nameLockedHelperId = useId()
   const nameTakenErrorId = useId()
   const nameErrorId = useId()
-  const descriptionInputId = useId()
   const adminPhonesInputId = useId()
   const adminPhonesHelperId = useId()
   const adminPhonesErrorId = useId()
@@ -176,25 +175,19 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
         )}
       </div>
 
-      {/* Description */}
-      <div>
-        <label htmlFor={descriptionInputId} className="c-heading c-field-label">
-          Description <span className="text-text-3">(optional)</span>
-        </label>
-        <div className="flex items-center gap-[var(--sp-2)]">
-        <TextInput
-          id={descriptionInputId}
-          type="text"
-          value={description}
-          onChange={(e) => onChange({ description: e.target.value })}
-          placeholder="What this line is for"
-          confirmed={showConfirmed && Boolean(description.trim())}
-        />
-        {showConfirmed && description.trim() && (
-          <Check size={16} className="wizard-check" />
+      {/* Description — canonical Field: optional marker + built-in confirmed Check (DD-43/W2-S5) */}
+      <Field label="Description" optional confirmed={showConfirmed && Boolean(description.trim())}>
+        {(id) => (
+          <TextInput
+            id={id}
+            type="text"
+            value={description}
+            onChange={(e) => onChange({ description: e.target.value })}
+            placeholder="What this line is for"
+            confirmed={showConfirmed && Boolean(description.trim())}
+          />
         )}
-        </div>
-      </div>
+      </Field>
 
       {/* Admin Phones */}
       <div>
