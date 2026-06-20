@@ -17,6 +17,7 @@ import type { TwilioVoiceConfig } from './types.ts';
 import type { InboundSms } from './port.ts';
 import type { TranscriptDelivery } from './webhook-payloads.ts';
 import { parseInboundSmsWebhook, parseTranscriptionCallback } from './webhook-payloads.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const { validateRequest } = twilio;
 
@@ -63,7 +64,7 @@ export class TwilioWebhookServer {
         // request with 500 instead.
         this.handleRequest(req, res).catch((err: unknown) => {
           log.error(
-            { path: req.url, err: err instanceof Error ? err.message : String(err) },
+            { path: req.url, err: errorMessage(err) },
             'twilio-webhook: handler error',
           );
           if (!res.headersSent) res.writeHead(500).end();

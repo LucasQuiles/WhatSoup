@@ -10,6 +10,7 @@ import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transpo
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
+import { errorMessage } from './lib/error-message.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -331,7 +332,7 @@ if (instanceRaw) {
     instance = JSON.parse(instanceRaw) as Record<string, any>;
   } catch (err) {
     throw new Error(
-      `INSTANCE_CONFIG contains invalid JSON: ${err instanceof Error ? err.message : String(err)}`
+      `INSTANCE_CONFIG contains invalid JSON: ${errorMessage(err)}`
     );
   }
 }

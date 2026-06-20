@@ -6,6 +6,7 @@ import type { Database } from './database.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { nextCronRun } from './cron.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('scheduler');
 
@@ -126,7 +127,7 @@ export class MessageScheduler {
                  SET status = 'failed', sent_at = ?, error = ?
                  WHERE id = ?`,
               )
-              .run(sentAt, `Invalid recurrence after send: ${cronErr instanceof Error ? cronErr.message : String(cronErr)}`, row.id);
+              .run(sentAt, `Invalid recurrence after send: ${errorMessage(cronErr)}`, row.id);
             log.error({ id: row.id, recurrence: row.recurrence, err: cronErr }, 'scheduler: invalid cron in DB, marked failed after send');
             continue;
           }
@@ -151,7 +152,7 @@ export class MessageScheduler {
         }
       } catch (err) {
         const newRetryCount = row.retry_count + 1;
-        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorMsg = errorMessage(err);
         if (newRetryCount >= this.config.maxRetries) {
           if (row.recurrence) {
             // Recurring: a recurring schedule must not be permanently destroyed by

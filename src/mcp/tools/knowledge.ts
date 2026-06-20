@@ -11,6 +11,7 @@ import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
 import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
 import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const log = createChildLogger('knowledge-tools');
 
@@ -427,7 +428,7 @@ export function registerKnowledgeTools(
         };
       } catch (err) {
         const durationMs = Date.now() - startMs;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         log.error({ err, index: indexName, query: query.slice(0, 80), durationMs }, 'knowledge search failed');
 
         // User-friendly error for common failures

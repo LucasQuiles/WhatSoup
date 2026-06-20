@@ -3,6 +3,7 @@ import { fasterWhisperProvider } from './faster-whisper.ts';
 import { openAIWhisperProvider } from './openai-whisper.ts';
 import { FALLBACK_TEXT, type TranscriptionProvider } from './types.ts';
 import { whisperCppProvider } from './whisper-cpp.ts';
+import { errorMessage } from '../../../../lib/error-message.ts';
 
 const log = createChildLogger('transcription-chain');
 
@@ -26,7 +27,7 @@ export async function transcribeAudioWithProviders(
       log.info({ provider: provider.name, textLength: text.length }, 'transcription complete');
       return text;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       log.warn({ provider: provider.name, error: message }, 'transcription provider failed');
     }
   }

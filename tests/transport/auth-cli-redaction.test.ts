@@ -38,7 +38,7 @@ describe('auth CLI redaction', () => {
 
     expect(source).toContain('redactAuthCliText(jid)');
     expect(source).toContain('redactAuthCliText(config.authDir)');
-    expect(source).toContain('redactAuthCliText(err instanceof Error ? err.message : String(err))');
+    expect(source).toContain('redactAuthCliText(errorMessage(err))');
     expect(source).not.toContain('Authenticated successfully as ${jid}');
     expect(source).not.toContain('Auth directory: ${config.authDir}');
   });

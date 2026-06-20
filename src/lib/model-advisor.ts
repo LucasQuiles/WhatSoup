@@ -18,6 +18,7 @@
 import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
+import { errorMessage } from './error-message.ts';
 
 const log = createChildLogger('model-advisor');
 
@@ -114,7 +115,7 @@ async function fetchModelIds(
 }
 
 function sanitizeFetchFailureReason(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorMessage(err);
   return raw
     .replace(/\b(?:sk|sk-ant|sk-proj)-[A-Za-z0-9._-]{8,}\b/g, '[redacted-key]')
     .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}\b/gi, 'Bearer [redacted]');
@@ -278,7 +279,7 @@ export function startModelCurrencyMonitor(
     try {
       notifyModelCurrencyResult(instance, await checkModelCurrencyStatus(models));
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = errorMessage(err);
       log.warn({ err: reason }, 'model currency check failed');
     }
   };

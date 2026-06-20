@@ -12,6 +12,7 @@ import type {
   OutboundSendsWriter,
 } from './outbound-sends.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
 export type TextSendTransportResult = { transportId?: string | null } | void;
@@ -116,7 +117,7 @@ export function createSendPipeline({
         return result;
       } catch (err) {
         if (auditId !== undefined) {
-          auditWriter!.markFailure(auditId, err instanceof Error ? err.message : String(err));
+          auditWriter!.markFailure(auditId, errorMessage(err));
         }
         throw err;
       }

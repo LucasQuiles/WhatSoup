@@ -20,6 +20,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 export type AuthBondStatus = 'present' | 'missing' | 'invalid';
 
@@ -258,7 +259,7 @@ function hardenPrivateTree(root: string): string[] {
       st = lstatSync(current);
     } catch (err) {
       const rel = current === root ? '.' : relative(root, current);
-      issues.push(`auth_mode_stat_failed:${rel}:${err instanceof Error ? err.message : String(err)}`);
+      issues.push(`auth_mode_stat_failed:${rel}:${errorMessage(err)}`);
       continue;
     }
 
@@ -274,7 +275,7 @@ function hardenPrivateTree(root: string): string[] {
         chmodSync(current, desiredMode);
       } catch (err) {
         const rel = current === root ? '.' : relative(root, current);
-        issues.push(`auth_mode_chmod_failed:${rel}:${err instanceof Error ? err.message : String(err)}`);
+        issues.push(`auth_mode_chmod_failed:${rel}:${errorMessage(err)}`);
       }
     }
 
@@ -288,7 +289,7 @@ function hardenPrivateTree(root: string): string[] {
         stack.push(...entries);
       } catch (err) {
         const rel = current === root ? '.' : relative(root, current);
-        issues.push(`auth_mode_readdir_failed:${rel}:${err instanceof Error ? err.message : String(err)}`);
+        issues.push(`auth_mode_readdir_failed:${rel}:${errorMessage(err)}`);
       }
     }
   }
@@ -593,7 +594,7 @@ export class AuthBondGuard {
       }
       this.lastCaptureAt = this.now().toISOString();
       this.lastCaptureReason = reason;
-      this.lastCaptureError = err instanceof Error ? err.message : String(err);
+      this.lastCaptureError = errorMessage(err);
       return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
   }
@@ -715,7 +716,7 @@ export class AuthBondGuard {
           // Preserve the original failure; the alert evidence includes the quarantine path.
         }
       }
-      const error = err instanceof Error ? err.message : String(err);
+      const error = errorMessage(err);
       this.lastRestoreAt = restoredAt.toISOString();
       this.lastRestoreSource = latestBackupPath;
       this.lastRestoreError = `${error}; quarantine=${quarantine}`;
@@ -762,7 +763,7 @@ export class AuthBondGuard {
       }
       manifest = parsed as BackupManifest;
     } catch (err) {
-      return `backup manifest is unreadable: ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`;
+      return `backup manifest is unreadable: ${manifestPath}: ${errorMessage(err)}`;
     }
 
     if (manifest.instanceName && safeName(manifest.instanceName) !== this.instanceName) {
@@ -788,7 +789,7 @@ export class AuthBondGuard {
       if (st.isSymbolicLink()) return `backup path is a symlink: ${backupPath}`;
       if (!st.isDirectory()) return `backup path is not a directory: ${backupPath}`;
     } catch (err) {
-      return `backup path is unreadable: ${backupPath}: ${err instanceof Error ? err.message : String(err)}`;
+      return `backup path is unreadable: ${backupPath}: ${errorMessage(err)}`;
     }
     return null;
   }

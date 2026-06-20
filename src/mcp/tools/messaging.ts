@@ -25,13 +25,14 @@ import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
 // ---------------------------------------------------------------------------
 
 function sanitizeError(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorMessage(err);
   // Map known error patterns to user-friendly messages
   if (/not connected|connection closed|socket|ECONNRESET/i.test(raw)) {
     return 'WhatsApp is temporarily disconnected. Try again in a moment.';

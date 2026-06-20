@@ -19,6 +19,7 @@ import type {
   ProviderMcpTool,
   ProviderMcpToolResult,
 } from './types.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('mcp-bridge');
 
@@ -147,7 +148,7 @@ export async function executeBridgeTool(
   try {
     return await bridge.executeTool(name, input);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     return {
       content: `Tool "${name}" failed: ${message}`,
       isError: true,

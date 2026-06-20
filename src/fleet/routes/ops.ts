@@ -31,6 +31,7 @@ import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.t
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError } from '../../lib/private-fs.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -379,7 +380,7 @@ async function handleServiceAction(
 }
 
 function serviceErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return errorMessage(err);
 }
 
 function serviceErrorExitCode(err: unknown): number | string | undefined {

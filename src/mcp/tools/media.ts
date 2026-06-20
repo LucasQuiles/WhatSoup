@@ -17,6 +17,7 @@ import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type Sess
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const log = createChildLogger('mcp:media');
 
@@ -327,7 +328,7 @@ export function registerMediaTools(
       try {
         result = await coreDownloadMedia(downloadFn, mime);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorMessage(err);
         if (/timed? ?out/i.test(msg)) {
           return errorResult({ error: 'download_timeout', message: 'Media download timed out after 30s.' });
         }
@@ -465,7 +466,7 @@ export function registerMediaTools(
             updateMediaPath(db, messageId, filePath);
           }
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           if (/404|410|gone|expired/i.test(msg)) {
             return errorResult({ error: 'media_expired', message: 'Audio media URL has expired.' });
           }

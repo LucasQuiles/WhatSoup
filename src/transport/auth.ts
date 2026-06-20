@@ -20,6 +20,7 @@ import { redactAuthCliText } from './auth-cli-redaction.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 // ---------------------------------------------------------------------------
 // Lock check
@@ -159,6 +160,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('Auth failed:', redactAuthCliText(err instanceof Error ? err.message : String(err)));
+  console.error('Auth failed:', redactAuthCliText(errorMessage(err)));
   process.exit(1);
 });

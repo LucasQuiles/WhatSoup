@@ -1,6 +1,7 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { LLMProvider } from '../providers/types.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('contradiction');
 
@@ -90,7 +91,7 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
     });
     raw = response.content.trim();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log.warn({ err: message }, 'contradiction detection: LLM call failed');
     return { results: [], status: 'llm_failed', error: message };
   }
@@ -101,7 +102,7 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
   try {
     parsed = JSON.parse(jsonStr);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log.warn({ err: message, rawLength: raw.length }, 'contradiction detection: JSON parse failed');
     return { results: [], status: 'parse_failed', error: message, rawLength: raw.length };
   }

@@ -19,6 +19,7 @@ export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 // config generation can consume them. Re-exported here so runtime callers
 // keep one import site for everything keyring-shaped.
 import { SERVICE_ENV_MAP } from './provider-key-service.ts';
+import { errorMessage } from './error-message.ts';
 
 export { SERVICE_ENV_MAP, resolveProviderKeyService } from './provider-key-service.ts';
 
@@ -56,7 +57,7 @@ export function detectKeyringBackend(): KeyringBackend {
     execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
+    const errMsg = errorMessage(err);
     // CRED-2: distinguish "no keyring installed" (ENOENT — the expected, benign
     // fallback) from "the keyring probe ERRORED" (timeout, EACCES, unexpected
     // exit). A transient/errored probe silently downgrading ALL credential
@@ -154,7 +155,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           // Warn on primary candidate failure; migration fallback misses are expected.
           if (index === 0) {
             getLog().warn(
-              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              { service, backend, err: errorMessage(err) },
               'keyring read failed — falling back to env lookup',
             );
           }
@@ -187,7 +188,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           // Warn on primary candidate failure; migration fallback misses are expected.
           if (index === 0) {
             getLog().warn(
-              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              { service, backend, err: errorMessage(err) },
               'keyring read failed — falling back to env lookup',
             );
           }

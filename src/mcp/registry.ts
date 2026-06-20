@@ -14,6 +14,7 @@ import { toConversationKey } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import { isToolErrorPayload, type ToolDeclaration, type ToolCallResult, type SessionContext } from './types.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('ToolRegistry');
 
@@ -356,7 +357,7 @@ export class ToolRegistry {
         ...(isError ? { isError: true } : {}),
       };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
       if (durabilityId !== undefined) {
         this.durability!.markToolComplete(durabilityId, `error: ${message}`);

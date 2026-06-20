@@ -9,6 +9,7 @@ import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { createChildLogger } from '../../logger.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const log = createChildLogger('mcp:voice');
 
@@ -64,7 +65,7 @@ export function registerVoiceTools(
       try {
         result = await synthesizeSpeech(text, voiceId ? { voiceId } : undefined);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         log.warn({ error: message, textLength: text.length }, 'voice synthesis failed');
         return errorResult('synthesis_failed', message);
       }
@@ -83,7 +84,7 @@ export function registerVoiceTools(
           seconds: result.duration,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         log.error({ err, chatJid }, 'failed to send voice note');
         return errorResult('send_failed', `Failed to send voice note: ${message}`);
       }

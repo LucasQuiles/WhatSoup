@@ -1295,7 +1295,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.lastCredsUpdateFailedAt = Date.now();
           this.recordCredentialLifecycle('creds_update_failed', {
             authBond: this.authBond.inspect(),
-            note: err instanceof Error ? err.message : String(err),
+            note: errorMessage(err),
           });
           this.persistConnectionRuntimeState('creds_update_failed');
           this.log.error({ err }, 'Failed to save credentials');
@@ -2718,4 +2718,5 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 // back-compat; remove these re-exports once all external callers migrate).
 // ---------------------------------------------------------------------------
 import { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage } from '../core/message-parser.ts';
+import { errorMessage } from '../lib/error-message.ts';
 export { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage };
