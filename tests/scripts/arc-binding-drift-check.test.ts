@@ -7,6 +7,8 @@ import {
   parseAdoptPrint,
   resolveArcRepoDir,
   checkArcBindingDrift,
+  checkVendoredSha,
+  extractSha,
 } from '../../scripts/arc-binding-drift-check.ts';
 
 const TOML_A85E = [
@@ -48,12 +50,25 @@ function makeArcRepo(toml: string, md: string): string {
   return dir;
 }
 
-/** Write a repo root with tracked .arc/ files. */
-function makeRepoRoot(toml: string, md: string): string {
+/**
+ * Write a repo root with tracked .arc/ files. By default the vendored
+ * `.arc/.canonical-sha` pin is derived from the `arc.toml` sha so the pin check
+ * agrees; pass `pinSha` to force a mismatching (stale) pin.
+ */
+function makeRepoRoot(
+  toml: string,
+  md: string,
+  opts: { pinSha?: string; writePin?: boolean } = {},
+): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'arc-consumer-'));
   mkdirSync(path.join(dir, '.arc'), { recursive: true });
   writeFileSync(path.join(dir, '.arc', 'arc.toml'), `${toml}\n`);
   writeFileSync(path.join(dir, '.arc', 'ARC_BINDING.md'), `${md}\n`);
+  const writePin = opts.writePin ?? true;
+  if (writePin) {
+    const pinSha = opts.pinSha ?? extractSha(toml) ?? 'sha256:a85e';
+    writeFileSync(path.join(dir, '.arc', '.canonical-sha'), `${pinSha}\n`);
+  }
   return dir;
 }
 
@@ -80,18 +95,83 @@ describe('resolveArcRepoDir', () => {
   });
 });
 
-describe('checkArcBindingDrift', () => {
-  it('skips when the ARC repo is not locatable', () => {
+describe('extractSha', () => {
+  it('pulls the sha token from a raw pin line', () => {
+    expect(extractSha('sha256:a85e\n')).toBe('sha256:a85e');
+  });
+  it('pulls the sha token from a toml payload_sha line', () => {
+    expect(extractSha('payload_sha = "sha256:a85e"')).toBe('sha256:a85e');
+  });
+  it('pulls the sha token from an ARC_BINDING.md Payload SHA line', () => {
+    expect(extractSha('- Payload SHA: `sha256:a85e`')).toBe('sha256:a85e');
+  });
+  it('returns undefined when no sha token is present', () => {
+    expect(extractSha('emits = []')).toBeUndefined();
+  });
+});
+
+describe('checkVendoredSha', () => {
+  it('passes when pin, arc.toml, and ARC_BINDING.md all agree (no sibling repo needed)', () => {
     const repoRoot = makeRepoRoot(TOML_A85E, MD_A85E);
-    const result = checkArcBindingDrift({ repoRoot, arcRepoDir: undefined });
-    expect(result.status).toBe('skip');
+    expect(checkVendoredSha({ repoRoot }).status).toBe('ok');
   });
 
-  it('skips when adopt.py is missing from the given ARC repo', () => {
+  it('detects drift when arc.toml is stale vs the pin (the #1274-in-CI case)', () => {
+    // arc.toml/md say 4fef but the committed pin still says a85e.
+    const repoRoot = makeRepoRoot(
+      TOML_4FEF,
+      MD_A85E.replace('a85e', '4fef'),
+      { pinSha: 'sha256:a85e' },
+    );
+    const result = checkVendoredSha({ repoRoot });
+    expect(result.status).toBe('drift');
+    expect(result.pinDrift?.join('\n')).toContain('sha256:4fef');
+    expect(result.pinDrift?.join('\n')).toContain('vendored pin sha256:a85e');
+  });
+
+  it('detects drift when the vendored pin is missing entirely', () => {
+    const repoRoot = makeRepoRoot(TOML_A85E, MD_A85E, { writePin: false });
+    const result = checkVendoredSha({ repoRoot });
+    expect(result.status).toBe('drift');
+    expect(result.pinDrift?.join('\n')).toContain('.canonical-sha');
+  });
+});
+
+describe('checkArcBindingDrift', () => {
+  it('runs the vendored-pin check and passes when .arc/ agrees, with no sibling repo (CI mode)', () => {
+    const repoRoot = makeRepoRoot(TOML_A85E, MD_A85E);
+    const result = checkArcBindingDrift({ repoRoot, arcRepoDir: undefined });
+    expect(result.status).toBe('ok');
+  });
+
+  it('HARD-BLOCKS a stale .arc/ in CI mode (no sibling repo) via the vendored pin', () => {
+    // The #1274-in-CI regression: arc.toml went stale (4fef) but the pin is a85e,
+    // and the sibling repo is absent. Previously this SKIPped and merged green.
+    const repoRoot = makeRepoRoot(
+      TOML_4FEF,
+      MD_A85E.replace('a85e', '4fef'),
+      { pinSha: 'sha256:a85e' },
+    );
+    const result = checkArcBindingDrift({ repoRoot, arcRepoDir: undefined });
+    expect(result.status).toBe('drift');
+    expect(result.pinDrift?.join('\n')).toContain('sha256:4fef');
+  });
+
+  it('still runs the vendored-pin check when adopt.py is missing from the given ARC repo', () => {
     const repoRoot = makeRepoRoot(TOML_A85E, MD_A85E);
     const emptyArc = mkdtempSync(path.join(tmpdir(), 'arc-noadopt-'));
     const result = checkArcBindingDrift({ repoRoot, arcRepoDir: emptyArc });
-    expect(result.status).toBe('skip');
+    expect(result.status).toBe('ok');
+  });
+
+  it('cross-checks the vendored pin against the live generator and reports drift when the pin is stale', () => {
+    // .arc/ and pin all agree on a85e locally, but the live generator now emits
+    // 4fef — the pin itself is stale and must be updated.
+    const repoRoot = makeRepoRoot(TOML_A85E, MD_A85E, { pinSha: 'sha256:a85e' });
+    const arcRepoDir = makeArcRepo(TOML_4FEF, MD_A85E.replace('a85e', '4fef'));
+    const result = checkArcBindingDrift({ repoRoot, arcRepoDir });
+    expect(result.status).toBe('drift');
+    expect(result.pinDrift?.join('\n')).toContain('update .arc/.canonical-sha');
   });
 
   it('passes when tracked .arc/ matches the canonical generator output', () => {
