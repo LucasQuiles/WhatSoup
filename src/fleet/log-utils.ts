@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { errorMessage } from '../lib/error-message.ts';
 
 export interface LatestLogFileOk {
   ok: true;
@@ -28,7 +29,7 @@ function logReadFailure(pathValue: string, err: unknown): LogReadFailure {
     ok: false,
     path: pathValue,
     ...(typeof nodeErr.code === 'string' ? { code: nodeErr.code } : {}),
-    error: err instanceof Error ? err.message : String(err),
+    error: errorMessage(err),
   };
 }
 

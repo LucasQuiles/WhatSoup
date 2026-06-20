@@ -27,6 +27,7 @@ import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '.
 import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -323,7 +324,7 @@ export class AnthropicApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       log.error({ err: msg, model }, 'fetch error in callApi');
       return { text: '', terminalResultText: '_Connection error - please try again._' };
     }
@@ -524,7 +525,7 @@ export class AnthropicApiProvider implements ProviderSession {
     try {
       parsed = JSON.parse(toolUse.inputJson || '{}');
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       log.warn({
         err: message,
         model,

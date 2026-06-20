@@ -25,6 +25,7 @@ import { nextCronRun } from '../cron.ts';
 import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
 import type { Messenger } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const log = createChildLogger('substrate.trigger-poller');
 
@@ -189,7 +190,7 @@ export class TriggerPoller {
         outputSummary: 'executor threw',
         outputJson: {},
         errorKind: 'execute_throw',
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: errorMessage(err),
       };
     }
 
@@ -270,7 +271,7 @@ export class TriggerPoller {
         outputSummary: 'spec_json is not valid JSON',
         outputJson: {},
         errorKind: 'spec_parse',
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: errorMessage(err),
       };
     }
     try {
@@ -282,7 +283,7 @@ export class TriggerPoller {
         outputSummary: 'spec_json failed SPEC_REGISTRY validation',
         outputJson: { kind },
         errorKind: 'spec_invalid',
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: errorMessage(err),
       };
     }
 
@@ -339,7 +340,7 @@ export class TriggerPoller {
         outputSummary: 'SQL execution failed',
         outputJson: { sql: spec.sql },
         errorKind: 'sql_error',
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: errorMessage(err),
       };
     }
     const rowCount = rows.length;

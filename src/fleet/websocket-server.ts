@@ -16,6 +16,7 @@ import type { Server as HttpServer, IncomingMessage } from 'node:http';
 import { URL } from 'node:url';
 import { createChildLogger } from '../logger.ts';
 import type { TicketStore } from './ws-ticket.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('fleet:ws');
 
@@ -136,7 +137,7 @@ export class FleetWebSocketServer {
           client.send(data);
         } catch (err) {
           this.clients.delete(client);
-          log.warn({ err: err instanceof Error ? err.message : String(err) }, 'ws_broadcast_failed');
+          log.warn({ err: errorMessage(err) }, 'ws_broadcast_failed');
         }
       }
     }

@@ -30,6 +30,7 @@ import {
   type DiagnosticId,
   type ResponseWorkflow,
 } from './response-registry.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 const DEFAULT_PROBE_TIMEOUT_MS = 2500;
 const MAX_ERROR_SUMMARY_LEN = 160;
@@ -60,7 +61,7 @@ export interface RunDiagnosticBundleArgs {
 }
 
 function errorSummary(id: DiagnosticId, err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = errorMessage(err);
   return `probe ${id} failed: ${raw.slice(0, MAX_ERROR_SUMMARY_LEN)}`;
 }
 

@@ -13,6 +13,7 @@ import {
 } from './core/agent-config-validator.ts';
 import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
+import { errorMessage } from './lib/error-message.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -131,7 +132,7 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   try {
     raw = fs.readFileSync(instanceFile, 'utf8');
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new Error(`Failed to read instance file at ${instanceFile}: ${message}`);
   }
 
@@ -140,7 +141,7 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new Error(`Failed to parse config.json for "${name}": ${message}`);
   }
 

@@ -4,6 +4,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
@@ -28,10 +29,6 @@ function queryLogFields(query: string): { queryHash: string; queryLength: number
     queryHash: createHash('sha256').update(query).digest('hex').slice(0, 12),
     queryLength: query.length,
   };
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 function getBreaker(operation: string): CircuitBreaker {

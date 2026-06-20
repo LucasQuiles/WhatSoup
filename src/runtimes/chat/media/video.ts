@@ -4,6 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { writeTempFile, cleanupTempFile } from '../../../core/media-download.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 
 const execFile = promisify(_execFile);
 const log = createChildLogger('media:video');
@@ -105,7 +106,7 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
           fallbackPattern,
         ], opts);
       } catch (fallbackErr) {
-        const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        const message = errorMessage(fallbackErr);
         // ENOENT means the ffmpeg binary itself is absent — a missing system
         // dependency, not a bad video. Surface it distinctly so a host without
         // ffmpeg is alertable instead of looking like generic frame failure (#1075).
@@ -206,7 +207,7 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
       durationSeconds: duration,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log.error({ err: message }, 'extractFrames failed entirely');
     return { frames: [], status: 'failed', fallbackUsed: false, error: message };
   } finally {

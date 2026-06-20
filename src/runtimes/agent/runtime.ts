@@ -434,6 +434,7 @@ export {
   isPromptTooLongMessage,
   isProviderModelUnavailableMessage,
 } from './failure-taxonomy.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -934,7 +935,7 @@ export class AgentRuntime implements Runtime {
         provider,
         toolId: args.toolId,
         toolName: args.toolName,
-        err: err instanceof Error ? err.message : String(err),
+        err: errorMessage(err),
       }, 'failed to emit BOT ERRORS tool failure alert');
     }
   }
@@ -2316,7 +2317,7 @@ export class AgentRuntime implements Runtime {
       // (extractor bugs, constraint errors on malformed extraction output)
       // is swallowed with a warn so a substrate bug doesn't drop the user's
       // message. Per spec §8.4 / INV-7: observability is a product surface.
-      const msgText = err instanceof Error ? err.message : String(err);
+      const msgText = errorMessage(err);
       const code = (err as { code?: unknown })?.code;
       const codeStr = typeof code === 'string' ? code : '';
       const isUnrecoverable =

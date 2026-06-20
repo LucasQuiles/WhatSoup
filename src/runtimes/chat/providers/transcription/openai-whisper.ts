@@ -5,6 +5,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../../../../lib/emit-
 import { createChildLogger } from '../../../../logger.ts';
 import { extensionForMimeType } from './local-audio.ts';
 import type { TranscriptionProvider } from './types.ts';
+import { errorMessage } from '../../../../lib/error-message.ts';
 
 const log = createChildLogger('openai-whisper');
 const WHISPER_TIMEOUT_MS = 20_000;
@@ -47,7 +48,7 @@ export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Pr
     return result.text;
   } catch (err) {
     breaker.recordFailure();
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log.warn({ error: message, elapsedMs: Date.now() - startMs, audioSize: buffer.length }, 'openai_whisper_transcription_failed');
 
     if (breaker.isOpen()) {

@@ -2,6 +2,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
 import { lookupCredential } from '../../../lib/keyring.ts';
+import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('elevenlabs');
 const ELEVENLABS_TIMEOUT_MS = 30_000;
@@ -123,7 +124,7 @@ export async function synthesizeSpeech(
     } catch (retryErr) {
       const elapsedMs = Date.now() - startMs;
       breaker.recordFailure();
-      const message = retryErr instanceof Error ? retryErr.message : String(retryErr);
+      const message = errorMessage(retryErr);
       log.warn({ error: message, elapsedMs, textLength: text.length }, 'elevenlabs_synthesis_failed');
       throw new Error(`ElevenLabs synthesis failed: ${message}`);
     }

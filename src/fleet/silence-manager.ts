@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createChildLogger } from '../logger.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('silence-manager');
 
@@ -32,7 +33,7 @@ function loadRules(): SilenceRule[] {
       // Missing file is normal on first run — silent
     } else {
       log.warn(
-        { file: SILENCES_FILE, err: err instanceof Error ? err.message : String(err) },
+        { file: SILENCES_FILE, err: errorMessage(err) },
         'failed to load silence file — returning empty rules',
       );
     }

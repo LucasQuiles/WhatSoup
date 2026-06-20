@@ -1,5 +1,6 @@
 import './transport/install-third-party-console-redaction.ts';
 import { bootstrapCommon } from './bootstrap-common.ts';
+import { errorMessage } from './lib/error-message.ts';
 
 export async function bootstrap(): Promise<void> {
   await bootstrapCommon('./main.ts', 'whatsoup');
@@ -9,7 +10,7 @@ export async function bootstrap(): Promise<void> {
 const isDirectRun = process.argv[1]?.endsWith('bootstrap.ts');
 if (isDirectRun) {
   bootstrap().catch((err) => {
-    console.error(err instanceof Error ? err.message : String(err));
+    console.error(errorMessage(err));
     process.exit(1);
   });
 }

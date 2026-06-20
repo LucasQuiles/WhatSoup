@@ -28,6 +28,7 @@ import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distil
 import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
 import { resolveHandoffDistillConfig } from './handoff-distill-config.ts';
 import { getSessionTokenSnapshot, listActiveSessionRows } from './session-db.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 // Same component name as AgentRuntime: the sweep / arm / degraded log lines keep their
 // existing `component: 'agent-runtime'` binding (no observable change).
@@ -176,7 +177,7 @@ export class HandoffDistillCoordinator {
           await runner.tickConversation(conversationKey);
         } catch (err) {
           log.warn(
-            { instance: this.instanceName, conversationKey, err: err instanceof Error ? err.message : String(err) },
+            { instance: this.instanceName, conversationKey, err: errorMessage(err) },
             'handoff distill tick failed (folded, continuing)',
           );
         }
@@ -190,7 +191,7 @@ export class HandoffDistillCoordinator {
     } catch (err) {
       // Enumeration itself failed — swallow; next tick retries.
       log.warn(
-        { instance: this.instanceName, err: err instanceof Error ? err.message : String(err) },
+        { instance: this.instanceName, err: errorMessage(err) },
         'handoff distill sweep failed (folded)',
       );
     }
@@ -211,7 +212,7 @@ export class HandoffDistillCoordinator {
       );
     } catch (err) {
       log.warn(
-        { instance: this.instanceName, conversationKey, err: err instanceof Error ? err.message : String(err) },
+        { instance: this.instanceName, conversationKey, err: errorMessage(err) },
         'failed to emit handoff distiller degraded alert',
       );
     }

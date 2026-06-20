@@ -11,6 +11,7 @@ import {
 const log = createChildLogger('emit-alert');
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { errorMessage } from './error-message.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
 let missingScriptWarned = false;
@@ -168,7 +169,7 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
     });
     return { attempted: true, accepted: true };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log.warn({ ...logContext, err: reason }, `${message}; legacy helper failed`);
     return { attempted: true, accepted: false, reason: 'spawn_failed', error: reason };
   }
@@ -190,7 +191,7 @@ export function emitAlert(
     const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log.warn({ instance, source, err: reason }, 'bot-errors outbox write failed');
     if (isThrottled(instance, source, summary)) {
       return { ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed', outboxError: reason };
@@ -231,7 +232,7 @@ export function clearAlertSource(
     });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log.warn({ instance, source, err: reason }, 'bot-errors clear outbox write failed');
     const legacy = spawnLegacyAlert(
       ['--clear', evidence, '--source', source],

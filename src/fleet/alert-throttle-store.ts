@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('alert-throttle-store');
 
@@ -70,7 +71,7 @@ export function loadAlertThrottleDetailed(nowMs = Date.now()): AlertThrottleLoad
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
       log.warn(
-        { file: ALERT_THROTTLE_FILE, err: err instanceof Error ? err.message : String(err) },
+        { file: ALERT_THROTTLE_FILE, err: errorMessage(err) },
         'failed to load alert throttle file — resetting to empty (corrupt or unreadable)',
       );
     }
@@ -81,7 +82,7 @@ export function loadAlertThrottleDetailed(nowMs = Date.now()): AlertThrottleLoad
         : {
             file: ALERT_THROTTLE_FILE,
             ...(typeof code === 'string' ? { code } : {}),
-            error: err instanceof Error ? err.message : String(err),
+            error: errorMessage(err),
           },
     };
   }

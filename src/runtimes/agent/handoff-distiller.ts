@@ -24,6 +24,7 @@ import {
   type DistillState,
 } from './handoff-distill-gate.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
+import { errorMessage } from '../../lib/error-message.ts';
 
 /** Result of the injected LLM distill call. */
 export interface DistillOutcome {
@@ -87,7 +88,7 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
     return { ran: true, denied: null, failed: false, nextState };
   } catch (err) {
     const nextState = recordDistillFailure(decision.nextState, deps.now, deps.config);
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     deps.onDegraded?.(`handoff distill failed: ${reason.slice(0, 160)}`);
     return { ran: false, denied: null, failed: true, nextState };
   }
