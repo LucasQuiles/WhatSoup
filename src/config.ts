@@ -1044,6 +1044,10 @@ export const config = {
     enableRelayMessage: (instance?.advanced?.enableRelayMessage as boolean | undefined) ?? false,
     enableResync: (instance?.advanced?.enableResync as boolean | undefined) ?? false,
     relayMaxPayloadBytes: (instance?.advanced?.relayMaxPayloadBytes as number | undefined) ?? 1_048_576, // 1MB
+    // poll.url watch gate (F2 Slice B). Default OFF: create_watch rejects
+    // source:'poll.url' at creation and the poller fails closed at exec time
+    // unless an operator opts in. Mirrors enableRelayMessage/enableResync.
+    enableUrlWatch: (instance?.advanced?.enableUrlWatch as boolean | undefined) ?? false,
   },
 
   // Access mode (from instance config, defaults to allowlist for backward compat).

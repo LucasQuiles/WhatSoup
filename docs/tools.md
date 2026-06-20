@@ -347,7 +347,7 @@ Create a watch bead and poll trigger. Admin only. TTL defaults and caps come fro
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | title | string | optional | Bead title; defaults to `watch:<source>`. |
-| source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"poll.shell"` \| `"event.message"` | required | Trigger source kind. |
+| source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"event.message"` | required | Trigger source kind. `poll.shell` was REMOVED (no executor). `poll.url` is gated behind `advanced.enableUrlWatch` — creation is rejected when the flag is off (default). |
 | criteria | object | required | Trigger criteria/spec payload. |
 | interval_seconds | number | optional | Poll interval. |
 | ttl_hours | number | optional | Requested TTL, clamped by policy. |

@@ -39,6 +39,15 @@ export interface SubstrateDeps {
    */
   dbWrapper: Database;
   adminPhones: Set<string>;
+  /**
+   * Gate for `poll.url` watches (F2 Slice B). Defaults OFF — a `create_watch`
+   * with `source:'poll.url'` THROWS at creation (never persists) unless an
+   * operator explicitly sets `advanced.enableUrlWatch: true` in instance
+   * config. Mirrors `advanced.enableRelayMessage`/`enableResync`. The poller
+   * re-guards at exec time so a row persisted while ON still fails closed if
+   * the flag is later turned OFF.
+   */
+  enableUrlWatch?: boolean;
   memory: {
     adminJid: string;
     vaultPath: string;
@@ -179,11 +188,13 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'create_watch',
-    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. NOTE: only poll.sqlite currently fires; poll.email/url/file/pinecone/shell and event.message are accepted and persisted but no-op (the poller logs a warn and bumps next_fire_at so the row does not hot-loop) until their executors are wired.',
+    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. Wired kinds: poll.sqlite, poll.pinecone, poll.file, poll.url (gated behind advanced.enableUrlWatch, default OFF — rejected at creation when disabled), and schedule.*. poll.email is accepted and persisted but no-op until its executor is wired. poll.shell has been REMOVED (no executor; not a valid source).',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
       title: z.string().optional(),
-      source: z.enum(['poll.email','poll.url','poll.file','poll.sqlite','poll.pinecone','poll.shell','event.message']),
+      // poll.shell removed (F2 Slice B): no executor ever existed; rejected here
+      // so creation fails loudly via Zod rather than persisting a dead row.
+      source: z.enum(['poll.email','poll.url','poll.file','poll.sqlite','poll.pinecone','event.message']),
       criteria: z.record(z.unknown()),
       interval_seconds: z.number().int().positive().optional(),
       ttl_hours: z.number().positive().optional(),
@@ -202,6 +213,13 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         on_terminal?: 'notify' | 'silent' | 'reopen_bead';
         dedupe_key?: string;
       };
+      // poll.url is gated default-OFF (F2 Slice B). Throw BEFORE any bead/trigger
+      // is created so a disabled url watch never persists, mirroring the
+      // relay_message disabled path. The poller also re-guards at exec time.
+      if (p.source === 'poll.url' && !deps.enableUrlWatch) {
+        log.warn({ source: p.source }, 'create_watch rejected: url watch is disabled');
+        throw new Error('url watch is disabled. Set advanced.enableUrlWatch: true in instance config to enable poll.url watches.');
+      }
       const now = nowUnixSec();
       const ttlHours = Math.min(p.ttl_hours ?? deps.memory.watchTtl.defaultHours, deps.memory.watchTtl.maxHours);
       const requestedTerminalAt = now + Math.round(ttlHours * 3600);

@@ -42,12 +42,14 @@ function registerDefaultTools(
   overrides: {
     dbWrapper?: Database;
     observationConfidenceMin?: number;
+    enableUrlWatch?: boolean;
   } = {},
 ) {
   registerSubstrateTools(registry, {
     db: db.raw,
     dbWrapper: overrides.dbWrapper ?? db,
     adminPhones: new Set<string>([adminPhone]),
+    enableUrlWatch: overrides.enableUrlWatch ?? false,
     memory: {
       adminJid: adminPhone,
       vaultPath,
@@ -304,9 +306,53 @@ describe('substrate MCP tools', () => {
   });
 
   it('create_watch rejects invalid criteria without leaving a bead', async () => {
+    // enableUrlWatch is OFF by default; a poll.url source is rejected at the
+    // disabled gate before zod even runs. Either way no bead/trigger persists.
     const res = await registry.call('create_watch', {
       source: 'poll.url',
       criteria: { url: 'not-a-url', hash_mode: 'text' },
+      report_chat: 'watch-report@s.whatsapp.net',
+    }, adminSession);
+
+    expect(res.isError).toBe(true);
+    const beads = parseResult(await registry.call('list_beads', { owner_jid: adminPhone }, adminSession));
+    const triggers = parseResult(await registry.call('list_triggers', {}, adminSession));
+    expect(beads.beads).toEqual([]);
+    expect(triggers.triggers).toEqual([]);
+  });
+
+  it('create_watch with source:poll.url throws at creation when enableUrlWatch is OFF (never persists)', async () => {
+    const res = await registry.call('create_watch', {
+      source: 'poll.url',
+      criteria: { url: 'https://example.com/feed', hash_mode: 'text' },
+      report_chat: 'watch-report@s.whatsapp.net',
+    }, adminSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/url watch is disabled|enableUrlWatch/i);
+    const beads = parseResult(await registry.call('list_beads', { owner_jid: adminPhone }, adminSession));
+    const triggers = parseResult(await registry.call('list_triggers', {}, adminSession));
+    expect(beads.beads).toEqual([]);
+    expect(triggers.triggers).toEqual([]);
+  });
+
+  it('create_watch with source:poll.url persists when enableUrlWatch is ON', async () => {
+    const r2 = new ToolRegistry();
+    registerDefaultTools(r2, db, vaultPath, { enableUrlWatch: true });
+    const res = parseResult(await r2.call('create_watch', {
+      source: 'poll.url',
+      criteria: { url: 'https://example.com/feed', hash_mode: 'text' },
+      report_chat: 'watch-report@s.whatsapp.net',
+    }, adminSession));
+    expect(res.trigger_id).toBeGreaterThan(0);
+    const triggers = parseResult(await r2.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(triggers.triggers[0].kind).toBe('poll.url');
+  });
+
+  it('create_watch with source:poll.shell is rejected at creation (removed from the enum)', async () => {
+    const res = await registry.call('create_watch', {
+      source: 'poll.shell',
+      criteria: { argv: ['/bin/true'], fire_when: 'exit_zero' },
       report_chat: 'watch-report@s.whatsapp.net',
     }, adminSession);
 

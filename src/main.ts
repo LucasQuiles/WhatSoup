@@ -738,9 +738,9 @@ messageScheduler.start();
 
 // 16a. Substrate trigger poller — drains bead_triggers.next_fire_at on a
 // 30s interval and dispatches poll.sqlite / poll.pinecone / poll.file /
-// schedule.* watches to their report_chat_jid. The remaining SPEC_REGISTRY
-// kinds (poll.url / poll.shell / poll.email / event.message) are recognised
-// but no-op (see src/core/substrate/poller.ts header).
+// poll.url (gated, default-OFF) / schedule.* watches to their report_chat_jid.
+// poll.email is recognised but no-op (deferred); event.message is re-homed to
+// the ingest path; poll.shell is removed (see src/core/substrate/poller.ts).
 //
 // poll.pinecone reuses the knowledge_search Pinecone client + index/namespace
 // allowlist (no second client). poll.file's allowed-root set is the explicit
@@ -750,6 +750,9 @@ const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   pineconeAllowedIndexes: pineconeWatch?.allowedIndexes ?? [],
   pineconeSearch: pineconeWatch?.search,
   fileWatchAllowedRoots: config.memory.fileWatch.allowedRoots,
+  // poll.url is gated default-OFF (F2 Slice B). When enabled, the poller fetches
+  // through the shared ssrfSafeAgent stack (default urlFetch = fetchUrlGuarded).
+  enableUrlWatch: config.advanced.enableUrlWatch,
 });
 triggerPoller.start();
 

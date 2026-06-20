@@ -12,16 +12,22 @@
 //                       (reuses the knowledge_search client + index allowlist)
 //   - poll.file       — file existence / mtime / content-hash watch, behind a
 //                       fail-closed allowed-root path policy (deny-all default)
+//   - poll.url         — HTTP(S) change-detection watch (F2 Slice B), GATED
+//                       default-OFF behind config.advanced.enableUrlWatch.
+//                       Reuses the link-preview SSRF stack (fetchUrlGuarded),
+//                       https-only + default-port-only + fail-CLOSED on a
+//                       blocked host. Fires on a body/selector/header hash diff.
 //   - schedule.cron   — fires on cron expression
 //   - schedule.at_time — one-shot at fire_at, expires after
 //   - terminal_at expiry — sets status='expired', fires on_terminal action
 //
-// The remaining SPEC_REGISTRY kinds (poll.shell, poll.url, poll.email,
-// event.message) are recognised but not yet executed; the poller records a
-// noop with reason 'not_implemented' and bumps `next_fire_at` by the 1h
-// cooldown so the row does not hot-loop. poll.shell/poll.url/poll.email are
-// owner-gated (see docs/superpowers/plans F2 closure); event.message is
-// architecturally re-homed to the ingest path, not the interval poller.
+// poll.email is recognised but not yet executed (deferred — no Gmail/M365
+// client exists); the poller records a noop with reason 'not_implemented' and
+// bumps `next_fire_at` by the 1h cooldown so the row does not hot-loop.
+// event.message is architecturally re-homed to the ingest path, not the
+// interval poller. poll.shell has been REMOVED (no executor; dropped from the
+// create_watch enum) — a legacy persisted row fails CLOSED here with
+// errorKind 'shell_watch_removed' rather than crashing.
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { resolve, sep } from 'node:path';
@@ -36,6 +42,7 @@ import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
 import type { Messenger } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { fetchUrlGuarded, SsrfBlockedError, type GuardedFetchResult } from '../../lib/ssrf-fetch.ts';
 
 const log = createChildLogger('substrate.trigger-poller');
 
@@ -64,6 +71,24 @@ const FILE_HASH_MAX_BYTES = 16 * 1024 * 1024;
  */
 const DENIED_PATH_PREFIXES = ['/proc', '/dev', '/sys'];
 
+/**
+ * Ports a `poll.url` watch may target. https default (443) and the bare form
+ * only — any explicit non-default port is rejected fail-closed (a confused
+ * deputy could otherwise reach an internal service on a high port whose host
+ * happens to resolve public). Mirrors the SSRF posture of the link-preview
+ * stack but tighter (the preview path soft-degrades; the watch errors).
+ */
+const URL_WATCH_ALLOWED_PORTS = new Set(['', '443']);
+/**
+ * Max bytes fetched for a `poll.url` watch. Bounds the blast radius of a
+ * confused-deputy spec pointed at a huge response. Reusing the same 5 MiB cap
+ * the link-preview path uses (readBodyCapped truncates at this prefix; any
+ * prefix change still flips the change-detection hash).
+ */
+const URL_WATCH_MAX_BYTES = 5_000_000;
+/** Header subset hashed for hash_mode:'headers' — stable change-detection keys. */
+const URL_WATCH_HASH_HEADERS = ['etag', 'last-modified', 'content-length', 'content-type'];
+
 /** A single Pinecone match — only the score is consumed (no record body). */
 export interface PineconeMatch {
   score: number;
@@ -84,6 +109,14 @@ export interface PineconeSearchArgs {
  * the poller entirely (redaction-by-construction).
  */
 export type PineconeSearchFn = (args: PineconeSearchArgs) => Promise<{ matches: PineconeMatch[] }>;
+
+/**
+ * Injected guarded-fetch path for `poll.url`. Production wires this to
+ * `fetchUrlGuarded` from the link-preview SSRF stack (per-hop resolved-IP
+ * revalidation, body-cap, timeout); tests inject a stub. Throwing
+ * `SsrfBlockedError` maps to a fail-closed `ssrf_blocked` outcome.
+ */
+export type UrlFetchFn = (url: string, opts: { maxBytes: number }) => Promise<GuardedFetchResult>;
 
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
@@ -117,6 +150,18 @@ export interface TriggerPollerOptions {
    * runs unsandboxed in the main process.
    */
   fileWatchAllowedRoots?: string[];
+  /**
+   * Gate for `poll.url` watches (F2 Slice B). Default OFF — when false the
+   * executor fails closed with `url_watch_disabled` even for a persisted row
+   * (defense-in-depth alongside the create_watch creation-throw). Production
+   * passes `config.advanced.enableUrlWatch`.
+   */
+  enableUrlWatch?: boolean;
+  /**
+   * Injected guarded-fetch path for `poll.url`. When unset, defaults to the
+   * shared `fetchUrlGuarded` SSRF helper. Tests inject a stub to avoid network.
+   */
+  urlFetch?: UrlFetchFn;
 }
 
 interface SqliteSpec {
@@ -136,6 +181,12 @@ interface PineconeTriggerSpec {
 interface FileTriggerSpec {
   path: string;
   watch: 'exists' | 'mtime' | 'content_hash';
+}
+
+interface UrlTriggerSpec {
+  url: string;
+  selector?: string;
+  hash_mode: 'text' | 'selector' | 'headers';
 }
 
 /** Default top_k when a poll.pinecone spec omits it. */
@@ -169,6 +220,8 @@ export class TriggerPoller {
   private readonly pineconeAllowedIndexes: ReadonlySet<string>;
   private readonly pineconeSearch: PineconeSearchFn | null;
   private readonly fileWatchAllowedRoots: readonly string[];
+  private readonly enableUrlWatch: boolean;
+  private readonly urlFetch: UrlFetchFn;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -192,6 +245,8 @@ export class TriggerPoller {
       const abs = resolve(r);
       try { return realpathSync(abs); } catch { return abs; }
     });
+    this.enableUrlWatch = opts.enableUrlWatch ?? false;
+    this.urlFetch = opts.urlFetch ?? fetchUrlGuarded;
   }
 
   start(): void {
@@ -393,6 +448,20 @@ export class TriggerPoller {
     if (kind === 'poll.sqlite') return this.executeSqlite(t, spec as SqliteSpec);
     if (kind === 'poll.pinecone') return this.executePinecone(spec as PineconeTriggerSpec);
     if (kind === 'poll.file') return this.executeFile(t, spec as FileTriggerSpec);
+    if (kind === 'poll.url') return this.executeUrl(t, spec as UrlTriggerSpec);
+    if (kind === 'poll.shell') {
+      // poll.shell was REMOVED (F2 Slice B): no executor ever existed and the
+      // create_watch enum no longer accepts it. A legacy persisted row (if any)
+      // fails CLOSED here rather than crashing or hot-looping as a noop.
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'poll.shell has been removed',
+        outputJson: { reason: 'shell_watch_removed' },
+        errorKind: 'shell_watch_removed',
+        errorMessage: 'poll.shell watches are removed; no executor exists. Recreate as a different watch kind.',
+      };
+    }
     if (kind === 'schedule.cron' || kind === 'schedule.at_time') {
       return {
         status: 'ok',
@@ -750,6 +819,118 @@ export class TriggerPoller {
     }
   }
 
+  /**
+   * poll.url — fetch a URL and fire on a change in the body / a selected
+   * subtree / a header subset (change detection).
+   *
+   * Controls (defense-in-depth; the create_watch creation-throw is the first
+   * gate, this is the exec-time re-guard):
+   *   1. Gated default-OFF: if `enableUrlWatch` is false → `url_watch_disabled`
+   *      (a row persisted while ON still fails closed once the flag is OFF).
+   *   2. https-only (reject any non-https scheme).
+   *   3. Default-port-only (reject any explicit non-443 port).
+   *   4. SSRF fail-CLOSED: the fetch runs through the shared `ssrfSafeAgent`
+   *      stack (per-hop resolved-IP revalidation, body-cap, timeout); a blocked
+   *      private/loopback/metadata host throws `SsrfBlockedError` →
+   *      `ssrf_blocked` (NOT the soft fallback the link-preview path uses).
+   *
+   * `outputJson` is reduced to scalars/booleans (`hashChanged` + the opaque
+   * digest used for the next comparison) — the fetched body NEVER enters
+   * output_json (parity with the SQL `sampleRow` / pinecone redaction posture).
+   */
+  private async executeUrl(t: TriggerRow, spec: UrlTriggerSpec): Promise<ExecuteOutcome> {
+    if (!this.enableUrlWatch) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'url watch is disabled',
+        outputJson: { reason: 'url_watch_disabled' },
+        errorKind: 'url_watch_disabled',
+        errorMessage: 'poll.url is disabled; set advanced.enableUrlWatch:true to enable',
+      };
+    }
+
+    const ssrfBlocked = (detail: string): ExecuteOutcome => ({
+      status: 'failed',
+      fired: false,
+      outputSummary: `url rejected: ${detail}`,
+      outputJson: { reason: 'ssrf_blocked' },
+      errorKind: 'ssrf_blocked',
+      errorMessage: `poll.url ${detail}`,
+    });
+
+    let parsed: URL;
+    try {
+      parsed = new URL(spec.url);
+    } catch {
+      return ssrfBlocked('url is not parseable');
+    }
+    // https-only — reject http:// and any other scheme fail-closed.
+    if (parsed.protocol !== 'https:') {
+      return ssrfBlocked('only https URLs are allowed');
+    }
+    // Default-port-only — reject any explicit non-443 port.
+    if (!URL_WATCH_ALLOWED_PORTS.has(parsed.port)) {
+      return ssrfBlocked(`non-default port ${parsed.port} is not allowed`);
+    }
+
+    let result: GuardedFetchResult;
+    try {
+      result = await this.urlFetch(spec.url, { maxBytes: URL_WATCH_MAX_BYTES });
+    } catch (err) {
+      if (err instanceof SsrfBlockedError) {
+        return ssrfBlocked(`blocked (${err.reason})`);
+      }
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'url fetch failed',
+        outputJson: { reason: 'fetch_error' },
+        errorKind: 'fetch_error',
+        errorMessage: errorMessage(err),
+      };
+    }
+
+    let hashInput: string;
+    if (spec.hash_mode === 'headers') {
+      hashInput = await hashUrlHeaders(result.headers);
+    } else if (spec.hash_mode === 'selector') {
+      hashInput = await hashUrlSelector(result.body, spec.selector ?? '');
+    } else {
+      hashInput = result.body;
+    }
+    const hash = createHash('sha256').update(hashInput).digest('hex');
+
+    const lastHash = this.lastUrlHashFor(t.id);
+    const hashChanged = lastHash === null ? true : hash !== lastHash;
+    return {
+      status: hashChanged ? 'ok' : 'noop',
+      fired: hashChanged,
+      outputSummary: hashChanged
+        ? (lastHash === null ? 'url hash recorded (first run)' : 'url content changed')
+        : 'url content unchanged',
+      // Scalars/booleans only — the hash is an opaque digest, never the body.
+      outputJson: { hashChanged, urlHash: hash, hashMode: spec.hash_mode },
+    };
+  }
+
+  /** Prior run's recorded poll.url digest, mirroring `lastHashFor`. */
+  private lastUrlHashFor(triggerId: number): string | null {
+    const row = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    ).get(triggerId) as { output_json: string | null } | undefined;
+    if (!row?.output_json) return null;
+    try {
+      const parsed = JSON.parse(row.output_json) as { urlHash?: unknown };
+      return typeof parsed.urlHash === 'string' ? parsed.urlHash : null;
+    } catch {
+      return null;
+    }
+  }
+
   private lastScalarFor(triggerId: number, key: string): number | null {
     const row = this.db.prepare(
       `SELECT output_json FROM trigger_runs
@@ -1067,6 +1248,34 @@ function hashFileCapped(filePath: string, maxBytes: number): Promise<string> {
       reject(err);
     });
   });
+}
+
+/**
+ * Stable change-detection string over a header subset (hash_mode:'headers').
+ * Only a fixed allowlist of caching/identity headers is included so the digest
+ * is deterministic and small; values are joined in a fixed key order.
+ */
+async function hashUrlHeaders(headers: Record<string, string>): Promise<string> {
+  return URL_WATCH_HASH_HEADERS.map((k) => `${k}=${headers[k] ?? ''}`).join('\n');
+}
+
+/**
+ * Extract and serialise the selected subtree (hash_mode:'selector') so the
+ * digest reflects only that region of the page. Uses cheerio (already a project
+ * dep, dynamically imported like the link-preview path). A missing/invalid
+ * selector hashes the empty string, so an absent element is a stable state.
+ */
+async function hashUrlSelector(html: string, selector: string): Promise<string> {
+  if (!selector) return '';
+  try {
+    const { load } = await import('cheerio');
+    const $ = load(html);
+    return $(selector).html() ?? '';
+  } catch {
+    // On a selector/parse failure, fall back to a stable empty marker rather
+    // than throwing — keeps change-detection deterministic.
+    return '';
+  }
 }
 
 export function toBindArgs(binds: unknown[] | Record<string, unknown>): SQLInputValue[] {
