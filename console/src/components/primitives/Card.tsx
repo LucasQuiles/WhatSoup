@@ -42,7 +42,7 @@ export interface CardProps extends HTMLAttributes<HTMLElement> {
    * 'interactive'/'selectable' always render a <button> regardless (interactive-card-is-button).
    * An href additionally forces an <a>. Default 'div'.
    */
-  as?: 'div' | 'button' | 'a';
+  as?: 'div' | 'button' | 'a' | 'section';
   /** 'selectable' only — drives aria-pressed + the accent border/inset ring. */
   selected?: boolean;
   /** 'status-edge' only — the channel the inset edge is keyed to (pair with a shape + label). */
@@ -91,7 +91,7 @@ export function Card({
   // Polymorphic tag: interactive/selectable (and as='button') render a real <button>; an href
   // forces <a>; otherwise the requested element (default 'div'). createElement (vs JSX) keeps
   // the union tag from over-narrowing and lets `ref` flow without a per-element cast.
-  const tag: 'div' | 'button' | 'a' = href ? 'a' : isInteractive || as === 'button' ? 'button' : as;
+  const tag: 'div' | 'button' | 'a' | 'section' = href ? 'a' : isInteractive || as === 'button' ? 'button' : as;
   const isButtonTag = tag === 'button';
 
   // Token-only utility composition. `c-card` carries bg/border/radius/shadow verbatim.

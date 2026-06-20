@@ -23,6 +23,17 @@ describe('Card primitive (DD-38)', () => {
     expect(el!.textContent).toContain('body');
   });
 
+  it('as="section" renders a <section> carrying the .c-card recipe (W2-S4 semantic panels)', () => {
+    // The `as` union gained 'section' so MetricsTab's chart panels keep their semantic
+    // <section> outline while adopting the Card surface.
+    const { container } = render(<Card as="section" className="font-mono">panel</Card>);
+    const el = container.querySelector('.c-card');
+    expect(el).not.toBeNull();
+    expect(el!.tagName).toBe('SECTION');
+    expect(el!.className).toContain('font-mono');
+    expect(el!.textContent).toContain('panel');
+  });
+
   it('interactive renders a real <button> (interactive-card-is-button), not a click div', () => {
     render(<Card variant="interactive" onClick={() => {}}>go</Card>);
     const btn = screen.getByRole('button', { name: 'go' });

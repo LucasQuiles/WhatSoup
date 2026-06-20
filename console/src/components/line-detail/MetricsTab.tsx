@@ -7,7 +7,7 @@ import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import { formatCount } from '../../lib/text-utils'
-import { ToolbarTimeRange, Tabs, Tab, TabPanel } from '../primitives'
+import { Card, ToolbarTimeRange, Tabs, Tab, TabPanel } from '../primitives'
 import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
@@ -88,10 +88,10 @@ export function MetricsTab({
         <div className="flex flex-col gap-[var(--sp-4)]">
           {/* Hero: Message Volume bar chart */}
           {metrics?.hasMessageData && (
-            <section className="c-card font-mono p-[var(--sp-4)] min-h-[var(--chart-min-h)]">
+            <Card as="section" className="font-mono p-[var(--sp-4)] min-h-[var(--chart-min-h)]">
               <div className="c-section-label mb-[var(--sp-3)]">Message Volume</div>
               <MetricsChart data={metrics.messageVolume} range={metricsRange} />
-            </section>
+            </Card>
           )}
 
           {/* Active Hours Heatmap */}
@@ -101,7 +101,7 @@ export function MetricsTab({
 
           {/* Detail metrics — tabbed */}
           {hasDetailData && (
-            <section className="c-card font-mono p-[var(--sp-4)]">
+            <Card as="section" className="font-mono p-[var(--sp-4)]">
               <Tabs
                 label="Metric detail series"
                 value={activeDetailTab}
@@ -137,12 +137,12 @@ export function MetricsTab({
                   </TabPanel>
                 )}
               </div>
-            </section>
+            </Card>
           )}
 
           {/* Token Usage Card (static totals) */}
           {line?.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
-            <section className="c-card font-mono p-[var(--sp-4)]">
+            <Card as="section" className="font-mono p-[var(--sp-4)]">
               <div className="c-section-label mb-[var(--sp-3)]">Token Usage</div>
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
@@ -177,12 +177,12 @@ export function MetricsTab({
                 />
                 <div className="flex-1 bg-[var(--data-token-output-solid)]" style={{ height: '100%' }} />
               </div>
-            </section>
+            </Card>
           )}
 
           {/* Model Configuration Card */}
           {line?.models && (
-            <section className="c-card font-mono p-[var(--sp-4)]">
+            <Card as="section" className="font-mono p-[var(--sp-4)]">
               <div className="c-section-label mb-[var(--sp-3)]">Model Configuration</div>
               <div
                 className="grid gap-y-[var(--sp-1)] gap-x-[var(--sp-3)]"
@@ -197,7 +197,7 @@ export function MetricsTab({
                   ) : null
                 )}
               </div>
-            </section>
+            </Card>
           )}
         </div>
       )}

@@ -30,9 +30,9 @@ const ALLOWLIST = new Set<string>([
   // HoverCard primitive and the `.c-card--detail` modifier was deleted, so it is no
   // longer a raw `c-card` consumer (removed from this allowlist per the honesty test).
   'console/src/components/line-detail/GroupCard.tsx',
-  'console/src/components/line-detail/MetricsTab.tsx',
-  // ProvidersKeysCard MIGRATED (W2-S4): its sole c-card surface now renders via the Card
-  // primitive (the motion wrapper is kept outside), so it no longer uses the raw recipe.
+  // ProvidersKeysCard + MetricsTab MIGRATED (W2-S4): ProvidersKeysCard's surface renders via
+  // the Card primitive (motion kept outside); MetricsTab's 4 chart sections now render via
+  // <Card as="section"> (the `as` union gained 'section'). Neither uses the raw recipe.
   'console/src/components/line-detail/SummaryTab.tsx',
   'console/src/pages/SoupKitchen.tsx',
   // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx, pages/Operator.tsx,
