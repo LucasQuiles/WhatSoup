@@ -209,6 +209,48 @@ describe('repo hygiene guard', () => {
     expect(issues[0].filePath).toBe('commit:abc123def456');
   });
 
+  it('flags retired/ad-hoc automation commit authors but not sanctioned SoupBot', () => {
+    const issues = scanCommitAuthors([
+      {
+        sha: '1111111111111111',
+        name: 'whatsoup-bot',
+        email: 'bot@users.noreply.github.com',
+        subject: 'test: coverage bundle',
+      },
+      {
+        sha: '2222222222222222',
+        name: 'Worker',
+        // Built from parts so the publication guard's static scan does not treat
+        // the fixture as a real address (same convention as the host fixtures above).
+        email: ['worker', 'local'].join('@'),
+        subject: 'chore: worker output',
+      },
+      {
+        sha: '3333333333333333',
+        name: 'Codex Snapshot',
+        email: ['snapshot', ['codex', 'local'].join('.')].join('@'),
+        subject: 'snapshot',
+      },
+      {
+        sha: '4444444444444444',
+        name: 'SoupBot',
+        email: 'soupbot@users.noreply.github.com',
+        subject: 'test: sanctioned automation commit',
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'ad-hoc-bot-author',
+      'ad-hoc-bot-author',
+      'ad-hoc-bot-author',
+    ]);
+    expect(issues.map((issue) => issue.filePath)).toEqual([
+      'commit:111111111111',
+      'commit:222222222222',
+      'commit:333333333333',
+    ]);
+  });
+
   it('flags public-hygiene violations in branch commit messages', () => {
     const issues = scanCommitAuthors([
       {

@@ -138,6 +138,22 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
     message: 'Commit author uses a placeholder identity; amend before publishing.',
     regex: /\bWhatSoup Test\b/i,
   },
+  // Ad-hoc automation identities. The commit-time allowlist in
+  // .husky/check-commit-identity.sh prevents these at creation; this denylist is
+  // defense-in-depth so a --no-verify bypass is still caught by the CI range
+  // scan. Sanctioned automation commits as SoupBot <soupbot@users.noreply.github.com>.
+  {
+    code: 'ad-hoc-bot-author',
+    message:
+      'Commit author uses a retired/ad-hoc automation identity; use SoupBot <soupbot@users.noreply.github.com>.',
+    regex: /\bwhatsoup-bot\b|\bbot@users\.noreply\.github\.com\b/i,
+  },
+  {
+    code: 'ad-hoc-bot-author',
+    message:
+      'Commit author uses a retired/ad-hoc automation identity; use SoupBot <soupbot@users.noreply.github.com>.',
+    regex: /@(?:local|codex\.local)\b/i,
+  },
 ];
 
 function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
