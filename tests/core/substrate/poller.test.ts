@@ -890,6 +890,101 @@ describe('TriggerPoller — notification throttle', () => {
     await poller.tickOnce();
     expect(calls).toHaveLength(2);
   });
+
+  it('does NOT throttle when the substring deliveredWaMessageId appears only in row data, not as a delivered receipt', async () => {
+    // Regression for the brittle `output_json LIKE '%deliveredWaMessageId%'`
+    // throttle: a watch whose query result serialises the text
+    // "deliveredWaMessageId" under $.sampleRow must NOT be mistaken for a run
+    // that actually delivered a WhatsApp notification. With the old LIKE scan
+    // the first (never-delivered) run false-matched and suppressed dispatch;
+    // json_extract($.deliveredWaMessageId) IS NOT NULL keys on the real value.
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'self-watch', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)`);
+    // Row body literally contains the receipt key name — a realistic case for a
+    // watch over a table that stores JSON / log text.
+    db.raw.prepare(`INSERT INTO notes (body) VALUES (?)`).run('audit: deliveredWaMessageId was set elsewhere');
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM notes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 30, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      notificationThrottleMinIntervalSec: 100,
+    });
+
+    // First tick: the only run so far has output_json containing the substring
+    // (via sampleRow) but it is the run that is dispatching NOW — it must still
+    // dispatch (the throttle looks at PRIOR delivered runs, of which there are none).
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);
+    // Sanity: that run's output_json does carry the colliding substring.
+    const firstRun = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC LIMIT 1`).get(t.id) as { output_json: string };
+    expect(firstRun.output_json).toContain('deliveredWaMessageId');
+
+    // Now strip the real delivered receipt from that first run, leaving ONLY the
+    // colliding substring in sampleRow. Under the old LIKE scan this run would be
+    // treated as "delivered" and throttle the next tick. It must not.
+    db.raw.prepare(
+      `UPDATE trigger_runs SET output_json = json_remove(output_json, '$.deliveredWaMessageId') WHERE trigger_id = ?`,
+    ).run(t.id);
+    const stripped = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC LIMIT 1`).get(t.id) as { output_json: string };
+    expect(JSON.parse(stripped.output_json).deliveredWaMessageId).toBeUndefined();
+    expect(stripped.output_json).toContain('deliveredWaMessageId');  // still present in sampleRow
+
+    // Second tick 30s later (well within the 100s window). No PRIOR run actually
+    // delivered, so dispatch must proceed — the substring collision must not throttle.
+    now = 1_000_000_031;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+    expect(calls).toHaveLength(2);  // dispatched again, NOT throttled
+  });
+
+  it('does NOT treat a literal-null deliveredWaMessageId as a delivered receipt', async () => {
+    // A run whose output_json has $.deliveredWaMessageId === null is NOT a
+    // delivered run. The old LIKE scan matched the key name regardless of value;
+    // json_extract(...) IS NOT NULL correctly excludes the null value.
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'nullrcpt', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 30, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      notificationThrottleMinIntervalSec: 100,
+    });
+
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);
+
+    // Force the first run's receipt to a literal JSON null (never a real delivery).
+    db.raw.prepare(
+      `UPDATE trigger_runs SET output_json = json_set(output_json, '$.deliveredWaMessageId', json('null')) WHERE trigger_id = ?`,
+    ).run(t.id);
+    const nulled = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC LIMIT 1`).get(t.id) as { output_json: string };
+    expect(nulled.output_json).toContain('deliveredWaMessageId');
+    expect(JSON.parse(nulled.output_json).deliveredWaMessageId).toBeNull();
+
+    // Second tick within the window: the prior run's null receipt is not a real
+    // delivery, so dispatch proceeds.
+    now = 1_000_000_031;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe('poller.ts uncovered-branch coverage', () => {
