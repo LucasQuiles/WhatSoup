@@ -144,6 +144,8 @@ async function importMainWithMocks(options: {
         lookbackDays: 7,
         dryRun: false,
       },
+      pinecone: { allowedIndexes: [] },
+      fileWatch: { allowedRoots: [] },
     },
     controlPeers: new Set(['q']),
     configRoot: '/tmp/whatsoup-main-config-root',

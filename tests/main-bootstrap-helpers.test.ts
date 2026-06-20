@@ -212,7 +212,7 @@ async function importMainWithMocks(options: {
     chatAliases: {},
     profiles: null,
     authDir: '/tmp/ws-helpers-auth',
-    memory: { consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false } },
+    memory: { consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false }, pinecone: { allowedIndexes: [] }, fileWatch: { allowedRoots: [] } },
     controlPeers: new Set<string>(),
     configRoot: '/tmp/ws-helpers-config-root',
     adminReplayMax: 5,
