@@ -231,19 +231,145 @@ describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
 // Tests: no policy file → allow all
 // ---------------------------------------------------------------------------
 
-describe('agent-sandbox.sh — no policy file', () => {
-  it('allows everything when no sandbox-policy.json exists', () => {
+describe('agent-sandbox.sh — no policy file (R1-A: fail closed)', () => {
+  function runNoPolicy(env: Record<string, string> = {}) {
     const dir = makeTmpDir();
-    // Remove the policy file that makeTmpDir created the dir for (but we never wrote it)
-    // Just run without writing a policy file
+    // Never write a policy file into dir/.claude.
     const input = JSON.stringify({ tool_name: 'mcp__whatsoup__send_message' });
     const { spawnSync } = require('node:child_process');
     const result = spawnSync('bash', [HOOK_PATH], {
       input,
       cwd: dir,
       encoding: 'utf8',
+      env: { ...process.env, ...env },
     });
-    const parsed = JSON.parse((result.stdout as string).trim());
+    return result as { stdout: string; stderr: string };
+  }
+
+  it('DENIES by default when no sandbox-policy.json exists (fail closed)', () => {
+    const result = runNoPolicy();
+    const parsed = JSON.parse(result.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain('missing');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(
+      'WHATSOUP_SANDBOX_FAIL_OPEN',
+    );
+  });
+
+  it('emits a structured sandbox_deny log on stderr when failing closed', () => {
+    const result = runNoPolicy();
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(result.stderr.trim());
+    } catch {
+      // fail below
+    }
+    expect(parsed).not.toBeNull();
+    expect(parsed!.event).toBe('sandbox_deny');
+    expect(typeof parsed!.reason).toBe('string');
+    expect(parsed!.policyPath).toBe('.claude/sandbox-policy.json');
+  });
+
+  it('allows everything when WHATSOUP_SANDBOX_FAIL_OPEN=1 (legacy opt-out)', () => {
+    const result = runNoPolicy({ WHATSOUP_SANDBOX_FAIL_OPEN: '1' });
+    const parsed = JSON.parse(result.stdout.trim());
     expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow');
+  });
+
+  it('still fails closed for any non-"1" value of the opt-out env', () => {
+    const result = runNoPolicy({ WHATSOUP_SANDBOX_FAIL_OPEN: 'true' });
+    const parsed = JSON.parse(result.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: Bash path-restriction hardening (R1-B)
+//
+// HONEST SCOPE: these prove the denylist now blocks the obvious, low-effort
+// escapes that previously slipped through. They do NOT claim bash is fully
+// sandboxed — a shell can still construct out-of-sandbox paths at runtime in
+// ways a raw-string scan cannot see. The must-allow cases lock in that ordinary
+// in-sandbox usage keeps working.
+// ---------------------------------------------------------------------------
+
+describe('agent-sandbox.sh — Bash path restriction (R1-B)', () => {
+  const bashPolicy = (dir: string): Policy => ({
+    allowedPaths: [dir],
+    allowedMcpTools: [],
+    bash: { enabled: true, pathRestricted: true },
+  });
+
+  function runBash(dir: string, command: string) {
+    return runHookFull(bashPolicy(dir), { tool_name: 'Bash', tool_input: { command } }, dir);
+  }
+
+  describe('denies known escape patterns', () => {
+    const denyCases: Array<[string, string]> = [
+      ['tilde home dir', 'cat ~/secrets.txt'],
+      ['tilde bare arg', 'tar czf out.tgz ~'],
+      ['tilde then relative read', 'cd ~ && cat secrets.txt'],
+      ['tilde user', 'cat ~root/.bashrc'],
+      ['HOME default-value indirection', 'cat ${HOME:-/x}/secrets.txt'],
+      ['HOME brace split', 'cat ${H}${OME}/secrets.txt'],
+      ['HOME quote split', "cat $HO''ME/secrets.txt"],
+      ['literal $HOME', 'cat $HOME/.bashrc'],
+      ['XDG home var', 'cat $XDG_CONFIG_HOME/x'],
+      ['command substitution $()', 'cat $(printf %s /Users/testuser)/secrets'],
+      ['command substitution backtick', 'cat `echo /etc`/passwd'],
+      ['directory traversal', 'cat ../../../etc/passwd'],
+      ['system config /etc', 'cat /etc/passwd'],
+      ['ssh keys', 'cat .ssh/id_rsa'],
+      ['absolute path outside sandbox', 'cat /var/log/system.log'],
+      ['quoted absolute path with space outside', 'cat "/Users/testuser/my file.txt"'],
+    ];
+    for (const [label, command] of denyCases) {
+      it(`denies: ${label}`, () => {
+        const dir = makeTmpDir();
+        expect(runBash(dir, command).decision).toBe('deny');
+      });
+    }
+  });
+
+  describe('allows legitimate in-sandbox commands', () => {
+    const allowCases: Array<[string, (d: string) => string]> = [
+      ['plain echo', () => 'echo hello'],
+      ['git status', () => 'git status'],
+      ['npm test', () => 'npm test'],
+      ['list sandbox root', (d) => `ls ${d}`],
+      ['read file in sandbox', (d) => `cat ${d}/file.txt`],
+      ['grep within sandbox', (d) => `grep -r foo ${d}/src`],
+      ['mkdir + cd inside sandbox', (d) => `mkdir -p ${d}/sub && cd ${d}/sub`],
+      ['system binary path', () => 'cat /usr/bin/env'],
+      ['redirect to /dev/null', () => 'echo hi > /dev/null'],
+    ];
+    for (const [label, build] of allowCases) {
+      it(`allows: ${label}`, () => {
+        const dir = makeTmpDir();
+        expect(runBash(dir, build(dir)).decision).toBe('allow');
+      });
+    }
+  });
+
+  it('Bash disabled by policy is denied regardless of command', () => {
+    const dir = makeTmpDir();
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedMcpTools: [], bash: { enabled: false } },
+      { tool_name: 'Bash', tool_input: { command: 'echo hi' } },
+      dir,
+    );
+    expect(result.decision).toBe('deny');
+    expect(result.reason).toContain('disabled');
+  });
+
+  it('Bash allowed but not path-restricted permits an out-of-sandbox path', () => {
+    const dir = makeTmpDir();
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedMcpTools: [], bash: { enabled: true } },
+      { tool_name: 'Bash', tool_input: { command: 'cat ~/anything' } },
+      dir,
+    );
+    // pathRestricted is falsy → no path scan applies; tilde is allowed.
+    expect(result.decision).toBe('allow');
   });
 });
