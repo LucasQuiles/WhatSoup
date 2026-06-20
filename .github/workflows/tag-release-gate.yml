@@ -15,12 +15,23 @@ on:
     tags:
       - 'v*'
 
+# Serialize per-tag but NEVER cancel a release mid-flight: a release gate that
+# is interrupted can leave a tag half-validated. cancel-in-progress is
+# deliberately false here (unlike quality.yml, where superseded PR runs are
+# safe to drop).
+concurrency:
+  group: tag-release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   release-gate:
     runs-on: ubuntu-latest
+    # Generous cap so only a genuinely hung run is killed; without it a hung
+    # run rides to the 6h GitHub default.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:

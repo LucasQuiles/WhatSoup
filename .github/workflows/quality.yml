@@ -6,12 +6,23 @@ on:
     branches:
       - main
 
+# Cancel superseded runs for the same ref. A new push/PR-sync supersedes the
+# in-flight run instead of leaving it orphaned at "pending 0s" for hours (the
+# close+reopen-to-retrigger workaround) and frees a runner slot immediately.
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    # Generous cap so it only kills a genuinely hung run, not a slow-but-live
+    # one (the quality job runs the full suite + coverage and can take ~40min).
+    # Without this a hung run rides to the 6h GitHub default.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
