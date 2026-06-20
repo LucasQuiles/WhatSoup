@@ -268,6 +268,7 @@ async function importMainWithMocks(options: {
     lookupAccess: vi.fn(() => null),
     updateAccess: vi.fn(),
     insertAllowed: vi.fn(),
+    seedAutoRespondGroups: vi.fn(() => 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
     hydrateLidMappings: vi.fn(() => 1),
     upsertLidMapping: vi.fn(),
@@ -396,6 +397,7 @@ async function importMainWithMocks(options: {
     lookupAccess: mocks.lookupAccess,
     updateAccess: mocks.updateAccess,
     insertAllowed: mocks.insertAllowed,
+    seedAutoRespondGroups: mocks.seedAutoRespondGroups,
     resolvePhoneFromJid: mocks.resolvePhoneFromJid,
   }));
   vi.doMock('../src/core/lid-resolver.ts', () => ({
