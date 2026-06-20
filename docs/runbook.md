@@ -1156,9 +1156,11 @@ Key log patterns to monitor:
 
 ## AskUserQuestion Poll Bridge
 
-When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer. The runtime includes persistence scaffolding (`persistPendingPoll`, `rehydratePendingPolls`) but the `pending_polls` migration has not yet landed — persistence calls fail silently and polls do not survive restarts.
+When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
 
 ### Pending poll state
+
+Pending polls are persisted to the `pending_polls` table (migration 28) and rehydrated into the in-memory store on startup; polls whose hard close time has passed during downtime are pruned and the affected chats are notified.
 
 ### Vote reconciliation
 
@@ -1166,9 +1168,7 @@ If a user reports they voted but the agent didn't respond:
 
 1. Check transport logs for decrypt failures: `grep "poll vote decryption failed" <log>`
 2. If `pollVoteFailed` fired, the runtime should have sent a text fallback — check for `"poll vote failure switched AskUserQuestion to text fallback"` in logs
-3. If the service restarted between poll send and vote, the in-memory pending state was lost — the user should re-trigger the question
-
-**Future:** When migration 28 (`pending_polls` table) lands, pending polls will persist across restarts and the rehydration path will be operational.
+3. If the service restarted between poll send and vote, the pending state is rehydrated from the `pending_polls` table at startup, so the poll should still be live (unless its hard close time elapsed during downtime, in which case it is pruned and the chat is notified)
 
 ### Nudge timer
 
