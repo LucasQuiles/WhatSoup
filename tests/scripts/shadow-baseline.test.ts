@@ -57,11 +57,12 @@ describe('check-shadow-baseline.mjs', () => {
     expect(result.stderr).toContain(KEY);
   });
 
-  it('passes and reports a below-ceiling note when an injected result is under its ceiling', () => {
+  it('fails closed when an injected result falls below its ceiling without --update (no reusable slack)', () => {
     const { resultsPath, baselinePath } = fixture(oneWarning, { total: 2, rules: { [KEY]: 2 } });
     const result = run(['--results-json', resultsPath, '--baseline', baselinePath]);
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('below their ceiling');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`FALL: ${KEY} -> 1 warnings (ceiling 2, -1)`);
+    expect(result.stderr).toContain('run with --update to lower the baseline');
   });
 
   it('refuses --results-json combined with --update so a fixture can never write a baseline', () => {

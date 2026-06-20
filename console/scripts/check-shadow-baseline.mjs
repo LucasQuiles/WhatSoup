@@ -101,8 +101,15 @@ if (regressions) {
   console.error(`\n${regressions} rule(s) exceeded the shadow baseline. New violations are not allowed; fix them or (for sanctioned scope) update the baseline in the same commit with a justification.`);
   process.exit(1);
 }
-console.log(`shadow baseline OK: ${total} warnings (ceiling ${baseline.total})`);
+
+// Fail-closed on improvement too: a count that FELL below its ceiling without a
+// same-commit `--update` leaves reusable slack (a fixed violation could be silently
+// re-spent). Mirror the design-burndown ratchet — an improvement must ratchet the
+// baseline DOWN in the same commit, never bank headroom. (Rise detection above is
+// unchanged.)
 if (improved.length) {
-  console.log(`note: ${improved.length} rule(s) are below their ceiling — consider ratcheting with --update:`);
-  for (const [r, c] of improved) console.log(`  ${r}: ${sorted[r] ?? 0} < ${c}`);
+  for (const [r, c] of improved) console.error(`FALL: ${r} -> ${sorted[r] ?? 0} warnings (ceiling ${c}, -${c - (sorted[r] ?? 0)})`);
+  console.error(`\n${improved.length} rule(s) are below their ceiling — run with --update to lower the baseline in the same commit (no reusable slack).`);
+  process.exit(1);
 }
+console.log(`shadow baseline OK: ${total} warnings (ceiling ${baseline.total})`);
