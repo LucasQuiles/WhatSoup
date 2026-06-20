@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 188
+**Total entries:** 41
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=15, handoff=4, plan=21, review=2, spec=13, state=20 |
-| Status | closed=11, completed=118, deferred=8, pending=38, unknown=13 |
-| Status source | bead-manifest=3, body-marker=110, directory=7, fallback=4, phase-log=7, state-md-status=57 |
+| Kind | handoff=4, plan=21, review=2, spec=13, state=1 |
+| Status | closed=1, completed=19, deferred=7, pending=1, unknown=13 |
+| Status source | body-marker=36, fallback=4, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -65,253 +65,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ## Full listing by canonical parent
 
-### docs/sdlc/closed/add-line-wizard-20260401  _(2 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md` | doc | closed | directory | add-line-wizard | 2026-04-05 |  |
-| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | closed | directory | add-line-wizard | 2026-04-23 |  |
-
-### docs/sdlc/closed/bot-errors-reliability-20260531  _(2 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md` | doc | closed | body-marker | bot-errors-reliability | 2026-06-14 |  |
-| `docs/sdlc/closed/bot-errors-reliability-20260531/state.md` | state | closed | state-md-status | bot-errors-reliability | 2026-06-14 |  |
-
-### docs/sdlc/closed/control-plane-20260401  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/control-plane-20260401/state.md` | state | completed | state-md-status | control-plane | 2026-04-05 |  |
-
-### docs/sdlc/closed/dedup-consolidation-20260404  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/dedup-consolidation-20260404/state.md` | state | completed | state-md-status | dedup-consolidation | 2026-04-24 |  |
-
-### docs/sdlc/closed/design-fidelity-fixes-20260401  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/design-fidelity-fixes-20260401/state.md` | state | completed | state-md-status | design-fidelity-fixes | 2026-04-05 |  |
-
-### docs/sdlc/closed/design-system-compliance-2026-04-06  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | state | closed | directory | design-system-compliance | 2026-04-23 |  |
-
 ### docs/sdlc/closed/fleet-charts-20260407  _(1 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | deferred | state-md-status | fleet-charts | 2026-04-23 |  |
-
-### docs/sdlc/closed/mark-read-api-20260408  _(4 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/mark-read-api-20260408/beads/MR-01-health-handler.md` | bead | pending | body-marker | mark-read-api | 2026-04-08 |  |
-| `docs/sdlc/closed/mark-read-api-20260408/beads/MR-02-fleet-endpoint.md` | bead | pending | body-marker | mark-read-api | 2026-04-08 |  |
-| `docs/sdlc/closed/mark-read-api-20260408/beads/MR-03-console-ui.md` | bead | pending | body-marker | mark-read-api | 2026-04-08 |  |
-| `docs/sdlc/closed/mark-read-api-20260408/state.md` | state | completed | state-md-status | mark-read-api | 2026-04-08 |  |
-
-### docs/sdlc/closed/multi-provider-runtime-2026-0404  _(21 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-provider-interface.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-extract-claude-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-config-schema.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-codex-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-api-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-anthropic-api-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-mcp-bridge.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/evidence-packet.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/gap-analysis.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/handoff-frontend.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/review-provider-interface-2026-04-04.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/revised-provider-spec.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-23 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-
-### docs/sdlc/closed/phase3-console-features-20260401  _(3 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/phase3-console-features-20260401/backlog-scan-20260405-agent-020.md` | doc | closed | directory | phase3-console-features | 2026-04-05 |  |
-| `docs/sdlc/closed/phase3-console-features-20260401/implementation-plan.md` | doc | closed | directory | phase3-console-features | 2026-04-05 |  |
-| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | state | closed | directory | phase3-console-features | 2026-04-23 |  |
-
-### docs/sdlc/closed/session-leak-audit-20260406  _(33 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-01-control-slot-lock.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-02-durability-null-guard.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-03-workspace-provision-safety.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-04-shutdown-exception-safety.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-05-ingest-slot-safety.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/FIX-01-ds-compliance-test-drift.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-01-cleanup-helper.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-02-wire-crash-paths.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-03-wire-shutdown.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-04-workspace-eviction.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-05-shared-queue-pruning.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-06-socket-destroy.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-07-respawn-timer-tracking.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-08-sigterm-grace.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-09-control-timeout.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-10-module-sets.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-11-fleet-cache-pruning.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LEAK-12-typing-interval-guard.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LOG-01-critical-path-logging.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/LOG-02-periodic-health-stats.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/PERF-01-durability-prepared-stmts.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/PERF-02-streaming-buffer-optimization.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/PERF-03-turn-completion-transaction.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/RACE-01-lid-remap-event-drop.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/RACE-02-perchat-concurrent-spawn.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/RACE-03-sqlite-busy-orphan.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/RACE-04-active-tool-names-isolation.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-01-spawn-per-turn-db-args.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-02-spawn-per-turn-exit-no-result.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-03-global-crash-count.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-04-usage-limit-dirty-state.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/orchestrator-handoff.md` | doc | completed | state-md-status | session-leak-audit | 2026-06-12 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/state.md` | state | completed | state-md-status | session-leak-audit | 2026-04-08 |  |
-
-### docs/sdlc/closed/whatsapp-mcp-features  _(3 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | deferred | body-marker | whatsapp-mcp-features | 2026-04-05 |  |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | completed | phase-log | whatsapp-mcp-features | 2026-04-23 |  |
-| `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
-
-### docs/sdlc/completed/agent-layer-hardening-20260405  _(5 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-06-12 |  |
-
-### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/audit-remediation-20260330/state.md` | state | completed | state-md-status | audit-remediation | 2026-04-23 |  |
-
-### docs/sdlc/completed/codex-transport-gaps-20260404  _(31 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md` | bead | completed | body-marker | codex-transport-gaps | 2026-04-24 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B02-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B02-system-prompt-identity.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B03-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B03-opencode-parser-concurrency.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B04-codex-session-resume.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B04-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B04a-codex-threadid-persistence.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B04a-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B05-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B05-event-driven-ready-signal.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B06-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B06-wire-provider-budget.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B07-approval-prefilter.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B07-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B08-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B08-mcp-config-centralize.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B09-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B09-integration-verification.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B10-council-review.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B10-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B11-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B11-followup-gemini-token-tracking.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B12-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B12-followup-opencode-dual-impl.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B12a-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B12a-remove-dead-opencode-adapter.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B13-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B13-gemini-resume-investigation.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
-| `docs/sdlc/completed/codex-transport-gaps-20260404/state.md` | state | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
-
-### docs/sdlc/completed/heal-reliability-fixes-20260401  _(8 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p0-zombie-sessions-decision-trace.md` | bead | completed | phase-log | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p0-zombie-sessions.md` | bead | completed | body-marker | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p1-control-timeout-decision-trace.md` | bead | completed | phase-log | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p1-control-timeout.md` | bead | completed | body-marker | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p4-degradation-timer-decision-trace.md` | bead | completed | phase-log | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/beads/p4-degradation-timer.md` | bead | completed | body-marker | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/delivery.md` | doc | completed | phase-log | heal-reliability-fixes | 2026-04-04 |  |
-| `docs/sdlc/completed/heal-reliability-fixes-20260401/state.md` | state | completed | phase-log | heal-reliability-fixes | 2026-04-04 |  |
-
-### docs/sdlc/completed/p0-production-blockers-20260330  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/p0-production-blockers-20260330/state.md` | state | completed | directory | p0-production-blockers | 2026-04-23 |  |
-
-### docs/sdlc/completed/remaining-hardening-20260330  _(1 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | state | completed | state-md-status | remaining-hardening | 2026-04-23 |  |
-
-### docs/sdlc/completed/transport-hardening-20260404  _(13 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H01-budget-burst-mitigation.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H01-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H02-budget-test-coverage.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H02-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H03-approval-key-ordering.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H03-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H04-codex-turn-integration-test.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H04-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H05-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H05-fitness-sweep.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H06-council-review.md` | bead | pending | body-marker | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/beads/H06-decision-trace.md` | bead | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/transport-hardening-20260404/state.md` | state | completed | state-md-status | transport-hardening | 2026-04-04 |  |
-
-### docs/sdlc/completed/whatsoup-full-hardening-20260331  _(15 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B01-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B01-fix-test-failures.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B02-chatruntime-send-retry.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B02-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B03-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B03-trivial-p2-fixes.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B04-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B04-docs-configuration.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B05-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B05-docs-tool-reference.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B06-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B06-docs-runbook.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-decision-trace.md` | bead | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-docs-durability.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
-| `docs/sdlc/completed/whatsoup-full-hardening-20260331/state.md` | state | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
 
 ### docs/superpowers/handoffs  _(4 entries)_
 
@@ -376,4 +134,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-14T05:17:18Z from commit `9e5090ddddb785715bbb40519ce4a98089a9ee8c`
+- Generated at 2026-06-20T06:50:34Z from commit `e88e3d009b94051088622e0c6fe896e45bb3488e`
