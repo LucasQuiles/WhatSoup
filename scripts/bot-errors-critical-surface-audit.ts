@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 type FileKind = 'missing' | 'regular' | 'directory' | 'symlink' | 'other';
 type ExpectedKind = 'file' | 'directory';
@@ -164,10 +165,6 @@ const sensitiveContentPatterns: Array<{ kind: string; pattern: RegExp }> = [
 interface SensitiveContentScan {
   kinds: string[];
   error?: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function normalizeMarkers(value: unknown): string[] {
