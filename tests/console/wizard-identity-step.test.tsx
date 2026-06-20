@@ -108,6 +108,20 @@ describe('initial render', () => {
     expect(screen.getByText('Admin Phones')).toBeDefined()
   })
 
+  it('renders the Description field via the canonical Field (optional marker, not a raw inline span)', () => {
+    // W2-S5 DD-43: Description migrated onto <Field optional> — the "(optional)" hint is now the
+    // canonical c-optional-marker (aria-hidden), not a hand-rolled text-text-3 span in the label.
+    renderStep()
+    const marker = document.querySelector('.c-optional-marker') as HTMLElement
+    expect(marker).not.toBeNull()
+    expect(marker.textContent).toMatch(/optional/i)
+    expect(marker.getAttribute('aria-hidden')).toBe('true')
+    // the old ad-hoc pattern is gone: no text-text-3 span carrying "(optional)"
+    const adhocOptional = [...document.querySelectorAll('span.text-text-3')]
+      .some((s) => /optional/i.test(s.textContent ?? ''))
+    expect(adhocOptional).toBe(false)
+  })
+
   it('shows the three type options: Passive, Chat, Agent', () => {
     renderStep()
     expect(screen.getByText('Passive')).toBeDefined()
