@@ -2681,7 +2681,12 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
   display: inline-flex;
 }
 
+/* --hc-tx is the horizontal-centering translate; default centers the panel
+   (translateX(-50%) over left:50%). The edge-anchor modifiers zero it and pin the
+   panel to the trigger's left or right edge instead (anchorX="edge", driven by
+   resolveViewportPlacement().rightAnchored — consumed by MessageBubble's DetailCard). */
 .soup-hovercard__panel {
+  --hc-tx: -50%;
   position: absolute;
   left: 50%;
   min-width: var(--tooltip-min-w);
@@ -2697,9 +2702,21 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
   z-index: var(--z-toast);
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-50%) translateY(var(--sp-1));
+  transform: translateX(var(--hc-tx)) translateY(var(--sp-1));
   transition: opacity var(--dur-fast) var(--ease-enter),
     transform var(--dur-fast) var(--ease-enter);
+}
+
+.soup-hovercard__panel--align-left {
+  --hc-tx: 0;
+  left: 0;
+  right: auto;
+}
+
+.soup-hovercard__panel--align-right {
+  --hc-tx: 0;
+  left: auto;
+  right: 0;
 }
 
 .soup-hovercard__panel--top {
@@ -2710,22 +2727,22 @@ details[open] > .soup-accordion__summary .soup-accordion__chev {
 .soup-hovercard__panel--bottom {
   top: 100%;
   margin-top: var(--sp-2);
-  transform: translateX(-50%) translateY(calc(-1 * var(--sp-1)));
+  transform: translateX(var(--hc-tx)) translateY(calc(-1 * var(--sp-1)));
 }
 
 .soup-hovercard__panel--show {
   opacity: 1;
   pointer-events: auto;
-  transform: translateX(-50%) translateY(var(--sp-0));
+  transform: translateX(var(--hc-tx)) translateY(var(--sp-0));
 }
 
 @media (prefers-reduced-motion: reduce) {
   .soup-hovercard__panel {
     transition: none;
-    transform: translateX(-50%);
+    transform: translateX(var(--hc-tx));
   }
   .soup-hovercard__panel--bottom,
   .soup-hovercard__panel--show {
-    transform: translateX(-50%);
+    transform: translateX(var(--hc-tx));
   }
 }

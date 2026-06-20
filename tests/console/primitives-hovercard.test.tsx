@@ -246,3 +246,59 @@ describe('HoverCard — hover debounce + bridge', () => {
     expect(isOpen()).toBe(false)
   })
 })
+
+describe('HoverCard — horizontal anchoring (anchorX / rightAnchored)', () => {
+  // Stub a real anchor rect at a given left so resolveViewportPlacement decides
+  // rightAnchored = (left + 260 > innerWidth[1024]). left 40 → left-anchored; 900 → right.
+  function withRect(left: number, fn: () => void) {
+    const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 120, height: 32, top: 40, left, right: left + 120, bottom: 72, x: left, y: 40,
+      toJSON: () => ({}),
+    } as DOMRect)
+    try {
+      fn()
+    } finally {
+      spy.mockRestore()
+    }
+  }
+  const renderAnchored = (anchorX?: 'center' | 'edge') =>
+    render(
+      <HoverCard cardLabel="Detail" anchorX={anchorX} card={<span>c</span>}>
+        <button type="button">tg</button>
+      </HoverCard>,
+    )
+  const panel = () => {
+    const t = screen.getByRole('button', { name: 'tg' })
+    act(() => {
+      fireEvent.focus(t)
+    })
+    return document.getElementById(t.getAttribute('aria-controls') as string) as HTMLElement
+  }
+
+  it('defaults to centered (data-align center, no edge class)', () => {
+    withRect(40, () => {
+      renderAnchored()
+      const p = panel()
+      expect(p.getAttribute('data-align')).toBe('center')
+      expect(p.className).not.toMatch(/--align-/)
+    })
+  })
+
+  it('anchorX=edge anchors LEFT when the trigger is far from the viewport right edge', () => {
+    withRect(40, () => {
+      renderAnchored('edge')
+      const p = panel()
+      expect(p.getAttribute('data-align')).toBe('left')
+      expect(p.className).toContain('soup-hovercard__panel--align-left')
+    })
+  })
+
+  it('anchorX=edge flips to RIGHT anchor near the viewport right edge', () => {
+    withRect(900, () => {
+      renderAnchored('edge')
+      const p = panel()
+      expect(p.getAttribute('data-align')).toBe('right')
+      expect(p.className).toContain('soup-hovercard__panel--align-right')
+    })
+  })
+})

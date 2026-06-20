@@ -33,7 +33,13 @@ is over the trigger *or* the card) and **open/close debounce**.
 
 `card` (ReactNode, interactive) · `cardLabel` (string — accessible name for the `role="group"`
 region) · `children` (the focusable trigger) · `id?` · `openDelay?` (default 150ms) ·
-`closeDelay?` (default 180ms) · `className?`.
+`closeDelay?` (default 180ms) · `anchorX?` (`"center"` default | `"edge"`) · `className?`.
+
+**`anchorX`** controls horizontal placement. `"center"` centers the panel over the trigger
+(`translateX(-50%)`). `"edge"` pins the panel to the trigger's **left** edge, flipping to the
+**right** edge near the viewport's right border — driven by `resolveViewportPlacement().rightAnchored`,
+the model MessageBubble's detail card needs to avoid clipping at the conversation edge. The
+rendered `data-align` attribute (`center`/`left`/`right`) reflects the resolved anchor.
 
 ## A11y acceptance matrix (interaction-patterns.md §45)
 

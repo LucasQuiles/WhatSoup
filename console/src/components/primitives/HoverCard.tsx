@@ -64,6 +64,13 @@ export interface HoverCardProps {
   openDelay?: number;
   /** Close debounce in ms (default 180) — lets the pointer cross the gap onto the card. */
   closeDelay?: number;
+  /**
+   * Horizontal anchoring. "center" (default) centers the panel over the trigger.
+   * "edge" pins it to the trigger's left edge, flipping to the right edge near the
+   * viewport's right border (driven by resolveViewportPlacement().rightAnchored) — the
+   * model MessageBubble's detail card needs to avoid clipping at the conversation edge.
+   */
+  anchorX?: 'center' | 'edge';
   /** Extra class on the positioned anchor wrapper. */
   className?: string;
 }
@@ -75,6 +82,7 @@ export const HoverCard: FC<HoverCardProps> = ({
   id,
   openDelay = DEFAULT_OPEN_DELAY,
   closeDelay = DEFAULT_CLOSE_DELAY,
+  anchorX = 'center',
   className,
 }) => {
   const autoId = useId();
@@ -82,6 +90,7 @@ export const HoverCard: FC<HoverCardProps> = ({
 
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<ViewportPlacement>('above');
+  const [rightAnchored, setRightAnchored] = useState(false);
   const anchorRef = useRef<HTMLSpanElement>(null);
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -115,6 +124,7 @@ export const HoverCard: FC<HoverCardProps> = ({
       estimatedCardWidth: ESTIMATED_CARD_WIDTH,
     });
     setPlacement(resolved.placement);
+    setRightAnchored(resolved.rightAnchored);
   }, []);
 
   const scheduleOpen = useCallback(() => {
@@ -180,7 +190,13 @@ export const HoverCard: FC<HoverCardProps> = ({
   );
 
   const sideClass = placement === 'below' ? 'soup-hovercard__panel--bottom' : 'soup-hovercard__panel--top';
-  const panelClass = ['soup-hovercard__panel', sideClass, open ? 'soup-hovercard__panel--show' : '']
+  const alignClass =
+    anchorX === 'edge'
+      ? rightAnchored
+        ? 'soup-hovercard__panel--align-right'
+        : 'soup-hovercard__panel--align-left'
+      : '';
+  const panelClass = ['soup-hovercard__panel', sideClass, alignClass, open ? 'soup-hovercard__panel--show' : '']
     .filter(Boolean)
     .join(' ');
   const anchorClass = ['soup-hovercard', className].filter(Boolean).join(' ');
@@ -213,6 +229,7 @@ export const HoverCard: FC<HoverCardProps> = ({
         role="group"
         aria-label={cardLabel}
         data-placement={placement}
+        data-align={anchorX === 'edge' ? (rightAnchored ? 'right' : 'left') : 'center'}
         aria-hidden={open ? undefined : true}
         className={panelClass}
       >
