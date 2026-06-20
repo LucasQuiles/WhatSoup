@@ -66,6 +66,7 @@ import {
   StatusCell,
   ModeBadge,
   Checkbox,
+  Card,
   Button,
   DrawerLayout,
   Drawer,
@@ -738,8 +739,9 @@ const SoupKitchen: FC = () => {
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease }}
-        className="c-card flex-shrink-0 flex flex-wrap gap-[var(--sp-2)] p-[var(--sp-2)]"
+        className="flex-shrink-0"
       >
+        <Card variant="base" className="flex flex-wrap gap-[var(--sp-2)] p-[var(--sp-2)]">
         <KpiCard
           value={kpis.connected}
           label="Lines Connected"
@@ -793,10 +795,11 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "media"}
           sparkData={messageSparklines?.media}
         />
+        </Card>
       </motion.div>
 
       {/* Charts Section */}
-      <div className="c-card flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
+      <Card variant="base" className="flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
         <div className="flex items-center justify-between">
           <h2 className="c-heading-lg">Metrics</h2>
           <ToolbarTimeRange
@@ -882,7 +885,7 @@ const SoupKitchen: FC = () => {
             </ChartPanel>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* Alert Banner */}
       <AlertBanner alerts={alerts} />
@@ -895,7 +898,7 @@ const SoupKitchen: FC = () => {
         className="flex flex-col lg:flex-row flex-1 min-h-[var(--fleet-pane-min-h)] gap-[var(--sp-3)]"
       >
         {/* Connection Table */}
-        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:grow-[3]">
+        <Card variant="base" className="flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:grow-[3]">
           {/* Lines heading — layout hierarchy: above the toolbar anatomy */}
           <h2 className="c-heading-lg flex-shrink-0 px-[var(--sp-3)] pt-[var(--sp-2)]">
             Lines
@@ -1294,16 +1297,16 @@ const SoupKitchen: FC = () => {
               </Table>
             </div>
           </DrawerLayout>
-        </div>
+        </Card>
 
         {/* Activity Feed */}
-        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
+        <Card variant="base" className="flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
           <ActivityFeed
             events={feed}
             error={feedError ? feedLoadErrorMessage : undefined}
             onRetry={feedError ? () => { void refetchFeed() } : undefined}
           />
-        </div>
+        </Card>
       </motion.div>
 
       <Suspense fallback={null}>
