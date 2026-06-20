@@ -198,6 +198,7 @@ The `config` volume is critical — losing it requires re-scanning the QR code f
 |----------|------|-------------|
 | `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `config.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
 | `WHATSOUP_NODE` | path | Optional Node binary path propagated into the generated macOS launchd plist's `EnvironmentVariables` (`src/fleet/platform.ts:105`). When set in the generating process's environment, a `WHATSOUP_NODE` key with this value is emitted into the plist so the launched instance uses the chosen Node runtime; when unset the key is omitted entirely. |
+| `WHATSOUP_SANDBOX_FAIL_OPEN` | string (`1` to enable) | Read by the agent sandbox `PreToolUse` hook (`deploy/hooks/agent-sandbox.sh`). Controls behaviour when `.claude/sandbox-policy.json` is **missing**. Default (unset/any value ≠ `1`): the hook **fails closed** — it denies the tool call and logs a structured `sandbox_deny` event, because WhatSoup only wires this hook in the same code path that writes the policy file (`src/core/workspace.ts` `writeSandboxArtifacts`), so a missing policy means the sandbox was tampered with or misconfigured. Set to exactly `1` to restore the legacy allow-all-on-missing-policy behaviour for out-of-band manual deployments that intentionally run the hook with no policy file. |
 
 ---
 
@@ -754,6 +755,10 @@ Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.
 | `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
 | `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
+
+**Missing-policy behaviour.** When the hook runs but `.claude/sandbox-policy.json` is absent it **fails closed** (denies, logs `sandbox_deny`) by default. Override with `WHATSOUP_SANDBOX_FAIL_OPEN=1` (see [Environment Variables → Internal / Bootstrap](#internal--bootstrap)).
+
+**Bash `pathRestricted` is best-effort, not a real sandbox.** When `bash.pathRestricted` is `true`, the hook scans the *raw* command string and denies obvious out-of-sandbox escapes: absolute paths outside `allowedPaths` (including quoted paths with spaces), `../` traversal, known credential paths (`.ssh/`, `.gnupg/`, `secret-tool`), tilde expansion (`~`, `~user`), `$HOME`/`$XDG_*` and their brace/quote/default-value split forms, and command substitution (`$(...)`, backticks). This raises the bar against low-effort escapes but **cannot fully contain bash** — a shell can still construct an out-of-sandbox path at runtime in ways a static string scan cannot see (e.g. values read from files, `eval`, `base64 -d`, `$IFS` tricks, env vars assigned earlier in the same command). For hard isolation, run the agent under an OS-level boundary (separate UID, container, or `sandbox-exec`/`bwrap`) in addition to this hook. The residual-bypass note in `deploy/hooks/agent-sandbox.sh` documents this scope.
 
 #### `agentOptions.enabledPlugins`
 

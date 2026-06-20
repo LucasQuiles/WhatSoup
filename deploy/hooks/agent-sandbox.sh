@@ -9,8 +9,23 @@ INPUT=$(cat)
 POLICY_FILE=".claude/sandbox-policy.json"
 
 if [ ! -f "$POLICY_FILE" ]; then
-  # No sandbox policy — allow everything
-  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+  # Missing policy contract (R1-A):
+  #   WhatSoup wires this PreToolUse hook into .claude/settings.json ONLY in the
+  #   same code path that writes .claude/sandbox-policy.json (see
+  #   src/core/workspace.ts writeSandboxArtifacts + src/runtimes/agent/runtime.ts).
+  #   So when the hook actually runs, the policy file is expected to exist. A
+  #   missing file therefore means the sandbox was tampered with / corrupted /
+  #   manually misconfigured — which is exactly when allow-all is most dangerous.
+  #   Default: FAIL CLOSED (deny). Opt back into the legacy allow-all behaviour
+  #   with WHATSOUP_SANDBOX_FAIL_OPEN=1 for out-of-band manual deployments that
+  #   intentionally run the hook with no policy file.
+  if [ "${WHATSOUP_SANDBOX_FAIL_OPEN:-}" = "1" ]; then
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+    exit 0
+  fi
+  # Structured deny log on stderr, mirroring the deny() reason emitted by node.
+  printf '%s\n' '{"event":"sandbox_deny","tool":"","reason":"sandbox-policy.json missing; failing closed (set WHATSOUP_SANDBOX_FAIL_OPEN=1 to allow)","cwd":"'"$PWD"'","policyPath":"'"$POLICY_FILE"'"}' >&2
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"sandbox-policy.json missing; failing closed (set WHATSOUP_SANDBOX_FAIL_OPEN=1 to allow)"}}'
   exit 0
 fi
 
@@ -102,9 +117,16 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
       if (policy.bash?.pathRestricted && allowedPaths.length > 0) {
         const cmd = toolInput.command ?? '';
         // Block commands that reference paths outside the sandbox.
-        // Strategy: extract path-like tokens and validate each one.
-        // Also block known escape patterns.
-        // Use includes() to avoid bash double-quote escaping issues with \$
+        //
+        // HONEST SCOPE (R1-B): this is a best-effort denylist over the *raw*
+        // command string, NOT a real sandbox. A shell offers unbounded ways to
+        // construct a path that this string scan cannot see (runtime variable
+        // expansion, here-docs, eval, base64-decoded args, \$IFS tricks, ...).
+        // The only sound bash containment is an OS-level boundary (see the
+        // residual-bypass note in docs/configuration.md #agentoptionssandbox).
+        // What we do here is raise the bar against the obvious, low-effort
+        // escapes and known credential paths. Use includes() to dodge bash
+        // double-quote escaping issues with \$.
         const blockedStrings = [
           '../',           // directory traversal
           '/etc/',         // system config
@@ -116,14 +138,41 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
           '.ssh ',         // ssh keys (space after)
           '.gnupg/',       // gpg keys
           '\$HOME',        // home variable
-          '\${HOME}',      // home variable (braces)
+          '\${HOME',       // home variable (braces, incl. \${HOME:-x} indirection)
+          '\$HO',          // \$HO''ME / \$HO\"ME split-quote evasion of \$HOME
+          '\${H}',         // \${H}\${OME} brace-split evasion of \$HOME
+          '\$XDG_',        // XDG_*_HOME and friends point outside the sandbox
         ];
         const blocked = blockedStrings.some((s) => cmd.includes(s));
         if (blocked) {
           deny('Bash command references paths or patterns outside the sandbox');
         }
-        // Also check for absolute paths that aren't within allowedPaths
-        const absPathMatches = cmd.match(/\\/[a-zA-Z0-9_\\-\\.\\/]+/g) || [];
+
+        // Tilde expansion escapes the sandbox (\${HOME}/..., ~user/...). The
+        // absolute-path regex below never sees a leading '/', so tilde forms
+        // slipped through entirely. Deny any '~' used as a path: start-of-token
+        // '~' or '~user'. A literal '~' mid-word (e.g. a backup~ filename) is
+        // only matched when it begins a shell word.
+        if (/(^|[\\s=:\"'(])~($|[\\/\\s\"'])/.test(cmd) || /(^|[\\s=:\"'(])~[a-zA-Z0-9_.-]+(\$|[\\/\\s\"'])/.test(cmd)) {
+          deny('Bash command uses tilde (~) path expansion outside the sandbox');
+        }
+
+        // Command substitution can build an out-of-sandbox path the string scan
+        // cannot evaluate (\$(printf %s /Users/testuser), \`...\`). When path-restricted,
+        // refuse to reason about a dynamically-constructed path: deny it.
+        if (cmd.includes('\$(') || cmd.includes('\`')) {
+          deny('Bash command uses command substitution; cannot verify constructed paths under path restriction');
+        }
+        // Also check for absolute paths that aren't within allowedPaths.
+        //  1. Bare paths: a leading '/' followed by path chars (stops at space).
+        //  2. Quoted paths: '/...'/\"/...\" that may legitimately contain spaces.
+        //     The bare regex truncated these at the first space, so a quoted
+        //     '/Users/testuser/my file' validated only '/Users/testuser/my'
+        //     and let the rest
+        //     escape. Capture the quoted span and validate the whole thing.
+        const bareAbs = cmd.match(/\\/[a-zA-Z0-9_\\-\\.\\/]+/g) || [];
+        const quotedAbs = (cmd.match(/[\"'](\\/[^\"']*)[\"']/g) || []).map((m) => m.slice(1, -1));
+        const absPathMatches = [...bareAbs, ...quotedAbs];
         for (const p of absPathMatches) {
           const absP = resolve(p);
           const inAllowed = allowedPaths.some((root) => {
