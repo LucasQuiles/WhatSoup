@@ -477,18 +477,27 @@ describe('admin phones field', () => {
     expect(screen.getByText('At least one admin required')).toBeDefined()
   })
 
-  it('labels the admin phone input and describes it with helper and error text', () => {
+  it('describes the admin phone input with the error and suppresses the helper when invalid', () => {
+    // W2-S5: migrated onto Field, which renders hint OR error (input.md
+    // [label][control][hint|error]) — an error hides the helper and is the described element.
     renderStep({ errors: { adminPhones: 'At least one admin required' } })
 
     const input = screen.getByLabelText('Admin Phones') as HTMLInputElement
-    const helper = screen.getByText(/Phone numbers with full admin access/)
     const error = screen.getByText('At least one admin required')
-    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
 
-    expect(helper.id).toBeTruthy()
+    expect(screen.queryByText(/Phone numbers with full admin access/)).toBeNull()
     expect(error.id).toBeTruthy()
     expect(input.getAttribute('aria-invalid')).toBe('true')
-    expect(describedBy).toEqual(expect.arrayContaining([helper.id, error.id]))
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
+  })
+
+  it('describes the admin phone input with the helper when there is no error', () => {
+    renderStep()
+    const input = screen.getByLabelText('Admin Phones') as HTMLInputElement
+    const helper = screen.getByText(/Phone numbers with full admin access/)
+    expect(helper.id).toBeTruthy()
+    expect(input.getAttribute('aria-describedby')).toBe(helper.id)
+    expect(input.getAttribute('aria-invalid')).toBeNull()
   })
 
   it('renders existing phone tags in the display', () => {
@@ -579,18 +588,20 @@ describe('error display', () => {
     expect(screen.queryByText('Admin phone required')).toBeNull()
   })
 
-  it('shows both name error and taken-name error simultaneously', async () => {
+  it('resolves to the uniqueness error when both format and taken-name errors apply (priority rule)', async () => {
+    // W2-S5 (owner round-5): Field shows ONE error; priority is nameLocked-helper >
+    // nameTaken-error > errors.name. With both a format error and a taken name, taken wins.
     mockCheckExists.mockResolvedValue({ exists: true })
     renderStep({ data: { name: 'taken' }, errors: { name: 'Invalid name format' } })
     await act(async () => {
       vi.advanceTimersByTime(500)
       await Promise.resolve()
     })
-    expect(screen.getByText('Invalid name format')).toBeDefined()
     expect(screen.getByText('Name already exists')).toBeDefined()
+    expect(screen.queryByText('Invalid name format')).toBeNull()
   })
 
-  it('describes the name input with both format and uniqueness errors when both render', async () => {
+  it('describes the name input with the single resolved error id (priority rule)', async () => {
     mockCheckExists.mockResolvedValue({ exists: true })
     renderStep({ data: { name: 'taken' }, errors: { name: 'Invalid name format' } })
     await act(async () => {
@@ -599,14 +610,12 @@ describe('error display', () => {
     })
 
     const input = screen.getByLabelText('Name') as HTMLInputElement
-    const formatError = screen.getByText('Invalid name format')
     const uniquenessError = screen.getByText('Name already exists')
-    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
 
-    expect(formatError.id).toBeTruthy()
     expect(uniquenessError.id).toBeTruthy()
     expect(input.getAttribute('aria-invalid')).toBe('true')
-    expect(describedBy).toEqual(expect.arrayContaining([uniquenessError.id, formatError.id]))
+    // Field wires aria-describedby to the one rendered error (the format error is suppressed).
+    expect(input.getAttribute('aria-describedby')).toBe(uniquenessError.id)
   })
 })
 

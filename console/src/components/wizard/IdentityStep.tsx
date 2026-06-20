@@ -46,13 +46,6 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
   const typeErrorId = useId()
-  const nameInputId = useId()
-  const nameLockedHelperId = useId()
-  const nameTakenErrorId = useId()
-  const nameErrorId = useId()
-  const adminPhonesInputId = useId()
-  const adminPhonesHelperId = useId()
-  const adminPhonesErrorId = useId()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -71,16 +64,15 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
     : adminPhones.length === 1
       ? 'Add another number for shared admin access, or continue with one.'
       : `${adminPhones.length} admin numbers configured.`
-  const adminPhonesDescribedBy = [
-    adminPhonesHelperId,
-    errors.adminPhones ? adminPhonesErrorId : undefined,
-  ].filter(Boolean).join(' ')
   const hasNameTakenError = !nameLocked && nameStatus === 'taken'
-  const nameDescribedBy = [
-    nameLocked ? nameLockedHelperId : undefined,
-    hasNameTakenError ? nameTakenErrorId : undefined,
-    errors.name ? nameErrorId : undefined,
-  ].filter(Boolean).join(' ') || undefined
+  // Name error-priority (owner round-5 dec 3): nameLocked → helper; else nameTaken → error;
+  // else errors.name → error. Field renders one helper OR one error, so we resolve here.
+  const nameErrorMsg = nameLocked
+    ? undefined
+    : hasNameTakenError
+      ? 'Name already exists'
+      : errors.name || undefined
+  const nameHelperMsg = nameLocked ? 'Name is locked — instance already provisioned' : undefined
 
   /* Debounced uniqueness check */
   useEffect(() => {
@@ -135,45 +127,35 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
         {errors.type && <div id={typeErrorId} className="c-error">{errors.type}</div>}
       </div>
 
-      {/* Name */}
-      <div>
-        <label htmlFor={nameInputId} className="c-heading c-field-label">
-          Name
-        </label>
-        <div className="flex items-center gap-[var(--sp-2)]">
+      {/* Name — canonical Field; the tri-state availability indicator rides the
+          statusAdornment slot (Loader2 / Check / X), error+helper resolved by priority (W2-S5). */}
+      <Field
+        label="Name"
+        error={nameErrorMsg}
+        helper={nameHelperMsg}
+        statusAdornment={
+          !nameLocked && nameStatus === 'checking' ? (
+            <Loader2 size={16} className="animate-spin text-text-2 flex-none" />
+          ) : nameStatus === 'available' || nameLocked ? (
+            <Check size={16} className="wizard-check" />
+          ) : !nameLocked && nameStatus === 'taken' ? (
+            <X size={16} className="text-s-crit flex-none" />
+          ) : null
+        }
+      >
+        {(id) => (
           <TextInput
-            id={nameInputId}
+            id={id}
             type="text"
             value={name}
             onChange={(e) => onChange({ name: slugAgentWorkspaceName(e.target.value) })}
             placeholder="my-line"
             className={nameLocked ? 'opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}
             disabled={nameLocked}
-            aria-invalid={errors.name || hasNameTakenError ? true : undefined}
-            aria-describedby={nameDescribedBy}
-            error={Boolean(errors.name) || hasNameTakenError}
-            confirmed={nameStatus === 'available' || nameLocked}
+            error={Boolean(nameErrorMsg)}
           />
-          {!nameLocked && nameStatus === 'checking' && (
-            <Loader2 size={16} className="animate-spin text-text-2 flex-none" />
-          )}
-          {(nameStatus === 'available' || nameLocked) && (
-            <Check size={16} className="wizard-check" />
-          )}
-          {!nameLocked && nameStatus === 'taken' && (
-            <X size={16} className="text-s-crit flex-none" />
-          )}
-        </div>
-        {nameLocked && (
-          <div id={nameLockedHelperId} className="c-helper">Name is locked — instance already provisioned</div>
         )}
-        {hasNameTakenError && (
-          <div id={nameTakenErrorId} className="c-error">Name already exists</div>
-        )}
-        {errors.name && (
-          <div id={nameErrorId} className="c-error">{errors.name}</div>
-        )}
-      </div>
+      </Field>
 
       {/* Description — canonical Field: optional marker + built-in confirmed Check (DD-43/W2-S5) */}
       <Field label="Description" optional confirmed={showConfirmed && Boolean(description.trim())}>
@@ -189,29 +171,25 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
         )}
       </Field>
 
-      {/* Admin Phones */}
-      <div>
-        <label htmlFor={adminPhonesInputId} className="c-heading block mb-[var(--sp-1)]">Admin Phones</label>
-        <div id={adminPhonesHelperId} className="c-helper">{adminPhonesHelperText}</div>
-        <div className="flex items-start gap-[var(--sp-2)] mt-[var(--sp-2)]">
-          <div className="flex-1 min-w-0">
-            <TagInput
-              id={adminPhonesInputId}
-              values={adminPhones}
-              onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
-              placeholder="Enter phone number"
-              validate={validatePhone}
-              accentColor={showConfirmed && adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
-              aria-invalid={errors.adminPhones ? true : undefined}
-              aria-describedby={adminPhonesDescribedBy}
-            />
-          </div>
-          {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} className="wizard-check mt-[var(--sp-2)]" />
-          )}
-        </div>
-        {errors.adminPhones && <div id={adminPhonesErrorId} className="c-error">{errors.adminPhones}</div>}
-      </div>
+      {/* Admin Phones — canonical Field; helper moves BELOW the control per input.md
+          ([label][control][hint|error]) and the built-in confirmed Check replaces the manual one (W2-S5). */}
+      <Field
+        label="Admin Phones"
+        helper={adminPhonesHelperText}
+        error={errors.adminPhones || undefined}
+        confirmed={showConfirmed && !errors.adminPhones && adminPhones.length > 0}
+      >
+        {(id) => (
+          <TagInput
+            id={id}
+            values={adminPhones}
+            onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
+            placeholder="Enter phone number"
+            validate={validatePhone}
+            accentColor={showConfirmed && adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
+          />
+        )}
+      </Field>
     </WizardStep>
   )
 }
