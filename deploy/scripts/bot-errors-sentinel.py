@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -1009,6 +1010,68 @@ def expired_q_remediation(state: dict, now: float) -> Optional[dict]:
     return dict(record)
 
 
+def redeem_q_remediation(state: dict, now: float, request_id: str, token: str) -> dict:
+    """Single-use redemption of the in-flight Tier-2 remediation token.
+
+    The Q worker that received the raw ``token`` (plus ``requestId``) in the
+    action-event payload presents them here to mark the token consumed. We
+    recompute the bound ``tokenHash`` from the *secret* raw token plus the
+    record's own ``host``/``actionHash`` and the presented ``requestId``, and
+    constant-time compare it against the stored hash. On the first valid match
+    we stamp ``redeemedAt`` so ``q_remediation_redeemed`` (already honored at
+    every consumption site: ``active_q_remediation`` and
+    ``expired_q_remediation``) rejects every subsequent presentation within the
+    TTL — closing the replay window.
+
+    Fail-closed: a missing/corrupt/empty record, a request-id mismatch, an
+    expired token, a non-matching hash, or an already-redeemed record all
+    return ``redeemed: False`` and mutate nothing on the rejection paths
+    (other than re-initializing a structurally-corrupt slot, mirroring
+    ``active_q_remediation``). Only a verified, fresh token is stamped."""
+    record = state.get("qRemediation")
+    if not isinstance(record, dict) or not record:
+        # Missing or structurally-corrupt record → nothing to redeem.
+        if record is not None and not isinstance(record, dict):
+            state.pop("qRemediation", None)
+        return {"redeemed": False, "reason": "no_active_remediation"}
+    if q_remediation_redeemed(record, now):
+        # Replay: token already consumed within (or before) its TTL.
+        return {
+            "redeemed": False,
+            "reason": "already_redeemed",
+            "requestId": record.get("requestId"),
+            "host": record.get("host"),
+            "redeemedAt": record.get("redeemedAt"),
+        }
+    expires_at = finite_float(record.get("expiresAtEpoch")) or 0.0
+    if expires_at <= now:
+        return {"redeemed": False, "reason": "expired", "requestId": record.get("requestId")}
+    stored_hash = record.get("tokenHash")
+    record_request_id = str(record.get("requestId") or "")
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return {"redeemed": False, "reason": "corrupt_token_hash"}
+    if not hmac.compare_digest(record_request_id, str(request_id)):
+        return {"redeemed": False, "reason": "request_id_mismatch"}
+    presented_hash = remediation_token_hash(
+        str(token),
+        str(record.get("host") or ""),
+        str(record.get("actionHash") or ""),
+        record_request_id,
+    )
+    if not hmac.compare_digest(stored_hash, presented_hash):
+        return {"redeemed": False, "reason": "token_mismatch", "requestId": record_request_id}
+    redeemed_at = now_iso(now)
+    record["redeemedAt"] = redeemed_at
+    return {
+        "redeemed": True,
+        "reason": "redeemed",
+        "requestId": record_request_id,
+        "host": record.get("host"),
+        "tokenId": record.get("tokenId"),
+        "redeemedAt": redeemed_at,
+    }
+
+
 def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, now: float, q_host_result: Optional[dict] = None) -> None:
     if payload.get("tier") != "tier2":
         return
@@ -1498,6 +1561,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate BOT ERRORS Fleet Runtime Sentinel state")
     parser.add_argument("--hosts", default=str(default_hosts_path()))
     parser.add_argument("--state-dir", default=str(state_root()))
+    parser.add_argument(
+        "--redeem-token",
+        default=None,
+        help="Raw Tier-2 remediation token to redeem (single-use). Requires --redeem-request-id. "
+        "Stamps redeemedAt under the instance lock so the token cannot be replayed within its TTL.",
+    )
+    parser.add_argument(
+        "--redeem-request-id",
+        default=None,
+        help="requestId bound to the token being redeemed (from the q-remediation-request payload).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1537,9 +1611,47 @@ def acquire_instance_lock(lock_path: Path) -> Optional[int]:
     return fd
 
 
+def run_redeem(config: SentinelConfig, request_id: str, token: str) -> dict:
+    """Load state, attempt single-use token redemption, persist on success.
+
+    Runs under the caller's instance lock so the redeemedAt write is serialized
+    against the per-cycle run_once writers (same flock, single JSON state file).
+    The state file is only re-written when a token is actually stamped, so
+    rejections never mutate persisted state."""
+    now = time.time()
+    state = load_state(config)
+    outcome = redeem_q_remediation(state, now, request_id, token)
+    if outcome.get("redeemed"):
+        state["schemaVersion"] = 1
+        state["updatedAt"] = now_iso(now)
+        save_state(config, state)
+    return {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-redeem",
+        "checkedAt": now_iso(now),
+        "statePath": str(state_path(config)),
+        **outcome,
+    }
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     config = default_config(Path(args.hosts).expanduser(), Path(args.state_dir).expanduser())
+    redeem_requested = args.redeem_token is not None or args.redeem_request_id is not None
+    if redeem_requested and (args.redeem_token is None or args.redeem_request_id is None):
+        print(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "kind": "bot-errors-sentinel-redeem",
+                    "redeemed": False,
+                    "reason": "redeem_requires_token_and_request_id",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     lock_path = _instance_lock_path()
     lock_fd = acquire_instance_lock(lock_path)
     if lock_fd is None:
@@ -1548,6 +1660,10 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"schemaVersion": 1, "checkedAt": now_iso(), "skipped": "already_running"}, sort_keys=True))
         return 0
     try:
+        if redeem_requested:
+            redeem_result = run_redeem(config, args.redeem_request_id, args.redeem_token)
+            print(json.dumps(redeem_result, sort_keys=True))
+            return 0 if redeem_result.get("redeemed") else 1
         result = run_once(config)
     except Exception as exc:
         print(json.dumps({"schemaVersion": 1, "healthy": False, "class": "fleet_sentinel_error", "problems": [str(exc)]}, sort_keys=True), file=sys.stderr)
