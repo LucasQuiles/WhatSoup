@@ -220,8 +220,16 @@ the backup key is absent; `hasContinuation` carries the continue-vs-resend
 decision and the resolved model card is passed as `backupCard`. The notice
 routing (one-message handoff stash vs standalone enqueue) is unchanged.
 
-- **Known gap** — the templates have no `tool-activity-blocked` variant. When a
-  replay is blocked because the first attempt already started an action, the
-  base template renders normally and the runtime appends the "an action already
-  started — confirm or resend the next step" clause inline. A dedicated template
-  id should eventually own this copy so it is not composed at the call site.
+- **`tool-activity-blocked`** — when a replay is blocked because the first
+  attempt already started an action, the copy now lives in `response-templates.ts`
+  rather than being composed at the call site. Two render paths share one source
+  of truth: the reason templates (`usage-limit`, `rate-limit`, …) render the
+  blocked directive in place of their continue/resend clause when the
+  `blockedByToolActivity` render flag is set, and a dedicated
+  `tool-activity-blocked` template id renders the directive standalone (with the
+  backup/digest context clauses). The directive — "The first attempt already
+  started an action, so I will not replay it automatically. Please confirm or
+  resend the next step." — is emitted once, never doubled with a resend clause.
+  `notifyProviderFallbackActivated` in `src/runtimes/agent/runtime.ts` passes the
+  flag through; the output is byte-for-byte identical to the previous inline
+  composition.

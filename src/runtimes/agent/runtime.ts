@@ -6202,27 +6202,20 @@ export class AgentRuntime implements Runtime {
     const templateId: UserTemplateId = credentialsMissing
       ? 'credentials-missing'
       : activation.reason;
-    // The deterministic templates have no "blocked by tool activity" variant
-    // (they only express continue / resend). That variant carries a distinct,
-    // user-facing instruction ("an action already started — confirm or resend
-    // the next step") which would otherwise be LOST. So for the blocked case we
-    // suppress the template's own continuation clause and append this single
-    // directive instead — avoiding a double-"resend". See the DONE_WITH_CONCERNS
-    // note: a dedicated template id should own this copy.
+    // When the replay is blocked because the first attempt already started an
+    // action, the reason template renders the dedicated tool-activity-blocked
+    // directive in place of its continue/resend clause (the copy now lives in
+    // response-templates.ts via the `tool-activity-blocked` template id and the
+    // `blockedByToolActivity` render flag — no longer composed at this call site).
     const blockedByToolActivity = !credentialsMissing && replay.blockedByToolActivity === true;
-    let message = renderUserMessage(templateId, {
+    const message = renderUserMessage(templateId, {
       hasContinuation,
       backupCard: credentialsMissing ? null : card,
       activeUntil: activation.activeUntil,
       bundle: null,
       formatClock: formatClockForUser,
-      suppressContinuation: blockedByToolActivity,
+      blockedByToolActivity,
     });
-    if (blockedByToolActivity) {
-      // Suppressing the continuation clause leaves a trailing space after the
-      // backup/digest clause; trim before joining so the directive reads cleanly.
-      message = `${message.trimEnd()} The first attempt already started an action, so I will not replay it automatically. Please confirm or resend the next step.`;
-    }
     // One-message collapse: when the stand-in will continue (a replay is
     // scheduled, not blocked, with credentials), stash the notice so it prepends
     // to the stand-in's first reply instead of being a separate message. Any
