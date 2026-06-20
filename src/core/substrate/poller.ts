@@ -5,18 +5,28 @@
 // notifications to the trigger's `report_chat_jid`, and handles
 // `terminal_at` expiry.
 //
-// Scope (per maintainer scoping decision, 2026-05-19):
+// Scope (per maintainer scoping decision, 2026-05-19; extended F2 Slice A
+// 2026-06-20):
 //   - poll.sqlite     — workhorse kind for personal-line watches
+//   - poll.pinecone   — similarity search over the bot's own memory index
+//                       (reuses the knowledge_search client + index allowlist)
+//   - poll.file       — file existence / mtime / content-hash watch, behind a
+//                       fail-closed allowed-root path policy (deny-all default)
 //   - schedule.cron   — fires on cron expression
 //   - schedule.at_time — one-shot at fire_at, expires after
 //   - terminal_at expiry — sets status='expired', fires on_terminal action
 //
-// Other kinds in SPEC_REGISTRY (poll.shell, poll.url, poll.email,
-// poll.file, poll.pinecone, event.message) are recognised but not yet
-// executed; the poller logs a warn and bumps `next_fire_at` so the row
-// does not hot-loop. Their executors are tracked as follow-up work.
+// The remaining SPEC_REGISTRY kinds (poll.shell, poll.url, poll.email,
+// event.message) are recognised but not yet executed; the poller records a
+// noop with reason 'not_implemented' and bumps `next_fire_at` by the 1h
+// cooldown so the row does not hot-loop. poll.shell/poll.url/poll.email are
+// owner-gated (see docs/superpowers/plans F2 closure); event.message is
+// architecturally re-homed to the ingest path, not the interval poller.
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { resolve, sep } from 'node:path';
+import { realpathSync, statSync, createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
 import { dueTriggers, validateTriggerSpec, isSafeSqliteSql } from './triggers.ts';
 import { TERMINAL } from './beads.ts';
@@ -39,6 +49,41 @@ const FAILED_RETRY_COOLDOWN_SEC = 60;
 const MAX_CONSECUTIVE_FAILURES = 5;
 /** Minimum seconds between WhatsApp notifications per trigger. */
 const NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300;
+/**
+ * Max bytes hashed for a `poll.file` content_hash read. Bounds the blast
+ * radius of a confused-deputy spec pointed at a huge file (the watch reads
+ * host FS in the MAIN process, outside the agent sandbox). 16 MiB is far
+ * above any realistic watched config/log file; larger reads stop early and
+ * the hash covers only the prefix (still a stable change-detector).
+ */
+const FILE_HASH_MAX_BYTES = 16 * 1024 * 1024;
+/**
+ * Pseudo-filesystem prefixes that are never legitimate watch targets even if
+ * an allowed root nominally contains them. Reading these can hang, leak kernel
+ * state, or block on device I/O. Rejected fail-closed regardless of allowlist.
+ */
+const DENIED_PATH_PREFIXES = ['/proc', '/dev', '/sys'];
+
+/** A single Pinecone match — only the score is consumed (no record body). */
+export interface PineconeMatch {
+  score: number;
+}
+
+/** Spec passed to an injected Pinecone search function. */
+export interface PineconeSearchArgs {
+  index: string;
+  namespace: string;
+  query: string;
+  topK: number;
+}
+
+/**
+ * Injected Pinecone access path for `poll.pinecone`. Production wires this to
+ * the same client + project guard used by `knowledge_search`; tests inject a
+ * stub. Returning only `{ matches: [{ score }] }` keeps record bodies out of
+ * the poller entirely (redaction-by-construction).
+ */
+export type PineconeSearchFn = (args: PineconeSearchArgs) => Promise<{ matches: PineconeMatch[] }>;
 
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
@@ -54,6 +99,24 @@ export interface TriggerPollerOptions {
   maxConsecutiveFailures?: number;
   /** Minimum seconds between dispatches per trigger. Default 300 (5 min). */
   notificationThrottleMinIntervalSec?: number;
+  /**
+   * Allowlist of Pinecone index names a `poll.pinecone` watch may query.
+   * Empty/unset = deny-all (fail-closed). Production passes
+   * `config.memory.pinecone.allowedIndexes`.
+   */
+  pineconeAllowedIndexes?: string[];
+  /**
+   * Injected Pinecone search path for `poll.pinecone`. When unset, the
+   * executor fails closed with `pinecone_unavailable` (never silently noops).
+   */
+  pineconeSearch?: PineconeSearchFn;
+  /**
+   * Allowlist of filesystem roots a `poll.file` watch may resolve under.
+   * Empty/unset = deny-all (fail-closed) — this INVERTS the agent-sandbox
+   * hook's fail-open `allowedPaths.length===0 ⇒ allow`, because the poller
+   * runs unsandboxed in the main process.
+   */
+  fileWatchAllowedRoots?: string[];
 }
 
 interface SqliteSpec {
@@ -61,6 +124,22 @@ interface SqliteSpec {
   binds?: unknown[] | Record<string, unknown>;
   fire_when: 'rows_returned' | 'rowcount_changed';
 }
+
+interface PineconeTriggerSpec {
+  index: string;
+  namespace: string;
+  query: string;
+  top_k?: number;
+  threshold?: number;
+}
+
+interface FileTriggerSpec {
+  path: string;
+  watch: 'exists' | 'mtime' | 'content_hash';
+}
+
+/** Default top_k when a poll.pinecone spec omits it. */
+const PINECONE_DEFAULT_TOP_K = 5;
 
 interface ExecuteOutcome {
   status: 'ok' | 'noop' | 'failed';
@@ -87,6 +166,9 @@ export class TriggerPoller {
   private readonly clearTimeoutImpl: typeof clearTimeout;
   private readonly maxConsecutiveFailures: number;
   private readonly notificationThrottleMinIntervalSec: number;
+  private readonly pineconeAllowedIndexes: ReadonlySet<string>;
+  private readonly pineconeSearch: PineconeSearchFn | null;
+  private readonly fileWatchAllowedRoots: readonly string[];
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -99,6 +181,17 @@ export class TriggerPoller {
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
     this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
+    this.pineconeAllowedIndexes = new Set(opts.pineconeAllowedIndexes ?? []);
+    this.pineconeSearch = opts.pineconeSearch ?? null;
+    // Canonicalise allowed roots once at construction. We realpath() each root
+    // so the exec-time symlink-escape recheck (which realpaths the TARGET)
+    // compares like-with-like — otherwise platform symlinks such as macOS
+    // /var -> /private/var would make every legitimate target appear to escape.
+    // Roots that do not yet exist fall back to their resolve()'d textual form.
+    this.fileWatchAllowedRoots = (opts.fileWatchAllowedRoots ?? []).map((r) => {
+      const abs = resolve(r);
+      try { return realpathSync(abs); } catch { return abs; }
+    });
   }
 
   start(): void {
@@ -298,6 +391,8 @@ export class TriggerPoller {
     }
 
     if (kind === 'poll.sqlite') return this.executeSqlite(t, spec as SqliteSpec);
+    if (kind === 'poll.pinecone') return this.executePinecone(spec as PineconeTriggerSpec);
+    if (kind === 'poll.file') return this.executeFile(t, spec as FileTriggerSpec);
     if (kind === 'schedule.cron' || kind === 'schedule.at_time') {
       return {
         status: 'ok',
@@ -390,6 +485,283 @@ export class TriggerPoller {
     try {
       const parsed = JSON.parse(row.output_json) as { rowCount?: unknown };
       return typeof parsed.rowCount === 'number' ? parsed.rowCount : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * poll.pinecone — similarity search over the bot's own memory index.
+   *
+   * Defense-in-depth (the analogue of `isSafeSqliteSql`): even though
+   * `create_watch` validated the spec shape, re-guard the index against the
+   * configured allowlist at EXEC time. Empty/unset allowlist = deny-all
+   * (fail-closed). The Pinecone client is injected; when absent we fail with
+   * `pinecone_unavailable` rather than silently noop. `outputJson` is reduced
+   * to scalars (`matchCount`, `topScore`) — record bodies never enter the
+   * poller (the search fn returns only scores), parity with the SQL
+   * `sampleRow` redaction posture.
+   */
+  private async executePinecone(spec: PineconeTriggerSpec): Promise<ExecuteOutcome> {
+    if (!this.pineconeAllowedIndexes.has(spec.index)) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: `index ${spec.index} not in allowlist`,
+        outputJson: { reason: 'index_not_allowed' },
+        errorKind: 'index_not_allowed',
+        errorMessage: 'poll.pinecone index is not in config.memory.pinecone.allowedIndexes',
+      };
+    }
+    if (!this.pineconeSearch) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'pinecone search path not configured',
+        outputJson: { reason: 'pinecone_unavailable' },
+        errorKind: 'pinecone_unavailable',
+        errorMessage: 'poll.pinecone has no Pinecone client wired in this process',
+      };
+    }
+
+    let matches: PineconeMatch[];
+    try {
+      const result = await this.pineconeSearch({
+        index: spec.index,
+        namespace: spec.namespace,
+        query: spec.query,
+        topK: spec.top_k ?? PINECONE_DEFAULT_TOP_K,
+      });
+      matches = Array.isArray(result.matches) ? result.matches : [];
+    } catch (err) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'pinecone query failed',
+        outputJson: { index: spec.index },
+        errorKind: 'pinecone_error',
+        errorMessage: errorMessage(err),
+      };
+    }
+
+    const matchCount = matches.length;
+    const topScore = matchCount > 0
+      ? matches.reduce((max, m) => (typeof m.score === 'number' && m.score > max ? m.score : max), -Infinity)
+      : null;
+
+    const fired = spec.threshold != null
+      ? (topScore != null && topScore >= spec.threshold)
+      : matchCount > 0;
+
+    return {
+      status: fired ? 'ok' : 'noop',
+      fired,
+      outputSummary: fired
+        ? `pinecone matched ${matchCount} result${matchCount === 1 ? '' : 's'} (top ${topScore ?? 'n/a'})`
+        : `pinecone below threshold (${matchCount} results, top ${topScore ?? 'n/a'})`,
+      outputJson: { matchCount, topScore },
+    };
+  }
+
+  /**
+   * poll.file — watch a host file for existence / mtime change / content
+   * change.
+   *
+   * Path policy (fail-closed, defense-in-depth analogue of `isSafeSqliteSql`):
+   *   1. resolve() the spec path,
+   *   2. require it under a configured allowed root (empty set = DENY-ALL —
+   *      this INVERTS the agent-sandbox hook's fail-open default because the
+   *      poller is unsandboxed in the main process),
+   *   3. reject /proc, /dev, /sys prefixes outright,
+   *   4. realpath() the target and re-check the resolved path is still under an
+   *      allowed root (symlink-escape defense),
+   *   5. require a regular file (stat.isFile()).
+   * Any failure → status:'failed', errorKind:'path_not_allowed'.
+   */
+  private async executeFile(t: TriggerRow, spec: FileTriggerSpec): Promise<ExecuteOutcome> {
+    const denied = (detail: string): ExecuteOutcome => ({
+      status: 'failed',
+      fired: false,
+      outputSummary: `path rejected: ${detail}`,
+      outputJson: { reason: 'path_not_allowed' },
+      errorKind: 'path_not_allowed',
+      errorMessage: `poll.file ${detail}`,
+    });
+
+    const resolved = resolve(spec.path);
+    // Syntactic pre-checks on the lexically-resolved path: reject denied
+    // pseudo-fs prefixes outright. The authoritative allowlist comparison runs
+    // against the realpath'd target below (symlink-canonical) so platform
+    // symlinks (macOS /var -> /private/var) don't cause false escapes.
+    if (this.isDeniedPrefix(resolved)) {
+      return denied('path is under a denied pseudo-filesystem prefix');
+    }
+
+    // Existence + symlink-escape + regular-file checks. A missing file is a
+    // legitimate state for watch:'exists' (noop), NOT a policy failure.
+    let realTarget: string;
+    let st: ReturnType<typeof statSync>;
+    try {
+      // realpathSync resolves symlinks; if the link escapes the root we catch
+      // it below. It throws ENOENT when the file is absent.
+      realTarget = realpathSync(resolved);
+      st = statSync(realTarget);
+    } catch {
+      // File absent (ENOENT). Still fail-closed if the path the operator named
+      // is not under an allowed root — an absent-path noop would otherwise be a
+      // file-existence oracle for arbitrary paths. We compare the realpath of
+      // the absent target's PARENT directory (the deepest existing ancestor) so
+      // platform symlinks on the parent are canonicalised; if even that is not
+      // resolvable or escapes, deny.
+      if (!this.resolvedAbsentPathAllowed(resolved)) {
+        return denied('path is outside the configured allowed roots');
+      }
+      // An absent file under an allowed root is a benign noop for every watch
+      // mode — there is nothing yet to fire on or compare against.
+      return {
+        status: 'noop',
+        fired: false,
+        outputSummary: 'file absent',
+        outputJson: { exists: false },
+      };
+    }
+
+    // Symlink-escape defense: the realpath'd target must ALSO be under an
+    // allowed root and not a denied pseudo-fs prefix.
+    if (this.isDeniedPrefix(realTarget) || !this.isUnderAllowedRoot(realTarget)) {
+      return denied('symlink target escapes the allowed roots');
+    }
+    if (!st.isFile()) {
+      return denied('target is not a regular file');
+    }
+
+    if (spec.watch === 'exists') {
+      return {
+        status: 'ok',
+        fired: true,
+        outputSummary: 'file present',
+        outputJson: { exists: true },
+      };
+    }
+
+    if (spec.watch === 'mtime') {
+      const mtime = Math.floor(st.mtimeMs);
+      const last = this.lastMtimeFor(t.id);
+      const fired = last === null ? true : mtime !== last;
+      return {
+        status: fired ? 'ok' : 'noop',
+        fired,
+        outputSummary: fired
+          ? `mtime changed: ${last ?? 'first run'} -> ${mtime}`
+          : `mtime unchanged at ${mtime}`,
+        outputJson: { exists: true, mtime },
+      };
+    }
+
+    // content_hash
+    let hash: string;
+    try {
+      hash = await hashFileCapped(realTarget, FILE_HASH_MAX_BYTES);
+    } catch (err) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'content hash failed',
+        outputJson: { exists: true },
+        errorKind: 'hash_error',
+        errorMessage: errorMessage(err),
+      };
+    }
+    const lastHash = this.lastHashFor(t.id);
+    const hashChanged = lastHash === null ? true : hash !== lastHash;
+    return {
+      status: hashChanged ? 'ok' : 'noop',
+      fired: hashChanged,
+      outputSummary: hashChanged
+        ? (lastHash === null ? 'content hash recorded (first run)' : 'content changed')
+        : 'content unchanged',
+      // Store the hash for the next comparison but keep the surfaced posture
+      // scalar/boolean: the hash itself is an opaque digest (not file content),
+      // and hashChanged is the operator-facing boolean.
+      outputJson: { exists: true, hashChanged, hash },
+    };
+  }
+
+  private isDeniedPrefix(absPath: string): boolean {
+    return DENIED_PATH_PREFIXES.some(
+      (prefix) => absPath === prefix || absPath.startsWith(prefix + '/'),
+    );
+  }
+
+  private isUnderAllowedRoot(absPath: string): boolean {
+    // Empty allowlist = deny-all (inverted from the sandbox hook's fail-open).
+    if (this.fileWatchAllowedRoots.length === 0) return false;
+    return this.fileWatchAllowedRoots.some(
+      (root) => absPath === root || absPath.startsWith(root + sep),
+    );
+  }
+
+  /**
+   * Allowlist check for an absent (ENOENT) target. We cannot realpath the
+   * target itself, so we canonicalise its deepest existing ancestor and require
+   * that ancestor be under an allowed root. This keeps the absent-file noop
+   * from acting as an existence oracle for paths outside the allowlist while
+   * still tolerating platform symlinks on the parent chain.
+   */
+  private resolvedAbsentPathAllowed(absPath: string): boolean {
+    if (this.fileWatchAllowedRoots.length === 0) return false;
+    let current = absPath;
+    // Walk up to the deepest existing ancestor.
+    for (let i = 0; i < 64; i++) {
+      try {
+        const realAncestor = realpathSync(current);
+        if (this.isDeniedPrefix(realAncestor)) return false;
+        // The absent leaf sits under `current`; require the canonical ancestor
+        // to be at or under an allowed root.
+        return this.isUnderAllowedRoot(realAncestor);
+      } catch {
+        const parent = resolve(current, '..');
+        if (parent === current) return false; // reached filesystem root
+        current = parent;
+      }
+    }
+    return false;
+  }
+
+  /** Prior run's recorded file mtime, mirroring `lastRowCountFor`. */
+  private lastMtimeFor(triggerId: number): number | null {
+    return this.lastScalarFor(triggerId, 'mtime');
+  }
+
+  /** Prior run's recorded content hash, mirroring `lastRowCountFor`. */
+  private lastHashFor(triggerId: number): string | null {
+    const row = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    ).get(triggerId) as { output_json: string | null } | undefined;
+    if (!row?.output_json) return null;
+    try {
+      const parsed = JSON.parse(row.output_json) as { hash?: unknown };
+      return typeof parsed.hash === 'string' ? parsed.hash : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private lastScalarFor(triggerId: number, key: string): number | null {
+    const row = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    ).get(triggerId) as { output_json: string | null } | undefined;
+    if (!row?.output_json) return null;
+    try {
+      const parsed = JSON.parse(row.output_json) as Record<string, unknown>;
+      const value = parsed[key];
+      return typeof value === 'number' ? value : null;
     } catch {
       return null;
     }
@@ -654,6 +1026,47 @@ function formatExpiryNotification(t: TriggerRow, reason: string): string {
 
 function formatPauseNotification(t: TriggerRow, failureCount: number): string {
   return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with extend_trigger or recreate.`;
+}
+
+/**
+ * Stream a SHA-256 over a file, stopping after `maxBytes`. Bounds the read so a
+ * confused-deputy `poll.file` spec pointed at a huge file cannot exhaust memory
+ * or stall the poller. Reading only the prefix is still a stable change
+ * detector (any prefix change flips the digest).
+ */
+function hashFileCapped(filePath: string, maxBytes: number): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const hash = createHash('sha256');
+    let read = 0;
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(hash.digest('hex'));
+    };
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk: string | Buffer) => {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      const remaining = maxBytes - read;
+      if (remaining <= 0) {
+        stream.destroy();
+        return;
+      }
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      hash.update(slice);
+      read += slice.length;
+      if (read >= maxBytes) stream.destroy();
+    });
+    // EOF or a destroy()-driven close both terminate the read; `finish` is
+    // idempotent so whichever fires first computes the digest exactly once.
+    stream.on('end', finish);
+    stream.on('close', finish);
+    stream.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+  });
 }
 
 export function toBindArgs(binds: unknown[] | Record<string, unknown>): SQLInputValue[] {

@@ -39,7 +39,8 @@ TriggerPoller (src/core/substrate/poller.ts)   ← wired in main.ts since PR #67
   │
   ├─ expiry sweep: status='active' AND terminal_at <= now → expireTrigger
   ├─ dueTriggers(db, now, batchSize) → process each
-  ├─ per-kind executor (poll.sqlite + schedule.* implemented; others no-op)
+  ├─ per-kind executor (poll.sqlite + poll.pinecone + poll.file + schedule.*
+  │     implemented; poll.url / poll.shell / poll.email / event.message no-op)
   ├─ writes trigger_runs row (status: running → ok/noop/failed/terminal_fired)
   └─ on fire, sends notification to report_chat_jid via Messenger
 ```
@@ -66,9 +67,9 @@ Defined in `src/core/substrate/triggers.ts` (`SPEC_REGISTRY`):
 | `schedule.at_time` | `fire_at` (unix epoch) | One-shot at a specific time |
 | `poll.email` | `source` (gmail/m365), `sender?`, `subject_regex?`, `label?`, `body_regex?` | Email polling |
 | `poll.url` | `url`, `hash_mode` (text/selector/headers), `selector?` | URL change detection |
-| `poll.file` | `path`, `watch` (exists/mtime/content_hash) | Local file monitoring |
+| `poll.file` | `path`, `watch` (exists/mtime/content_hash) | Local file monitoring — **wired**. Fail-closed path policy: the resolved path must be under `memory.fileWatch.allowed_roots` (empty allowlist = deny-all; the poller runs unsandboxed in the main process), `/proc` `/dev` `/sys` are rejected, symlink targets are realpath-rechecked against the allowlist (symlink-escape defense), and only regular files are accepted. Disallowed → `failed` / `path_not_allowed`. `content_hash` reads are size-bounded (16 MiB cap). |
 | `poll.sqlite` | `sql`, `fire_when` (rows_returned/rowcount_changed), `binds?` | SQLite query polling — the workhorse for personal-line watches |
-| `poll.pinecone` | `index`, `namespace`, `query`, `top_k?`, `threshold?` | Pinecone similarity search |
+| `poll.pinecone` | `index`, `namespace`, `query`, `top_k?`, `threshold?` | Pinecone similarity search — **wired**. Reuses the `knowledge_search` Pinecone client + `memory.pinecone.allowedIndexes` allowlist (fail-closed `index_not_allowed`; empty allowlist denies all). Fires when `topScore >= threshold` (or any result when no threshold). `output_json` carries only `{matchCount, topScore}` — no record bodies. |
 | `poll.shell` | `argv[]`, `fire_when` (exit_zero/stdout_nonempty/stdout_regex), `cwd?`, `regex?` | Shell command polling |
 | `event.message` | `match` (sender_jid/regex/mention), `value`, `chat_jid?` | Inbound message matching (poller recognises but does not yet execute — see §6) |
 
@@ -170,13 +171,13 @@ the first cut shipped only the kinds needed for personal-line watches.
 | Kind | Stored? | Fires? | Notes |
 |---|---|---|---|
 | `poll.sqlite` | yes | **yes** | SQL executed; `fire_when` (`rows_returned` / `rowcount_changed`) evaluated |
+| `poll.pinecone` | yes | **yes** | Similarity search via the `knowledge_search` client; fail-closed `index_not_allowed` against `memory.pinecone.allowedIndexes`; fires on `topScore >= threshold` (or any result when no threshold); `output_json` = `{matchCount, topScore}` only |
+| `poll.file` | yes | **yes** | exists/mtime/content_hash; fail-closed path policy against `memory.fileWatch.allowed_roots` (empty = deny-all), `/proc` `/dev` `/sys` and non-regular files rejected, symlink-escape realpath recheck, 16 MiB hash cap; disallowed → `failed` / `path_not_allowed` |
 | `schedule.cron` | yes | **yes** | Fires on cron expression; `next_fire_at` advanced via `nextCronRun` |
 | `schedule.at_time` | yes | **yes** | One-shot at `fire_at`, then transitions to `status='expired'` |
-| `poll.shell` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
-| `poll.url` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
-| `poll.email` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
-| `poll.file` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
-| `poll.pinecone` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `poll.shell` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (owner-gated — see F2 closure doc) |
+| `poll.url` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (owner-gated — see F2 closure doc) |
+| `poll.email` | yes | no | Recognised; logs `not_implemented`, 1h cooldown (deferred — no credential substrate) |
 | `event.message` | yes | no | Event-driven; needs message-bus integration, not a poller |
 
 **Terminal expiry is handled** by a separate sweep at the start of each

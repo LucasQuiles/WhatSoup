@@ -62,6 +62,17 @@ export interface MemoryConfig {
     defaultHours: number;
     maxHours: number;
   };
+  /**
+   * poll.file watch path policy. `allowedRoots` is the explicit allowlist of
+   * filesystem roots a `poll.file` trigger may resolve under. It defaults to
+   * EMPTY = deny-all (fail-closed): the trigger poller runs unsandboxed in the
+   * main process, so a confused-deputy watch spec must not be able to probe
+   * arbitrary host paths. Operators opt specific roots in via
+   * `memory.fileWatch.allowed_roots` in instance config.
+   */
+  fileWatch: {
+    allowedRoots: string[];
+  };
   conversation: {
     recent: number;
     extended: number;
@@ -678,6 +689,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const memoryRoot = asRecord(migrated.memory);
   const sweep = asRecord(memoryRoot?.sweep);
   const watchTtl = asRecord(memoryRoot?.watch_ttl);
+  const fileWatch = asRecord(memoryRoot?.file_watch);
   const conversation = asRecord(memoryRoot?.conversation);
   const retention = asRecord(memoryRoot?.retention);
   const consolidation = asRecord(memoryRoot?.consolidation);
@@ -738,6 +750,12 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     watchTtl: {
       defaultHours: numberProp(watchTtl, 'default_hours', 24),
       maxHours: numberProp(watchTtl, 'max_hours', 72),
+    },
+    fileWatch: {
+      // Deny-all by default (empty allowlist). Tilde-expanded so operators can
+      // configure roots like "~/watched". The poll.file executor additionally
+      // realpaths + re-checks each target at exec time (symlink-escape defense).
+      allowedRoots: stringArrayProp(fileWatch, 'allowed_roots').map(expandTilde),
     },
     conversation: {
       recent: numberProp(conversation, 'recent', 50),

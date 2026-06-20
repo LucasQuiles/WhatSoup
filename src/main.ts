@@ -51,6 +51,7 @@ import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/datab
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
+import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
@@ -736,10 +737,20 @@ messageScheduler.recoverStale();
 messageScheduler.start();
 
 // 16a. Substrate trigger poller — drains bead_triggers.next_fire_at on a
-// 30s interval and dispatches poll.sqlite / schedule.* watches to their
-// report_chat_jid. Other kinds in SPEC_REGISTRY are recognised but no-op
-// for now (see src/core/substrate/poller.ts header).
-const triggerPoller = new TriggerPoller(db.raw, connectionManager);
+// 30s interval and dispatches poll.sqlite / poll.pinecone / poll.file /
+// schedule.* watches to their report_chat_jid. The remaining SPEC_REGISTRY
+// kinds (poll.url / poll.shell / poll.email / event.message) are recognised
+// but no-op (see src/core/substrate/poller.ts header).
+//
+// poll.pinecone reuses the knowledge_search Pinecone client + index/namespace
+// allowlist (no second client). poll.file's allowed-root set is the explicit
+// fail-closed allowlist config.memory.fileWatch.allowedRoots (empty = deny-all).
+const pineconeWatch = createPineconeWatchSearch(config.memory.pinecone.allowedIndexes);
+const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
+  pineconeAllowedIndexes: pineconeWatch?.allowedIndexes ?? [],
+  pineconeSearch: pineconeWatch?.search,
+  fileWatchAllowedRoots: config.memory.fileWatch.allowedRoots,
+});
 triggerPoller.start();
 
 // 17. Seed contacts directory from message history (so @name mentions work after restart)
