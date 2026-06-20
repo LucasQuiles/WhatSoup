@@ -57,6 +57,43 @@ describe('ModelAuthStep — view dispatch by data.type', () => {
   })
 })
 
+describe('ModelAuthStep — role selects are label↔input associated via <Field> (W2-S5)', () => {
+  // Decisive a11y proof of the Field migration: getByLabelText resolves the role
+  // label to its <select> via the Field-provided htmlFor wiring. Before the
+  // migration these Anthropic/OpenAI role selects had a raw <label> with NO
+  // htmlFor, so getByLabelText could not find them (this test would fail).
+  it('resolves each Anthropic role label to its select element by accessible name', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const conversation = screen.getByLabelText('Conversation') as HTMLSelectElement
+    const extraction = screen.getByLabelText('Extraction') as HTMLSelectElement
+    const validation = screen.getByLabelText('Validation') as HTMLSelectElement
+
+    expect(conversation.tagName).toBe('SELECT')
+    expect(extraction.tagName).toBe('SELECT')
+    expect(validation.tagName).toBe('SELECT')
+    // The associated select carries the committed per-role default value.
+    expect(conversation.value).toBe('claude-sonnet-4-6')
+  })
+
+  it('resolves each OpenAI role label to its select element after switching tabs', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+
+    const fallback = screen.getByLabelText('Fallback / Conversation') as HTMLSelectElement
+    const extraction = screen.getByLabelText('Extraction') as HTMLSelectElement
+    const validation = screen.getByLabelText('Validation') as HTMLSelectElement
+
+    expect(fallback.tagName).toBe('SELECT')
+    expect(extraction.tagName).toBe('SELECT')
+    expect(validation.tagName).toBe('SELECT')
+    // OpenAI selects default to '' with a leading "None" option.
+    expect(fallback.value).toBe('')
+    expect(within(fallback).getByText('None')).toBeDefined()
+  })
+})
+
 describe('ModelAuthStep — chat view: Anthropic tab is active by default', () => {
   it('shows all three Anthropic role selects with default-model values', () => {
     renderStep({ data: { type: 'chat' } })

@@ -2,7 +2,7 @@ import { type FC, useId, useState } from 'react'
 import { Tabs, Tab } from '../primitives/Tabs'
 import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
-import { RadioField, SelectInput, TextInput } from '../primitives'
+import { Field, RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface ModelAuthStepProps {
@@ -73,27 +73,24 @@ const ModelAndKeyTabs: FC<{
         <Tab id="local" disabled disabledReason="Coming soon">Local</Tab>
       </Tabs>
 
-      {/* Anthropic tab */}
+      {/* Anthropic tab — canonical Field wires label↔select htmlFor (W2-S5) */}
       {activeTab === 'anthropic' && (
         <div role="tabpanel" id="tabpanel-anthropic" aria-labelledby="tab-anthropic" className="flex flex-col gap-[var(--sp-3)]">
           {ANTHROPIC_ROLES.map(({ key, label }) => (
-            <div key={key} className="flex flex-col gap-[var(--sp-1)]">
-              <label className="c-label c-field-label">{label}</label>
-              <div className="flex items-center gap-[var(--sp-2)]">
-                <div className="flex-1 min-w-0">
-                  <SelectInput
-                    value={models[key]}
-                    onChange={(e) => onModelChange(key, e.target.value)}
-                    confirmed
-                  >
-                    {ANTHROPIC_MODELS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </SelectInput>
-                </div>
-                <Check size={16} className="wizard-check" />
-              </div>
-            </div>
+            <Field key={key} label={label} confirmed>
+              {(id) => (
+                <SelectInput
+                  id={id}
+                  value={models[key]}
+                  onChange={(e) => onModelChange(key, e.target.value)}
+                  confirmed
+                >
+                  {ANTHROPIC_MODELS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </SelectInput>
+              )}
+            </Field>
           ))}
           {!hideAnthropicKey && (
             <ApiKeyInput
@@ -107,28 +104,25 @@ const ModelAndKeyTabs: FC<{
         </div>
       )}
 
-      {/* OpenAI tab */}
+      {/* OpenAI tab — canonical Field wires label↔select htmlFor (W2-S5) */}
       {activeTab === 'openai' && (
         <div role="tabpanel" id="tabpanel-openai" aria-labelledby="tab-openai" className="flex flex-col gap-[var(--sp-3)]">
           {OPENAI_ROLES.map(({ key, label }) => (
-            <div key={key} className="flex flex-col gap-[var(--sp-1)]">
-              <label className="c-label c-field-label">{label}</label>
-              <div className="flex items-center gap-[var(--sp-2)]">
-                <div className="flex-1 min-w-0">
-                  <SelectInput
-                    value={models[key]}
-                    onChange={(e) => onModelChange(key, e.target.value)}
-                    confirmed={!!models[key]}
-                  >
-                    <option value="">None</option>
-                    {OPENAI_MODELS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </SelectInput>
-                </div>
-                {models[key] && <Check size={16} className="wizard-check" />}
-              </div>
-            </div>
+            <Field key={key} label={label} confirmed={!!models[key]}>
+              {(id) => (
+                <SelectInput
+                  id={id}
+                  value={models[key]}
+                  onChange={(e) => onModelChange(key, e.target.value)}
+                  confirmed={!!models[key]}
+                >
+                  <option value="">None</option>
+                  {OPENAI_MODELS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </SelectInput>
+              )}
+            </Field>
           ))}
           <ApiKeyInput
             label="API Key"
@@ -157,13 +151,19 @@ const ApiKeyInput: FC<{
   const [visible, setVisible] = useState(false)
   const filled = value.trim().length > 0
 
+  // Canonical Field owns the label↔input htmlFor wiring (W2-S5). Error/helper
+  // association stays hand-wired here because the masked-key control carries a
+  // sibling visibility toggle inside its positioning context, so aria-describedby/
+  // aria-invalid must target the <input> directly (not Field's cloned wrapper div).
   return (
-    <div className="flex flex-col gap-[var(--sp-1)]">
-      <label htmlFor={inputId} className="c-label c-field-label">{label}</label>
-      <div className="flex items-center gap-[var(--sp-2)]">
+    <Field
+      label={label}
+      statusAdornment={!error && filled ? <Check size={16} className="wizard-check" /> : null}
+    >
+      {(inputElementId) => (
         <div className="relative flex-1 min-w-0">
           <TextInput
-            id={inputId}
+            id={inputElementId}
             type={visible ? 'text' : 'password'}
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -187,14 +187,11 @@ const ApiKeyInput: FC<{
               padding: 0,
             }}
           />
+          {error && <div id={errorId} className="c-error">{error}</div>}
+          {!error && helper && <span id={helperId} className="c-helper">{helper}</span>}
         </div>
-        {!error && filled && (
-          <Check size={16} className="wizard-check" />
-        )}
-      </div>
-      {error && <div id={errorId} className="c-error">{error}</div>}
-      {!error && helper && <span id={helperId} className="c-helper">{helper}</span>}
-    </div>
+      )}
+    </Field>
   )
 }
 
