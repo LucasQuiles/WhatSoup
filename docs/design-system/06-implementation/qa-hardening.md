@@ -118,6 +118,8 @@ Use `/frontend-design` for this review and record the verdict.
 
 **Harness note (HoverCard HC-04 runtime proof):** the new interactive-overlay primitive `HoverCard` (DD-43) adds `tests/browser/hovercard.test.tsx` because JSDOM cannot verify the behaviors a code review flagged as assumption-bound: that the card renders VISIBLE on hover (real CSS cascade — `opacity` 0→1, real geometry), that the **hover-bridge holds** across real pointer round-trips trigger↔card, that it closes when the pointer leaves the whole component, and that the `--surface-overlay`/`--shadow-overlay`/`--border-hairline` tokens resolve to a real painted surface. Run via `vitest.browser.config.ts` (playwright/chromium), 4 tests. **Explicitly NOT proven here** (tracked separate bead): portal/clip-escape (B1 renders the card inline; a portal severs the wrapper-region hover-bridge and needs its own implementation + proof) and the reduced-motion lift (screenshot-class check deferred with the portal work).
 
+**Harness note (HoverCard HC-05a horizontal anchoring):** `tests/browser/hovercard.test.tsx` gains a real-geometry proof for `anchorX="edge"` — a left-placed trigger anchors the panel LEFT, a right-edge-placed trigger flips it to RIGHT (`data-align`/computed `right:0px`), driven by `resolveViewportPlacement().rightAnchored`. JSDOM stubs `getBoundingClientRect` to cover the branch in `primitives-hovercard.test.tsx`; the browser proves the flip resolves from true viewport geometry (jsdom returns a zero rect → no real placement). 5 browser tests total now.
+
 ## 6. Coverage Matrix
 
 Maintain one coverage row per slice-surface combination:

@@ -84,6 +84,36 @@ describe('HoverCard — browser proof (HC-04)', () => {
     await vi.waitFor(() => expect(expanded(trigger)).toBe(false));
   });
 
+  it('anchorX=edge resolves left vs right anchor from REAL viewport geometry', async () => {
+    // A left-placed trigger anchors left; a right-edge-placed trigger flips to right
+    // (resolveViewportPlacement().rightAnchored from the real rect + viewport width).
+    const { getByRole } = await render(
+      <div style={{ position: 'relative', width: '100%', height: '400px' }}>
+        <div style={{ position: 'absolute', left: '8px', top: '200px' }}>
+          <HoverCard cardLabel="L" anchorX="edge" card={<span>cl</span>} openDelay={40} closeDelay={40}>
+            <button type="button">left-tg</button>
+          </HoverCard>
+        </div>
+        <div style={{ position: 'absolute', right: '8px', top: '200px' }}>
+          <HoverCard cardLabel="R" anchorX="edge" card={<span>cr</span>} openDelay={40} closeDelay={40}>
+            <button type="button">right-tg</button>
+          </HoverCard>
+        </div>
+      </div>,
+    );
+    const lt = getByRole('button', { name: 'left-tg' }).element() as HTMLElement;
+    await userEvent.hover(lt);
+    await vi.waitFor(() => expect(expanded(lt)).toBe(true));
+    expect(panelOf(lt).getAttribute('data-align')).toBe('left');
+
+    const rt = getByRole('button', { name: 'right-tg' }).element() as HTMLElement;
+    await userEvent.hover(rt);
+    await vi.waitFor(() => expect(expanded(rt)).toBe(true));
+    expect(panelOf(rt).getAttribute('data-align')).toBe('right');
+    // the right-anchored panel pins to the trigger's right edge (no -50% centering)
+    expect(getComputedStyle(panelOf(rt)).right).toBe('0px');
+  });
+
   it('resolves design tokens — the open card paints a real themed surface + shadow (not transparent)', async () => {
     const { getByRole } = await render(<Subject />);
     const trigger = getByRole('button', { name: 'trigger' }).element() as HTMLElement;
