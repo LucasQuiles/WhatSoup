@@ -242,6 +242,7 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-dispatcher.py` | Hub-side delivery + suppression engine: dedupe keys, throttle/renotify, storm-collapse, forceNotify policy, WhatsApp + email-fallback delivery. |
 | `bot-errors-heartbeat-watchdog.py` | Independent watchdog of the hub lanes (q_loop, dispatcher, collector, daily_health, queue_backlog). The only `forceNotify`-privileged source. |
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
+| `retire-outbound-quarantine.py` | Operator tool: retires one reviewed `quarantined` row in an instance's `outbound_ops` table (`--db`, `--instance`, `--op-id`, `--reason`), backing up the DB first and flipping the op to `failed_permanent`/`is_terminal=1`. When that was the last quarantined op it shells out to `bot-errors-emit.py` to emit a BOT ERRORS clear event. Supports `--dry-run` (no writes, reports whether a clear would fire), `--no-backup`, `--no-emit`, and `--emit-script`. |
 
 ## Canonical source for this import (diff matrix)
 

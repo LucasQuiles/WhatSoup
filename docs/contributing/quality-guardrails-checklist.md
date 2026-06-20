@@ -44,6 +44,38 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, and the targeted guard test list below |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
 
+The "ring/boundary/service/config guards" phrasing above folds in several named
+guards that `verify:push:branch` runs. Spelled out:
+
+| Guard | Command | Purpose | Also in CI (`quality.yml`)? |
+|---|---|---|---|
+| Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
+| Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no `projectId` host trap) and per-host health-port map integrity. | yes |
+| Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
+| Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
+| ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | no (pre-push only) |
+| Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
+
+### Regenerating the ARC binding shim (`.arc/`)
+
+The tracked `.arc/` shim (`arc.toml`, `ARC_BINDING.md`) is **generated output** of
+the canonical ARC adopt tool, which lives in the sibling agent-runtime-protocol
+repository — not in this repo. Do not hand-edit `.arc/`; regenerate it. When the
+`guard:arc-binding-drift` guard reports drift:
+
+```bash
+python3 "$ARC_REPO_DIR/tools/adopt.py" whatsoup --output-dir .arc --force
+```
+
+`$ARC_REPO_DIR` is the sibling agent-runtime-protocol checkout (the guard also
+auto-resolves `../agent-runtime-protocol`). Then update `.arc/.canonical-sha` to
+the new payload sha — the guard's always-on vendored-pin check asserts that
+`.arc/.canonical-sha`, the `payload_sha` line in `arc.toml`, and the `Payload SHA`
+line in `ARC_BINDING.md` all agree, and hard-blocks a stale shim even in CI where
+the sibling repo is absent. (When the sibling repo is reachable the guard also
+cross-checks the pin against the freshly generated sha, so the pin cannot silently
+go stale.)
+
 Coverage-threshold headroom is available as an explicit diagnostic: run `npm run
 coverage:check && npm run guard:coverage-headroom`. It is not part of
 `verify:release` until the current tree has at least two percentage points of
