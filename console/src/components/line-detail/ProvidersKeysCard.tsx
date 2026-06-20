@@ -2,6 +2,7 @@ import { type FC, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
 import EmptyState from '../EmptyState'
+import { Card } from '../primitives'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, getProviderColor } from '../../lib/providers'
@@ -150,8 +151,8 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: 0.35, ease: [0.22, 1, 0.36, 1] }}
-      className="c-card overflow-hidden"
     >
+      <Card variant="base" className="overflow-hidden">
       <div className="c-toolbar bg-surface-raised c-border-b">
         <span className="c-col-header text-text-2">Providers &amp; Keys</span>
       </div>
@@ -203,6 +204,7 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
           </>
         )}
       </div>
+      </Card>
     </motion.div>
   )
 }
