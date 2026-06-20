@@ -11,7 +11,8 @@ export type NodePinSource =
   | 'deploy/whatsoup-auth'
   | 'deploy/whatsoup-fleet'
   | 'scripts/run-with-pinned-node.sh'
-  | 'scripts/run-with-pinned-npm.sh';
+  | 'scripts/run-with-pinned-npm.sh'
+  | 'deploy/templates/watchdog-script.sh';
 
 export interface NodePinReading {
   source: NodePinSource;
@@ -52,6 +53,10 @@ const WRAPPER_SOURCES: { source: NodePinSource; relPath: string }[] = [
   { source: 'deploy/whatsoup-fleet', relPath: 'deploy/whatsoup-fleet' },
   { source: 'scripts/run-with-pinned-node.sh', relPath: 'scripts/run-with-pinned-node.sh' },
   { source: 'scripts/run-with-pinned-npm.sh', relPath: 'scripts/run-with-pinned-npm.sh' },
+  // The watchdog template hardcodes the pinned node path (never reads .nvmrc — it
+  // runs from a rendered install location). Scanning it forces a .nvmrc bump to
+  // also update the template, instead of silently breaking the watchdog's node.
+  { source: 'deploy/templates/watchdog-script.sh', relPath: 'deploy/templates/watchdog-script.sh' },
 ];
 
 function readNvmrc(cwd: string): NodePinReading {
