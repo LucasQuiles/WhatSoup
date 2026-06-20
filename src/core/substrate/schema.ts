@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS trigger_runs (
   started_at            INTEGER NOT NULL,
   finished_at           INTEGER,
   duration_ms           INTEGER,
-  retrieval_context_id  TEXT,
+  retrieval_context_id  TEXT,    -- reserved: not yet wired (0-ref; intentional)
   output_summary        TEXT,
   output_json           TEXT,
   error_kind            TEXT,
@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS bead_entity_refs (
 );
 CREATE INDEX IF NOT EXISTS idx_refs_entity ON bead_entity_refs(entity_id);
 
+-- reserved: not yet wired (sweep_runs is 0-ref; intentional, do not remove)
 CREATE TABLE IF NOT EXISTS sweep_runs (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id             TEXT    NOT NULL UNIQUE,
