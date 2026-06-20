@@ -247,9 +247,19 @@ export class TriggerPoller {
    * 0 means no throttle (no prior dispatch in trigger_runs, or window elapsed).
    */
   private throttleRemainingFor(triggerId: number, now: number): number {
+    // Find the most recent run that actually delivered a WhatsApp notification.
+    // A delivered run carries a non-null $.deliveredWaMessageId in output_json.
+    // json_extract on the JSON path is required here, NOT a `LIKE
+    // '%deliveredWaMessageId%'` substring scan: the substring form matches the
+    // KEY name anywhere in the column text — so it false-positives on arbitrary
+    // operator-query row data serialised under $.sampleRow (e.g. a watch over a
+    // table whose rows contain that text) and on a literal-null value — wrongly
+    // treating a never-delivered run as delivered and silently throttling future
+    // notifications. json_extract(...) IS NOT NULL keys on the real value.
     const row = this.db.prepare(
       `SELECT started_at FROM trigger_runs
-       WHERE trigger_id = ? AND status = 'ok' AND output_json LIKE '%deliveredWaMessageId%'
+       WHERE trigger_id = ? AND status = 'ok'
+         AND json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL
        ORDER BY started_at DESC, id DESC
        LIMIT 1`,
     ).get(triggerId) as { started_at: number } | undefined;
