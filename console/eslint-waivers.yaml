@@ -132,7 +132,7 @@ waivers:
     rule: no-restricted-syntax (inline-style restriction)
     owner: console-maintainer
     reason: recharts Tooltip contentStyle only accepts an inline style object; className is not supported by the library API.
-    scope: console/src/lib/chart-utils.ts:14
+    scope: console/src/lib/chart-utils.ts:24
     expiry: 2026-12-31
     replacement_plan: chart theming consolidates into the Card/Chart primitive at C2/C3; revisit recharts wrapper there.
     safer_alternative_considered: CSS class injection via wrapperClassName — rejected, recharts applies contentStyle after class styles.

@@ -104,7 +104,8 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `PINECONE_INDEX` | string | `whatsapp-bot` | Pinecone index name for the memory pipeline. When this equals `whatsapp-bot` (the default), `pineconeSearchMode` defaults to `memory`; any other index defaults to `entity`. |
 | `PINECONE_PROJECT_ID` | string | unset | Optional project guard. When set, readiness and knowledge search verify that the resolved index host belongs to this project ID. |
 | `PINECONE_EXPECTED_HOST_SUFFIX` | string | unset | Optional stricter project guard, for example `-nf9hzvy.svc.aped-4627-b74a.pinecone.io`. |
-| `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Default local embed endpoint for vector knowledge profiles that do not override `embedUrl`. |
+| `KNOWLEDGE_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Canonical local embed endpoint for vector knowledge profiles. Resolution order is `memory.pinecone.embedUrl` (per-instance) → `KNOWLEDGE_EMBED_URL` → `MW_MIND_EMBED_URL` (deprecated) → this default (`src/config.ts:691`). |
+| `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | **Deprecated alias** of `KNOWLEDGE_EMBED_URL` (expires 2026-10-26). Honored only when neither `memory.pinecone.embedUrl` nor `KNOWLEDGE_EMBED_URL` is set; using it emits a startup deprecation warning. Prefer `KNOWLEDGE_EMBED_URL`. |
 | `RECENCY_HALF_LIFE_DAYS` | integer | `14` | Positive day-count half-life for memory-search recency decay. Smaller values forget faster; zero/negative/malformed values fall back to `14`. |
 | `MAX_AGE_DAYS` | integer | `90` | Positive day-count cutoff for memory search; records older than this are filtered out. Zero/negative/malformed values fall back to `90`. |
 
