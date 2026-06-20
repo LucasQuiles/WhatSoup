@@ -1,4 +1,4 @@
-import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
@@ -183,8 +183,6 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const pineconeTopK = (data.pineconeTopK as number) ?? 20
   const pineconeAllowedIndexes = (data.pineconeAllowedIndexes as string[]) ?? []
   const toolUpdateMode = (data.toolUpdateMode as string) ?? 'full'
-  const allowedContactsInputId = useId()
-  const allowedContactsHelperId = useId()
 
   const handleFileUpload = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
@@ -375,17 +373,18 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Allowlist</span>
               <p className="c-body text-text-2">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
               <div className="mt-[var(--sp-3)]">
-                <label htmlFor={allowedContactsInputId} className="c-label c-field-label">Pre-approved contacts</label>
-                <TagInput
-                  id={allowedContactsInputId}
-                  values={allowedContacts}
-                  onChange={(values) => onChange({ allowedContacts: values.map(v => v.replace(/\D/g, '')) })}
-                  placeholder="Add phone number"
-                  validate={validatePhone}
-                  accentColor={allowedContacts.length > 0 ? 'var(--wizard-accent)' : undefined}
-                  aria-describedby={allowedContactsHelperId}
-                />
-                <div id={allowedContactsHelperId} className="c-helper">These contacts will be automatically approved when they first message.</div>
+                <Field label="Pre-approved contacts" helper="These contacts will be automatically approved when they first message.">
+                  {(id) => (
+                    <TagInput
+                      id={id}
+                      values={allowedContacts}
+                      onChange={(values) => onChange({ allowedContacts: values.map(v => v.replace(/\D/g, '')) })}
+                      placeholder="Add phone number"
+                      validate={validatePhone}
+                      accentColor={allowedContacts.length > 0 ? 'var(--wizard-accent)' : undefined}
+                    />
+                  )}
+                </Field>
               </div>
             </div>
           )}

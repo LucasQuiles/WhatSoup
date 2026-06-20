@@ -355,6 +355,16 @@ describe('ConfigStep — real React handler wiring', () => {
 
       expect(helper.id).toBeTruthy()
       expect(input.getAttribute('aria-describedby')).toBe(helper.id)
+
+      // Canonical <Field> migration proof: the label is now rendered by the Field
+      // primitive (FormControl.tsx -> `c-heading c-field-label`) rather than the prior
+      // hand-rolled `<label className="c-label c-field-label">`. This assertion FAILS on
+      // the raw markup (which carried `c-label`, never `c-heading`) and PASSES once the
+      // field is migrated onto <Field>, locking the field to the canonical primitive.
+      const label = document.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`)
+      expect(label).not.toBeNull()
+      expect(label!.className).toContain('c-heading')
+      expect(label!.className).toContain('c-field-label')
     })
 
     it('labels the RAG allowed indexes input and describes it with its Field helper', () => {
