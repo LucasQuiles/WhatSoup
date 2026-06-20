@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 set -e
 
+# Fail-closed commit-identity mandate (strict allowlist). Runs first and cheap so
+# a rogue author/committer (e.g. the historical `whatsoup-bot`) is rejected before
+# the commit object is written. Self-contained — see .husky/check-commit-identity.sh.
+./.husky/check-commit-identity.sh
+
 npm run guard:repo:staged
 
 # Sub-second deterministic guards — no console deps required, always run.
