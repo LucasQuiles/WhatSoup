@@ -29,6 +29,23 @@ export interface RenderContext {
   formatClock: (epochMs: number) => string;
   /** When true, omit the trailing continuation clause (the caller appends its own directive). */
   suppressContinuation?: boolean;
+  /**
+   * When true, the replay was blocked because the first attempt already started
+   * an action. The reason templates then render the {@link toolActivityBlockedClause}
+   * directive in place of the continue/resend clause, so the copy lives here
+   * rather than being composed at the call site.
+   */
+  blockedByToolActivity?: boolean;
+}
+
+/**
+ * Directive shown when a replay is blocked because the first attempt already
+ * started an action. The stand-in will not replay it automatically; the user
+ * must confirm or resend. This is the single source of truth for that copy.
+ */
+function toolActivityBlockedClause(): string {
+  return 'The first attempt already started an action, so I will not replay it automatically. '
+    + 'Please confirm or resend the next step.';
 }
 
 function etaClause(ctx: RenderContext): string {
@@ -37,6 +54,7 @@ function etaClause(ctx: RenderContext): string {
 }
 
 function continuationClause(ctx: RenderContext): string {
+  if (ctx.blockedByToolActivity) return toolActivityBlockedClause();
   if (ctx.suppressContinuation) return '';
   return ctx.hasContinuation ? "I'll continue here." : 'Please resend your last message.';
 }
@@ -79,6 +97,10 @@ export function renderUserMessage(id: UserTemplateId, ctx: RenderContext): strin
       return 'Primary model is unavailable and the backup credentials look missing; an operator has been notified.';
     case 'exhausted':
       return `All configured models are temporarily unavailable${eta}. An operator has been notified; please try again shortly.`;
+    case 'tool-activity-blocked':
+      // Standalone rendering: the reason-context clauses (backup/digest) precede
+      // the blocked directive, which replaces the continue/resend clause.
+      return `${backup}${digest} ${toolActivityBlockedClause()}`.trimStart();
     case 'none':
       return '';
   }

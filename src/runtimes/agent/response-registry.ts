@@ -56,6 +56,7 @@ export type UserTemplateId =
   | 'no-fallback'
   | 'credentials-missing'
   | 'exhausted'
+  | 'tool-activity-blocked'
   | 'none';
 
 export interface FallbackPolicy {

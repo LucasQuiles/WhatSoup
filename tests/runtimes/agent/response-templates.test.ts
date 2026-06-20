@@ -5,7 +5,8 @@ import type { DiagnosticBundle, UserTemplateId } from '../../../src/runtimes/age
 
 const ALL_TEMPLATES: UserTemplateId[] = [
   'usage-limit', 'rate-limit', 'auth-required', 'model-unavailable',
-  'context-overflow', 'transient', 'no-fallback', 'credentials-missing', 'exhausted', 'none',
+  'context-overflow', 'transient', 'no-fallback', 'credentials-missing', 'exhausted',
+  'tool-activity-blocked', 'none',
 ];
 
 const fixedClock = (epochMs: number): string => `T${epochMs}`;
@@ -106,5 +107,52 @@ describe('renderUserMessage — content', () => {
   it('exhausted and credentials-missing report an operator was notified', () => {
     expect(renderUserMessage('exhausted', ctx())).toContain('operator has been notified');
     expect(renderUserMessage('credentials-missing', ctx())).toContain('operator has been notified');
+  });
+});
+
+describe('renderUserMessage — tool-activity-blocked variant', () => {
+  it('the blockedByToolActivity flag replaces the continue/resend clause with the blocked directive', () => {
+    const msg = renderUserMessage('usage-limit', ctx({ blockedByToolActivity: true }));
+    expect(msg).toContain('usage/quota limit'); // reason still rendered
+    expect(msg).toContain('Switching to OpenCode / minimax.'); // backup still rendered
+    expect(msg).toContain(
+      'The first attempt already started an action, so I will not replay it automatically. '
+      + 'Please confirm or resend the next step.',
+    );
+    // It must NOT also carry a continue/resend clause (avoids a double-directive).
+    expect(msg).not.toContain("I'll continue here.");
+    expect(msg).not.toContain('Please resend your last message.');
+  });
+
+  it('blockedByToolActivity takes precedence over hasContinuation and suppressContinuation', () => {
+    const cont = renderUserMessage('rate-limit', ctx({ blockedByToolActivity: true, hasContinuation: true }));
+    const resend = renderUserMessage('rate-limit', ctx({ blockedByToolActivity: true, hasContinuation: false }));
+    const suppressed = renderUserMessage('rate-limit', ctx({ blockedByToolActivity: true, suppressContinuation: true }));
+    const directive = 'so I will not replay it automatically';
+    expect(cont).toContain(directive);
+    expect(resend).toContain(directive);
+    expect(suppressed).toContain(directive);
+  });
+
+  it('the standalone tool-activity-blocked id renders the directive with reason-context clauses', () => {
+    const msg = renderUserMessage('tool-activity-blocked', ctx());
+    expect(msg).toContain('Switching to OpenCode / minimax.');
+    expect(msg).toContain('(diagnostics: 1 ok, 1 flagged)');
+    expect(msg).toContain(
+      'The first attempt already started an action, so I will not replay it automatically. '
+      + 'Please confirm or resend the next step.',
+    );
+    // No leading whitespace even though the backup clause starts with a space.
+    expect(msg).toBe(msg.trimStart());
+  });
+
+  it('preserves byte-for-byte the previously inline-composed blocked message', () => {
+    // The old call site rendered the reason template with suppressContinuation
+    // then appended the directive after a trimEnd + single space. Reproduce that
+    // exactly and assert the new flag path yields the identical string.
+    const base = renderUserMessage('usage-limit', ctx({ suppressContinuation: true }));
+    const expected = `${base.trimEnd()} The first attempt already started an action, `
+      + 'so I will not replay it automatically. Please confirm or resend the next step.';
+    expect(renderUserMessage('usage-limit', ctx({ blockedByToolActivity: true }))).toBe(expected);
   });
 });
