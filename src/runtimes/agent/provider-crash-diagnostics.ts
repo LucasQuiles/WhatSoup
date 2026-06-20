@@ -3,7 +3,7 @@
 import type { AgentFailureClass } from './failure-taxonomy.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 
-export const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
+const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
 
 export interface ProviderCrashMetadata {
   provider: string;

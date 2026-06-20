@@ -92,7 +92,7 @@ export function ssrfSafeLookup(
   });
 }
 
-export const ssrfSafeAgent = new Agent({
+const ssrfSafeAgent = new Agent({
   connect: { lookup: ssrfSafeLookup as never },
 });
 

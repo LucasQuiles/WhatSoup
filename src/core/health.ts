@@ -180,7 +180,7 @@ function agentRuntimeDetailsForHealth(
 }
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
-export const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
+const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 
 type AuthFailureClass =
   | 'none'

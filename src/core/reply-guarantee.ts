@@ -9,7 +9,7 @@ const log = createChildLogger('reply-guarantee');
 
 export const DEFAULT_REPLY_GUARANTEE_TEXT = "I'm still working on this and will follow up shortly.";
 export const DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS = 10 * 60 * 1000;
-export const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * 60 * 1000;
+const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * 60 * 1000;
 
 export type InboundProcessingStatus = 'processing' | 'turn_done' | 'complete' | 'failed' | 'skipped';
 

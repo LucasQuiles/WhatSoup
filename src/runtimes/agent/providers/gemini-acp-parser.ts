@@ -298,7 +298,7 @@ export function parseGeminiAcpEvent(line: string, currentSessionId = ''): AgentE
 // ---------------------------------------------------------------------------
 
 /** Build a JSON-RPC nd-JSON line (ready to write to Gemini stdin). */
-export function buildAcpRequest(
+function buildAcpRequest(
   id: number,
   method: string,
   params: JsonObject,
