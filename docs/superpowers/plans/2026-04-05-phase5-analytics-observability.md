@@ -1,6 +1,7 @@
 # Phase 5: Analytics & Observability
 
-**Status:** unknown — stalled at SPEC stage; never became an SDLC epic. Kept for historical reference. _Originally marked "SPEC — team consensus pending"._  
+**Status:** completed - current metrics collector, fleet metrics API, and console metrics surfaces have shipped; use current docs/code instead of this historical proposal.
+**Superseded by:** `README.md`, `docs/public-surface.md`, `src/core/metrics-collector.ts`, `src/fleet/routes/metrics.ts`, `src/fleet/routes/fleet-metrics.ts`, and `console/src/pages/LineDetail.tsx`.
 **Date:** 2026-04-05  
 **Contributors:** Q (orchestrator), Shannon (data model analysis)
 

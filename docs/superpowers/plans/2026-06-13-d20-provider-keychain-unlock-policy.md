@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, pytest, Vitest health-check integration tests, BOT ERRORS runtime-manifest guard.
 
-**Status:** landed via PR #830 (`97e60757`). This plan is retained as the D20 policy/design record; do not reimplement it from the historical compose branch notes.
+**Status:** completed - landed via PR #830 (`97e60757`). This plan is retained as the D20 policy/design record; do not reimplement it from the historical compose branch notes.
 
 ---
 

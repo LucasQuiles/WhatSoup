@@ -4,6 +4,9 @@
 
 > **READ-ONLY HISTORICAL REFERENCE:** This plan predates the WS ticket + rotatable token design. Do not execute the steps below against the current codebase; they target the deprecated single-token auth model. Preserved for historical context only.
 
+**Status:** completed - WebSocket console integration shipped; this file is historical and its single-token auth guidance is superseded.
+**Superseded by:** PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`.
+
 **Goal:** Wire existing `FleetWebSocketServer` to emit events from fleet route mutations, and create a console `useWebSocket` hook that replaces polling with WS-driven React Query invalidation (falling back to polling on disconnect).
 
 **Architecture:** The WS server (`src/fleet/websocket-server.ts`) already handles auth, upgrade, broadcast, and event types. This plan adds: (1) `wsServer` to `RouteDeps` so handlers can broadcast, (2) broadcast calls in mutation handlers, (3) a console `useWebSocket()` hook that invalidates React Query caches on WS events, and (4) updated fleet hooks that disable polling when WS is connected.

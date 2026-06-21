@@ -18,39 +18,21 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 41
+**Total entries:** 42
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=21, review=2, spec=13, state=1 |
-| Status | closed=1, completed=19, deferred=7, pending=1, unknown=13 |
-| Status source | body-marker=36, fallback=4, state-md-status=1 |
+| Kind | handoff=4, plan=22, review=2, spec=13, state=1 |
+| Status | closed=4, completed=30, deferred=7, pending=1 |
+| Status source | body-marker=41, state-md-status=1 |
 
 ## Inconsistencies
 
 0 detected.
 
 ## Synthesis
-
-### Unknown-status — triage needed (13)
-
-| Path | Kind | Topic | Last Mod |
-|------|------|-------|----------|
-| `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | colony-orchestration-phase1 | 2026-04-04 |
-| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | phase4-m2-websocket-console | 2026-05-12 |
-| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
-| `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
-| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | plan | d20-provider-keychain-unlock-policy | 2026-06-13 |
-| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | provider-errpreview-sanitization | 2026-06-13 |
-| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | python-deploy-redaction-ssot | 2026-06-13 |
-| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | verification-reliability-residuals | 2026-06-13 |
-| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | bot-errors-tool-call-audit | 2026-06-12 |
-| `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
-| `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
-| `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
 
 ### Cross-tree topic clusters (1)
 
@@ -80,19 +62,19 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(21 entries)_
+### docs/superpowers/plans  _(22 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | unknown | fallback | colony-orchestration-phase1 | 2026-04-04 |  |
-| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | unknown | fallback | phase4-m2-websocket-console | 2026-05-12 |  |
-| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | unknown | body-marker | phase4-realtime-performance | 2026-05-12 |  |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | unknown | body-marker | phase5-analytics-observability | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | closed | body-marker | colony-orchestration-phase1 | 2026-06-20 | current workspace runtime topology, tmup operating docs, and repo `CLAUDE.md` for active coordination rules. |
+| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | completed | body-marker | phase4-m2-websocket-console | 2026-06-20 | PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`. |
+| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | closed | body-marker | phase4-realtime-performance | 2026-06-20 | PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`. |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | completed | body-marker | phase5-analytics-observability | 2026-06-20 | `README.md`, `docs/public-surface.md`, `src/core/metrics-collector.ts`, `src/fleet/routes/metrics.ts`, `src/fleet/routes/fleet-metrics.ts`, and `console/src/pages/LineDetail.tsx`. |
 | `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-24 |  |
-| `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | unknown | fallback | scheduled-groups-tabs | 2026-04-06 |  |
+| `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | completed | body-marker | scheduled-groups-tabs | 2026-06-20 | `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below. |
 | `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-06-12 |  |
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
@@ -100,32 +82,33 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
-| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | plan | unknown | body-marker | d20-provider-keychain-unlock-policy | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | plan | completed | body-marker | d20-provider-keychain-unlock-policy | 2026-06-20 |  |
 | `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | plan | completed | body-marker | outstanding-burndown | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | unknown | body-marker | provider-errpreview-sanitization | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | unknown | body-marker | python-deploy-redaction-ssot | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | unknown | body-marker | verification-reliability-residuals | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | completed | body-marker | provider-errpreview-sanitization | 2026-06-20 |  |
+| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | completed | body-marker | python-deploy-redaction-ssot | 2026-06-20 |  |
+| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | completed | body-marker | verification-reliability-residuals | 2026-06-20 |  |
+| `docs/superpowers/plans/2026-06-16-handoff-distiller-wiring.md` | plan | completed | body-marker | handoff-distiller-wiring | 2026-06-20 |  |
 
 ### docs/superpowers/reviews  _(2 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-06-12 |  |
-| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | unknown | fallback | bot-errors-tool-call-audit | 2026-06-12 |  |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 
 ### docs/superpowers/specs  _(13 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | unknown | body-marker | colony-orchestration-design | 2026-04-04 |  |
+| `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | closed | body-marker | colony-orchestration-design | 2026-06-20 | current workspace runtime topology, tmup operating docs, and repo `CLAUDE.md` for active coordination rules. |
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | spec | completed | body-marker | mcp-feature-gaps-design | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | spec | completed | body-marker | phase2-mcp-features-design | 2026-04-24 |  |
-| `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | unknown | body-marker | scheduled-groups-tabs-design | 2026-04-06 |  |
+| `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | completed | body-marker | scheduled-groups-tabs-design | 2026-06-20 | `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below. |
 | `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | completed | body-marker | anti-echo-session-controls-design | 2026-06-12 |  |
 | `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | completed | body-marker | provider-attribution | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md` | spec | deferred | body-marker | soup-kitchen-fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-25-baseline-test-failures.md` | spec | closed | body-marker | baseline-test-failures | 2026-05-12 |  |
-| `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | unknown | body-marker | console-test-jsx-runtime-fix | 2026-04-25 |  |
+| `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | completed | body-marker | console-test-jsx-runtime-fix | 2026-06-20 | `vitest.config.ts` React runtime aliases and current console test suites. |
 | `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` | spec | completed | body-marker | instance-loader-fixture-fix | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | spec | completed | body-marker | operation-tracker-design | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | completed | body-marker | pr-0a-aqs | 2026-05-12 |  |
@@ -134,4 +117,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-20T06:50:34Z from commit `e88e3d009b94051088622e0c6fe896e45bb3488e`
+- Generated at 2026-06-21T01:36:48Z from commit `fd807a3ccab4cd6d3734e29bde3aa2e410b9372c`

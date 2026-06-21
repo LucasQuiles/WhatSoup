@@ -67,6 +67,7 @@ Thumbs.db
 
 # Publication/artifact sweep scratch output
 .sweep/
+.hypothesis/
 
 # SDLC working state (ephemeral — covered by docs/sdlc/ above)
 docs/sdlc/active/*/beads/

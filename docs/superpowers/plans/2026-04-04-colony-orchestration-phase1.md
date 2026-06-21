@@ -1,5 +1,8 @@
 # Colony Orchestration — Phase 1: Core Loop
 
+**Status:** closed - historical external-orchestration proposal; not an active WhatSoup implementation workstream.
+**Superseded by:** current workspace runtime topology, tmup operating docs, and repo `CLAUDE.md` for active coordination rules.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wire the core colony loop: Deacon detects work → spawns Conductor → Conductor dispatches worker → worker completes → Deacon detects completion → spawns Conductor to evaluate. This is the reference slice that proves the protocol works.

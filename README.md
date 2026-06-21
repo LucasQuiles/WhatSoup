@@ -341,9 +341,11 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 
 | Document | Description |
 |----------|-------------|
+| [Project Map](docs/project-map.md) | Current source, feature, documentation, and artifact ownership map |
+| [Current Program](docs/current-program.md) | Current generated-index synthesis and artifact-sweep status |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 162 tools (160 always-registered + 2 conditionally-registered) with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 162 tools across 20 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
