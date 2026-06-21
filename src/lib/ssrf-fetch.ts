@@ -24,42 +24,110 @@ const FETCH_TIMEOUT_MS = 10_000;
 export const MAX_FETCH_BYTES = 5_000_000;
 
 /**
- * Returns true if the hostname resolves to a private/loopback address range.
- * Used to prevent SSRF attacks on internal services.
+ * Classify a dotted-quad IPv4 string against private/reserved ranges. Returns
+ * true (block) for any non-globally-routable range. Comprehensive: RFC1918,
+ * loopback, link-local (incl. cloud metadata 169.254.169.254), "this network"
+ * 0.0.0.0/8, CGNAT 100.64.0.0/10, the three TEST-NET docs ranges, multicast
+ * 224.0.0.0/4, and reserved/future 240.0.0.0/4 (which covers 255.255.255.255).
+ * Returns null when `ip` is not a valid dotted-quad (caller falls through).
+ */
+function classifyIPv4(ip: string): boolean | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return null;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  const octets = [a, b, Number(m[3]), Number(m[4])];
+  if (octets.some((n) => n > 255)) return null;                   // not a valid IPv4
+  if (a === 0) return true;                                       // 0.0.0.0/8 "this network"
+  if (a === 10) return true;                                      // 10.0.0.0/8
+  if (a === 127) return true;                                     // 127.0.0.0/8 loopback
+  if (a === 100 && b >= 64 && b <= 127) return true;             // 100.64.0.0/10 CGNAT
+  if (a === 169 && b === 254) return true;                        // 169.254.0.0/16 link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;             // 172.16.0.0/12
+  if (a === 192 && b === 0 && octets[2] === 2) return true;     // 192.0.2.0/24 TEST-NET-1
+  if (a === 192 && b === 168) return true;                       // 192.168.0.0/16
+  if (a === 198 && b === 51 && octets[2] === 100) return true;  // 198.51.100.0/24 TEST-NET-2
+  if (a === 203 && b === 0 && octets[2] === 113) return true;   // 203.0.113.0/24 TEST-NET-3
+  if (a >= 224 && a <= 239) return true;                         // 224.0.0.0/4 multicast
+  if (a >= 240) return true;                                     // 240.0.0.0/4 reserved + 255.255.255.255 broadcast
+  return false;
+}
+
+/**
+ * Classify an IPv6 string against private/reserved ranges. Returns true (block)
+ * for: unspecified `::`, loopback `::1`, ULA `fc00::/7` (fc/fd), link-local
+ * `fe80::/10`, and multicast `ff00::/8`. IPv4-mapped (`::ffff:a.b.c.d` or the
+ * hex `::ffff:wwww:xxxx` form) is decomposed and the embedded IPv4 is run
+ * through `classifyIPv4` so a mapped private/loopback address is also blocked.
+ * Returns null when `ip` is not parseable as IPv6 (caller falls through).
+ */
+function classifyIPv6(ip: string): boolean | null {
+  if (!ip.includes(':')) return null;
+  const lower = ip.toLowerCase();
+  // Strip a zone id (fe80::1%eth0) before classification.
+  const bare = lower.split('%')[0];
+  if (bare === '::' || bare === '0:0:0:0:0:0:0:0') return true;   // unspecified
+  if (bare === '::1' || bare === '0:0:0:0:0:0:0:1') return true;  // loopback
+
+  // IPv4-mapped / IPv4-compatible: extract trailing embedded IPv4 and classify it.
+  // Dotted form: ::ffff:127.0.0.1  → classify 127.0.0.1
+  const dotted = /(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(bare);
+  if (dotted) {
+    const embedded = classifyIPv4(dotted[1]);
+    if (embedded !== null) return embedded;
+  }
+  // Hex mapped form: ::ffff:7f00:0001 → 127.0.0.1
+  const hexMapped = /^(?:0*:)*0*ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(bare);
+  if (hexMapped) {
+    const hi = parseInt(hexMapped[1], 16);
+    const lo = parseInt(hexMapped[2], 16);
+    const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    const embedded = classifyIPv4(v4);
+    if (embedded !== null) return embedded;
+  }
+
+  // Normalize the first hextet to compare prefixes (handles compressed forms
+  // like fc00::1 / fd12:... / fe80::1 / ff02::1). A leading '::' means the
+  // first group is 0, which is none of the blocked prefixes.
+  if (bare.startsWith('::')) return false;
+  const firstGroup = bare.split(':')[0];
+  if (!/^[0-9a-f]{1,4}$/.test(firstGroup)) return null;          // not valid IPv6
+  const first16 = parseInt(firstGroup, 16);
+  if ((first16 & 0xfe00) === 0xfc00) return true;                // fc00::/7 ULA (fc.. and fd..)
+  if ((first16 & 0xffc0) === 0xfe80) return true;                // fe80::/10 link-local
+  if ((first16 & 0xff00) === 0xff00) return true;                // ff00::/8 multicast
+  return false;
+}
+
+/**
+ * Returns true if the hostname (a literal IP or `localhost`) is a
+ * private/loopback/reserved address. Literal IPs are classified comprehensively
+ * via the shared `isPrivateIP`; this is the static pre-DNS check.
  */
 export function isPrivateHost(hostname: string): boolean {
-  // IPv4 loopback and unspecified
-  if (hostname === 'localhost' || hostname === '0.0.0.0') return true;
-  // IPv6 loopback
-  if (hostname === '::1' || hostname === '0:0:0:0:0:0:0:1') return true;
-  // IPv4 private ranges
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
-  if (ipv4) {
-    const [, a, b] = ipv4.map(Number);
-    if (a === 127) return true;                               // 127.x.x.x loopback
-    if (a === 10) return true;                                // 10.0.0.0/8
-    if (a === 172 && b >= 16 && b <= 31) return true;        // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;                  // 192.168.0.0/16
-    if (a === 169 && b === 254) return true;                  // 169.254.0.0/16 link-local
-  }
-  return false;
+  if (hostname === 'localhost') return true;
+  // Bracketed IPv6 literal from a URL host (e.g. [fe80::1]) → strip brackets.
+  const host = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  return isPrivateIP(host);
 }
 
 /**
  * Check if a resolved IP address falls within private/reserved ranges.
  * Used as a DNS-aware SSRF guard: even if the hostname looks public,
- * reject it when it resolves to a private IP.
+ * reject it when it resolves to a private/reserved IP. Comprehensively covers
+ * IPv4 (RFC1918, loopback, link-local, 0.0.0.0/8, CGNAT, TEST-NETs, multicast,
+ * reserved) AND IPv6 (unspecified, loopback, ULA fc00::/7, link-local fe80::/10,
+ * multicast ff00::/8, and IPv4-mapped addresses by classifying the embedded
+ * IPv4). Fail-closed: anything not provably a public unicast address blocked
+ * when it matches a reserved pattern; unparseable input returns false (the
+ * undici connect-time lookup is the backstop for those).
  */
 export function isPrivateIP(ip: string): boolean {
-  const parts = ip.split('.').map(Number);
-  if (parts.length === 4 && parts.every((n) => n >= 0 && n <= 255)) {
-    if (parts[0] === 10) return true;                                // 10.0.0.0/8
-    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
-    if (parts[0] === 192 && parts[1] === 168) return true;          // 192.168.0.0/16
-    if (parts[0] === 127) return true;                               // 127.0.0.0/8 loopback
-    if (parts[0] === 169 && parts[1] === 254) return true;          // 169.254.0.0/16 link-local / cloud metadata
-  }
-  if (ip === '0.0.0.0' || ip === '::1' || ip === '::') return true;
+  const v4 = classifyIPv4(ip);
+  if (v4 !== null) return v4;
+  const v6 = classifyIPv6(ip);
+  if (v6 !== null) return v6;
   return false;
 }
 

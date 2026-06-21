@@ -79,6 +79,62 @@ describe('triggers core', () => {
     expect(() => extendTrigger(db.raw, t.id, { until: now - 10, maxTtlHours: 72, actor: 'u' })).toThrow(/future/i);
   });
 
+  it('event.message persists with next_fire_at NULL (reserved scaffold, not polled)', () => {
+    // event.message is a RESERVED SCAFFOLD: accepted + persisted but never
+    // executed by the interval poller (pending a future ingest-path
+    // integration). computeNextFireAt returns NULL so the row sits inert and
+    // dueTriggers (which requires next_fire_at IS NOT NULL) never selects it.
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg', ownerJid: 'mw', actor: 'user' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'sender_jid', value: '123@s.whatsapp.net' },
+      reportChatJid: 'c', intervalSeconds: 60, actor: 'user',
+    });
+    // Persisted active, but inert: next_fire_at is NULL so the poller never
+    // selects it. Assert the full shape so the row identity is pinned, not just
+    // a bare null.
+    expect(t).toMatchObject({ kind: 'event.message', status: 'active', next_fire_at: null });
+  });
+
+  it('dueTriggers does NOT return an event.message row even when past-due fields would otherwise match', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg', ownerJid: 'mw', actor: 'user' });
+    const now = Math.floor(Date.now() / 1000);
+    createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'regex', value: 'urgent' },
+      reportChatJid: 'c', actor: 'user',
+    });
+    // Sanity: a normal past-due trigger on the same bead IS returned, so the
+    // exclusion is specific to event.message's NULL next_fire_at.
+    const sched = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: now - 5 },
+      reportChatJid: 'c', actor: 'user',
+    });
+    const due = dueTriggers(db.raw, now, 10);
+    const kinds = due.map(d => d.kind);
+    expect(kinds).not.toContain('event.message');
+    expect(due.map(d => d.id)).toContain(sched.id);
+  });
+
+  it('event.message still TTL-expires via the kind-agnostic terminal_at sweep', () => {
+    // The persisted row carries a terminal_at (create_watch always sets one),
+    // so the poller expiry sweep (status=active AND terminal_at <= now) still
+    // reaps it even though it is never polled. Proven here at the data layer:
+    // the row is selectable by the sweep predicate.
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg', ownerJid: 'mw', actor: 'user' });
+    const now = Math.floor(Date.now() / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'mention', value: '@me' },
+      reportChatJid: 'c', requestedTerminalAt: now - 1, actor: 'user',
+    });
+    expect(t.terminal_at).not.toBeNull();
+    const overdue = db.raw.prepare(
+      `SELECT id FROM bead_triggers WHERE status='active' AND terminal_at IS NOT NULL AND terminal_at <= ?`,
+    ).all(now) as Array<{ id: number }>;
+    expect(overdue.map(r => r.id)).toContain(t.id);
+  });
+
   it('dueTriggers returns active past-due rows, excludes far-future', () => {
     const bead = createBead(db.raw, { kind: 'agent_job', title: 'x', ownerJid: 'mw', actor: 'u' });
     const now = Math.floor(Date.now() / 1000);

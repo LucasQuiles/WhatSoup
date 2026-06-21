@@ -560,6 +560,37 @@ describe('TriggerPoller — not-yet-implemented kinds', () => {
     const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number };
     expect(refreshed.next_fire_at).toBe(1_000_000_001 + 3_600);
   });
+
+  it('a LEGACY event.message row with a non-null next_fire_at fails closed and is NOT rescheduled on the 1h cooldown', async () => {
+    // event.message is a reserved scaffold; fresh rows persist with
+    // next_fire_at=NULL so the poller never sees them. This forces the legacy
+    // shape (non-null next_fire_at) via a direct UPDATE and proves the
+    // defensive exec-time branch: fail CLOSED + clear next_fire_at (stop
+    // polling), NOT a silent 1h not_implemented reschedule.
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'sender_jid', value: '123@s.whatsapp.net' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60, actor: 'u',
+    });
+    // Created inert (NULL); simulate a legacy row by force-arming it.
+    expect((db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number | null }).next_fire_at).toBeNull();
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(1_000_000_000, t.id);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ reason: 'event_message_not_polled' });
+
+    // Not rescheduled on ANY cooldown — next_fire_at cleared (stops polling)
+    // and the row stays active (it TTL-expires via the sweep, not here).
+    const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
+    expect(refreshed).toMatchObject({ status: 'active', next_fire_at: null });
+  });
 });
 
 describe('TriggerPoller — messenger failure tolerance', () => {
