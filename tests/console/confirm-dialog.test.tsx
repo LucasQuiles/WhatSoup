@@ -161,6 +161,33 @@ describe('ConfirmDialog actions', () => {
     expect(onCancel).not.toHaveBeenCalled()
     expect(onConfirm).not.toHaveBeenCalled()
   })
+
+  it('can disable and mark the confirm button busy without invoking onConfirm', () => {
+    const onConfirm = vi.fn()
+
+    render(
+      <ConfirmDialog
+        open
+        title="Proceed?"
+        confirmLabel="Run"
+        confirmDisabled
+        confirmLoading
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      >
+        Body
+      </ConfirmDialog>,
+    )
+
+    const confirm = screen.getByRole('button', { name: 'Run' }) as HTMLButtonElement
+
+    expect(confirm.disabled).toBe(true)
+    expect(confirm.getAttribute('aria-busy')).toBe('true')
+
+    fireEvent.click(confirm)
+
+    expect(onConfirm).not.toHaveBeenCalled()
+  })
 })
 
 describe('ConfirmDialog labels and variants', () => {

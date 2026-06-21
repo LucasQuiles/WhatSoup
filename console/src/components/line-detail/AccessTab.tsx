@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { UserCheck, Ban, User, Users, UserPlus, UserX } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
@@ -35,13 +35,19 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
   const toast = useToast()
   const queryClient = useQueryClient()
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+  const [executingAction, setExecutingAction] = useState(false)
+  const executingActionRef = useRef(false)
 
   const confirmAccess = (subjectType: string, subjectId: string, subjectName: string, action: 'allow' | 'block') => {
+    if (executingActionRef.current) return
     setPendingAction({ subjectType, subjectId, subjectName, action })
   }
 
   const executeAccess = async () => {
     if (!pendingAction) return
+    if (executingActionRef.current) return
+    executingActionRef.current = true
+    setExecutingAction(true)
     const { subjectType, subjectId, subjectName, action } = pendingAction
     const label = action === 'allow' ? 'Allow' : 'Block'
     try {
@@ -51,6 +57,8 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
     } catch (e) {
       toast.error(`${label} failed: ${(e as Error).message}`)
     } finally {
+      executingActionRef.current = false
+      setExecutingAction(false)
       setPendingAction(null)
     }
   }
@@ -196,6 +204,8 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
         confirmLabel={pendingAction?.action === 'allow' ? 'Allow' : 'Block'}
         confirmVariant={pendingAction?.action === 'allow' ? 'primary' : 'danger'}
         confirmIcon={pendingAction?.action === 'allow' ? <UserCheck size={14} /> : <Ban size={14} />}
+        confirmDisabled={executingAction}
+        confirmLoading={executingAction}
         onConfirm={executeAccess}
         onCancel={() => setPendingAction(null)}
       >
