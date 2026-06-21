@@ -18,6 +18,8 @@ interface ShortcutHandlers {
  *
  * Shortcuts:
  * - Cmd/Ctrl+K → Focus search input (calls onSearch)
+ * - / → Focus the page's search input (the element marked with
+ *   `shortcutTarget` → `data-search-shortcut-target`; only when no input focused)
  * - Escape → Close modals / clear search (browser-native for modals)
  * - 1-3 → Navigate to pages (only when no input focused)
  *   1 = SoupKitchen, 2 = Inbox, 3 = Ops
@@ -57,6 +59,19 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
       // ? key — toggle shortcuts help
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         handlersRef.current.onHelp?.();
+        return;
+      }
+
+      // "/" — focus the page's search input (GitHub-style). DOM-attribute driven:
+      // any page that marks its search field with `shortcutTarget` (→
+      // data-search-shortcut-target) participates without threading a callback.
+      // The isInput guard above means this never steals focus while typing.
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const searchEl = document.querySelector<HTMLElement>('[data-search-shortcut-target="true"]');
+        if (searchEl) {
+          e.preventDefault();
+          searchEl.focus();
+        }
         return;
       }
 
