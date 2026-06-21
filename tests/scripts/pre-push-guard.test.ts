@@ -136,6 +136,42 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('verify:push:branch invokes the fast CI-only checks that drove local-green/CI-red (#1105)', () => {
+    // Regression guard for #1105: verify:push:branch omitted console lint/build,
+    // guard:design-system-hygiene, guard:harness-maintenance, and test:tokenomics —
+    // all blocking steps in the CI quality job — so violations in those surfaces
+    // (e.g. console noUnusedLocals/verbatimModuleSyntax, design-system drift,
+    // harness node-pin drift, tokenomics regressions) passed the local push gate
+    // and failed only in CI. These are fast+deterministic; the slow coverage/
+    // drills/browser tail intentionally stays in verify:release (asserted below).
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:design-system-hygiene\b/);
+    expect(chain).toMatch(/\bnpm run guard:harness-maintenance\b/);
+    expect(chain).toMatch(/\bnpm run test:tokenomics\b/);
+    expect(chain).toMatch(/--prefix console run lint\b/);
+    expect(chain).toMatch(/--prefix console run build\b/);
+  });
+
+  it('quality.yml console lint + build steps are mirrored by the local push gate (#1105)', () => {
+    // The CI quality workflow runs console lint + build as blocking steps; the
+    // local gate must mirror them so console strict-tsconfig violations fail fast.
+    expect(qualityWorkflow).toMatch(/--prefix console run lint/);
+    expect(qualityWorkflow).toMatch(/--prefix console run build/);
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain).toMatch(/--prefix console run lint\b/);
+    expect(chain).toMatch(/--prefix console run build\b/);
+  });
+
+  it('verify:release retains the slow coverage/browser tail intentionally omitted from the push gate (#1105)', () => {
+    // Documents the intentional split: the full-suite coverage gate and the
+    // browser suites stay in verify:release (and CI), not the fast push gate.
+    const release = packageJson.scripts['verify:release'];
+    expect(release, 'verify:release script must exist').toBeDefined();
+    expect(release).toMatch(/\bnpm run coverage:check\b/);
+    expect(release).toMatch(/\bnpm run verify:console-browser\b/);
+  });
+
   it('shared console design verification invokes design guard fixture tests', () => {
     const chain = packageJson.scripts['verify:console-design'];
     expect(chain, 'verify:console-design script must exist').toBeDefined();
