@@ -41,6 +41,8 @@ function cleanup(...paths: string[]): void {
   }
 }
 
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 32 }, (_, i) => i + 1);
+
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
  * Used to manually bootstrap partial-state databases without Database.open().
@@ -387,7 +389,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
       db.close();
     }
 
-    // Second open — schema_migrations has all known versions; migration 5 must NOT re-run
+    // Second open — schema_migrations has all known versions; migrations must NOT re-run
     const db2 = new Database(dbPath);
     expect(() => db2.open()).not.toThrow();
 
@@ -396,7 +398,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+    expect(versions).toEqual(ALL_MIGRATION_VERSIONS);
 
     db2.close();
   });
@@ -499,7 +501,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+    expect(rows.map((r) => r.version)).toEqual(ALL_MIGRATION_VERSIONS);
 
     db.close();
   });
@@ -699,7 +701,7 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+    expect(versions).toEqual(ALL_MIGRATION_VERSIONS);
 
     const tables = (
       db.raw
@@ -952,7 +954,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+    expect(versions).toEqual(ALL_MIGRATION_VERSIONS);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
@@ -982,6 +984,74 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
       raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
     }).toThrow(); // "no such table: messages"
     raw.close();
+  });
+});
+
+describe('scheduled_messages send-start migration contract', () => {
+  let dbPath: string;
+
+  afterEach(() => cleanup(dbPath));
+
+  it('migration 32 adds send_started_at and marks existing processing rows as uncertain', () => {
+    dbPath = tmpFile();
+
+    {
+      const raw = new DatabaseSync(dbPath);
+      raw.exec('PRAGMA journal_mode = WAL');
+      raw.exec(`
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE scheduled_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_jid TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          scheduled_at INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          retry_count INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+      const insertVersion = raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+      for (let version = 1; version <= 31; version += 1) {
+        insertVersion.run(version);
+      }
+      raw
+        .prepare(
+          `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+           VALUES
+             (?, 'text', 'processing-message', 1700000000, 'processing'),
+             (?, 'text', 'pending-message', 1700000000, 'pending')`,
+        )
+        .run('15550100001@s.whatsapp.net', '15550100002@s.whatsapp.net');
+      raw.close();
+    }
+
+    const beforeOpen = Math.floor(Date.now() / 1000);
+    const db = new Database(dbPath);
+    db.open();
+
+    const cols = db.raw
+      .prepare('PRAGMA table_info(scheduled_messages)')
+      .all() as Array<{ name: string; type: string }>;
+    expect(cols).toContainEqual(expect.objectContaining({ name: 'send_started_at', type: 'INTEGER' }));
+
+    const rows = db.raw
+      .prepare('SELECT payload, status, send_started_at FROM scheduled_messages ORDER BY id')
+      .all() as Array<{ payload: string; status: string; send_started_at: number | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ payload: 'processing-message', status: 'processing' });
+    expect(rows[0].send_started_at).toEqual(expect.any(Number));
+    expect(rows[0].send_started_at).toBeGreaterThanOrEqual(beforeOpen);
+    expect(rows[1]).toEqual({ payload: 'pending-message', status: 'pending', send_started_at: null });
+
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 32')
+      .get() as { version: number } | undefined;
+    expect(version?.version).toBe(32);
+
+    db.close();
   });
 });
 

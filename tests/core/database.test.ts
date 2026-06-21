@@ -223,6 +223,12 @@ describe('Database schema', () => {
     expect(colMap['created_at'].type).toBe('INTEGER');
     expect(colMap['sent_at']).toBeDefined();
     expect(colMap['error']).toBeDefined();
+    expect(colMap['send_started_at']).toMatchObject({
+      name: 'send_started_at',
+      type: 'INTEGER',
+      notnull: 0,
+      dflt_value: null,
+    });
     expect(colMap['retry_count']).toMatchObject({
       name: 'retry_count',
       type: 'INTEGER',
