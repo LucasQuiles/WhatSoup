@@ -142,11 +142,27 @@ describe('Anthropic Provider', () => {
     expect(textBlock?.text).toBe('Describe this');
   });
 
-  it('does not return empty string as valid content', async () => {
-    mockCreate.mockResolvedValueOnce(makeSuccessResponse({ content: [{ type: 'text', text: 'non-empty', citations: [] }] }));
+  it('returns empty content for a valid empty completion (stop_reason: end_turn) (#1064)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [],
+      usage: { input_tokens: 10, output_tokens: 0 },
+      model: 'claude-opus-4-6',
+      stop_reason: 'end_turn',
+    });
     const result = await provider.generate(makeRequest());
-    expect(result.content).not.toBe('');
-    expect(result.content.length).toBeGreaterThan(0);
+    expect(result.content).toBe('');
+  });
+
+  it('throws on empty content with a non-end_turn stop_reason (#1064)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [],
+      usage: { input_tokens: 10, output_tokens: 0 },
+      model: 'claude-opus-4-6',
+      stop_reason: 'max_tokens',
+    });
+    await expect(provider.generate(makeRequest())).rejects.toMatchObject({
+      code: 'LLM_UNAVAILABLE',
+    });
   });
 
   // ── Negative tests ────────────────────────────────────────────────────────

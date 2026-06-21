@@ -70,14 +70,34 @@ export function createAnthropicProvider(): LLMProvider {
 
       const durationMs = Date.now() - startMs;
 
+      const inputTokens = response.usage.input_tokens;
+      const outputTokens = response.usage.output_tokens;
+
       const block = response.content[0];
-      if (!block || block.type !== 'text') {
+      if (!block) {
+        // #1064: empty content with a normal end_turn is a VALID empty reply —
+        // the model chose to say nothing. max_tokens truncation (or any other
+        // stop reason) with no text is still a failure.
+        if (response.stop_reason !== 'end_turn') {
+          logger.error(
+            { model, provider: 'anthropic', stopReason: response.stop_reason, response },
+            'Anthropic returned no content with a non-end_turn stop',
+          );
+          throw new AppError(
+            `Anthropic returned no content (stop_reason: ${response.stop_reason ?? 'unknown'})`,
+            'LLM_UNAVAILABLE',
+          );
+        }
+        logger.info(
+          { model, provider: 'anthropic', inputTokens, outputTokens, durationMs },
+          'Anthropic returned a valid empty completion',
+        );
+        return { content: '', inputTokens, outputTokens, model: response.model, durationMs };
+      }
+      if (block.type !== 'text') {
         logger.error({ model, provider: 'anthropic', response }, 'Unexpected response shape from Anthropic');
         throw new AppError('Unexpected response shape from Anthropic', 'LLM_UNAVAILABLE');
       }
-
-      const inputTokens = response.usage.input_tokens;
-      const outputTokens = response.usage.output_tokens;
 
       logger.info(
         { model, provider: 'anthropic', inputTokens, outputTokens, durationMs },
