@@ -27,7 +27,7 @@
       "name": "secondary-bot",
       "expected": "always_on",
       "service": "com.whatsoup.secondary-bot",
-      "healthPort": 9190,
+      "healthPort": 9091,
       "primaryPhoneOwner": "instance:secondary-bot"
     }
   ]
