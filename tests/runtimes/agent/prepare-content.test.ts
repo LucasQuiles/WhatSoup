@@ -127,6 +127,8 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
     start: vi.fn(),
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
+    updateActorJid: vi.fn(),
+    updateConversationKey: vi.fn(),
   })),
 }));
 

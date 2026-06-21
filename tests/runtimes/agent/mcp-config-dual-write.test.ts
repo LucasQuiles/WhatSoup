@@ -36,6 +36,7 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
     updateActorJid: vi.fn(),
+    updateConversationKey: vi.fn(),
   };
   function MockWhatSoupSocketServer() {
     return mockSocketServerInstance;
