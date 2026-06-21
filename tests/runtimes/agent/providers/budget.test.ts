@@ -71,6 +71,16 @@ describe('ProviderBudget — requestsPerMinute limit', () => {
     expect(budget.checkBudget().allowed).toBe(true);
   });
 
+  it('clamps an impossible negative pending count before enforcing limits', () => {
+    const budget = new ProviderBudget('p', { requestsPerMinute: 1 });
+    const internals = budget as unknown as { pendingRequests: number };
+    internals.pendingRequests = -1;
+
+    expect(budget.checkBudget().allowed).toBe(true);
+    expect(internals.pendingRequests).toBe(1);
+    expect(budget.checkBudget().allowed).toBe(false);
+  });
+
   it('prunes window entries older than 60 seconds', () => {
     const budget = new ProviderBudget('p', { requestsPerMinute: 2 });
     budget.recordUsage({ input: 1, output: 0 });
@@ -207,5 +217,20 @@ describe('ProviderBudget.resetDaily', () => {
     expect(budget.checkBudget().allowed).toBe(false);
     budget.resetDaily();
     expect(budget.checkBudget().allowed).toBe(true);
+  });
+
+  it('automatically resets daily spend after the reset time passes', () => {
+    const budget = new ProviderBudget('p', {
+      dailySpendCapUsd: 1,
+      costPerMillionTokens: 10,
+    });
+    const internals = budget as unknown as { dailyResetTime: number };
+    budget.recordUsage({ input: 100_000, output: 0 });
+    expect(budget.checkBudget().allowed).toBe(false);
+
+    internals.dailyResetTime = Date.now() - 1;
+
+    expect(budget.checkBudget().allowed).toBe(true);
+    expect(budget.getSnapshot().estimatedDailySpendUsd).toBe(0);
   });
 });
