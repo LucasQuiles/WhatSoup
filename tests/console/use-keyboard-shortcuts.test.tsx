@@ -518,3 +518,56 @@ describe('useKeyboardShortcuts - cleanup on unmount', () => {
     expect(second).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// "/" - focus the page search input (#1101)
+// ---------------------------------------------------------------------------
+
+describe('useKeyboardShortcuts - "/" focuses the search target (#1101)', () => {
+  function addSearchTarget(): HTMLInputElement {
+    const input = document.createElement('input');
+    input.setAttribute('data-search-shortcut-target', 'true');
+    document.body.appendChild(input);
+    return input;
+  }
+
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it('focuses the element marked data-search-shortcut-target on "/"', () => {
+    const input = addSearchTarget();
+    renderHook(() => useKeyboardShortcuts(), { wrapper });
+
+    expect(document.activeElement).not.toBe(input);
+    const event = fireKey('/', { cancelable: true });
+    expect(document.activeElement).toBe(input);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('does NOT hijack "/" while the user is typing in another input', () => {
+    addSearchTarget();
+    const other = document.createElement('input');
+    document.body.appendChild(other);
+    other.focus();
+    renderHook(() => useKeyboardShortcuts(), { wrapper });
+
+    const event = fireKey('/', { cancelable: true }, other);
+    expect(document.activeElement).toBe(other); // focus stays where the user is typing
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('does NOT consume "/" when no search target is present on the page', () => {
+    renderHook(() => useKeyboardShortcuts(), { wrapper });
+    const event = fireKey('/', { cancelable: true });
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('does NOT fire on "/" combined with a modifier (e.g. Cmd+/)', () => {
+    const input = addSearchTarget();
+    renderHook(() => useKeyboardShortcuts(), { wrapper });
+    const event = fireKey('/', { metaKey: true, cancelable: true });
+    expect(document.activeElement).not.toBe(input);
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
