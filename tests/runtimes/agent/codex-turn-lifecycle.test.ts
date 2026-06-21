@@ -245,7 +245,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: vi.fn().mockImplementation(function () {
-    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn() };
+    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn() };
   }),
 }));
 
