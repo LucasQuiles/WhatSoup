@@ -72,13 +72,35 @@ export function createOpenAIProvider(): LLMProvider {
       const durationMs = Date.now() - startMs;
 
       const choice = response.choices[0];
-      if (!choice?.message?.content) {
+      const inputTokens = response.usage?.prompt_tokens ?? 0;
+      const outputTokens = response.usage?.completion_tokens ?? 0;
+
+      if (!choice?.message) {
         logger.error({ model, provider: 'openai', response }, 'Unexpected response shape from OpenAI');
         throw new AppError('Unexpected response shape from OpenAI', 'LLM_UNAVAILABLE');
       }
 
-      const inputTokens = response.usage?.prompt_tokens ?? 0;
-      const outputTokens = response.usage?.completion_tokens ?? 0;
+      const rawContent = choice.message.content;
+      if (rawContent == null || rawContent === '') {
+        // #1064: an empty completion with a normal stop is a VALID empty reply —
+        // the model chose to say nothing. Truncation ('length') or content
+        // filtering with no text is still a failure.
+        if (choice.finish_reason !== 'stop') {
+          logger.error(
+            { model, provider: 'openai', finishReason: choice.finish_reason, response },
+            'OpenAI returned no content with a non-stop finish',
+          );
+          throw new AppError(
+            `OpenAI returned no content (finish_reason: ${choice.finish_reason ?? 'unknown'})`,
+            'LLM_UNAVAILABLE',
+          );
+        }
+        logger.info(
+          { model, provider: 'openai', inputTokens, outputTokens, durationMs },
+          'OpenAI returned a valid empty completion',
+        );
+        return { content: '', inputTokens, outputTokens, model: response.model, durationMs };
+      }
 
       logger.info(
         { model, provider: 'openai', inputTokens, outputTokens, durationMs },
@@ -86,7 +108,7 @@ export function createOpenAIProvider(): LLMProvider {
       );
 
       return {
-        content: choice.message.content,
+        content: rawContent,
         inputTokens,
         outputTokens,
         model: response.model,

@@ -10,6 +10,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
 import { recordResponse, recordAttempt } from './rate-limits-db.ts';
+import { chatFailureMessage, type ChatFailureCause } from './response-messages.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
@@ -283,6 +284,7 @@ export class ChatRuntime implements Runtime {
 
     // 7. LLM call with retry + fallback
     let responseText: string | null = null;
+    let failureCause: ChatFailureCause | null = null;
     let modelUsed: string = config.models.conversation;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -323,6 +325,7 @@ export class ChatRuntime implements Runtime {
         log.error({ traceId, err: primaryErr, code: primaryErr.code }, 'non-retryable LLM error — skipping retry and fallback');
         llmDurationMs = Date.now() - llmStart;
         responseText = null;
+        failureCause = primaryErr.code === 'LLM_AUTH_ERROR' ? 'auth' : 'rate-limited';
         emitAlertChecked(
           this.botName,
           'llm_total_failure',
@@ -348,6 +351,7 @@ export class ChatRuntime implements Runtime {
           log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
+          failureCause = 'transient';
           emitAlertChecked(
             this.botName,
             'llm_total_failure',
@@ -395,6 +399,7 @@ export class ChatRuntime implements Runtime {
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
+          failureCause = 'outage';
           emitAlertChecked(
             this.botName,
             'llm_total_failure',
@@ -406,10 +411,21 @@ export class ChatRuntime implements Runtime {
       } // end else (retryable errors)
     }
 
-    // 8. On total failure: send fallback message (not stored, not rate-limited)
-    if (!responseText) {
+    // 8a. Valid empty completion (#1064): the provider returned successfully
+    // with no text — the model chose to stay silent. Send nothing; this is NOT
+    // a failure, so no failure message and no fallback alert.
+    if (responseText === '') {
+      log.info({ traceId, model: modelUsed }, 'llm returned a valid empty completion — no reply sent');
+      return;
+    }
+
+    // 8b. On total failure: send a deterministic message that fits the actual
+    // occurrence (#1064 — was a single generic "brain broke" for every cause).
+    // Not stored, not rate-limited.
+    if (responseText === null) {
+      const message = chatFailureMessage(failureCause ?? 'transient');
       try {
-        await sendTracked(this.messenger, msg.chatJid, 'lol my brain just broke, give me a sec', this.durability, { replayPolicy: 'unsafe', isTerminal: true });
+        await sendTracked(this.messenger, msg.chatJid, message, this.durability, { replayPolicy: 'unsafe', isTerminal: true });
       } catch (fallbackSendErr) {
         log.error({ traceId, err: fallbackSendErr, chatJid: msg.chatJid }, 'failed to send fallback message');
       }

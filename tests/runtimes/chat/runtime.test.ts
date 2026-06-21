@@ -481,7 +481,7 @@ describe('Provider chain', () => {
     // Bot reply storage now handled by Baileys echo
   });
 
-  it('both providers fail → sends fallback message "lol my brain just broke, give me a sec"', async () => {
+  it('both providers fail → sends the deterministic outage message (#1064)', async () => {
     vi.useFakeTimers();
     const { handler, messenger, primary, fallback } = makeHandler();
     vi.mocked(primary.generate).mockRejectedValue(new Error('primary down'));
@@ -493,7 +493,7 @@ describe('Provider chain', () => {
 
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       expect.any(String),
-      'lol my brain just broke, give me a sec',
+      '⚠️ My language model is unavailable right now and my operator has been notified — please try again in a bit.',
     );
   });
 
@@ -524,8 +524,9 @@ describe('Provider chain', () => {
     await expect(drainQueue()).resolves.toBeUndefined();
   });
 
-  it('primary returns empty string content → treated as failure, sends fallback message', async () => {
-    // The code checks `!responseText` — empty string is falsy, so it triggers fallback message
+  it('primary returns empty string content → valid empty completion, no message sent (#1064)', async () => {
+    // #1064: an empty completion is the model choosing to stay silent — NOT a
+    // failure. The bot sends nothing rather than the old generic failure message.
     const { handler, messenger, primary } = makeHandler();
     vi.mocked(primary.generate).mockResolvedValue({
       content: '',
@@ -537,11 +538,7 @@ describe('Provider chain', () => {
 
     await handleAndDrain(handler, makeIncomingMessage());
 
-    // Empty string is falsy → fallback message sent
-    expect(messenger.sendMessage).toHaveBeenCalledWith(
-      expect.any(String),
-      'lol my brain just broke, give me a sec',
-    );
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -1260,10 +1257,10 @@ describe('WhatSoupError non-retryable paths', () => {
     expect(vi.mocked(fallback.generate)).not.toHaveBeenCalled();
     // Primary only called once — no retry
     expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
-    // User gets the fallback user-facing message
+    // User gets the deterministic auth-fitting message (#1064)
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       expect.any(String),
-      'lol my brain just broke, give me a sec',
+      "⚠️ I can't reach my language model right now — it looks like a setup issue on my end. My operator has been notified; please try again later.",
     );
     // Alert must be emitted
     expect(mockEmitAlert).toHaveBeenCalledWith(
@@ -1286,7 +1283,7 @@ describe('WhatSoupError non-retryable paths', () => {
     expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       expect.any(String),
-      'lol my brain just broke, give me a sec',
+      "I'm getting more messages than I can keep up with right now — give me a minute and ask again.",
     );
     expect(mockEmitAlert).toHaveBeenCalledWith(
       expect.any(String),
@@ -1341,7 +1338,7 @@ describe('WhatSoupError non-retryable paths', () => {
     expect(vi.mocked(fallback.generate)).toHaveBeenCalledOnce();
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       expect.any(String),
-      'lol my brain just broke, give me a sec',
+      'lol my brain glitched for a sec — mind asking me again?',
     );
     expect(mockEmitAlert).toHaveBeenCalledWith(
       expect.any(String),
@@ -1839,10 +1836,10 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
       expect.stringContaining('All LLM providers failed'),
       expect.stringContaining('unknown'),
     );
-    // Fallback message sent to user
+    // Deterministic outage message sent to user (#1064)
     expect(messenger.sendMessage).toHaveBeenCalledWith(
       expect.any(String),
-      'lol my brain just broke, give me a sec',
+      '⚠️ My language model is unavailable right now and my operator has been notified — please try again in a bit.',
     );
   });
 

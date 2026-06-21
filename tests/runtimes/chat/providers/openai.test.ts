@@ -168,11 +168,25 @@ describe('OpenAI Provider', () => {
     expect(imgPart?.image_url?.url).toContain('base64data');
   });
 
-  it('does not return empty string as valid content', async () => {
-    mockCreate.mockResolvedValueOnce(makeSuccessResponse({ content: 'non-empty' }));
+  it('returns empty content for a valid empty completion (finish_reason: stop) (#1064)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: '', role: 'assistant' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 0 },
+      model: 'gpt-5.4',
+    });
     const result = await provider.generate(makeRequest());
-    expect(result.content).not.toBe('');
-    expect(result.content.length).toBeGreaterThan(0);
+    expect(result.content).toBe('');
+  });
+
+  it('throws on empty content with a non-stop finish_reason (#1064)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: '', role: 'assistant' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 10, completion_tokens: 0 },
+      model: 'gpt-5.4',
+    });
+    await expect(provider.generate(makeRequest())).rejects.toMatchObject({
+      code: 'LLM_UNAVAILABLE',
+    });
   });
 
   // ── Negative tests ────────────────────────────────────────────────────────
