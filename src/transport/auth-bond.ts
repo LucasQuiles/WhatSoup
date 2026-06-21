@@ -125,6 +125,10 @@ function isoForFileName(date: Date): string {
   return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
+function isHistoryStagingDirName(name: string): boolean {
+  return /\.tmp-\d+$/.test(name);
+}
+
 function modeString(mode: number): string {
   return (mode & 0o777).toString(8);
 }
@@ -414,6 +418,7 @@ export class AuthBondGuard {
   private readonly freshInvalidGraceMs: number;
   private readonly root: string;
   private readonly historyRoot: string;
+  private readonly stagingRoot: string;
   private readonly latestManifestPath: string;
   private lastCaptureAt: string | null = null;
   private lastCaptureReason: string | null = null;
@@ -440,6 +445,7 @@ export class AuthBondGuard {
       : join(dirname(options.authDir), '..', 'state');
     this.root = join(stateRoot, 'auth-bond-backups', this.instanceName);
     this.historyRoot = join(this.root, 'history');
+    this.stagingRoot = join(this.root, 'staging');
     this.latestManifestPath = join(this.root, 'latest.json');
   }
 
@@ -534,6 +540,7 @@ export class AuthBondGuard {
     try {
       forceEnsurePrivateDirectorySync(this.root, 'auth-bond backup root directory');
       forceEnsurePrivateDirectorySync(this.historyRoot, 'auth-bond backup history directory');
+      forceEnsurePrivateDirectorySync(this.stagingRoot, 'auth-bond backup staging directory');
 
       const latest = readLatestManifest(this.latestManifestPath);
       if (
@@ -550,7 +557,7 @@ export class AuthBondGuard {
       const createdAt = this.now();
       const dirName = `${isoForFileName(createdAt)}.${safeName(reason)}.${snapshot.treeHash.slice(0, 16)}`;
       const target = join(this.historyRoot, dirName);
-      tmp = `${target}.tmp-${process.pid}`;
+      tmp = join(this.stagingRoot, `${dirName}.tmp-${process.pid}`);
       rmSync(tmp, { recursive: true, force: true });
       mkdirSync(tmp, { recursive: true, mode: 0o700 });
       const copiedAuthDir = join(tmp, 'auth');
@@ -797,6 +804,7 @@ export class AuthBondGuard {
   private pruneHistory(): void {
     if (this.keepBackups <= 0 || !existsSync(this.historyRoot)) return;
     const entries = readdirSync(this.historyRoot)
+      .filter(name => !isHistoryStagingDirName(name))
       .map(name => join(this.historyRoot, name))
       .filter(path => {
         try {

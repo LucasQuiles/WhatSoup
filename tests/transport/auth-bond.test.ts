@@ -699,6 +699,47 @@ describe('AuthBondGuard', () => {
     expect(existsSync(first.path!)).toBe(false);
   });
 
+  it('excludes in-flight temp backup directories from retention pruning', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    let now = new Date('2026-06-09T12:00:00Z');
+    writeAuth(authDir, '15550100070:1@s.whatsapp.net');
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'tmp-prune-bot',
+      keepBackups: 2,
+      now: () => now,
+    });
+
+    const first = guard.capture('connection-open');
+    expect(first.ok).toBe(true);
+
+    now = new Date('2026-06-09T12:01:00Z');
+    writeAuth(authDir, '15550100071:1@s.whatsapp.net');
+    const second = guard.capture('creds-update');
+    expect(second.ok).toBe(true);
+
+    const historyRoot = join(stateRoot, 'auth-bond-backups', 'tmp-prune-bot', 'history');
+    const inFlightTmp = join(historyRoot, '20260609T120300Z.creds-update.inflight.tmp-999');
+    mkdirSync(inFlightTmp, { recursive: true, mode: 0o700 });
+
+    now = new Date('2026-06-09T12:02:00Z');
+    writeAuth(authDir, '15550100072:1@s.whatsapp.net');
+    const third = guard.capture('creds-update');
+    expect(third.ok).toBe(true);
+
+    const history = readdirSync(historyRoot).sort();
+    const completed = history.filter(name => !name.includes('.tmp-'));
+    expect(history).toContain('20260609T120300Z.creds-update.inflight.tmp-999');
+    expect(completed).toHaveLength(2);
+    expect(existsSync(first.path!)).toBe(false);
+    expect(existsSync(second.path!)).toBe(true);
+    expect(existsSync(third.path!)).toBe(true);
+  });
+
   it('leaves backup history unpruned when the retention count is zero', () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
