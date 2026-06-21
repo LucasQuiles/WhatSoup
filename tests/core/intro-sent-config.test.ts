@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { persistIntroSentFlag } from '../../src/core/intro-sent-config.ts';
+import { privateConfigLockPath } from '../../src/core/private-config-file.ts';
+import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lock.ts';
 
 function fileMode(filePath: string): number {
   return statSync(filePath).mode & 0o777;
@@ -69,6 +71,7 @@ describe('persistIntroSentFlag', () => {
   it('leaves config.json unchanged when JSON parsing fails', () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'config.json');
+    const lockPath = privateConfigLockPath(configPath);
     const original = '{not-json\n';
     writeFileSync(configPath, original);
     chmodSync(configPath, 0o644);
@@ -77,6 +80,22 @@ describe('persistIntroSentFlag', () => {
 
     expect(readFileSync(configPath, 'utf-8')).toBe(original);
     expect(fileMode(configPath)).toBe(0o644);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('fails closed while another writer owns the config mutation lock', () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ name: 'agent', introSent: false }, null, 2) + '\n');
+    chmodSync(configPath, 0o600);
+    const lock = acquireProcessLock(privateConfigLockPath(configPath), { token: 'held-config-lock' });
+
+    try {
+      expect(() => persistIntroSentFlag(configPath, true)).toThrow(/process lock active/);
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))).toMatchObject({ introSent: false });
+    } finally {
+      releaseProcessLock(lock);
+    }
   });
 
   it('leaves config.json unchanged when the private temp write cannot start', () => {

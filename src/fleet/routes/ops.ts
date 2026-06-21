@@ -23,6 +23,12 @@ import { validateInstanceConfig } from '../../core/agent-config-validator.ts';
 import type { ValidationError as ConfigValidationError } from '../../core/agent-config-validator.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
+import { persistIntroSentFlag } from '../../core/intro-sent-config.ts';
+import {
+  readPrivateConfigFileSync,
+  withPrivateConfigLockSync,
+  writePrivateConfigFileSync,
+} from '../../core/private-config-file.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 import { systemdUnitName, type ServiceManager } from '../platform.ts';
@@ -57,6 +63,17 @@ function deepMergeRecords(
       : value;
   }
   return result;
+}
+
+class ConfigUpdateResponseSent extends Error {
+  constructor() {
+    super('config update response already sent');
+    this.name = 'ConfigUpdateResponseSent';
+  }
+}
+
+function haltConfigUpdateAfterResponse(): never {
+  throw new ConfigUpdateResponseSent();
 }
 
 interface PrivateWriteOptions {
@@ -451,150 +468,162 @@ export async function handleConfigUpdate(
     return;
   }
 
-  // Read existing config
-  let existing: Record<string, unknown>;
+  let mergedClean: Record<string, unknown>;
   try {
-    existing = JSON.parse(fs.readFileSync(instance.configPath, 'utf-8'));
-  } catch (err) {
-    jsonResponse(res, 500, { error: `failed to read config: ${(err as Error).message}` });
-    return;
-  }
-
-  // Deep merge nested config so partial memory.pinecone patches do not destroy
-  // sibling namespaces, BYOK key-env settings, or project guards.
-  const merged = deepMergeRecords(existing, patch);
-
-  // --- Shape/normalization that must run BEFORE the shared validator ---
-  // 1. agentOptions defaulting + cwd traversal check (paths are inherently
-  //    filesystem-aware; the shared validator only does type/range/enum).
-  if (merged.type === 'agent') {
-    if (merged.agentOptions == null) {
-      merged.agentOptions = defaultAgentOptions(params.name);
-    }
-    if (typeof merged.agentOptions !== 'object' || Array.isArray(merged.agentOptions)) {
-      jsonResponse(res, 400, { error: 'agentOptions must be an object' });
-      return;
-    }
-    if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) return;
-  }
-
-  // 2. Normalize adminPhones if patched so the validator sees E.164.
-  if (patch.adminPhones !== undefined) {
-    if (
-      !Array.isArray(patch.adminPhones) ||
-      patch.adminPhones.length === 0 ||
-      !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())
-    ) {
-      jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
-      return;
-    }
-    merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
-  }
-
-  // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
-  // Runs on the post-merge view so partial patches are checked against the
-  // assembled config, not the bare patch. Mirrors loader + CREATE.
-  {
-    const portInventory = patch.healthPort === undefined ? null : scanHealthPortInventory(params.name);
-    if (portInventory && !portInventory.ok) {
-      emitInventoryFailure(res, portInventory);
-      return;
-    }
-    const validationError = validateInstanceConfig(merged, {
-      name: params.name,
-      mode: 'patch',
-      ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
-      originalType: existing.type,
-    });
-    if (validationError) {
-      if (!emitValidationError(validationError, res)) return;
-    }
-  }
-
-  // pluginDirs home-confinement is fs-aware (not in the shared validator).
-  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
-  if (Array.isArray(mergedAo?.pluginDirs)) {
-    if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) return;
-  }
-  if (patch.claudeMd && merged.type === 'agent') {
-    const ao = merged.agentOptions as Record<string, unknown> | undefined;
-    if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+    mergedClean = withPrivateConfigLockSync(instance.configPath, () => {
+      // Read existing config under the same advisory lock used by the instance
+      // process, so read-merge-write cannot clobber introSent updates.
+      let existing: Record<string, unknown>;
       try {
-        const claudeDir = path.join(ao.cwd, '.claude');
-        ensureHomeConfinedDirectory(claudeDir);
-        writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
+        existing = JSON.parse(readPrivateConfigFileSync(instance.configPath));
       } catch (err) {
-        jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
-        return;
+        jsonResponse(res, 500, { error: `failed to read config: ${(err as Error).message}` });
+        haltConfigUpdateAfterResponse();
       }
-    }
-  }
 
-  // Write settings.json when settingsJson is in the patch (agent instances only)
-  if (patch.settingsJson && merged.type === 'agent') {
-    const ao = merged.agentOptions as Record<string, unknown> | undefined;
-    if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
-      try {
-        const claudeDir = path.join(ao.cwd, '.claude');
-        const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
-        if (settings) {
-          ensureHomeConfinedDirectory(claudeDir);
-          writePermissionsSettings(claudeDir, settings);
+      // Deep merge nested config so partial memory.pinecone patches do not destroy
+      // sibling namespaces, BYOK key-env settings, or project guards.
+      const merged = deepMergeRecords(existing, patch);
+
+      // --- Shape/normalization that must run BEFORE the shared validator ---
+      // 1. agentOptions defaulting + cwd traversal check (paths are inherently
+      //    filesystem-aware; the shared validator only does type/range/enum).
+      if (merged.type === 'agent') {
+        if (merged.agentOptions == null) {
+          merged.agentOptions = defaultAgentOptions(params.name);
         }
-      } catch (err) {
-        jsonResponse(res, 500, { error: `failed to write settings.json: ${(err as Error).message}` });
-        return;
+        if (typeof merged.agentOptions !== 'object' || Array.isArray(merged.agentOptions)) {
+          jsonResponse(res, 400, { error: 'agentOptions must be an object' });
+          haltConfigUpdateAfterResponse();
+        }
+        if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) {
+          haltConfigUpdateAfterResponse();
+        }
       }
-    }
-  }
 
-  // Write enabledPlugins to .claude/settings.json when agentOptions.enabledPlugins changes
-  if (patch.agentOptions && merged.type === 'agent') {
-    const patchAo = patch.agentOptions as Record<string, unknown>;
-    if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
-      const ao = merged.agentOptions as Record<string, unknown> | undefined;
-      if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
-        try {
-          const claudeDir = path.join(ao.cwd, '.claude');
-          ensureHomeConfinedDirectory(claudeDir);
-          // Build a full PermissionsSettings so writePermissionsSettings handles the merge
-          const settingsPath = path.join(claudeDir, 'settings.json');
-          let existingPerms = defaultSettingsJson('agent')!.permissions;
+      // 2. Normalize adminPhones if patched so the validator sees E.164.
+      if (patch.adminPhones !== undefined) {
+        if (
+          !Array.isArray(patch.adminPhones) ||
+          patch.adminPhones.length === 0 ||
+          !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())
+        ) {
+          jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
+          haltConfigUpdateAfterResponse();
+        }
+        merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
+      }
+
+      // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
+      // Runs on the post-merge view so partial patches are checked against the
+      // assembled config, not the bare patch. Mirrors loader + CREATE.
+      {
+        const portInventory = patch.healthPort === undefined ? null : scanHealthPortInventory(params.name);
+        if (portInventory && !portInventory.ok) {
+          emitInventoryFailure(res, portInventory);
+          haltConfigUpdateAfterResponse();
+        }
+        const validationError = validateInstanceConfig(merged, {
+          name: params.name,
+          mode: 'patch',
+          ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
+          originalType: existing.type,
+        });
+        if (validationError) {
+          emitValidationError(validationError, res);
+          haltConfigUpdateAfterResponse();
+        }
+      }
+
+      // pluginDirs home-confinement is fs-aware (not in the shared validator).
+      const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
+      if (Array.isArray(mergedAo?.pluginDirs)) {
+        if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
+      }
+      if (patch.claudeMd && merged.type === 'agent') {
+        const ao = merged.agentOptions as Record<string, unknown> | undefined;
+        if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
           try {
-            const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-            if (existing.permissions) {
-              const permissions = existing.permissions as PermissionsSettings['permissions'];
-              existingPerms = {
-                ...permissions,
-                deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
-              };
-            }
-          } catch { /* use defaults */ }
-          writePermissionsSettings(claudeDir, {
-            permissions: existingPerms,
-            // null or {} = reset to global inheritance
-            enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
-          });
-        } catch (err) {
-          jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${(err as Error).message}` });
-          return;
+            const claudeDir = path.join(ao.cwd, '.claude');
+            ensureHomeConfinedDirectory(claudeDir);
+            writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
+          } catch (err) {
+            jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
+            haltConfigUpdateAfterResponse();
+          }
         }
       }
-    }
-  }
 
-  // Atomic write: write to .tmp then rename
-  // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
-  const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
-  const mergedClean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;
-  const tmpPath = instance.configPath + '.tmp';
-  try {
-    writePrivateFileSync(tmpPath, JSON.stringify(mergedClean, null, 2) + '\n');
-    fs.renameSync(tmpPath, instance.configPath);
+      // Write settings.json when settingsJson is in the patch (agent instances only)
+      if (patch.settingsJson && merged.type === 'agent') {
+        const ao = merged.agentOptions as Record<string, unknown> | undefined;
+        if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+          try {
+            const claudeDir = path.join(ao.cwd, '.claude');
+            const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
+            if (settings) {
+              ensureHomeConfinedDirectory(claudeDir);
+              writePermissionsSettings(claudeDir, settings);
+            }
+          } catch (err) {
+            jsonResponse(res, 500, { error: `failed to write settings.json: ${(err as Error).message}` });
+            haltConfigUpdateAfterResponse();
+          }
+        }
+      }
+
+      // Write enabledPlugins to .claude/settings.json when agentOptions.enabledPlugins changes
+      if (patch.agentOptions && merged.type === 'agent') {
+        const patchAo = patch.agentOptions as Record<string, unknown>;
+        if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
+          const ao = merged.agentOptions as Record<string, unknown> | undefined;
+          if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+            try {
+              const claudeDir = path.join(ao.cwd, '.claude');
+              ensureHomeConfinedDirectory(claudeDir);
+              // Build a full PermissionsSettings so writePermissionsSettings handles the merge
+              const settingsPath = path.join(claudeDir, 'settings.json');
+              let existingPerms = defaultSettingsJson('agent')!.permissions;
+              try {
+                const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+                if (existing.permissions) {
+                  const permissions = existing.permissions as PermissionsSettings['permissions'];
+                  existingPerms = {
+                    ...permissions,
+                    deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
+                  };
+                }
+              } catch { /* use defaults */ }
+              writePermissionsSettings(claudeDir, {
+                permissions: existingPerms,
+                // null or {} = reset to global inheritance
+                enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
+              });
+            } catch (err) {
+              jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${(err as Error).message}` });
+              haltConfigUpdateAfterResponse();
+            }
+          }
+        }
+      }
+
+      // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
+      const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
+      const clean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;
+      try {
+        writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
+      } catch (err) {
+        jsonResponse(res, 500, { error: `failed to write config: ${(err as Error).message}` });
+        haltConfigUpdateAfterResponse();
+      }
+      return clean;
+    });
   } catch (err) {
-    // Clean up tmp on failure
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-    jsonResponse(res, 500, { error: `failed to write config: ${(err as Error).message}` });
+    if (err instanceof ConfigUpdateResponseSent) {
+      return;
+    }
+    const action = errnoCode(err) === 'ENOENT' ? 'failed to read config' : 'failed to write config';
+    jsonResponse(res, 500, { error: `${action}: ${(err as Error).message}` });
     return;
   }
 
@@ -1336,12 +1365,7 @@ export async function handleAuth(
           connected = true;
           // Reset introSent so the instance sends an introduction on next boot
           try {
-            const cfgPath = instance.configPath;
-            const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-            raw.introSent = false;
-            const tmpPath = cfgPath + '.tmp';
-            writePrivateFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n');
-            fs.renameSync(tmpPath, cfgPath);
+            persistIntroSentFlag(instance.configPath, false);
           } catch (err) {
             // Not fatal to the auth flow, but without this warn the operator
             // has no clue why the instance never re-introduced itself.

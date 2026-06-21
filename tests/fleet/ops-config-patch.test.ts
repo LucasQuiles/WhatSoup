@@ -17,6 +17,8 @@ import { normalizePhone, normalizePhoneE164, isAdminPhone } from '../../src/lib/
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
+import { privateConfigLockPath } from '../../src/core/private-config-file.ts';
+import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lock.ts';
 
 // Mock external deps used by ops.ts
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
@@ -354,6 +356,27 @@ describe('handleConfigUpdate PATCH validation', () => {
     });
     expect(body).not.toHaveProperty('pineconeAllowedIndexes');
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(body);
+  });
+
+  it('fails closed when another process owns the config mutation lock', async () => {
+    const configPath = writeConfig({ model: 'old-model' });
+    const lock = acquireProcessLock(privateConfigLockPath(configPath), { token: 'held-fleet-patch-lock' });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+
+    try {
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ model: 'new-model' })),
+        res, deps, { name: 'test-line' },
+      );
+
+      expect(res._status).toBe(500);
+      expect(JSON.parse(res._body).error).toMatch(/process lock active/);
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).model).toBe('old-model');
+    } finally {
+      releaseProcessLock(lock);
+    }
   });
 
   // -- combined patch --
