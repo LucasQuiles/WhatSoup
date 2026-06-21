@@ -147,7 +147,7 @@ type FallbackView = {
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'server-error',
   ): unknown;
   deactivateProviderFallback(reason: string): void;
   getFallbackState(): {
@@ -369,6 +369,34 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(stallAlerts()).toHaveLength(0);
+  });
+
+  it('(g2b) ignores a stale successful standing-probe result after the fallback window is re-armed', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    let resolveProbe: ((value: boolean) => void) | null = null;
+    const probeResult = new Promise<boolean>((resolve) => {
+      resolveProbe = resolve;
+    });
+    const probe = vi.fn(() => probeResult);
+    v.probePrimaryProviderRecovered = probe as unknown as () => Promise<boolean>;
+
+    v.activateProviderFallback(null, 'auth-required');
+    const firstWindow = v.fallbackWindow.activeUntil;
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    v.deactivateProviderFallback('test-rearm');
+    v.activateProviderFallback(null, 'auth-required');
+    const rearmedWindow = v.fallbackWindow.activeUntil;
+    expect(rearmedWindow).not.toBe(firstWindow);
+
+    resolveProbe!(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(v.fallbackWindow.activeUntil).toBe(rearmedWindow);
+    expect(v.effectiveProvider).toBe('opencode-cli');
   });
 
   it('(g3) failed early-window probes do not count toward the stall threshold (window not yet expired)', async () => {

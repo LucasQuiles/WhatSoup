@@ -8,6 +8,7 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
+  detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
 } from './failure-taxonomy.ts';
 import {
@@ -15,7 +16,7 @@ import {
   type ResponseWorkflow,
   type UserTemplateId,
 } from './response-registry.ts';
-import { renderUserMessage, providerUnknownTerminalNotice } from './response-templates.ts';
+import { autoSwitchNoticeMessage, renderUserMessage, providerUnknownTerminalNotice } from './response-templates.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
@@ -230,12 +231,13 @@ function oneMessageHandoffEnabled(): boolean {
   return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
 }
 
-type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
+type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error';
 
 /** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
 function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
   return value === 'usage-limit' || value === 'rate-limit'
-    || value === 'auth-required' || value === 'model-unavailable';
+    || value === 'auth-required' || value === 'model-unavailable'
+    || value === 'server-error';
 }
 
 /**
@@ -473,7 +475,8 @@ function fallbackReasonForResultText(text: string): ProviderFallbackReason | nul
     kind === 'usage-limit' ||
     kind === 'rate-limit' ||
     kind === 'auth-required' ||
-    kind === 'model-unavailable'
+    kind === 'model-unavailable' ||
+    kind === 'server-error'
   ) {
     return kind;
   }
@@ -592,9 +595,15 @@ function armingFailureLogMessage(reason: ProviderFallbackReason): string {
       return 'suppressed provider auth-required message from result — session will be shut down';
     case 'rate-limit':
       return 'terminal provider rate-limit result observed';
+    case 'server-error':
+      return 'terminal provider server-error result observed';
     case 'model-unavailable':
       return 'suppressed provider model-unavailable message from result — session will be shut down';
   }
+}
+
+function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
+  return reason === 'server-error' ? 'transient' : reason;
 }
 
 export class AgentRuntime implements Runtime {
@@ -3719,6 +3728,7 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
+          if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
           // Suppress usage-limit messages — don't flood WhatsApp with them.
           // Fallback activation is intentionally NOT triggered here: it is
           // deferred to the 'result' event. Activating on streaming text would
@@ -3863,6 +3873,7 @@ export class AgentRuntime implements Runtime {
         };
 
         if (event.text && !hasPendingPoll) {
+          if (this.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result')) break;
           if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
             queue,
             session,
@@ -3957,12 +3968,12 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
-          if (providerFailureKind === 'rate-limit') {
+          if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
             recordTurnFailure(providerFailureKind);
-            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, armingFailureLogMessage(providerFailureKind));
             const activation = this.activateProviderFallbackAfterTerminalResult(
               null,
-              'rate-limit',
+              providerFailureKind,
               session,
               event.text,
             );
@@ -3986,7 +3997,10 @@ export class AgentRuntime implements Runtime {
               conversationKey,
               mapKey,
             });
-            if (!replayScheduled) session?.shutdown();
+            if (!replayScheduled) {
+              if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+              session?.shutdown();
+            }
             break;
           }
           if (providerFailureKind === 'model-unavailable') {
@@ -5882,6 +5896,7 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
       if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
+      const windowAtProbe = this.fallbackWindow.activeUntil;
       void Promise.resolve()
         .then(() => this.probePrimaryProviderRecovered())
         .catch((err) => {
@@ -5889,8 +5904,11 @@ export class AgentRuntime implements Runtime {
           return false;
         })
         .then((recovered) => {
-          // The window may have been deactivated while the probe ran.
-          if (this.fallbackWindow.activeUntil === null || !this.fallbackWindow.recoveryProbeRequired) return;
+          if (
+            this.fallbackWindow.activeUntil === null ||
+            !this.fallbackWindow.recoveryProbeRequired ||
+            this.fallbackWindow.activeUntil !== windowAtProbe
+          ) return;
           if (recovered) {
             this.deactivateProviderFallback('primary-probe-ok');
             return;
@@ -6201,7 +6219,7 @@ export class AgentRuntime implements Runtime {
     // this is a 1:1 mapping; the credentials-missing case overrides it below.
     const templateId: UserTemplateId = credentialsMissing
       ? 'credentials-missing'
-      : activation.reason;
+      : templateForFallbackReason(activation.reason);
     // When the replay is blocked because the first attempt already started an
     // action, the reason template renders the dedicated tool-activity-blocked
     // directive in place of its continue/resend clause (the copy now lives in
@@ -6258,6 +6276,26 @@ export class AgentRuntime implements Runtime {
       return text;
     }
     return prefix ? `${prefix}\n\n${text}` : text;
+  }
+
+  private enqueueAutoSwitchNotice(
+    queue: IOutboundQueue,
+    text: string,
+    logChatJid: string | null | undefined,
+    mode: 'streaming' | 'result',
+  ): boolean {
+    const notice = detectAutoSwitchNotice(text);
+    if (!notice) return false;
+    const message = autoSwitchNoticeMessage(notice);
+    log.info({
+      chatJid: logChatJid,
+      from: notice.from,
+      to: notice.to,
+      reason: notice.reason,
+    }, 'surfaced provider auto-switch notice');
+    if (mode === 'streaming') queue.enqueueStreamingText(message);
+    else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message));
+    return true;
   }
 
   /**
@@ -7257,6 +7295,10 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
+          if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming')) {
+            this.turnHadVisibleOutput = true;
+            break;
+          }
           // Suppress usage-limit messages — don't flood WhatsApp with them.
           // Fallback activation is intentionally NOT triggered here: it is
           // deferred to the 'result' event. Activating on streaming text would
@@ -7398,6 +7440,10 @@ export class AgentRuntime implements Runtime {
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          if (this.enqueueAutoSwitchNotice(queue, event.text, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'result')) {
+            this.turnHadVisibleOutput = true;
+            break;
+          }
           if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
             queue,
             session: this.session,
@@ -7495,12 +7541,12 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (providerFailureKind === 'rate-limit') {
+          if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
             recordTurnFailure(providerFailureKind);
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, armingFailureLogMessage(providerFailureKind));
             const activation = this.activateProviderFallbackAfterTerminalResult(
               null,
-              'rate-limit',
+              providerFailureKind,
               this.session,
               event.text,
             );
@@ -7523,7 +7569,10 @@ export class AgentRuntime implements Runtime {
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
-            if (!replayScheduled) this.session?.shutdown();
+            if (!replayScheduled) {
+              if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerUnknownTerminalNotice());
+              this.session?.shutdown();
+            }
             this.singleTurnHadToolActivity = false;
             break;
           }
