@@ -7,6 +7,12 @@ export interface DatabaseRetentionConfig {
   intervalMs: number;
   terminalDurabilityDays: number;
   exportedFactDays: number;
+  /**
+   * Retention window for the append-only `metrics_hourly` rollup table.
+   * Must stay above the dashboard reader's max lookback (720h / 30d, see
+   * `src/fleet/db-reader.ts`) so pruning never removes a readable bucket.
+   */
+  metricsHourlyDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -14,12 +20,14 @@ export interface DatabaseRetentionResult {
   outboundOps: number;
   toolCalls: number;
   factExportQueue: number;
+  metricsHourly: number;
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   intervalMs: 24 * 60 * 60 * 1000,
   terminalDurabilityDays: 30,
   exportedFactDays: 30,
+  metricsHourlyDays: 180,
 };
 
 function daysModifier(days: number): string {
@@ -61,8 +69,16 @@ export function runDatabaseRetention(
        AND COALESCE(exported_at, created_at) < datetime('now', ?)
   `).run(factCutoff));
 
-  const result = { inboundEvents, outboundOps, toolCalls, factExportQueue };
-  const total = inboundEvents + outboundOps + toolCalls + factExportQueue;
+  // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
+  // (written via toISOString()); datetime(bucket) normalizes it for comparison.
+  const metricsCutoff = daysModifier(retention.metricsHourlyDays);
+  const metricsHourly = changes(db.raw.prepare(`
+    DELETE FROM metrics_hourly
+     WHERE datetime(bucket) < datetime('now', ?)
+  `).run(metricsCutoff));
+
+  const result = { inboundEvents, outboundOps, toolCalls, factExportQueue, metricsHourly };
+  const total = inboundEvents + outboundOps + toolCalls + factExportQueue + metricsHourly;
   if (total > 0) {
     log.info({ ...result, total }, 'database retention: deleted old terminal rows');
   }
