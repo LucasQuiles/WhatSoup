@@ -1,4 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockSchedulerLog = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
+
+vi.mock('../../src/logger.ts', () => ({
+  createChildLogger: () => mockSchedulerLog,
+}));
+
 import { Database } from '../../src/core/database.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
@@ -25,9 +37,14 @@ describe('scheduler recurrence', () => {
     db = makeDb();
     conn = mockConnection();
     scheduler = new MessageScheduler(db, conn, { intervalMs: 60_000, maxRetries: 3 });
+    vi.useRealTimers();
+    vi.clearAllMocks();
   });
 
-  afterEach(() => { db.raw.close(); });
+  afterEach(() => {
+    vi.useRealTimers();
+    db.raw.close();
+  });
 
   it('recurring message stays pending after send with updated next_run_at and run_count', async () => {
     const now = Math.floor(Date.now() / 1000);
@@ -47,6 +64,39 @@ describe('scheduler recurrence', () => {
     expect(row.next_run_at).toBeGreaterThan(now);
     expect(row.sent_at).toBeGreaterThan(0);
     expect(conn.sendRaw).toHaveBeenCalledWith('123@s.whatsapp.net', { text: 'weekly update' });
+  });
+
+  it('counts skipped recurring windows when a downtime catch-up collapses missed slots', async () => {
+    const dueAt = Date.parse('2026-06-21T10:00:00.000Z') / 1000;
+    const sentAt = Date.parse('2026-06-21T10:05:30.000Z') / 1000;
+    vi.useFakeTimers();
+    vi.setSystemTime(sentAt * 1000);
+
+    db.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, recurrence, next_run_at, run_count, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('123@s.whatsapp.net', 'text', '{"text":"minute update"}', dueAt, '* * * * *', dueAt, 4, 'pending');
+
+    await scheduler.tick();
+
+    const row = db.raw.prepare('SELECT status, run_count, next_run_at, sent_at FROM scheduled_messages WHERE id = 1').get() as {
+      status: string; run_count: number; next_run_at: number; sent_at: number;
+    };
+
+    expect(row.status).toBe('pending');
+    expect(row.run_count).toBe(5);
+    expect(row.sent_at).toBe(sentAt);
+    expect(row.next_run_at).toBe(Date.parse('2026-06-21T10:06:00.000Z') / 1000);
+    expect(mockSchedulerLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 1,
+        skippedOccurrences: 5,
+        previousNextRun: dueAt,
+        sentAt,
+        nextRun: Date.parse('2026-06-21T10:06:00.000Z') / 1000,
+      }),
+      'scheduler: recurring message skipped missed occurrences after downtime',
+    );
   });
 
   it('one-shot message still transitions to sent', async () => {
@@ -107,6 +157,28 @@ describe('scheduler recurrence', () => {
     expect(row.status).toBe('pending');
     expect(row.retry_count).toBe(0);
     expect(row.next_run_at).toBeGreaterThan(now);
+  });
+
+  it('uses unix seconds when skipping a failed recurring occurrence at maxRetries', async () => {
+    const dueAt = Date.parse('2026-06-21T10:04:00.000Z') / 1000;
+    const now = Date.parse('2026-06-21T10:05:30.000Z') / 1000;
+    vi.useFakeTimers();
+    vi.setSystemTime(now * 1000);
+
+    db.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, recurrence, next_run_at, status, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('123@s.whatsapp.net', 'text', '{"text":"daily"}', dueAt, '* * * * *', dueAt, 'pending', 2);
+
+    (conn.sendRaw as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('transient outage'));
+    await scheduler.tick();
+
+    const row = db.raw.prepare('SELECT status, retry_count, next_run_at FROM scheduled_messages WHERE id = 1').get() as {
+      status: string; retry_count: number; next_run_at: number;
+    };
+    expect(row.status).toBe('pending');
+    expect(row.retry_count).toBe(0);
+    expect(row.next_run_at).toBe(Date.parse('2026-06-21T10:06:00.000Z') / 1000);
   });
 
   it('successful recurring send resets accumulated retry_count to 0', async () => {
