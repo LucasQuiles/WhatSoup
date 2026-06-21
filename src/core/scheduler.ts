@@ -18,8 +18,36 @@ interface ScheduledRow {
   retry_count: number;
   media_blob: Uint8Array | null;
   recurrence: string | null;
+  next_run_at: number | null;
   run_count: number;
   timezone: string | null;
+}
+
+const MISSED_OCCURRENCE_SCAN_CAP = 10_000;
+
+function advanceRecurringRun(
+  recurrence: string,
+  previousNextRun: number,
+  sentAt: number,
+  timezone: string,
+): { nextRun: number; skippedOccurrences: number; capped: boolean } {
+  let skippedOccurrences = 0;
+  let cursor = previousNextRun;
+
+  for (let i = 0; i < MISSED_OCCURRENCE_SCAN_CAP; i++) {
+    const nextRun = nextCronRun(recurrence, cursor, timezone);
+    if (nextRun > sentAt) {
+      return { nextRun, skippedOccurrences, capped: false };
+    }
+    skippedOccurrences += 1;
+    cursor = nextRun;
+  }
+
+  return {
+    nextRun: nextCronRun(recurrence, sentAt, timezone),
+    skippedOccurrences,
+    capped: true,
+  };
 }
 
 export class MessageScheduler {
@@ -78,7 +106,7 @@ export class MessageScheduler {
     // are left alone.
     const candidates = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count, timezone
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, next_run_at, run_count, timezone
          FROM scheduled_messages
          WHERE status = 'pending'
            AND (
@@ -103,7 +131,7 @@ export class MessageScheduler {
     // Only process the rows we just claimed (re-fetch to confirm claimed status)
     const rows = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count, timezone
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, next_run_at, run_count, timezone
          FROM scheduled_messages
          WHERE id IN (${placeholders}) AND status = 'processing'`,
       )
@@ -118,8 +146,18 @@ export class MessageScheduler {
           // Wrap nextCronRun separately — if a bad cron slipped into the DB,
           // mark it permanently failed rather than entering a send-retry loop.
           let nextRun: number;
+          let skippedOccurrences = 0;
+          let skippedOccurrencesCapped = false;
           try {
-            nextRun = nextCronRun(row.recurrence, sentAt, row.timezone ?? 'UTC');
+            const advanced = advanceRecurringRun(
+              row.recurrence,
+              row.next_run_at ?? sentAt,
+              sentAt,
+              row.timezone ?? 'UTC',
+            );
+            nextRun = advanced.nextRun;
+            skippedOccurrences = advanced.skippedOccurrences;
+            skippedOccurrencesCapped = advanced.capped;
           } catch (cronErr) {
             this.db.raw
               .prepare(
@@ -138,6 +176,20 @@ export class MessageScheduler {
                WHERE id = ?`,
             )
             .run(sentAt, row.run_count + 1, nextRun, row.id);
+          if (skippedOccurrences > 0) {
+            log.warn(
+              {
+                id: row.id,
+                chatJid: row.chat_jid,
+                previousNextRun: row.next_run_at,
+                sentAt,
+                nextRun,
+                skippedOccurrences,
+                skippedOccurrencesCapped,
+              },
+              'scheduler: recurring message skipped missed occurrences after downtime',
+            );
+          }
           log.info({ id: row.id, chatJid: row.chat_jid, nextRun }, 'scheduler: recurring message sent, rescheduled');
         } else {
           // One-shot: mark as sent
@@ -160,8 +212,19 @@ export class MessageScheduler {
             // the next cron slot, and reset retry_count so failures don't accumulate
             // across occurrences. Only mark 'failed' if the next slot is uncomputable.
             let nextRun: number | null = null;
+            let skippedOccurrences = 0;
+            let skippedOccurrencesCapped = false;
             try {
-              nextRun = nextCronRun(row.recurrence, Date.now(), row.timezone ?? 'UTC');
+              const now = nowUnixSec();
+              const advanced = advanceRecurringRun(
+                row.recurrence,
+                row.next_run_at ?? now,
+                now,
+                row.timezone ?? 'UTC',
+              );
+              nextRun = advanced.nextRun;
+              skippedOccurrences = advanced.skippedOccurrences;
+              skippedOccurrencesCapped = advanced.capped;
             } catch {
               nextRun = null;
             }
@@ -174,7 +237,14 @@ export class MessageScheduler {
                 )
                 .run(nextRun, `Occurrence skipped after ${newRetryCount} failures: ${errorMsg}`, row.id);
               log.warn(
-                { id: row.id, retries: newRetryCount, nextRun, err },
+                {
+                  id: row.id,
+                  retries: newRetryCount,
+                  nextRun,
+                  skippedOccurrences,
+                  skippedOccurrencesCapped,
+                  err,
+                },
                 'scheduler: recurring occurrence failed, skipped to next slot',
               );
             } else {
