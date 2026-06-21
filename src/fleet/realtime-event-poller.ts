@@ -51,6 +51,7 @@ export class FleetRealtimeEventPoller {
   private timer: ReturnType<typeof setInterval> | null = null;
   private snapshots = new Map<string, InstanceSnapshot>();
   private lastTyping = new Map<string, number>(); // key: `instance|jid` → since
+  private polling = false;
 
   constructor(deps: RealtimeEventPollerDeps, intervalMs = 2000) {
     this.deps = deps;
@@ -77,52 +78,58 @@ export class FleetRealtimeEventPoller {
 
   /** Single poll cycle — compare snapshots and emit diffs. */
   async poll(): Promise<void> {
-    const instances = this.deps.discovery.getInstances();
+    if (this.polling) return;
+    this.polling = true;
+    try {
+      const instances = this.deps.discovery.getInstances();
 
-    for (const [name, inst] of instances) {
-      try {
-        const dbSnapshot = this.getSnapshot(name, inst.dbPath);
-        const previous = this.snapshots.get(name);
+      for (const [name, inst] of instances) {
+        try {
+          const dbSnapshot = this.getSnapshot(name, inst.dbPath);
+          const previous = this.snapshots.get(name);
 
-        // Fast path: stat only the cached log path (1 syscall vs N for full dir scan)
-        const logMtime = this.getLogMtime(inst.logDir, previous?.lastLogPath ?? null);
-        const current: InstanceSnapshot = {
-          ...dbSnapshot,
-          latestLogMtime: logMtime?.mtimeMs ?? previous?.latestLogMtime ?? null,
-          lastLogPath: logMtime?.path ?? previous?.lastLogPath ?? null,
-        };
+          // Fast path: stat only the cached log path (1 syscall vs N for full dir scan)
+          const logMtime = this.getLogMtime(inst.logDir, previous?.lastLogPath ?? null);
+          const current: InstanceSnapshot = {
+            ...dbSnapshot,
+            latestLogMtime: logMtime?.mtimeMs ?? previous?.latestLogMtime ?? null,
+            lastLogPath: logMtime?.path ?? previous?.lastLogPath ?? null,
+          };
 
-        if (previous) {
-          if (current.latestMessageMarker !== previous.latestMessageMarker) {
-            publishMessageReceived(this.deps.realtime, name);
-            publishChatUpdated(this.deps.realtime, name);
-            publishFeedEvent(this.deps.realtime, name);
+          if (previous) {
+            if (current.latestMessageMarker !== previous.latestMessageMarker) {
+              publishMessageReceived(this.deps.realtime, name);
+              publishChatUpdated(this.deps.realtime, name);
+              publishFeedEvent(this.deps.realtime, name);
+            }
+            if (current.latestAccessMarker !== previous.latestAccessMarker) {
+              publishAccessChanged(this.deps.realtime, name);
+              publishFeedEvent(this.deps.realtime, name);
+            }
+            if (current.latestLogMtime !== null && current.latestLogMtime !== previous.latestLogMtime) {
+              publishLogChanged(this.deps.realtime, name);
+              publishFeedEvent(this.deps.realtime, name);
+            }
           }
-          if (current.latestAccessMarker !== previous.latestAccessMarker) {
-            publishAccessChanged(this.deps.realtime, name);
-            publishFeedEvent(this.deps.realtime, name);
-          }
-          if (current.latestLogMtime !== null && current.latestLogMtime !== previous.latestLogMtime) {
-            publishLogChanged(this.deps.realtime, name);
-            publishFeedEvent(this.deps.realtime, name);
-          }
+
+          this.snapshots.set(name, current);
+        } catch {
+          // Instance DB unavailable — skip
         }
-
-        this.snapshots.set(name, current);
-      } catch {
-        // Instance DB unavailable — skip
       }
-    }
 
-    const discoveredNames = new Set(instances.keys());
-    for (const name of this.snapshots.keys()) {
-      if (!discoveredNames.has(name)) {
-        this.snapshots.delete(name);
+      const discoveredNames = new Set(instances.keys());
+      for (const name of this.snapshots.keys()) {
+        if (!discoveredNames.has(name)) {
+          this.snapshots.delete(name);
+        }
       }
-    }
 
-    // Typing indicators via health proxy
-    await this.pollTyping(instances);
+      // Typing indicators via health proxy
+      await this.pollTyping(instances);
+    } finally {
+      this.polling = false;
+    }
   }
 
   // ---------------------------------------------------------------------------
