@@ -1079,6 +1079,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 29 | Normalizes any existing millisecond-scale `messages.timestamp` rows down to Unix epoch seconds so message ordering, retention, enrichment windows, and fleet displays use one timestamp unit (`runMigration29`) |
 | 30 | Adds `scheduled_messages.timezone` (IANA zone) so recurring schedules evaluate their cron in the user's timezone (DST-aware); `NULL` preserves the legacy UTC interpretation (`runMigration30`) |
 | 31 | Adds the `llm_attempts` table (`sender_jid`, `attempt_at`) — records every LLM invocation, separate from the `rate_limits` (successful-response) counter, so outage/retry LLM cost is observable without charging the user's response rate-limit (`runMigration31`) |
+| 32 | Adds `scheduled_messages.send_started_at` so scheduler crash recovery can distinguish pre-send claims from uncertain in-flight sends and fail closed instead of blindly replaying accepted messages (`runMigration32`) |
 
 ---
 

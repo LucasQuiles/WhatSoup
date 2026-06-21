@@ -729,6 +729,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [29, runMigration29],
   [30, runMigration30],
   [31, runMigration31],
+  [32, runMigration32],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -786,6 +787,26 @@ function runMigration31(db: DatabaseSync): void {
       attempt_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_llm_attempts_sender ON llm_attempts(sender_jid, attempt_at);
+  `);
+}
+
+function runMigration32(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_messages'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db
+    .prepare("PRAGMA table_info('scheduled_messages')")
+    .all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'send_started_at')) {
+    db.exec('ALTER TABLE scheduled_messages ADD COLUMN send_started_at INTEGER');
+  }
+
+  db.exec(`
+    UPDATE scheduled_messages
+    SET send_started_at = unixepoch()
+    WHERE status = 'processing' AND send_started_at IS NULL
   `);
 }
 

@@ -86,13 +86,30 @@ export class MessageScheduler {
     }
   }
 
-  /** Reset any rows stuck in 'processing' (crashed mid-send) back to 'pending'. */
+  /** Recover rows stuck in 'processing' after a crash without blindly replaying uncertain sends. */
   recoverStale(): void {
-    const count = this.db.raw
-      .prepare(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing'`)
+    const uncertainCount = this.db.raw
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'failed',
+             error = 'Recovered after crash during scheduled send; manual verification required before retry',
+             send_started_at = NULL
+         WHERE status = 'processing' AND send_started_at IS NOT NULL`,
+      )
       .run().changes;
-    if (count > 0) {
-      log.info({ count }, 'scheduler: recovered stale processing rows to pending');
+    if (uncertainCount > 0) {
+      log.warn({ count: uncertainCount }, 'scheduler: failed closed stale processing rows with uncertain send status');
+    }
+
+    const requeuedCount = this.db.raw
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'pending', send_started_at = NULL
+         WHERE status = 'processing' AND send_started_at IS NULL`,
+      )
+      .run().changes;
+    if (requeuedCount > 0) {
+      log.info({ count: requeuedCount }, 'scheduler: recovered stale pre-send processing rows to pending');
     }
   }
 
@@ -139,6 +156,16 @@ export class MessageScheduler {
 
     for (const row of rows) {
       try {
+        const sendStartedAt = nowUnixSec();
+        const marked = this.db.raw
+          .prepare(
+            `UPDATE scheduled_messages
+             SET send_started_at = ?
+             WHERE id = ? AND status = 'processing'`,
+          )
+          .run(sendStartedAt, row.id).changes;
+        if (marked === 0) continue;
+
         await this.executeSend(row);
         const sentAt = nowUnixSec();
         if (row.recurrence) {
@@ -162,7 +189,7 @@ export class MessageScheduler {
             this.db.raw
               .prepare(
                 `UPDATE scheduled_messages
-                 SET status = 'failed', sent_at = ?, error = ?
+                 SET status = 'failed', sent_at = ?, error = ?, send_started_at = NULL
                  WHERE id = ?`,
               )
               .run(sentAt, `Invalid recurrence after send: ${errorMessage(cronErr)}`, row.id);
@@ -172,7 +199,7 @@ export class MessageScheduler {
           this.db.raw
             .prepare(
               `UPDATE scheduled_messages
-               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?, retry_count = 0
+               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?, retry_count = 0, send_started_at = NULL
                WHERE id = ?`,
             )
             .run(sentAt, row.run_count + 1, nextRun, row.id);
@@ -196,7 +223,7 @@ export class MessageScheduler {
           this.db.raw
             .prepare(
               `UPDATE scheduled_messages
-               SET status = 'sent', sent_at = ?
+               SET status = 'sent', sent_at = ?, send_started_at = NULL
                WHERE id = ?`,
             )
             .run(sentAt, row.id);
@@ -232,7 +259,7 @@ export class MessageScheduler {
               this.db.raw
                 .prepare(
                   `UPDATE scheduled_messages
-                   SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?
+                   SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?, send_started_at = NULL
                    WHERE id = ?`,
                 )
                 .run(nextRun, `Occurrence skipped after ${newRetryCount} failures: ${errorMsg}`, row.id);
@@ -251,7 +278,7 @@ export class MessageScheduler {
               this.db.raw
                 .prepare(
                   `UPDATE scheduled_messages
-                   SET status = 'failed', retry_count = ?, error = ?
+                   SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
                    WHERE id = ?`,
                 )
                 .run(newRetryCount, `Recurring failed (cannot compute next slot): ${errorMsg}`, row.id);
@@ -264,7 +291,7 @@ export class MessageScheduler {
             this.db.raw
               .prepare(
                 `UPDATE scheduled_messages
-                 SET status = 'failed', retry_count = ?, error = ?
+                 SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
                  WHERE id = ?`,
               )
               .run(newRetryCount, errorMsg, row.id);
@@ -274,7 +301,7 @@ export class MessageScheduler {
           this.db.raw
             .prepare(
               `UPDATE scheduled_messages
-               SET status = 'pending', retry_count = ?
+               SET status = 'pending', retry_count = ?, send_started_at = NULL
                WHERE id = ?`,
             )
             .run(newRetryCount, row.id);

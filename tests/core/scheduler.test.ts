@@ -43,6 +43,7 @@ function insertScheduledMessage(
     status?: string;
     retryCount?: number;
     mediaBlob?: Buffer | null;
+    sendStartedAt?: number | null;
   } = {},
 ): number {
   const {
@@ -53,13 +54,14 @@ function insertScheduledMessage(
     status = 'pending',
     retryCount = 0,
     mediaBlob = null,
+    sendStartedAt = null,
   } = opts;
 
   const stmt = raw.prepare(`
-    INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, retry_count, media_blob)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, retry_count, media_blob, send_started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(chatJid, contentType, payload, scheduledAt, status, retryCount, mediaBlob);
+  const result = stmt.run(chatJid, contentType, payload, scheduledAt, status, retryCount, mediaBlob, sendStartedAt);
   return result.lastInsertRowid as number;
 }
 
@@ -120,6 +122,18 @@ describe('MessageScheduler — tick()', () => {
     expect(row.sent_at).toBeGreaterThanOrEqual(before);
   });
 
+  it('clears the send-start marker after a successful one-shot send', async () => {
+    const id = insertScheduledMessage(db.raw, { status: 'pending' });
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    const row = db.raw
+      .prepare('SELECT status, send_started_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; send_started_at: number | null };
+    expect(row).toEqual({ status: 'sent', send_started_at: null });
+  });
+
   it('increments retry_count on send failure', async () => {
     const failConn: Partial<ConnectionManager> = {
       sendRaw: vi.fn().mockRejectedValue(new Error('send failed')),
@@ -135,6 +149,22 @@ describe('MessageScheduler — tick()', () => {
       .get(id) as { status: string; retry_count: number };
     expect(row.retry_count).toBe(1);
     expect(row.status).toBe('pending');
+  });
+
+  it('clears the send-start marker when a send failure returns the row to pending', async () => {
+    const failConn: Partial<ConnectionManager> = {
+      sendRaw: vi.fn().mockRejectedValue(new Error('send failed')),
+      sendMedia: vi.fn().mockRejectedValue(new Error('send failed')),
+    };
+    const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
+
+    const scheduler = new MessageScheduler(db, failConn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    const row = db.raw
+      .prepare('SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; retry_count: number; send_started_at: number | null };
+    expect(row).toEqual({ status: 'pending', retry_count: 1, send_started_at: null });
   });
 
   it('sets status to failed after maxRetries exceeded', async () => {
@@ -218,7 +248,7 @@ describe('MessageScheduler — recoverStale()', () => {
     db = makeDb();
   });
 
-  it('resets processing rows to pending', () => {
+  it('resets processing rows with no started send marker to pending', () => {
     const id = insertScheduledMessage(db.raw, { status: 'processing' });
     const { mock: conn } = makeMockConnection();
 
@@ -229,6 +259,26 @@ describe('MessageScheduler — recoverStale()', () => {
       .prepare('SELECT status FROM scheduled_messages WHERE id = ?')
       .get(id) as { status: string };
     expect(row.status).toBe('pending');
+  });
+
+  it('fails closed instead of re-queueing a processing row whose send already started', () => {
+    const id = insertScheduledMessage(db.raw, {
+      status: 'processing',
+      sendStartedAt: Math.floor(Date.now() / 1000) - 30,
+    });
+    const { mock: conn } = makeMockConnection();
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    scheduler.recoverStale();
+
+    const row = db.raw
+      .prepare('SELECT status, error, send_started_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as { status: string; error: string; send_started_at: number | null };
+    expect(row).toEqual({
+      status: 'failed',
+      error: 'Recovered after crash during scheduled send; manual verification required before retry',
+      send_started_at: null,
+    });
   });
 
   it('does not touch rows with other statuses', () => {
