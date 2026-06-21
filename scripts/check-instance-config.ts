@@ -13,9 +13,9 @@
  *     refuses every query (`project_mismatch`) with no startup error — the
  *     ml-bot / ew-bot `"memory": {}` dead-memory incident. We require a
  *     non-empty `memory.pinecone.expectedHostSuffix` of the documented
- *     `<slug>.svc.<env>.pinecone.io` shape and forbid a `projectId` UUID (the
- *     `host.includes("-<projectId>.")` trap that fails closed against the
- *     standard host format).
+ *     `<slug>.svc.<env>.pinecone.io` shape and forbid UUID-shaped `projectId`
+ *     values (the `host.includes("-<projectId>.")` trap that fails closed
+ *     against the standard host format).
  *
  *   Class B — health-port collisions / console squats / off-band ports.
  *     The runtime accepts any 1024-65535 port. Two instances on one host can
@@ -54,6 +54,7 @@ import { isRecord } from '../src/lib/type-guards.ts';
 // such as "us-east-1.aws"), so dots are allowed there.
 // ---------------------------------------------------------------------------
 const HOST_SUFFIX_RE = /^-[a-z0-9-]+\.svc\.[a-z0-9.-]+\.pinecone\.io$/i;
+const PROJECT_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-/i;
 
 export interface ConfigFinding {
   /** Logical instance name (directory name or config "name"). */
@@ -118,7 +119,7 @@ function hasExplicitMemoryPinecone(raw: Record<string, unknown>): boolean {
  *  - an empty `memory: {}` (or absent pinecone block) while the type is a
  *    memory consumer is the silent-dead shape → ERROR;
  *  - a present pinecone block MUST carry a well-shaped expectedHostSuffix;
- *  - it MUST NOT carry projectId (the host-match trap).
+ *  - it MUST NOT carry a UUID-shaped projectId (the host-match trap).
  */
 export function checkMemoryIntegrity(
   raw: Record<string, unknown>,
@@ -155,19 +156,21 @@ export function checkMemoryIntegrity(
 
   if (!pinecone) return findings;
 
-  // projectId trap: must NOT be set. host.includes(`-${projectId}.`) fails
-  // closed against the standard `<slug>.svc.<env>.pinecone.io` host, killing
-  // memory. expectedHostSuffix is the correct guard.
-  if ('projectId' in pinecone && pinecone['projectId'] !== undefined && pinecone['projectId'] !== null) {
+  // UUID-shaped projectId trap: host.includes(`-${projectId}.`) fails closed
+  // against the standard `<slug>.svc.<env>.pinecone.io` host, killing memory.
+  // Short-slug projectId values are allowed because they match the host slug.
+  const projectId = pinecone['projectId'];
+  if (typeof projectId === 'string' && PROJECT_ID_UUID_RE.test(projectId)) {
     findings.push({
       instance,
       filePath,
       category: 'A-memory',
       field: 'memory.pinecone.projectId',
       message:
-        'memory.pinecone.projectId must NOT be set — the runtime guard checks ' +
+        'memory.pinecone.projectId must not be UUID-shaped — the runtime guard checks ' +
         'host.includes("-<projectId>.") which fails closed against the standard ' +
-        'host shape and silently disables memory. Use expectedHostSuffix instead.',
+        'slug-based host shape and silently disables memory. Use the short slug or ' +
+        'expectedHostSuffix instead.',
     });
   }
 
@@ -192,7 +195,7 @@ export function checkMemoryIntegrity(
       message:
         `memory.pinecone.expectedHostSuffix ${JSON.stringify(suffix)} does not match ` +
         'the host-suffix shape "-<slug>.svc.<env>.pinecone.io" — a malformed suffix ' +
-        'either never matches (memory dead) or is a projectId UUID in the wrong field.',
+        'either never matches (memory dead) or uses a UUID where the host has a slug.',
     });
   }
 

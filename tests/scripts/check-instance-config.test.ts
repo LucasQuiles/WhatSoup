@@ -142,12 +142,26 @@ describe('Class A — memory-config integrity', () => {
     expect(classesOf(findings)).toContain('A-memory');
   });
 
-  it('FAILS: memory.pinecone with a projectId set → host.includes trap', () => {
+  it('PASSES: memory.pinecone may include the short-slug projectId used in Pinecone hosts', () => {
     const cfg = validChatConfig({
       memory: {
         pinecone: {
           expectedHostSuffix: VALID_SUFFIX,
           projectId: 'team-project-id',
+          index: 'team-search',
+        },
+      },
+    });
+    const findings = checkMemoryIntegrity(cfg, 'chat-bot', '/x/config.json');
+    expect(findings).toEqual([]);
+  });
+
+  it('FAILS: memory.pinecone with a UUID-shaped projectId set → host.includes trap', () => {
+    const cfg = validChatConfig({
+      memory: {
+        pinecone: {
+          expectedHostSuffix: VALID_SUFFIX,
+          projectId: '123e4567-e89b-12d3-a456-426614174000',
           index: 'team-search',
         },
       },

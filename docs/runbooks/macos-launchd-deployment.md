@@ -151,8 +151,8 @@ Recommended Pinecone guard shape:
   "memory": {
     "pinecone": {
       "apiKeyEnv": "PINECONE_API_KEY",
-      "projectId": "<pinecone-project-id>",
-      "expectedHostSuffix": "-<pinecone-project-id>.svc.<environment>.pinecone.io",
+      "projectId": "<pinecone-project-slug>",
+      "expectedHostSuffix": "-<pinecone-project-slug>.svc.<environment>.pinecone.io",
       "index": "<memory-index>",
       "allowedIndexes": []
     }

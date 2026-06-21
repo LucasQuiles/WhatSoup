@@ -13,12 +13,12 @@ permissive runtime schema otherwise lets through silently:
 
 - **Class A — memory-config integrity.** An `agent`/`chat` instance with a
   `memory` block must carry a well-shaped `memory.pinecone.expectedHostSuffix`
-  (`-<slug>.svc.<env>.pinecone.io`) and must **not** set
-  `memory.pinecone.projectId`. An empty `memory: {}` on a memory-consuming bot
-  leaves the runtime project guard firing `project_mismatch` with no error — the
-  memory layer is silently dead. A `projectId` UUID trips the
-  `host.includes("-<projectId>.")` check against the standard host shape and
-  fails closed the same way. Use `expectedHostSuffix` only.
+  (`-<slug>.svc.<env>.pinecone.io`). If `memory.pinecone.projectId` is set, it
+  must be the short host slug, not a UUID. An empty `memory: {}` on a
+  memory-consuming bot leaves the runtime project guard firing
+  `project_mismatch` with no error — the memory layer is silently dead. A
+  `projectId` UUID trips the `host.includes("-<projectId>.")` check against the
+  standard slug-based host shape and fails closed the same way.
 
 - **Class B — health-port map.** Across one host, every effective health port
   must be unique, every explicit `healthPort` must fall inside the agreed band
