@@ -6,6 +6,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PassThrough } from 'node:stream';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
@@ -32,6 +35,8 @@ vi.mock('node:child_process', async () => {
 import { handleAuth } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { privateConfigLockPath } from '../../../src/core/private-config-file.ts';
+import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import { spawn } from 'node:child_process';
 
 function mockReq(body = '', url = '/'): IncomingMessage {
@@ -148,5 +153,52 @@ describe('handleAuth introSent reset failure', () => {
     // Let the SSE stream finish so the handler promise settles.
     child.emit('exit', 0);
     await pending;
+  });
+
+  it('warns and continues when the introSent reset is blocked by the config mutation lock', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-auth-lock-'));
+    const configPath = path.join(dir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ name: 'test-line', introSent: true }, null, 2) + '\n');
+    fs.chmodSync(configPath, 0o600);
+    const lock = acquireProcessLock(privateConfigLockPath(configPath), { token: 'held-auth-lock' });
+
+    try {
+      const instance = fakeInstance({ configPath });
+      const deps = makeDeps(instance);
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      const pending = handleAuth(req, res, deps, { name: 'test-line' });
+
+      await vi.waitFor(() => expect(vi.mocked(spawn)).toHaveBeenCalled());
+      const child = vi.mocked(spawn).mock.results[0]!.value as {
+        stdout: { emit: (event: string, chunk: Buffer) => void };
+        emit: (event: string, code: number) => void;
+      };
+
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'connected' }) + '\n'));
+
+      await vi.waitFor(() => {
+        const warned = mockLogWarn.mock.calls.some(
+          ([ctx, msg]) =>
+            typeof msg === 'string'
+            && msg.includes('introSent')
+            && typeof ctx === 'object'
+            && ctx !== null
+            && (ctx as Record<string, unknown>).err instanceof Error
+            && ((ctx as Record<string, unknown>).err as Error).message.includes('process lock active'),
+        );
+        expect(warned).toBe(true);
+      });
+
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).introSent).toBe(true);
+      expect(deps.serviceManager.startFire).toHaveBeenCalled();
+
+      child.emit('exit', 0);
+      await pending;
+    } finally {
+      releaseProcessLock(lock);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
