@@ -11,6 +11,10 @@
 #       Echoes the absolute path to the pinned, compatibility-checked Node binary.
 #       Honors $WHATSOUP_NODE override. Prints a FATAL line + returns non-zero on
 #       any failure (missing/invalid .nvmrc, binary not found, version out of range).
+#   whatsoup_validate_node_compatibility <repo-root> <node-bin>
+#       Validates a caller-resolved Node binary against .nvmrc and
+#       package.json#engines.node. Prints a FATAL line + returns non-zero on
+#       unreadable, unparsable, too-old, or too-new Node.
 #   whatsoup_check_node_pin <repo-root> <node-bin>
 #       Returns 0 if the resolved Node major == the .nvmrc major, else returns 1
 #       (non-fatal advisory; caller decides whether to warn or block).
@@ -33,23 +37,19 @@ _whatsoup_nvmrc_version() {
   printf '%s' "$version"
 }
 
-whatsoup_resolve_node() {
+whatsoup_validate_node_compatibility() {
   local repo_root="$1"
-  local nvmrc_version node default_node
+  local node="$2"
+  local nvmrc_version required_major engine_max_exclusive_major node_major resolved_version
   nvmrc_version="$(_whatsoup_nvmrc_version "$repo_root")" || return 1
 
-  default_node="$HOME/.nvm/versions/node/v${nvmrc_version}/bin/node"
-  node="${WHATSOUP_NODE:-$default_node}"
-  if [ ! -x "$node" ]; then
-    # Do NOT fall back to system node — it likely lacks --experimental-strip-types
-    # and would burn through systemd restart budget with repeated failures.
-    echo "FATAL: node v${nvmrc_version} not found at $node. Set WHATSOUP_NODE or run: nvm install ${nvmrc_version}" >&2
+  if [ -z "$node" ] || [ ! -x "$node" ]; then
+    echo "FATAL: node not found or not executable: ${node:-<empty>}" >&2
     return 1
   fi
 
-  # Version-compatibility gate: the entrypoint passes --experimental-strip-types,
+  # Version-compatibility gate: the entrypoints pass --experimental-strip-types,
   # which requires Node >= 22.6 (and the repo pins a specific major via .nvmrc).
-  local required_major engine_max_exclusive_major node_major resolved_version
   required_major="${nvmrc_version%%.*}"
   engine_max_exclusive_major="$("$node" -e '
 const fs = require("fs");
@@ -86,6 +86,23 @@ Or override with WHATSOUP_NODE=/path/to/compatible/node.
 EOF
     return 1
   fi
+}
+
+whatsoup_resolve_node() {
+  local repo_root="$1"
+  local nvmrc_version node default_node
+  nvmrc_version="$(_whatsoup_nvmrc_version "$repo_root")" || return 1
+
+  default_node="$HOME/.nvm/versions/node/v${nvmrc_version}/bin/node"
+  node="${WHATSOUP_NODE:-$default_node}"
+  if [ ! -x "$node" ]; then
+    # Do NOT fall back to system node — it likely lacks --experimental-strip-types
+    # and would burn through systemd restart budget with repeated failures.
+    echo "FATAL: node v${nvmrc_version} not found at $node. Set WHATSOUP_NODE or run: nvm install ${nvmrc_version}" >&2
+    return 1
+  fi
+
+  whatsoup_validate_node_compatibility "$repo_root" "$node" || return 1
 
   printf '%s' "$node"
 }

@@ -541,6 +541,19 @@ describe('harness maintenance guard', () => {
     expect(source).toContain('chmod 600 "$STATE_FILE"');
   });
 
+  it('harness-maintenance.sh validates PATH node fallback before running TypeScript guards', () => {
+    const source = readFileSync(
+      path.join(process.cwd(), 'deploy/scripts/harness-maintenance.sh'),
+      'utf8',
+    );
+
+    expect(source).toContain('lib/resolve-node.sh');
+    expect(source).toContain('whatsoup_validate_node_compatibility "$REPO_ROOT" "$REPO_NODE_BIN"');
+    expect(source).toContain('WARN: pinned node v${NVMRC_NODE_VERSION} not found; using PATH node');
+    expect(source).toContain('WARN: resolved PATH Node major differs from .nvmrc pin');
+    expect(source).not.toContain('REPO_NODE_BIN="$(command -v node || true)"');
+  });
+
   it('harness-maintenance.sh can install a missing OpenCode harness into a user-owned prefix', () => {
     const source = readFileSync(
       path.join(process.cwd(), 'deploy/scripts/harness-maintenance.sh'),
