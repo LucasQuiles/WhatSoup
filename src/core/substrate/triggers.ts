@@ -54,6 +54,10 @@ const PineconeSpec = z.object({
   top_k: z.number().int().positive().optional(),
   threshold: z.number().min(0).max(1).optional(),
 });
+// poll.shell is REMOVED FROM CREATION (dropped from the create_watch enum) but
+// RETAINED INTERNALLY here for legacy fail-closed handling: a row persisted
+// before removal still validates so the poller can reject it cleanly
+// (errorKind 'shell_watch_removed') rather than crashing on an unknown kind.
 const ShellSpec   = z.object({
   argv: z.array(z.string()).min(1),
   cwd: z.string().optional(),
@@ -113,6 +117,13 @@ function computeNextFireAt(
   if (kind === 'schedule.at_time') {
     return (spec as { fire_at: number }).fire_at;
   }
+  // event.message is a RESERVED SCAFFOLD: validated + persisted, but not yet
+  // executed (a future ingest-path integration will own it; the design exists).
+  // Return NULL so the row sits with next_fire_at = NULL — dueTriggers requires
+  // `next_fire_at IS NOT NULL`, so the interval poller never selects/churns it
+  // (no silent 1h not_implemented reschedule). It still TTL-expires via the
+  // kind-agnostic terminal_at sweep in the poller.
+  if (kind === 'event.message') return null;
   if (intervalSeconds && intervalSeconds > 0) return now + intervalSeconds;
   return now;
 }

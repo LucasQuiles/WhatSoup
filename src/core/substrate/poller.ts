@@ -24,10 +24,18 @@
 // poll.email is recognised but not yet executed (deferred — no Gmail/M365
 // client exists); the poller records a noop with reason 'not_implemented' and
 // bumps `next_fire_at` by the 1h cooldown so the row does not hot-loop.
-// event.message is architecturally re-homed to the ingest path, not the
-// interval poller. poll.shell has been REMOVED (no executor; dropped from the
-// create_watch enum) — a legacy persisted row fails CLOSED here with
-// errorKind 'shell_watch_removed' rather than crashing.
+// event.message is a RESERVED SCAFFOLD, not yet executed: a created row is
+// persisted with next_fire_at=NULL (computeNextFireAt returns NULL for this
+// kind) so dueTriggers never selects it — the poller does not poll or churn
+// it; it only TTL-expires via the kind-agnostic terminal_at sweep. A legacy
+// row that somehow has a non-null next_fire_at fails CLOSED here
+// (errorKind 'event_message_not_polled') and is not rescheduled. It is
+// event-driven and pending a future ingest-path integration (design exists),
+// not the interval poller. poll.shell was REMOVED FROM CREATION (dropped from
+// the create_watch enum so creation fails via Zod) but RETAINED INTERNALLY in
+// TriggerKind/ShellSpec/SPEC_REGISTRY for legacy fail-closed handling — a
+// legacy persisted row fails CLOSED here with errorKind 'shell_watch_removed'
+// rather than crashing.
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { resolve, sep } from 'node:path';
@@ -450,9 +458,11 @@ export class TriggerPoller {
     if (kind === 'poll.file') return this.executeFile(t, spec as FileTriggerSpec);
     if (kind === 'poll.url') return this.executeUrl(t, spec as UrlTriggerSpec);
     if (kind === 'poll.shell') {
-      // poll.shell was REMOVED (F2 Slice B): no executor ever existed and the
-      // create_watch enum no longer accepts it. A legacy persisted row (if any)
-      // fails CLOSED here rather than crashing or hot-looping as a noop.
+      // poll.shell was REMOVED FROM CREATION (F2 Slice B): no executor ever
+      // existed and the create_watch enum no longer accepts it. The kind is
+      // RETAINED INTERNALLY (TriggerKind/ShellSpec/SPEC_REGISTRY) only for
+      // legacy fail-closed handling: a legacy persisted row fails CLOSED here
+      // rather than crashing or hot-looping as a noop.
       return {
         status: 'failed',
         fired: false,
@@ -468,6 +478,23 @@ export class TriggerPoller {
         fired: true,
         outputSummary: kind === 'schedule.at_time' ? 'scheduled one-shot fired' : 'cron tick fired',
         outputJson: { kind },
+      };
+    }
+    if (kind === 'event.message') {
+      // event.message is a RESERVED SCAFFOLD owned by a future ingest path, not
+      // the interval poller. A freshly created row has next_fire_at=NULL
+      // (computeNextFireAt) so dueTriggers never selects it and we should not
+      // reach here. Defensive branch: a LEGACY row that somehow carries a
+      // non-null next_fire_at must NOT silently churn on the 1h not_implemented
+      // cooldown — fail CLOSED with a clear reason and stop polling (the
+      // scheduleNextFire fall-through sets next_fire_at=NULL for this kind).
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'event.message is not poller-executed (reserved for ingest path)',
+        outputJson: { kind, reason: 'event_message_not_polled' },
+        errorKind: 'event_message_not_polled',
+        errorMessage: 'event.message triggers are event-driven (ingest path), not interval-polled; this legacy row will not be rescheduled.',
       };
     }
     // Other kinds: recognised but not yet wired.
@@ -1030,6 +1057,11 @@ export class TriggerPoller {
         log.error({ err, triggerId: t.id }, 'cron next-fire computation failed');
         nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
       }
+    } else if (t.kind === 'event.message') {
+      // Reserved scaffold, never poller-executed. A legacy row that reached the
+      // executor failed CLOSED above; do not churn it on any cooldown — clear
+      // next_fire_at so it sits inert (it still TTL-expires via the sweep).
+      nextFireAt = null;
     } else if (outcome.outputJson.reason === 'not_implemented') {
       nextFireAt = now + NOT_IMPLEMENTED_COOLDOWN_SEC;
     } else if (outcome.status === 'failed') {

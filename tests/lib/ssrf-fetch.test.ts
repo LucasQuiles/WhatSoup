@@ -32,6 +32,67 @@ describe('ssrf-fetch — host/IP classification', () => {
     expect(isPrivateIP('::1')).toBe(true);
     expect(isPrivateIP('8.8.8.8')).toBe(false);
   });
+
+  it('isPrivateIP blocks additional reserved IPv4 ranges', () => {
+    expect(isPrivateIP('0.0.0.0')).toBe(true);          // 0.0.0.0/8 "this network"
+    expect(isPrivateIP('0.1.2.3')).toBe(true);          // 0.0.0.0/8
+    expect(isPrivateIP('100.64.0.1')).toBe(true);       // 100.64.0.0/10 CGNAT
+    expect(isPrivateIP('100.127.255.255')).toBe(true);  // CGNAT upper edge
+    expect(isPrivateIP('192.0.2.5')).toBe(true);        // 192.0.2.0/24 TEST-NET-1
+    expect(isPrivateIP('198.51.100.5')).toBe(true);     // 198.51.100.0/24 TEST-NET-2
+    expect(isPrivateIP('203.0.113.5')).toBe(true);      // 203.0.113.0/24 TEST-NET-3
+    expect(isPrivateIP('224.0.0.1')).toBe(true);        // 224.0.0.0/4 multicast
+    expect(isPrivateIP('239.255.255.255')).toBe(true);  // multicast upper edge
+    expect(isPrivateIP('240.0.0.1')).toBe(true);        // 240.0.0.0/4 reserved
+    expect(isPrivateIP('255.255.255.255')).toBe(true);  // limited broadcast
+    // CGNAT boundaries: 100.63.x is public, 100.128.x is public
+    expect(isPrivateIP('100.63.255.255')).toBe(false);
+    expect(isPrivateIP('100.128.0.0')).toBe(false);
+    // Still allow public
+    expect(isPrivateIP('1.1.1.1')).toBe(false);
+    expect(isPrivateIP('93.184.216.34')).toBe(false);
+  });
+
+  it('isPrivateIP blocks IPv6 ULA, link-local, multicast, unspecified', () => {
+    expect(isPrivateIP('::')).toBe(true);               // unspecified
+    expect(isPrivateIP('::1')).toBe(true);              // loopback
+    expect(isPrivateIP('fc00::1')).toBe(true);          // ULA fc00::/7 (fc..)
+    expect(isPrivateIP('fd12:3456:789a::1')).toBe(true);// ULA fc00::/7 (fd..)
+    expect(isPrivateIP('fe80::1')).toBe(true);          // link-local fe80::/10
+    expect(isPrivateIP('febf:ffff::1')).toBe(true);     // link-local upper edge
+    expect(isPrivateIP('ff02::1')).toBe(true);          // multicast ff00::/8
+    expect(isPrivateIP('FE80::1')).toBe(true);          // case-insensitive
+    // Public IPv6 still allowed
+    expect(isPrivateIP('2606:4700:4700::1111')).toBe(false); // cloudflare dns
+    expect(isPrivateIP('2001:4860:4860::8888')).toBe(false); // google dns
+    // fec0::/10 site-local is deprecated-but-reserved; fe-c0 is NOT link-local
+    expect(isPrivateIP('fec0::1')).toBe(false);
+  });
+
+  it('isPrivateIP blocks IPv4-mapped IPv6 by classifying the embedded IPv4', () => {
+    expect(isPrivateIP('::ffff:127.0.0.1')).toBe(true);   // mapped loopback
+    expect(isPrivateIP('::ffff:10.0.0.1')).toBe(true);    // mapped RFC1918
+    expect(isPrivateIP('::ffff:169.254.169.254')).toBe(true); // mapped metadata
+    expect(isPrivateIP('::ffff:192.168.1.1')).toBe(true); // mapped RFC1918
+    // hex-form IPv4-mapped (::ffff:7f00:1 == 127.0.0.1)
+    expect(isPrivateIP('::ffff:7f00:0001')).toBe(true);
+    // mapped public address stays allowed
+    expect(isPrivateIP('::ffff:8.8.8.8')).toBe(false);
+  });
+
+  it('isPrivateHost blocks IPv6 literal private ranges and mapped IPv4', () => {
+    expect(isPrivateHost('fc00::1')).toBe(true);
+    expect(isPrivateHost('fe80::1')).toBe(true);
+    expect(isPrivateHost('ff02::1')).toBe(true);
+    expect(isPrivateHost('::')).toBe(true);
+    expect(isPrivateHost('::ffff:127.0.0.1')).toBe(true);
+    expect(isPrivateHost('::ffff:10.0.0.1')).toBe(true);
+    expect(isPrivateHost('0.0.0.0')).toBe(true);
+    expect(isPrivateHost('100.64.0.1')).toBe(true);
+    expect(isPrivateHost('192.0.2.1')).toBe(true);
+    expect(isPrivateHost('224.0.0.1')).toBe(true);
+    expect(isPrivateHost('2606:4700:4700::1111')).toBe(false);
+  });
 });
 
 describe('ssrf-fetch — ssrfSafeLookup', () => {

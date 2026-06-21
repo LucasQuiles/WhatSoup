@@ -188,12 +188,14 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'create_watch',
-    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. Wired kinds: poll.sqlite, poll.pinecone, poll.file, poll.url (gated behind advanced.enableUrlWatch, default OFF — rejected at creation when disabled), and schedule.*. poll.email is accepted and persisted but no-op until its executor is wired. poll.shell has been REMOVED (no executor; not a valid source).',
+    description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. Wired kinds: poll.sqlite, poll.pinecone, poll.file, poll.url (gated behind advanced.enableUrlWatch, default OFF — rejected at creation when disabled), and schedule.*. poll.email is accepted and persisted but no-op until its executor is wired. event.message is accepted and persisted but is a reserved scaffold (next_fire_at=NULL, never polled) pending a future ingest path. poll.shell is removed from creation (not in this enum; retained internally only for legacy fail-closed handling).',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
       title: z.string().optional(),
-      // poll.shell removed (F2 Slice B): no executor ever existed; rejected here
-      // so creation fails loudly via Zod rather than persisting a dead row.
+      // poll.shell removed from creation (F2 Slice B): not in this enum so
+      // creation fails loudly via Zod rather than persisting a dead row. The
+      // kind is retained internally (types/SPEC_REGISTRY) only for legacy
+      // fail-closed handling of rows persisted before removal.
       source: z.enum(['poll.email','poll.url','poll.file','poll.sqlite','poll.pinecone','event.message']),
       criteria: z.record(z.unknown()),
       interval_seconds: z.number().int().positive().optional(),
