@@ -63,6 +63,7 @@ describe('database retention', () => {
       outboundOps: 1,
       toolCalls: 1,
       factExportQueue: 1,
+      metricsHourly: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -72,6 +73,29 @@ describe('database retention', () => {
     expect(columnValues('outbound_ops', 'conversation_key')).toEqual(['young-out']);
     expect(columnValues('tool_calls', 'conversation_key')).toEqual(['young-tool']);
     expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
+  });
+
+  it('prunes metrics_hourly buckets older than the retention window, preserving recent ones (#1108)', () => {
+    // metrics-collector writes bucket = start.toISOString(); reproduce that format.
+    const isoAgo = (mod: string): string =>
+      (db.raw.prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', ?) AS b`).get(mod) as { b: string }).b;
+    const oldBucket = isoAgo('-200 days'); // beyond the 180d window → pruned
+    const insideBucket = isoAgo('-179 days'); // just inside the window → kept (no read-floor regression)
+    const recentBucket = isoAgo('-5 days'); // within the 30d reader range → kept
+    const insert = db.raw.prepare(
+      `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', ?)`,
+    );
+    insert.run(oldBucket, 5);
+    insert.run(insideBucket, 7);
+    insert.run(recentBucket, 3);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result.metricsHourly).toBe(1);
+    expect(rowCount('metrics_hourly')).toBe(2);
+    expect(columnValues('metrics_hourly', 'bucket').sort()).toEqual(
+      [insideBucket, recentBucket].sort(),
+    );
   });
 
   it('preserves recoverable and unexported rows regardless of age', () => {
@@ -111,6 +135,7 @@ describe('database retention', () => {
       outboundOps: 0,
       toolCalls: 0,
       factExportQueue: 0,
+      metricsHourly: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
@@ -129,6 +154,7 @@ describe('database retention', () => {
         intervalMs: 1_000,
         terminalDurabilityDays: 30,
         exportedFactDays: 30,
+        metricsHourlyDays: 180,
       });
 
       insertOldCompleteInbound('immediate-in');
@@ -158,12 +184,14 @@ describe('database retention', () => {
         intervalMs: 1_000,
         terminalDurabilityDays: 30,
         exportedFactDays: 30,
+        metricsHourlyDays: 180,
       });
       const emptyResult = {
         inboundEvents: 0,
         outboundOps: 0,
         toolCalls: 0,
         factExportQueue: 0,
+        metricsHourly: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))
