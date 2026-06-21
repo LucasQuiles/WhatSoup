@@ -60,6 +60,11 @@ function formatTimestamp(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function framePrefixFromPattern(pattern: string): string {
+  const tsMatch = pattern.match(/frames_(\d+)/);
+  return `frames_${tsMatch?.[1] ?? ''}`;
+}
+
 export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> {
   const details = await extractFramesDetailed(videoBuffer);
   return details.frames;
@@ -137,9 +142,10 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
       }
 
       // Read the fallback frame
+      const fallbackPrefix = framePrefixFromPattern(fallbackPattern);
       const allFiles = await readdir(outputDir);
       const files = allFiles
-        .filter(f => f.endsWith('.jpg') && f.includes('frames_'))
+        .filter(f => f.endsWith('.jpg') && f.startsWith(fallbackPrefix))
         .sort();
 
       if (files.length === 0) {
@@ -173,10 +179,10 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
     }
 
     // Collect output frames
-    const tsMatch = outputPattern.match(/frames_(\d+)/);
+    const outputPrefix = framePrefixFromPattern(outputPattern);
     const allFiles = await readdir(outputDir);
     const files = allFiles
-      .filter(f => f.endsWith('.jpg') && f.startsWith(`frames_${tsMatch?.[1] ?? ''}`))
+      .filter(f => f.endsWith('.jpg') && f.startsWith(outputPrefix))
       .sort();
 
     const { readFile } = await import('node:fs/promises');
