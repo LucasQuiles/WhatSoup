@@ -703,6 +703,8 @@ export class AuthBondGuard {
         forceEnsurePrivateDirectorySync(dirname(this.authDir), 'auth parent directory');
       }
       copyPrivateTree(source, tmp);
+      const copiedAuthError = this.validateAuthTreeAgainstBackupManifest(tmp, latestBackupPath!, latest, 'copied');
+      if (copiedAuthError) throw new Error(copiedAuthError);
       renameSync(tmp, this.authDir);
       this.lastRestoreAt = restoredAt.toISOString();
       this.lastRestoreSource = latestBackupPath;
@@ -761,6 +763,15 @@ export class AuthBondGuard {
   private validateBackupForRestore(backupPath: string, latest: LatestManifest | null): string | null {
     const pathProblem = this.backupPathProblem(backupPath);
     if (pathProblem) return pathProblem;
+    return this.validateAuthTreeAgainstBackupManifest(join(backupPath, 'auth'), backupPath, latest, 'backup');
+  }
+
+  private validateAuthTreeAgainstBackupManifest(
+    authDir: string,
+    backupPath: string,
+    latest: LatestManifest | null,
+    prefix: string,
+  ): string | null {
     const manifestPath = join(backupPath, 'manifest.json');
     let manifest: BackupManifest;
     try {
@@ -780,11 +791,11 @@ export class AuthBondGuard {
       return 'latest pointer tree hash does not match backup manifest';
     }
 
-    return authTreeValidationError(join(backupPath, 'auth'), {
+    return authTreeValidationError(authDir, {
       credsHash: manifest.credsHash,
       meHash: manifest.meHash,
       treeHash: manifest.treeHash,
-    }, 'backup');
+    }, prefix);
   }
 
   private backupPathProblem(backupPath: string): string | null {
