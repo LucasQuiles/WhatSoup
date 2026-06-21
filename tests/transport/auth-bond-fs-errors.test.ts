@@ -376,6 +376,45 @@ describe('AuthBondGuard filesystem error paths', () => {
     expect(actualFs.readFileSync(join(authDir, 'creds.json'), 'utf8')).toBe('{ bad json');
   });
 
+  it('validates the copied restore tree before publishing it', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    let corruptRestoreCopy = false;
+
+    const { AuthBondGuard } = await importGuardWithFsMock((actual) => ({
+      copyFileSync: vi.fn((src: Parameters<FsModule['copyFileSync']>[0], dest: Parameters<FsModule['copyFileSync']>[1]) => {
+        actual.copyFileSync(src, dest);
+        if (
+          corruptRestoreCopy
+          && basename(String(src)) === 'creds.json'
+          && String(dest).includes('.restore-')
+        ) {
+          actual.writeFileSync(dest, '{}');
+        }
+      }) as FsModule['copyFileSync'],
+    }));
+
+    writeAuth(authDir, '15550100066:1@s.whatsapp.net');
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'restore-copy-validation-bot',
+      now: () => new Date('2026-06-09T12:00:00Z'),
+    });
+    const captured = guard.capture('connection-open');
+    expect(captured.ok).toBe(true);
+
+    actualFs.writeFileSync(join(authDir, 'creds.json'), '{ bad json');
+    corruptRestoreCopy = true;
+    const restored = guard.restoreLatestIfNeeded();
+
+    expect(restored).toMatchObject({ attempted: true, restored: false, source: captured.path });
+    expect(restored.error).toContain('copied creds.json hash mismatch');
+    expect(restored.error).toContain('quarantine=');
+    expect(actualFs.readFileSync(join(authDir, 'creds.json'), 'utf8')).toBe('{ bad json');
+  });
+
   it('reports restore copy failures before moving a missing auth tree', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
