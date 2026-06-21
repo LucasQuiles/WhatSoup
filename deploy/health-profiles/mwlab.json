@@ -10,7 +10,7 @@
   "expectRuntimeManifest": true,
   "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
-    "fleet-token",
+    "fleet-tokens.json",
     "instances/primary-bot/tokens.env",
     "instances/secondary-bot/tokens.env"
   ],

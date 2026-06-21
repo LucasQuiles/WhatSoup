@@ -483,6 +483,10 @@ function unsafeTrackedInstanceProfiles(cwd: string, tracked: string[]): string[]
     const credentials = Array.isArray(required) ? required : [];
     for (const item of credentials) {
       if (typeof item !== 'string') continue;
+      if (item === 'fleet-token') {
+        unsafe.push(`${file}:legacy-fleet-token`);
+        break;
+      }
       if (item.startsWith('/') || item.startsWith('~') || item.includes('..')) {
         unsafe.push(`${file}:unsafe-credential-path`);
         break;
@@ -703,11 +707,11 @@ function portableArtifactChecks(gitContext: GitContext): DiagnosticCheck[] {
       status: gitContext.trackedInstanceProfiles.length === 0 ? 'pass' : 'fail',
       message: gitContext.trackedInstanceProfiles.length === 0
         ? 'Tracked instance health profiles are sanitized.'
-        : 'Tracked instance health profiles contain unsafe credential material or paths.',
+        : 'Tracked instance health profiles contain unsafe credential material, paths, or legacy credential requirements.',
       evidence: gitContext.trackedInstanceProfiles.length === 0
         ? ['deploy/health-profiles/*.json contain only sanitized fleet metadata and relative credential requirements.']
         : gitContext.trackedInstanceProfiles,
-      remediation: 'Remove inline secrets and absolute/private credential paths from tracked health profiles.',
+      remediation: 'Remove inline secrets, absolute/private credential paths, and legacy root fleet-token requirements from tracked health profiles.',
     },
   ];
 }

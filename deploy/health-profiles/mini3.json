@@ -10,7 +10,7 @@
   "expectRuntimeManifest": true,
   "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
-    "fleet-token",
+    "fleet-tokens.json",
     "instances/yl-bot/tokens.env"
   ],
   "instances": [
