@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 vi.mock('../../console/src/lib/api', () => ({
   api: { accessDecision: vi.fn() },
@@ -322,6 +322,34 @@ describe('AccessTab — confirm executes api.accessDecision with the pinned shap
 
     expect(invalidateSpy).toHaveBeenCalledTimes(1)
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['access', LINE] })
+  })
+
+  it('keeps the confirm action single-flight while an access decision is pending', async () => {
+    let resolveDecision!: () => void
+    accessDecisionMock.mockReturnValue(new Promise(resolve => {
+      resolveDecision = () => resolve({ ok: true, result: 'allowed' })
+    }))
+
+    render(withProviders(
+      <AccessTab lineName={LINE} access={[pendingPhone]} />,
+    ))
+
+    fireEvent.click(screen.getByRole('button', { name: /^Allow$/ }))
+    const dialog = screen.getByRole('dialog')
+    const confirmButton = within(dialog).getByRole('button', { name: /^Allow$/ }) as HTMLButtonElement
+
+    fireEvent.click(confirmButton)
+    fireEvent.click(confirmButton)
+
+    expect(accessDecisionMock).toHaveBeenCalledTimes(1)
+    expect(confirmButton.disabled).toBe(true)
+
+    await act(async () => {
+      resolveDecision()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
   it('surfaces api errors via toast.error and still closes the dialog', async () => {

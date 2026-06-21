@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
@@ -185,6 +185,32 @@ describe('ModeSwitchDialog — confirm flow (mode change)', () => {
     expect(h.invalidateSpy).toHaveBeenCalledTimes(1)
     expect(h.invalidateSpy).toHaveBeenCalledWith({ queryKey: ['lines', 'demo-line'] })
     expect(h.onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the confirm action single-flight while the mode switch is pending', async () => {
+    let resolveUpdate!: () => void
+    updateConfig.mockReturnValue(new Promise<void>(resolve => {
+      resolveUpdate = resolve
+    }))
+    restart.mockResolvedValue(undefined)
+    const h = makeHarness()
+    renderDialog(h, 'passive', 'demo-line')
+
+    fireEvent.click(screen.getByText('Agent'))
+
+    const confirmButton = screen.getByRole('button', { name: 'Switch to agent' }) as HTMLButtonElement
+    fireEvent.click(confirmButton)
+    fireEvent.click(confirmButton)
+
+    expect(updateConfig).toHaveBeenCalledTimes(1)
+    expect(confirmButton.disabled).toBe(true)
+
+    await act(async () => {
+      resolveUpdate()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(restart).toHaveBeenCalledTimes(1))
   })
 })
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { GitBranch, AlertTriangle } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
@@ -26,12 +26,15 @@ export function ModeSwitchDialog({
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<Mode>(currentMode)
   const [switching, setSwitching] = useState(false)
+  const switchingRef = useRef(false)
 
   const handleConfirm = async () => {
     if (selected === currentMode) {
       onClose()
       return
     }
+    if (switchingRef.current) return
+    switchingRef.current = true
     setSwitching(true)
     try {
       await api.updateConfig(lineName, { type: selected })
@@ -42,6 +45,7 @@ export function ModeSwitchDialog({
     } catch (e) {
       toast.error(`Mode switch failed: ${(e as Error).message}`)
     } finally {
+      switchingRef.current = false
       setSwitching(false)
     }
   }
@@ -56,6 +60,8 @@ export function ModeSwitchDialog({
       confirmLabel={changed ? `Switch to ${selected}` : 'No change'}
       confirmVariant="primary"
       confirmIcon={<GitBranch size={14} strokeWidth={1.75} />}
+      confirmDisabled={switching}
+      confirmLoading={switching}
       onConfirm={handleConfirm}
       onCancel={onClose}
     >
@@ -74,6 +80,7 @@ export function ModeSwitchDialog({
               variant="ghost"
               aria-pressed={isSelected}
               onClick={() => !switching && setSelected(opt.value)}
+              disabled={switching}
               className="flex items-start gap-3 text-left cursor-pointer c-hover rounded-md py-[var(--sp-3)] px-[var(--sp-4)]"
               style={{
                 borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: isSelected ? `var(--m-${mk}-soft)` : 'var(--border-hairline)',

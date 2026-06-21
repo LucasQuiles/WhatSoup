@@ -20,6 +20,8 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   confirmVariant?: 'danger' | 'primary' | 'warning'
   confirmIcon?: ReactNode
+  confirmDisabled?: boolean
+  confirmLoading?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -31,6 +33,8 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
   confirmLabel = 'Confirm',
   confirmVariant = 'danger',
   confirmIcon,
+  confirmDisabled = false,
+  confirmLoading = false,
   onConfirm,
   onCancel,
 }) => {
@@ -55,6 +59,8 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
           variant={confirmVariant}
           onClick={onConfirm}
           icon={confirmIcon}
+          disabled={confirmDisabled}
+          loading={confirmLoading}
         >
           {confirmLabel}
         </Button>
