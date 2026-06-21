@@ -35,6 +35,8 @@ describe('FleetRealtimeEventPoller', () => {
   beforeEach(() => {
     publisher = makePublisher();
     vi.useFakeTimers();
+    mockProxyToInstance.mockReset();
+    mockProxyToInstance.mockResolvedValue({ status: 200, body: '{"composing":[]}' });
   });
 
   it('does not broadcast on identical snapshots', async () => {
@@ -123,6 +125,42 @@ describe('FleetRealtimeEventPoller', () => {
     poller.stop();
     expect(() => poller.stop()).not.toThrow();
     expect(publisher.calls).toHaveLength(0);
+  });
+
+  it('skips a poll tick while the previous typing probe is still in flight', async () => {
+    let resolveTyping!: (value: { status: number; body: string }) => void;
+    mockProxyToInstance.mockImplementation(() => new Promise((resolve) => {
+      resolveTyping = resolve;
+    }));
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 },
+    });
+    const dbReader = makeDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    const firstTick = poller.poll();
+    expect(mockProxyToInstance).toHaveBeenCalledTimes(1);
+
+    const overlappingTick = poller.poll();
+    expect(mockProxyToInstance).toHaveBeenCalledTimes(1);
+
+    resolveTyping({
+      status: 200,
+      body: JSON.stringify({ composing: [{ jid: 'group@g.us', since: 30 }] }),
+    });
+    await Promise.all([firstTick, overlappingTick]);
+
+    expect(mockProxyToInstance).toHaveBeenCalledTimes(1);
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({
+        type: 'typing_update',
+        instance: 'test',
+        jid: 'group@g.us',
+        composing: true,
+      }),
+    ]);
+
+    poller.stop();
   });
 
   it('prunes stale snapshots for instances removed from discovery', async () => {
