@@ -325,6 +325,25 @@ describe('ConfigEditDialog — field type rendering', () => {
     expect((readOnly as HTMLTextAreaElement).value).toContain('"nested"')
   })
 
+  it('renders null config values as read-only JSON literals', () => {
+    render(withProviders(
+      <ConfigEditDialog
+        open={true}
+        config={{ nullableSetting: null }}
+        lineName={LINE}
+        onClose={() => {}}
+      />,
+    ))
+
+    const nullableField = screen.getByLabelText('nullableSetting') as HTMLTextAreaElement
+
+    expect(nullableField.tagName).toBe('TEXTAREA')
+    expect(nullableField.readOnly).toBe(true)
+    expect(nullableField.value).toBe('null')
+    expect(screen.queryByText('modified')).toBeNull()
+    expect((screen.getByRole('button', { name: /^Save$/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('routes scalar controls through shared form primitives', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
