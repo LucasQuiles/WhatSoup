@@ -18,7 +18,7 @@
       "name": "ew-bot",
       "expected": "always_on",
       "service": "com.whatsoup.ew-bot",
-      "healthPort": 9099,
+      "healthPort": 9098,
       "primaryPhoneOwner": "instance:ew-bot"
     }
   ]

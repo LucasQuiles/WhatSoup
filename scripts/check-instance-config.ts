@@ -1,7 +1,8 @@
 /**
  * Instance-config integrity guard.
  *
- * Validates committed example instance configs (and, via --root, a host's live
+ * Validates committed example instance configs plus checked-in health profiles
+ * (and, via --root, a host's live
  * `~/.config/whatsoup/instances/<name>/config.json` tree offline) against the
  * canonical contract, catching two failure classes the permissive runtime
  * schema lets through silently:
@@ -18,9 +19,8 @@
  *
  *   Class B — health-port collisions / console squats / off-band ports.
  *     The runtime accepts any 1024-65535 port. Two instances on one host can
- *     collide, and a bot can squat DEFAULT_FLEET_PORT (the ew-bot 9099 squat
- *     that pushed the fleet console onto 9190). We enforce a per-host unique,
- *     in-band port map that never equals the fleet console port.
+ *     collide, and a bot can squat DEFAULT_FLEET_PORT. We enforce a per-host
+ *     unique, in-band port map that never equals the fleet console port.
  *
  * Wraps src/core/agent-config-validator.ts (shared schema SSOT) and
  * src/fleet/constants.ts (port SSOT) so the guard stays in lockstep with the
@@ -87,6 +87,8 @@ export interface CheckOptions {
    */
   defaultPort?: number;
 }
+
+type PortConfig = { instance: string; filePath: string; healthPort?: number };
 
 function nonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
@@ -209,7 +211,7 @@ export function checkMemoryIntegrity(
  * fleet port by construction, so omitting healthPort is not itself a finding.
  */
 export function checkPortMap(
-  configs: { instance: string; filePath: string; healthPort?: number }[],
+  configs: PortConfig[],
   options: Required<CheckOptions>,
 ): ConfigFinding[] {
   const findings: ConfigFinding[] = [];
@@ -309,6 +311,15 @@ function parseConfig(filePath: string): Record<string, unknown> {
   return parsed;
 }
 
+function defaultCheckOptions(options: CheckOptions = {}): Required<CheckOptions> {
+  return {
+    fleetPort: options.fleetPort ?? DEFAULT_FLEET_PORT,
+    portMin: options.portMin ?? INSTANCE_HEALTH_PORT_MIN,
+    portMax: options.portMax ?? INSTANCE_HEALTH_PORT_MAX,
+    defaultPort: options.defaultPort ?? DEFAULT_INSTANCE_HEALTH_PORT,
+  };
+}
+
 /**
  * Discover instance config files under a root. Accepts either:
  *  - a single config.json file path, or
@@ -348,17 +359,12 @@ export function checkInstanceConfigs(
   root: string,
   options: CheckOptions = {},
 ): CheckResult {
-  const opts: Required<CheckOptions> = {
-    fleetPort: options.fleetPort ?? DEFAULT_FLEET_PORT,
-    portMin: options.portMin ?? INSTANCE_HEALTH_PORT_MIN,
-    portMax: options.portMax ?? INSTANCE_HEALTH_PORT_MAX,
-    defaultPort: options.defaultPort ?? DEFAULT_INSTANCE_HEALTH_PORT,
-  };
+  const opts = defaultCheckOptions(options);
 
   const files = discoverConfigFiles(root);
   const findings: ConfigFinding[] = [];
   const scanned: CheckResult['scanned'] = [];
-  const portConfigs: { instance: string; filePath: string; healthPort?: number }[] = [];
+  const portConfigs: PortConfig[] = [];
 
   for (const { instance, filePath } of files) {
     let raw: Record<string, unknown>;
@@ -391,6 +397,110 @@ export function checkInstanceConfigs(
   return { scanned, findings };
 }
 
+/**
+ * Discover checked-in health profile files. Accepts either:
+ *  - a single <host>.json profile path, or
+ *  - a directory containing one or more *.json profiles.
+ *
+ * Health profiles are not instance config files, so they intentionally bypass
+ * Class A and shared instance-schema validation. They do carry per-host
+ * instance health ports, so they feed the same Class B checkPortMap SSOT.
+ */
+export function discoverHealthProfileFiles(root: string): string[] {
+  const st = statSync(root);
+  if (st.isFile()) return [root];
+
+  const out: string[] = [];
+  for (const entry of readdirSync(root)) {
+    if (!entry.endsWith('.json')) continue;
+    const candidate = path.join(root, entry);
+    try {
+      if (statSync(candidate).isFile()) out.push(candidate);
+    } catch {
+      // disappeared during scan — skip and let the next guard run observe it
+    }
+  }
+  out.sort((a, b) => a.localeCompare(b));
+  return out;
+}
+
+export function checkHealthProfiles(
+  root: string,
+  options: CheckOptions = {},
+): CheckResult {
+  const opts = defaultCheckOptions(options);
+  const findings: ConfigFinding[] = [];
+  const scanned: CheckResult['scanned'] = [];
+
+  for (const filePath of discoverHealthProfileFiles(root)) {
+    let raw: Record<string, unknown>;
+    try {
+      raw = parseConfig(filePath);
+    } catch (e) {
+      findings.push({
+        instance: path.basename(filePath, '.json'),
+        filePath,
+        category: 'schema',
+        field: '(parse)',
+        message: (e as Error).message,
+      });
+      continue;
+    }
+
+    const instancesRaw = raw['instances'];
+    if (instancesRaw === undefined) continue;
+    if (!Array.isArray(instancesRaw)) {
+      findings.push({
+        instance: path.basename(filePath, '.json'),
+        filePath,
+        category: 'schema',
+        field: 'instances',
+        message: 'health profile instances must be an array when present',
+      });
+      continue;
+    }
+
+    const portConfigs: PortConfig[] = [];
+    instancesRaw.forEach((item, index) => {
+      if (!isRecord(item)) {
+        findings.push({
+          instance: `${path.basename(filePath, '.json')}:instances[${index}]`,
+          filePath,
+          category: 'schema',
+          field: `instances[${index}]`,
+          message: 'health profile instance must be a JSON object',
+        });
+        return;
+      }
+
+      const instance = nonBlankString(item['name'])
+        ? item['name']
+        : `${path.basename(filePath, '.json')}:instances[${index}]`;
+      const rawHealthPort = item['healthPort'];
+      if (rawHealthPort !== undefined && rawHealthPort !== null && typeof rawHealthPort !== 'number') {
+        findings.push({
+          instance,
+          filePath,
+          category: 'schema',
+          field: `instances[${index}].healthPort`,
+          message: 'health profile healthPort must be a number when present',
+        });
+        scanned.push({ instance, filePath });
+        portConfigs.push({ instance, filePath });
+        return;
+      }
+
+      const healthPort = typeof rawHealthPort === 'number' ? rawHealthPort : undefined;
+      scanned.push({ instance, filePath, healthPort });
+      portConfigs.push({ instance, filePath, healthPort });
+    });
+
+    findings.push(...checkPortMap(portConfigs, opts));
+  }
+
+  return { scanned, findings };
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -399,22 +509,28 @@ function defaultExamplesRoot(cwd: string): string {
   return path.join(cwd, 'deploy', 'examples', 'instances');
 }
 
+function defaultHealthProfilesRoot(cwd: string): string {
+  return path.join(cwd, 'deploy', 'health-profiles');
+}
+
 interface ParsedArgs {
   root: string;
   fleetPort?: number;
   portMin?: number;
   portMax?: number;
   help: boolean;
+  explicitRoot: boolean;
 }
 
 export function parseArgs(argv: string[], cwd: string): ParsedArgs {
-  const out: ParsedArgs = { root: defaultExamplesRoot(cwd), help: false };
+  const out: ParsedArgs = { root: defaultExamplesRoot(cwd), help: false, explicitRoot: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') {
       out.help = true;
     } else if (a === '--root' || a === '--path') {
       out.root = argv[++i] ?? out.root;
+      out.explicitRoot = true;
     } else if (a === '--fleet-port') {
       out.fleetPort = Number(argv[++i]);
     } else if (a === '--port-min') {
@@ -423,6 +539,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
       out.portMax = Number(argv[++i]);
     } else if (a && !a.startsWith('-')) {
       out.root = a;
+      out.explicitRoot = true;
     }
   }
   return out;
@@ -431,9 +548,11 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 const HELP = `Usage: check-instance-config [--root <dir|config.json>] [--fleet-port N] [--port-min N] [--port-max N]
 
 Validates instance config.json files for memory-config integrity (Class A) and
-health-port map integrity (Class B). Defaults to the committed example configs
-under deploy/examples/instances. Pass --root to validate a host's live
-~/.config/whatsoup/instances tree offline.
+health-port map integrity (Class B). With no --root, validates both committed
+example configs under deploy/examples/instances and checked-in health profiles
+under deploy/health-profiles. Pass --root to validate a host's live
+~/.config/whatsoup/instances tree offline; explicit roots retain the historical
+config-tree behavior and do not also scan health profiles.
 
 Exit code 1 on any finding.`;
 
@@ -447,15 +566,28 @@ export function run(
     return { scanned: [], findings: [] };
   }
 
-  const result = checkInstanceConfigs(args.root, {
+  const options = {
     fleetPort: args.fleetPort,
     portMin: args.portMin,
     portMax: args.portMax,
-  });
+  };
+  const instanceResult = checkInstanceConfigs(args.root, options);
+  const result = args.explicitRoot
+    ? instanceResult
+    : (() => {
+        const healthResult = checkHealthProfiles(defaultHealthProfilesRoot(cwd), options);
+        return {
+          scanned: [...instanceResult.scanned, ...healthResult.scanned],
+          findings: [...instanceResult.findings, ...healthResult.findings],
+        };
+      })();
+  const scope = args.explicitRoot
+    ? args.root
+    : `${args.root} + ${defaultHealthProfilesRoot(cwd)}`;
 
   if (result.findings.length === 0) {
     console.log(
-      `instance-config integrity check passed (${result.scanned.length} config(s) under ${args.root})`,
+      `instance-config integrity check passed (${result.scanned.length} config(s) under ${scope})`,
     );
     return result;
   }

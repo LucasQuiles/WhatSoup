@@ -36,7 +36,7 @@
           "name": "secondary-bot",
           "expected": "always_on",
           "service": "com.whatsoup.secondary-bot",
-          "healthPort": 9190
+          "healthPort": 9091
         }
       ]
     },
@@ -205,7 +205,7 @@
           "name": "ew-bot",
           "expected": "always_on",
           "service": "com.whatsoup.ew-bot",
-          "healthPort": 9099
+          "healthPort": 9098
         }
       ]
     },

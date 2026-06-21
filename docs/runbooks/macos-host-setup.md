@@ -174,12 +174,12 @@ The bot wrapper (`~/.local/bin/whatsoup`) follows the same pattern and resolves
 
 | Service | Default port | Notes |
 |---|---|---|
-| WhatSoup Console (fleet) | **9099** | Standard across mini7, mini8 |
-| WhatSoup Console (fleet) — ew-bot host | **9190** | mini9 exception: ew-bot occupies :9099 |
-| ew-bot health endpoint | **9099** | mini9: bot health at :9099, fleet console at :9190 |
+| WhatSoup Console (fleet) | **9099** | Standard across monitored macOS hosts |
+| ew-bot health endpoint | **9098** | mini9; kept below the fleet console port |
 | rb-bot health endpoint | **9095** | mini7 |
 | ml-bot health endpoint | **9098** | mini8 |
 
 When adding a host to monitoring or writing a watchdog, verify the port map
-rather than assuming the fleet standard. The ew-bot / mini9 split is the only
-known exception as of 2026-06-11.
+rather than assuming only the fleet standard. Instance health ports must stay
+inside the `[9090, 9098]` band and must not squat the fleet console port
+(`9099`).

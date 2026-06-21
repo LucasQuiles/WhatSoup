@@ -2,12 +2,14 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  checkHealthProfiles,
   checkInstanceConfigs,
   checkMemoryIntegrity,
   checkPortMap,
+  run,
   type ConfigFinding,
 } from '../../scripts/check-instance-config.ts';
 import {
@@ -19,6 +21,7 @@ import {
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const EXAMPLES_ROOT = path.join(repoRoot, 'deploy', 'examples', 'instances');
+const HEALTH_PROFILES_ROOT = path.join(repoRoot, 'deploy', 'health-profiles');
 
 const VALID_SUFFIX = '-team-project-id.svc.aped-4627-b74a.pinecone.io';
 
@@ -54,6 +57,21 @@ function makeRoot(configs: Record<string, Record<string, unknown>>): string {
   return dir;
 }
 
+function makeRepoRootWithHealthProfile(profile: Record<string, unknown>): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-cfg-repo-'));
+  const instanceDir = path.join(dir, 'deploy', 'examples', 'instances', 'chat-bot');
+  const profilesDir = path.join(dir, 'deploy', 'health-profiles');
+  mkdirSync(instanceDir, { recursive: true });
+  mkdirSync(profilesDir, { recursive: true });
+  writeFileSync(
+    path.join(instanceDir, 'config.json'),
+    JSON.stringify(validChatConfig(), null, 2),
+    'utf8',
+  );
+  writeFileSync(path.join(profilesDir, 'test-host.json'), JSON.stringify(profile, null, 2), 'utf8');
+  return dir;
+}
+
 function classesOf(findings: ConfigFinding[]): string[] {
   return findings.map((f) => f.category);
 }
@@ -63,6 +81,40 @@ describe('check-instance-config — committed examples (self-run gate)', () => {
     const result = checkInstanceConfigs(EXAMPLES_ROOT);
     expect(result.findings).toEqual([]);
     expect(result.scanned.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('default CLI run scans health profiles as well as example config trees', () => {
+    const root = makeRepoRootWithHealthProfile({
+      role: 'bot-host',
+      instances: [
+        {
+          name: 'watched-bot',
+          expected: 'always_on',
+          service: 'com.whatsoup.watched-bot',
+          healthPort: DEFAULT_FLEET_PORT,
+        },
+      ],
+    });
+    const previousExitCode = process.exitCode;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const result = run([], root);
+      expect(result.scanned.some((item) => item.instance === 'watched-bot')).toBe(true);
+      expect(
+        result.findings.some(
+          (finding) => finding.instance === 'watched-bot' && finding.category === 'B-port',
+        ),
+      ).toBe(true);
+    } finally {
+      process.exitCode = previousExitCode;
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('the repo health profiles pass health-port map validation', () => {
+    const result = checkHealthProfiles(HEALTH_PROFILES_ROOT);
+    expect(result.findings).toEqual([]);
+    expect(result.scanned.length).toBeGreaterThanOrEqual(10);
   });
 });
 
