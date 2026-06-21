@@ -1740,9 +1740,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (action.reason === 'restart-required') {
         if (!this.shuttingDown) {
-          this.setConnectionState('reconnecting');
-          this.persistConnectionRuntimeState('restart_required_reconnect');
-          void this.connect();
+          this.scheduleReconnect();
         }
         return;
       }
