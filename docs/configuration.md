@@ -281,8 +281,10 @@ into place during deployment.
 |-------|-------------|
 | `self_only` | Only `adminPhones` can interact. Required for `passive`. |
 | `allowlist` | Only approved users (managed via MCP access-list tools) can interact. |
-| `open_dm` | Any direct message is accepted. |
+| `open_dm` | Any direct message is accepted, except unresolved WhatsApp LID senders are held closed until they map to a phone identity. |
 | `groups_only` | Only group chats are accepted. |
+
+All access modes keep phone blocklist checks authoritative. If a sender arrives only as an unresolved `@lid`, permissive DM/group paths fail closed because the real phone cannot yet be compared against blocked phone entries.
 
 ### `models` Object
 
