@@ -189,6 +189,18 @@ export class WhatSoupSocketServer {
     }
   }
 
+  /**
+   * Update conversation binding on the base session AND all active connections.
+   * Shared/global runtimes call this at turn start so injected tools inherit the
+   * originating conversation and the registry's cross-conversation guard can fire.
+   */
+  updateConversationKey(conversationKey: string | undefined): void {
+    this.baseSession.conversationKey = conversationKey;
+    for (const session of this.connectionSessions.values()) {
+      session.conversationKey = conversationKey;
+    }
+  }
+
   private async handleRequest(req: JsonRpcRequest, session: SessionContext): Promise<JsonRpcResponse | null> {
     const id = req.id ?? null;
 

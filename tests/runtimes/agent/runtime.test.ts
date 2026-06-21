@@ -21,6 +21,17 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     current: {
       allowM365Mutations?: boolean;
       configSystemPrompt?: string;
+      mcpBridge?: {
+        executeTool: (name: string, params: Record<string, unknown>) => Promise<unknown>;
+        listTools: () => unknown[];
+      };
+      mcpSessionContext?: {
+        tier: string;
+        conversationKey?: string;
+        deliveryJid?: string;
+        actorJid?: string;
+        allowedRoot?: string;
+      };
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
     } | null;
@@ -279,6 +290,7 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
     updateActorJid: vi.fn(),
+    updateConversationKey: vi.fn(),
   };
   // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   const MockWhatSoupSocketServer = vi.fn().mockImplementation(function () {
@@ -4672,6 +4684,59 @@ describe('AgentRuntime', () => {
 
     // Both messages should be forwarded to Claude Code as turns
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it('shared: binds global MCP context to the active turn conversation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    await runtime.start();
+
+    const runtimeState = runtime as unknown as { registry: { call: ReturnType<typeof vi.fn> } };
+    runtimeState.registry.call.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+
+    await sendAndDrainShared(runtime, makeMsg({ chatJid: 'chat-a@g.us', senderJid: 'sender-a@s.whatsapp.net', content: 'turn A', isGroup: true }));
+
+    const opts = capturedSessionManagerOptsRef.current;
+    expect(opts?.mcpSessionContext).toMatchObject({
+      tier: 'global',
+      conversationKey: 'chat-a_at_g.us',
+    });
+
+    await opts?.mcpBridge?.executeTool('probe_tool', { chatJid: 'chat-b@g.us' });
+
+    expect(runtimeState.registry.call).toHaveBeenLastCalledWith(
+      'probe_tool',
+      { chatJid: 'chat-b@g.us' },
+      expect.objectContaining({ conversationKey: 'chat-a_at_g.us' }),
+    );
+    expect(mockSocketServerInstance.updateConversationKey).toHaveBeenLastCalledWith('chat-a_at_g.us');
+
+    await sendAndDrainShared(runtime, makeMsg({ chatJid: 'chat-c@g.us', senderJid: 'sender-c@s.whatsapp.net', content: 'turn B', isGroup: true }));
+
+    expect(opts?.mcpSessionContext?.conversationKey).toBe('chat-c_at_g.us');
+    expect(mockSocketServerInstance.updateConversationKey).toHaveBeenLastCalledWith('chat-c_at_g.us');
+  });
+
+  it('per_chat: does not bind the singleton MCP conversation context', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+    const runtime = new AgentRuntime(db, messenger, 'loops', { sessionScope: 'per_chat' });
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: 'chat-a@g.us', senderJid: 'sender-a@s.whatsapp.net', content: 'per chat', isGroup: true }));
+
+    expect(capturedSessionManagerOptsRef.current?.mcpSessionContext).toMatchObject({
+      tier: 'chat-scoped',
+      conversationKey: 'chat-a_at_g.us',
+      deliveryJid: 'chat-a@g.us',
+    });
+    expect(mockSocketServerInstance.updateConversationKey).not.toHaveBeenCalled();
   });
 
   // @check CHK-063

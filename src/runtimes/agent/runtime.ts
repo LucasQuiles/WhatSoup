@@ -1233,6 +1233,7 @@ export class AgentRuntime implements Runtime {
 
   // Global socket server (non-sandboxPerChat mode)
   private globalSocketServer: WhatSoupSocketServer | null = null;
+  private singletonProviderToolSession: SessionContext | null = null;
 
   private durability: DurabilityEngine | null = null;
 
@@ -2052,6 +2053,7 @@ export class AgentRuntime implements Runtime {
         this.session = this.createSessionManager({
           chatJid: resumeChatJid,
           cwd: this.cwd,
+          trackSingletonMcpSession: true,
           onEvent: (event) => this.handleEvent(event),
           onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
           onCrash: (info) => {
@@ -2699,6 +2701,7 @@ export class AgentRuntime implements Runtime {
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
     this.currentTurnChatJid = chatJid;
+    this.bindActiveGlobalMcpConversation(chatJid);
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
     this.currentTurnReplayText = prefixedText;
@@ -2818,6 +2821,7 @@ export class AgentRuntime implements Runtime {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
     this.currentTurnChatJid = chatJid;
+    this.bindActiveGlobalMcpConversation(chatJid);
     this.turnHadVisibleOutput = false;
     this.currentTurnReplayText = text;
     this.currentTurnReplayActorJid = actorJid;
@@ -2939,6 +2943,15 @@ export class AgentRuntime implements Runtime {
     if (!actorJid) return;
     const maybeSession = session as SessionManager & { updateMcpActorJid?: (actorJid: string) => void };
     maybeSession.updateMcpActorJid?.(actorJid);
+  }
+
+  private bindActiveGlobalMcpConversation(chatJid: string): void {
+    if (this.sessionScope === 'per_chat') return;
+    const conversationKey = toConversationKey(chatJid);
+    if (this.singletonProviderToolSession) {
+      this.singletonProviderToolSession.conversationKey = conversationKey;
+    }
+    this.globalSocketServer?.updateConversationKey(conversationKey);
   }
 
   /**
@@ -4548,6 +4561,7 @@ export class AgentRuntime implements Runtime {
 
     if (silent) this.beginSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
     this.currentTurnChatJid = targetChatJid;
+    this.bindActiveGlobalMcpConversation(targetChatJid);
     // A manual /compact is a system turn: its result must not arm the post-turn
     // gate. Mirror the auto-compact path (single/shared discriminate on this in
     // handleEvent's result case).
@@ -4684,6 +4698,7 @@ export class AgentRuntime implements Runtime {
     this.session = null;
     this.activeChatJid = null;
     this.currentTurnChatJid = null;
+    this.singletonProviderToolSession = null;
 
     // Shutdown all operation trackers
     this.operationTracker?.shutdown();
@@ -6365,6 +6380,7 @@ export class AgentRuntime implements Runtime {
       chatJid,
       cwd: this.cwd,
       actorJid,
+      trackSingletonMcpSession: true,
       onEvent: (event) => this.handleEvent(event),
       onCrash: (info) => {
         this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
@@ -6466,6 +6482,7 @@ export class AgentRuntime implements Runtime {
     }
     this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
     this.currentTurnChatJid = args.chatJid;
+    this.bindActiveGlobalMcpConversation(args.chatJid);
     this.turnHadVisibleOutput = false;
     this.currentTurnReplayText = args.replayText;
     this.currentTurnReplayActorJid = args.actorJid;
@@ -6544,6 +6561,7 @@ export class AgentRuntime implements Runtime {
     chatJid: string;
     cwd: string | undefined;
     actorJid?: string;
+    trackSingletonMcpSession?: boolean;
     onEvent: (event: AgentEvent) => void;
     onCrash: (info: SessionCrashInfo) => void;
     notifyUser: (msg: string) => void;
@@ -6564,7 +6582,10 @@ export class AgentRuntime implements Runtime {
             tier: 'global',
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(!this.shared ? { conversationKey } : {}),
-          };
+        };
+    if (opts.trackSingletonMcpSession) {
+      this.singletonProviderToolSession = providerToolSession;
+    }
 
     const session = new SessionManager({
       db: this.db,
@@ -6851,6 +6872,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: this.cwd,
         actorJid,
+        trackSingletonMcpSession: true,
         onEvent: (event) => this.handleEvent(event),
         onCrash: (info) => {
           this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);

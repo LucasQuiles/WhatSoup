@@ -501,6 +501,63 @@ describe('WhatSoupSocketServer', () => {
     expect(session).toEqual({ tier: 'global', actorJid: undefined });
   });
 
+  it('updateConversationKey updates the base session', () => {
+    session = makeSession({ tier: 'global' });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+
+    server.updateConversationKey('room-a_at_g.us');
+
+    expect(session.conversationKey).toBe('room-a_at_g.us');
+  });
+
+  it('updateConversationKey propagates to a live connection and blocks cross-conversation injected calls', async () => {
+    registry.register(
+      makeTool({
+        name: 'bound_send',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string(), message: z.string() }),
+        handler: async (params) => ({ sentTo: params['chatJid'] }),
+      }),
+    );
+    session = makeSession({ tier: 'global' });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+    await vi.waitFor(() => { expect(server.connectionCount).toBe(1); });
+
+    server.updateConversationKey('room-a_at_g.us');
+
+    const crossConversation = await new Promise<{ result: { content: Array<{ text: string }>; isError?: boolean } }>((resolve, reject) => {
+      client.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 62,
+        method: 'tools/call',
+        params: {
+          name: 'bound_send',
+          arguments: { chatJid: 'room-b@g.us', message: 'nope' },
+        },
+      }) + '\n');
+      let buf = '';
+      client.on('data', (chunk) => {
+        buf += chunk.toString();
+        for (const line of buf.split('\n')) {
+          if (!line.trim()) continue;
+          try { resolve(JSON.parse(line)); client.end(); } catch { /* partial */ }
+        }
+      });
+      client.on('error', reject);
+    });
+
+    client.destroy();
+
+    expect(crossConversation.result.isError).toBe(true);
+    expect(crossConversation.result.content[0].text).toMatch(/does not match session conversation/);
+  });
+
   it('SP11: updateDeliveryJid propagates to all active connections', async () => {
     const capturedJids: string[] = [];
     registry.register(
