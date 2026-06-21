@@ -1,6 +1,7 @@
 # BOT ERRORS Tool-Call and Silent-Failure Audit
 
 Date: 2026-05-31
+**Status:** completed - historical audit snapshot; remaining residual risks are explicitly named below and are not hidden queue items.
 
 ## Scope
 

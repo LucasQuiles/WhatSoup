@@ -1,6 +1,7 @@
 # Spec: Console-Test JSX-Runtime Fix
 
-**Status:** Draft (no implementation plan written yet)
+**Status:** completed - root Vitest now aliases React JSX runtimes; retained as a historical failure record.
+**Superseded by:** `vitest.config.ts` React runtime aliases and current console test suites.
 **Date:** 2026-04-25
 
 This spec documents the JSX-runtime resolution failure that blocks all console test files and outlines investigation tasks and candidate fixes.
@@ -95,4 +96,4 @@ This spec does NOT touch:
 
 ## 7. Implementation Status
 
-This spec is documentation only — no implementation plan exists yet. An implementation plan will be written when the workstream is picked up.
+This spec is retained as a historical failure record. The current root `vitest.config.ts` aliases `react/jsx-runtime` and `react/jsx-dev-runtime`, so this no longer represents active work.

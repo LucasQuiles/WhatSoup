@@ -1,5 +1,8 @@
 # Scheduled Messages & Groups Management — Implementation Plan
 
+**Status:** completed - scheduled-message and WhatsApp group management surfaces shipped; current API/tool docs are canonical.
+**Superseded by:** `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete the SP11 scheduling backend (add recurrence, missing tools) and build rich console UI for both the Scheduled and Groups tabs.

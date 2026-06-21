@@ -1,7 +1,8 @@
 # Colony Orchestration Architecture: Persistent Multi-Agent System
 
 **Date:** 2026-04-04
-**Status:** Draft
+**Status:** closed - historical external-orchestration architecture exploration; not an active WhatSoup implementation spec.
+**Superseded by:** current workspace runtime topology, tmup operating docs, and repo `CLAUDE.md` for active coordination rules.
 **Authors:** Q (human) + L (lab agent)
 **Scope:** Architecture for a persistent, self-learning multi-agent system with cross-model collaboration, scoped autonomy, and layered escalation
 

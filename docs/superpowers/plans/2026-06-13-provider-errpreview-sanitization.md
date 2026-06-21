@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, existing provider API test harnesses, existing `src/runtimes/agent/provider-crash-diagnostics.ts` sanitizer logic.
 
-**Status:** landed via PR #830 (`97e60757`). This plan is retained as the provider-preview sanitization design/proof record.
+**Status:** completed - landed via PR #830 (`97e60757`). This plan is retained as the provider-preview sanitization design/proof record.
 
 ---
 

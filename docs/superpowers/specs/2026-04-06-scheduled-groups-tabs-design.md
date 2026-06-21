@@ -1,7 +1,8 @@
 # Scheduled Messages & Groups Management — Design Specification
 
 **Date:** 2026-04-06
-**Status:** Draft
+**Status:** completed - scheduled-message and WhatsApp group management surfaces shipped; current API/tool docs are canonical.
+**Superseded by:** `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below.
 **Author:** Lucas + Q (brainstorming session)
 **Depends on:** Phase 1 spec (SP1-SP4 deployed), Phase 2 spec (SP11 placeholder replaced by this spec)
 

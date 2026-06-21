@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, pytest, existing BOT ERRORS runtime manifest validation, existing TypeScript health-check manifest tests.
 
-**Status:** landed via PR #830 (`97e60757`). This plan is retained as the Python deploy redaction SSOT design/proof record.
+**Status:** completed - landed via PR #830 (`97e60757`). This plan is retained as the Python deploy redaction SSOT design/proof record.
 
 ---
 
