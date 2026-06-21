@@ -190,6 +190,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
     if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
     return `${Math.floor(ms / 3_600_000)}h ago`;
   }),
+  getProviderBinary: vi.fn(() => null),
 }));
 
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
@@ -3164,6 +3165,62 @@ describe('AgentRuntime', () => {
     expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
   });
 
+  it('server-error result arms fallback instead of default-denying to unknown-terminal (single path)', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
+    mockEmitAlert.mockClear();
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() =>
+      expect(runtime.getFallbackState().fallbackActiveUntil).toEqual(expect.any(Number)),
+    );
+    const fallbackState = runtime.getFallbackState();
+    expect(fallbackState.fallbackReason).toBe('server-error');
+    expect(fallbackState.effectiveProvider).toBe('opencode-cli');
+
+    const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+  });
+
+  it('assistant_text auto-switch notices are surfaced without arming fallback', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: 'Switched to Opus 4.7 due to high demand for Opus 4.8',
+    });
+
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(
+      '_Model auto-switched from Opus 4.8 to Opus 4.7 (high demand). Continuing normally._',
+    );
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ from: 'Opus 4.8', to: 'Opus 4.7', reason: 'high-demand' }),
+      'surfaced provider auto-switch notice',
+    );
+  });
+
   it('non-error result with text is still forwarded (no over-suppression)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5948,7 +6005,17 @@ describe('AgentRuntime', () => {
         getStatus: vi.fn(() => ({ active: true })),
       };
       (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
-      (runtime as unknown as { durability: { completeTurn: ReturnType<typeof vi.fn> } }).durability = { completeTurn: vi.fn() };
+      (runtime as unknown as {
+        durability: {
+          completeTurn: ReturnType<typeof vi.fn>;
+          upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+          completeInbound: ReturnType<typeof vi.fn>;
+        };
+      }).durability = {
+        completeTurn: vi.fn(),
+        upsertSessionCheckpoint: vi.fn(),
+        completeInbound: vi.fn(),
+      };
       const handleEventWithContext = (
         runtime as unknown as {
           handleEventWithContext: (
@@ -5998,8 +6065,16 @@ describe('AgentRuntime', () => {
       expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
     });
 
-    it('server-error result with dispatch enabled still emits ops alert + notice + records turn failure', () => {
+    it('server-error result with dispatch enabled arms fallback + records turn failure', () => {
       process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+      const agentConfig = mockConfig as typeof mockConfig & {
+        agentProvider?: string;
+        agentFallbackProvider?: string;
+        agentFallbackModel?: string;
+      };
+      agentConfig.agentProvider = 'claude-cli';
+      agentConfig.agentFallbackProvider = 'opencode-cli';
+      agentConfig.agentFallbackModel = 'minimax/minimax-m2';
       const { runtime, queue, session, handleEventWithContext } = makePerChatDispatchHarness();
       mockEmitAlert.mockClear();
 
@@ -6013,23 +6088,15 @@ describe('AgentRuntime', () => {
         '111#session',
       );
 
-      // Observable outcome: an ops alert is emitted (NOT a silent no-op). The
-      // server-error text has no dedicated legacy branch, so it routes through the
-      // is_error default-deny path which pages provider_unknown_terminal.
-      expect(mockEmitAlert).toHaveBeenCalledWith(
-        expect.any(String),
-        'provider_unknown_terminal',
-        expect.any(String),
-        expect.stringContaining('Service temporarily unavailable'),
-      );
-      // Generic notice reaches the user.
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+      expect(runtime.getFallbackState().fallbackReason).toBe('server-error');
+      expect(runtime.getFallbackState().fallbackActiveUntil).toEqual(expect.any(Number));
+      expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
       // Raw provider text is not forwarded.
       const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
       expect(forwardedRaw).not.toContain(SERVER_TEXT);
-      // Turn-capability accounting records the failure (unknown-terminal on this path).
+      // Turn-capability accounting records the real provider failure class.
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
-      expect(turnCapability.lastTurnErrorClass).toBe('unknown-terminal');
+      expect(turnCapability.lastTurnErrorClass).toBe('server-error');
     });
   });
 

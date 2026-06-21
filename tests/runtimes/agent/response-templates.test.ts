@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { renderUserMessage, type RenderContext } from '../../../src/runtimes/agent/response-templates.ts';
+import {
+  autoSwitchNoticeMessage,
+  renderUserMessage,
+  type RenderContext,
+} from '../../../src/runtimes/agent/response-templates.ts';
 import type { DiagnosticBundle, UserTemplateId } from '../../../src/runtimes/agent/response-registry.ts';
 
 const ALL_TEMPLATES: UserTemplateId[] = [
@@ -154,5 +158,23 @@ describe('renderUserMessage — tool-activity-blocked variant', () => {
     const expected = `${base.trimEnd()} The first attempt already started an action, `
       + 'so I will not replay it automatically. Please confirm or resend the next step.';
     expect(renderUserMessage('usage-limit', ctx({ blockedByToolActivity: true }))).toBe(expected);
+  });
+});
+
+describe('autoSwitchNoticeMessage', () => {
+  it('renders the high-demand source and target models deterministically', () => {
+    expect(autoSwitchNoticeMessage({
+      from: 'Opus 4.8',
+      to: 'Opus 4.7',
+      reason: 'high-demand',
+    })).toBe('_Model auto-switched from Opus 4.8 to Opus 4.7 (high demand). Continuing normally._');
+  });
+
+  it('renders no-source auto-routed notices deterministically', () => {
+    expect(autoSwitchNoticeMessage({
+      from: null,
+      to: 'Sonnet 4.6',
+      reason: 'auto-routed',
+    })).toBe('_Model auto-switched to Sonnet 4.6 (auto routed). Continuing normally._');
   });
 });

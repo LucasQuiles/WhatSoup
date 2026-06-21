@@ -38,6 +38,12 @@ export interface RenderContext {
   blockedByToolActivity?: boolean;
 }
 
+export interface AutoSwitchNoticeView {
+  from: string | null;
+  to: string;
+  reason: string;
+}
+
 /**
  * Directive shown when a replay is blocked because the first attempt already
  * started an action. The stand-in will not replay it automatically; the user
@@ -104,6 +110,14 @@ export function renderUserMessage(id: UserTemplateId, ctx: RenderContext): strin
     case 'none':
       return '';
   }
+}
+
+export function autoSwitchNoticeMessage(notice: AutoSwitchNoticeView): string {
+  const source = notice.from ? ` from ${notice.from}` : '';
+  const reason = notice.reason === 'high-demand'
+    ? 'high demand'
+    : notice.reason.replace(/-/g, ' ');
+  return `_Model auto-switched${source} to ${notice.to} (${reason}). Continuing normally._`;
 }
 
 /**
