@@ -27,6 +27,8 @@ export interface TriggerResult {
  *   allowlist  — gated DMs, group mentions, blocked denied
  *   open_dm    — anyone can DM, blocked senders still denied, groups by mention
  *   groups_only — no DMs, groups by mention
+ * Unresolved LID senders fail closed before any permissive path because their
+ * real phone identity cannot be compared against the phone blocklist.
  *
  * WhatsApp uses two identity formats:
  *   JID  — phone@s.whatsapp.net (traditional)
@@ -50,6 +52,8 @@ export function shouldRespond(
   }
 
   const effectivePhone = resolvePhoneFromJid(msg.senderJid, db);
+  const lidLocal = normalizeLid(bareNumber(msg.senderJid));
+  const isUnresolvedLidSender = isLidJid(msg.senderJid) && effectivePhone === lidLocal;
 
   const isSiblingBot = msg.isGroup && config.siblingPhones?.size > 0 && config.siblingPhones.has(effectivePhone);
   const accessMode: AccessMode = config.accessMode;
@@ -64,9 +68,7 @@ export function shouldRespond(
 
     // Explicit guard: if this is a LID sender whose LID couldn't be resolved
     // to a real phone, reject with a distinct reason for debuggability.
-    // Detect by comparing effectivePhone to the raw colon-stripped LID local part.
-    const lidLocal = normalizeLid(bareNumber(msg.senderJid));
-    if (isLidJid(msg.senderJid) && effectivePhone === lidLocal) {
+    if (isUnresolvedLidSender) {
       log.debug({ messageId: msg.messageId, senderJid: msg.senderJid }, 'trigger: self_only — LID unresolvable, rejecting');
       return { respond: false, reason: 'self_only_lid_unresolvable', accessStatus: 'blocked' };
     }
@@ -85,6 +87,11 @@ export function shouldRespond(
   if (entry?.status === 'blocked') {
     log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: blocked sender');
     return { respond: false, reason: 'blocked', accessStatus: 'blocked' };
+  }
+
+  if (isUnresolvedLidSender && !(accessMode === 'groups_only' && !msg.isGroup)) {
+    log.info({ messageId: msg.messageId, senderJid: msg.senderJid }, 'trigger: LID unresolvable, rejecting');
+    return { respond: false, reason: 'lid_unresolvable', accessStatus: 'blocked' };
   }
 
   // ── open_dm mode (REQ-003.AC-03) ──

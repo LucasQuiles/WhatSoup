@@ -829,14 +829,28 @@ describe('shouldRespond with LID senders', () => {
       expect(result.reason).toBe('pending');
     });
 
-    it('LID sender with unknown/unresolvable LID → rejected as unknown', () => {
+    it('LID sender with unknown/unresolvable LID → rejected before access-list allow paths', () => {
       const msg = makeMsg({
         chatJid: UNKNOWN_LID_JID,
         senderJid: UNKNOWN_LID_JID,
       });
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
       expect(result.respond).toBe(false);
-      expect(result.reason).toBe('unknown');
+      expect(result.reason).toBe('lid_unresolvable');
+      expect(result.accessStatus).toBe('blocked');
+    });
+
+    it('stale raw-LID allow entries do not authorize an unresolvable LID sender', () => {
+      const staleAllowedLid = '91919191919191';
+      insertAllowed(db, 'phone', staleAllowedLid);
+      const msg = makeMsg({
+        chatJid: `${staleAllowedLid}@lid`,
+        senderJid: `${staleAllowedLid}@lid`,
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('lid_unresolvable');
+      expect(result.accessStatus).toBe('blocked');
     });
 
     it('phone JID sender who is allowed → responds (baseline)', () => {
@@ -931,15 +945,27 @@ describe('shouldRespond with LID senders', () => {
       testConfig.accessMode = 'open_dm';
     });
 
-    it('LID DM from anyone → responds (open mode)', () => {
+    it('resolved LID DM from anyone → responds (open mode)', () => {
+      const msg = makeMsg({
+        chatJid: USER_LID_JID,
+        senderJid: USER_LID_JID,
+        isGroup: false,
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(true);
+      expect(result.reason).toBe('open_dm');
+    });
+
+    it('unresolvable LID DM → rejected before open_dm can bypass phone block checks', () => {
       const msg = makeMsg({
         chatJid: UNKNOWN_LID_JID,
         senderJid: UNKNOWN_LID_JID,
         isGroup: false,
       });
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
-      expect(result.respond).toBe(true);
-      expect(result.reason).toBe('open_dm');
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('lid_unresolvable');
+      expect(result.accessStatus).toBe('blocked');
     });
 
     it('blocked LID sender still blocked in open_dm', () => {
@@ -996,6 +1022,19 @@ describe('shouldRespond with LID senders', () => {
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
       expect(result.respond).toBe(false);
       expect(result.reason).toBe('blocked');
+    });
+
+    it('unresolvable LID sender in group with @mention → rejected before mention allow path', () => {
+      const msg = makeMsg({
+        chatJid: GROUP_JID,
+        senderJid: UNKNOWN_LID_JID,
+        isGroup: true,
+        mentionedJids: [BOT_JID],
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('lid_unresolvable');
+      expect(result.accessStatus).toBe('blocked');
     });
   });
 });
