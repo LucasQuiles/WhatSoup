@@ -655,6 +655,19 @@ describe('safeguard diagnostics', () => {
       .toEqual(['coverage-target/index.html']);
   });
 
+  it('fails when tracked health profiles require the legacy fleet-token file', () => {
+    const fixture = makeRepo({
+      trackedExtras: {
+        'deploy/health-profiles/test-host.json': '{"role":"bot-host","requiredCredentialFiles":["fleet-token"]}\n',
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'no-tracked-instance-health-profiles')?.evidence)
+      .toEqual(['deploy/health-profiles/test-host.json:legacy-fleet-token']);
+  });
+
   it('fails closed when required git inventory is unavailable', () => {
     const fixture = makeNonGitTree();
 

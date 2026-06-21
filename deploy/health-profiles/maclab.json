@@ -6,7 +6,7 @@
   "expectPersonalTools": false,
   "expectConfigInventory": true,
   "requiredCredentialFiles": [
-    "fleet-token"
+    "fleet-tokens.json"
   ],
   "instances": [
     {
