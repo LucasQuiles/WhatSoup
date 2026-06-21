@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
@@ -161,6 +164,40 @@ describe('FleetRealtimeEventPoller', () => {
     ]);
 
     poller.stop();
+  });
+
+  it('detects log rotation while the previous log file still exists', async () => {
+    const logDir = mkdtempSync(join(tmpdir(), 'realtime-log-rotation-'));
+    try {
+      const oldLog = join(logDir, 'app.log');
+      const newLog = join(logDir, 'app.1.log');
+      const oldTime = new Date('2026-06-21T10:00:00.000Z');
+      const newTime = new Date('2026-06-21T10:01:00.000Z');
+      writeFileSync(oldLog, 'before rotation\n');
+      utimesSync(oldLog, oldTime, oldTime);
+
+      const discovery = makeDiscovery({
+        test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
+      });
+      const dbReader = makeDbReader({ latestMessagePk: 1, latestAccessMarker: 'a' });
+      const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+      await poller.poll();
+      publisher.calls.length = 0;
+
+      writeFileSync(newLog, 'after rotation\n');
+      utimesSync(newLog, newTime, newTime);
+
+      await poller.poll();
+
+      const types = publisher.calls.map((event) => event.type);
+      expect(types).toContain('log_entry');
+      expect(types).toContain('feed_event');
+
+      poller.stop();
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+    }
   });
 
   it('prunes stale snapshots for instances removed from discovery', async () => {

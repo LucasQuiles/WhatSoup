@@ -88,7 +88,7 @@ export class FleetRealtimeEventPoller {
           const dbSnapshot = this.getSnapshot(name, inst.dbPath);
           const previous = this.snapshots.get(name);
 
-          // Fast path: stat only the cached log path (1 syscall vs N for full dir scan)
+          // Re-scan each cycle so pino-roll rotation to a newer numbered file is observed.
           const logMtime = this.getLogMtime(inst.logDir, previous?.lastLogPath ?? null);
           const current: InstanceSnapshot = {
             ...dbSnapshot,
@@ -148,12 +148,15 @@ export class FleetRealtimeEventPoller {
     };
   }
 
-  /** Stat the cached log path (1 syscall). Falls back to full dir scan if cached path is stale. */
+  /** Find the latest log file, falling back to the cached path for transient scan misses. */
   private getLogMtime(logDir: string, cachedPath: string | null): { path: string; mtimeMs: number } | null {
+    const latest = findLatestLogFile(logDir);
+    if (latest) return latest;
+
     if (cachedPath) {
-      try { return { path: cachedPath, mtimeMs: statSync(cachedPath).mtimeMs }; } catch { /* cached file gone, fall through */ }
+      try { return { path: cachedPath, mtimeMs: statSync(cachedPath).mtimeMs }; } catch { /* cached file gone */ }
     }
-    return findLatestLogFile(logDir);
+    return null;
   }
 
   private async pollTyping(instances: Map<string, any>): Promise<void> {
