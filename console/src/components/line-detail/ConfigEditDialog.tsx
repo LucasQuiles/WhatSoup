@@ -229,8 +229,8 @@ export function ConfigEditDialog({
       )
     }
 
-    // Object -> read-only JSON textarea
-    if (typeof originalValue === 'object' && originalValue !== null) {
+    // Object/null -> read-only JSON textarea
+    if (typeof originalValue === 'object') {
       return (
         <TextArea
           id={fieldId}
