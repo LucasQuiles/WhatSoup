@@ -444,7 +444,7 @@ describe('ConnectionManager — phase transitions', () => {
     await manager.shutdown();
   });
 
-  it('restartRequired disconnect triggers immediate reconnect without backoff', async () => {
+  it('restartRequired disconnect below the flap threshold enters backoff', async () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
@@ -455,9 +455,19 @@ describe('ConnectionManager — phase transitions', () => {
     // Emit restartRequired (515)
     emit(closeEvent(515));
 
-    // Should reconnect synchronously (no setTimeout), so no timer advance needed
-    await flushAsyncReconnect();
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      reconnectAttempts: 1,
+      reconnectPhase: 'backoff',
+    });
+    expect(manager.getConnectionState().firstFailureAt).not.toBeNull();
 
+    await vi.advanceTimersByTimeAsync(999);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
 
     await manager.shutdown();
@@ -475,9 +485,11 @@ describe('ConnectionManager — phase transitions', () => {
     const manager = new ConnectionManager();
     await manager.connect();
 
+    const backoffs = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000];
     for (let i = 0; i < 9; i++) {
       sockets[i]!.emit(closeEvent(515));
-      await flushAsyncReconnect();
+      expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(i + 1);
+      await vi.advanceTimersByTimeAsync(backoffs[i]!);
       expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(i + 2);
     }
 
@@ -488,11 +500,11 @@ describe('ConnectionManager — phase transitions', () => {
     expect(manager.getConnectionState()).toMatchObject({
       state: 'reconnecting',
       connected: false,
-      reconnectAttempts: 1,
+      reconnectAttempts: 10,
       reconnectPhase: 'backoff',
     });
 
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(10);
 
     await vi.advanceTimersByTimeAsync(1);
@@ -662,6 +674,34 @@ describe('ConnectionManager — terminal conditions', () => {
     expect(exhaustedSpy).toHaveBeenCalled();
 
     exitSpy.mockRestore();
+    await manager.shutdown();
+  });
+
+  it('sub-threshold restartRequired failures count toward the exhaustion window', async () => {
+    const exhaustedSpy = vi.fn();
+
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    manager.on('exhausted', exhaustedSpy);
+    await manager.connect();
+
+    sockets[0]!.emit(closeEvent(515));
+    await vi.advanceTimersByTimeAsync(1_000);
+    sockets[1]!.emit(closeEvent(515));
+    await vi.advanceTimersByTimeAsync(2_000);
+    sockets[2]!.emit(closeEvent(515));
+
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1);
+    sockets[3]?.emit(closeEvent(515));
+
+    expect(exhaustedSpy).toHaveBeenCalledTimes(1);
+
     await manager.shutdown();
   });
 
@@ -1760,9 +1800,11 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
 
     expect(contactsUpsertSpy).not.toHaveBeenCalled();
     expect(manager.getConnectionState()).toMatchObject({
-      state: 'connecting',
+      state: 'reconnecting',
       connected: false,
     });
+
+    await vi.advanceTimersByTimeAsync(1_000);
 
     sockets[1]!.emit({
       'connection.update': { connection: 'open' },
