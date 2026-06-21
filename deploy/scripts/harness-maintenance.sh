@@ -56,13 +56,29 @@ STATE_FILE="$STATE_DIR/state.json"
 touch "$EVENTS_FILE"
 
 NVMRC_NODE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
-REPO_NODE_BIN="${WHATSOUP_NODE_BIN:-$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin/node}"
-if [ ! -x "$REPO_NODE_BIN" ]; then
-  REPO_NODE_BIN="$(command -v node || true)"
+# Reuse the deploy wrapper's Node compatibility gate so the maintenance harness
+# cannot silently run TypeScript guards under an unsupported PATH node.
+# shellcheck source=deploy/lib/resolve-node.sh
+. "$REPO_ROOT/deploy/lib/resolve-node.sh"
+DEFAULT_REPO_NODE_BIN="$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin/node"
+REPO_NODE_BIN="${WHATSOUP_NODE_BIN:-$DEFAULT_REPO_NODE_BIN}"
+REPO_NODE_BIN_SOURCE="pinned"
+if [ -n "${WHATSOUP_NODE_BIN:-}" ]; then
+  REPO_NODE_BIN_SOURCE="env"
+elif [ ! -x "$REPO_NODE_BIN" ]; then
+  PATH_NODE_BIN="$(command -v node || true)"
+  if [ -n "$PATH_NODE_BIN" ]; then
+    REPO_NODE_BIN="$PATH_NODE_BIN"
+    REPO_NODE_BIN_SOURCE="path"
+    echo "WARN: pinned node v${NVMRC_NODE_VERSION} not found; using PATH node $REPO_NODE_BIN for harness maintenance" | tee -a "$RUN_LOG" >&2
+  fi
 fi
-if [ -z "$REPO_NODE_BIN" ]; then
-  echo "Node is required to run harness maintenance guards" >&2
+if ! whatsoup_validate_node_compatibility "$REPO_ROOT" "$REPO_NODE_BIN"; then
+  echo "FATAL: Node is required to run harness maintenance guards" >&2
   exit 1
+fi
+if [ "$REPO_NODE_BIN_SOURCE" = "path" ] && ! whatsoup_check_node_pin "$REPO_ROOT" "$REPO_NODE_BIN"; then
+  echo "WARN: resolved PATH Node major differs from .nvmrc pin; install v${NVMRC_NODE_VERSION} to remove fallback" | tee -a "$RUN_LOG" >&2
 fi
 
 CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin}"
