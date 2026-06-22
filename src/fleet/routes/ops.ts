@@ -36,7 +36,7 @@ import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
-import { privateWriteError } from '../../lib/private-fs.ts';
+import { assertPrivateDirectorySync, privateWriteError } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
@@ -79,16 +79,6 @@ function haltConfigUpdateAfterResponse(): never {
 interface PrivateWriteOptions {
   exclusive?: boolean;
   mode?: number;
-}
-
-function assertPrivateDirectorySync(dirPath: string): void {
-  const stat = fs.lstatSync(dirPath);
-  if (stat.isSymbolicLink()) {
-    throw privateWriteError('refusing to use private directory through symlink', 'ELOOP');
-  }
-  if (!stat.isDirectory()) {
-    throw privateWriteError('refusing to use private directory over non-directory path', 'EINVAL');
-  }
 }
 
 function writePrivateFileSync(filePath: string, data: string | Buffer, options: PrivateWriteOptions = {}): void {
