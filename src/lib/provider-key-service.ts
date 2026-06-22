@@ -28,6 +28,7 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',
   minimax: 'MINIMAX_API_KEY',
+  glm: 'ZAI_API_KEY',
   xai: 'XAI_API_KEY',
   groq: 'GROQ_API_KEY',
   mistral: 'MISTRAL_API_KEY',

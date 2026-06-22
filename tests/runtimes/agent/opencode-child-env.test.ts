@@ -172,18 +172,21 @@ describe('buildChildEnv — opencode-cli model-derived key', () => {
     expect(warnMock).not.toHaveBeenCalled();
   });
 
-  it('behaves exactly as before when no model is provided', () => {
+  it('forwards the fleet fallback trio (deepseek/minimax/glm) when no model is provided', () => {
     lookupCredentialMock.mockImplementation((service: string) => {
       if (service === 'deepseek') return 'ds-secret-123';
       if (service === 'minimax') return 'mm-secret-456';
+      if (service === 'glm') return 'zai-secret-789';
       return null;
     });
 
     const env = buildChildEnv('opencode-cli');
     expect(env.DEEPSEEK_API_KEY).toBe('ds-secret-123');
     expect(env.MINIMAX_API_KEY).toBe('mm-secret-456');
+    expect(env.ZAI_API_KEY).toBe('zai-secret-789');
     expect(lookupCredentialMock.mock.calls.map(([svc]) => svc).sort()).toEqual([
       'deepseek',
+      'glm',
       'minimax',
     ]);
     expect(warnMock).not.toHaveBeenCalled();
