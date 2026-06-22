@@ -63,6 +63,7 @@ import {
   parseSessionCookie,
   isSameOriginRequest,
   isSecureRequestTransport,
+  isLoopbackRequest,
 } from './console-session.ts';
 
 export interface FleetDeps {
@@ -821,6 +822,23 @@ export function createFleetServer(deps: FleetDeps) {
     return true;
   }
 
+  // C2: the root-token bootstrap (mint) endpoints must only be reachable from
+  // the loopback interface. Phase A binds the fleet to loopback and Phase B
+  // fronts it with `tailscale serve` (which proxies from 127.0.0.1), so every
+  // legitimate mint — local or serve-fronted remote — arrives with a loopback
+  // source. This gate fails closed against a bind regression that would expose
+  // the mint endpoints to raw tailnet peers. Ephemeral-ticket SENDS are not
+  // gated here; only the rare root-token mint paths are.
+  function requireLoopbackMint(req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
+    if (isLoopbackRequest(req)) return true;
+    log.warn(
+      { event: 'mint_nonloopback_rejected', path: pathname, remoteAddress: req.socket?.remoteAddress ?? null },
+      'root-token mint endpoint refused a non-loopback source',
+    );
+    jsonResponse(res, 403, { error: 'mint endpoints are loopback-only' });
+    return false;
+  }
+
   // Deprecation warning state for legacy `?token=<root>` HTTP API auth.
   // Mirrors `ws_legacy_token_path` on the WebSocket path (#393): one-shot
   // per server lifetime so a misbehaving caller hitting many endpoints does
@@ -843,6 +861,7 @@ export function createFleetServer(deps: FleetDeps) {
       // Console unlock (B1): the operator presents the root token once;
       // the browser receives an HttpOnly session cookie, never the token.
       if (method === 'POST' && pathname === '/api/console-session') {
+        if (!requireLoopbackMint(req, res, pathname)) return;
         if (!verifyToken(bearer)) {
           log.warn({ event: 'console_session_rejected', reason: 'invalid-root-token', origin: req.headers.origin ?? null }, 'console unlock rejected');
           jsonResponse(res, 401, { error: 'unauthorized' });
@@ -879,6 +898,7 @@ export function createFleetServer(deps: FleetDeps) {
       // with same-origin proof. They intentionally do not accept `?token=`
       // because these POST routes do not have EventSource's header limitation.
       if (method === 'POST' && pathname === '/api/auth-ticket') {
+        if (!requireLoopbackMint(req, res, pathname)) return;
         if (!verifyToken(bearer) && !verifyConsoleSession(req)) {
           jsonResponse(res, 401, { error: 'unauthorized' });
           return;
@@ -905,6 +925,7 @@ export function createFleetServer(deps: FleetDeps) {
       // this before the generic API ticket gate so an `api`-audience ticket
       // cannot be exchanged for WebSocket capability.
       if (method === 'POST' && pathname === '/api/ws-ticket') {
+        if (!requireLoopbackMint(req, res, pathname)) return;
         if (!verifyToken(bearer) && !verifyConsoleSession(req)) {
           jsonResponse(res, 401, { error: 'unauthorized' });
           return;

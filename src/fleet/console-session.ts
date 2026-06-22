@@ -142,3 +142,30 @@ export function isSecureRequestTransport(req: IncomingMessage): boolean {
   const socket = req.socket as { encrypted?: boolean };
   return socket?.encrypted === true;
 }
+
+/**
+ * True when the TCP peer is the loopback interface (defense-in-depth gate for
+ * the root-token bootstrap endpoints — C2).
+ *
+ * This checks the kernel-reported socket source address, NOT a forwardable
+ * header, so it cannot be spoofed by a remote peer. Behind `tailscale serve`
+ * (Phase B) the proxy reverse-proxies to `127.0.0.1`, so a legitimate remote
+ * mint arrives with a loopback source and is allowed — the tailnet identity is
+ * enforced at the WireGuard layer and the root token is still required on top.
+ * The gate's purpose is to fail closed if the bind ever regresses to a
+ * non-loopback address (bind-guard.ts handles startup; this handles per-request
+ * mint exposure): a direct tailnet peer hitting the raw port is refused.
+ *
+ * A missing/unparseable source address is treated as NON-loopback (fail
+ * closed). Covers IPv4 `127.0.0.0/8`, IPv6 `::1`, and IPv4-mapped
+ * `::ffff:127.x.x.x`.
+ */
+export function isLoopbackRequest(req: IncomingMessage): boolean {
+  const addr = req.socket?.remoteAddress;
+  if (typeof addr !== 'string' || addr.length === 0) return false;
+  // Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to its IPv4 tail.
+  const v4 = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
+  if (v4 === '::1') return true;
+  // 127.0.0.0/8 — any octet form starting with 127.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
+}
