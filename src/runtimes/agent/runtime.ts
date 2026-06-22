@@ -3795,6 +3795,11 @@ export class AgentRuntime implements Runtime {
             break;
           }
           queue.enqueueStreamingText(normalizedText);
+          // Reply-guarantee: visible output reached the user, so reset the
+          // silence window for this chat. The "still working" fallback then
+          // only fires after a full window of TRUE silence, not while a long
+          // turn is actively streaming replies.
+          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
           // Accumulate assistant text for voice reply (SP4)
           if (mapKey !== undefined) {
             this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
@@ -7383,6 +7388,10 @@ export class AgentRuntime implements Runtime {
           }
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;
+          // Reply-guarantee: visible output reached the user — reset the silence
+          // window so the "still working" fallback only fires after a full window
+          // of TRUE silence, not while a long turn is actively streaming replies.
+          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
           // Accumulate text for voice reply (SP4)
           this.currentTurnAssistantText += normalizedText;
         }

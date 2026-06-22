@@ -148,6 +148,114 @@ describe('ReplyGuaranteeManager', () => {
     expect(durability.completeTurn).not.toHaveBeenCalled();
   });
 
+  it('does not send concurrent duplicate fallbacks for the same chat (TOCTOU)', async () => {
+    const durability = makeDurability('processing');
+    let resolveSend: () => void = () => {};
+    const sendFallback = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    // Two open inbound turns on the SAME chat, both armed to fire together.
+    manager.arm({ inboundSeq: 31, chatJid: 'chatA@s.whatsapp.net' });
+    manager.arm({ inboundSeq: 32, chatJid: 'chatA@s.whatsapp.net' });
+
+    // Both timers fire in the same tick; the first must reserve the rate-limit
+    // slot synchronously (before awaiting the send) so the second is suppressed.
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).toHaveBeenCalledOnce();
+    resolveSend();
+  });
+
+  it('releases the rate-limit slot when the fallback send fails so a later turn can retry', async () => {
+    const durability = makeDurability('processing');
+    let attempt = 0;
+    const sendFallback = vi.fn(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('transport unavailable');
+    });
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 10_000,
+    });
+
+    manager.arm({ inboundSeq: 41, chatJid: 'chatB@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100); // first attempt throws
+
+    // Second turn fires well inside the rate-limit window. Because the prior
+    // send FAILED, the slot must have been released so this retry is allowed.
+    manager.arm({ inboundSeq: 42, chatJid: 'chatB@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).toHaveBeenCalledTimes(2);
+  });
+
+  it('notifyActivity resets the silence window so an active turn does not fire prematurely', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 51, chatJid: 'chatC@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(60);
+    manager.notifyActivity('chatC@s.whatsapp.net'); // visible output at t=60 → reset
+    await vi.advanceTimersByTimeAsync(60); // t=120, only 60ms since reset → not fired
+    expect(sendFallback).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(40); // 100ms since reset → fires once
+    expect(sendFallback).toHaveBeenCalledOnce();
+  });
+
+  it('notifyActivity for an unrelated chat leaves the armed timer untouched', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 61, chatJid: 'chatD@s.whatsapp.net' });
+    manager.notifyActivity('other@s.whatsapp.net');
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).toHaveBeenCalledOnce();
+  });
+
+  it('notifyActivity after disarm does not re-arm a timer', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => undefined);
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 71, chatJid: 'chatE@s.whatsapp.net' });
+    manager.disarm(71);
+    manager.notifyActivity('chatE@s.whatsapp.net');
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
   it('shutdown clears outstanding timers', async () => {
     const durability = makeDurability('processing');
     const sendFallback = vi.fn(async () => undefined);
