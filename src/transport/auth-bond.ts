@@ -541,6 +541,7 @@ export class AuthBondGuard {
       forceEnsurePrivateDirectorySync(this.root, 'auth-bond backup root directory');
       forceEnsurePrivateDirectorySync(this.historyRoot, 'auth-bond backup history directory');
       forceEnsurePrivateDirectorySync(this.stagingRoot, 'auth-bond backup staging directory');
+      this.sweepOrphanedStaging();
 
       const latest = readLatestManifest(this.latestManifestPath);
       if (
@@ -810,6 +811,29 @@ export class AuthBondGuard {
       return `backup path is unreadable: ${backupPath}: ${errorMessage(err)}`;
     }
     return null;
+  }
+
+  /**
+   * Remove orphaned staging temp dirs (`<name>.tmp-<pid>`) left behind when a
+   * process is SIGKILLed mid-capture. Staging only ever holds in-progress temp
+   * copies — never the published backups (those live under historyRoot/latest) —
+   * so deleting a dead process's leftovers is always safe and prevents
+   * credential-bearing residue from accumulating on disk (#1076/#1078).
+   * The current process's own in-flight staging (`.tmp-<our pid>`) is preserved.
+   */
+  private sweepOrphanedStaging(): void {
+    if (!existsSync(this.stagingRoot)) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(this.stagingRoot);
+    } catch {
+      return; // best-effort; never block a capture on cleanup
+    }
+    const ownSuffix = `.tmp-${process.pid}`;
+    for (const name of entries) {
+      if (!isHistoryStagingDirName(name) || name.endsWith(ownSuffix)) continue;
+      rmSync(join(this.stagingRoot, name), { recursive: true, force: true });
+    }
   }
 
   private pruneHistory(): void {
