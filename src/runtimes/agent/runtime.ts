@@ -2742,6 +2742,11 @@ export class AgentRuntime implements Runtime {
     mapKey?: string,
     actorJid?: string,
   ): Promise<void> {
+    // Defense-in-depth (#1095): every inbound turn dispatched to a shared/single
+    // global session MUST be pinned to its originating conversation before it
+    // runs, so an injected tool call cannot target a different chat. Enforced
+    // here at the single dispatch chokepoint, independent of the per-path binds.
+    this.enforceGlobalConversationBinding(chatJid);
     this.updateSessionActorJid(session, actorJid);
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
@@ -2952,6 +2957,32 @@ export class AgentRuntime implements Runtime {
       this.singletonProviderToolSession.conversationKey = conversationKey;
     }
     this.globalSocketServer?.updateConversationKey(conversationKey);
+  }
+
+  /**
+   * Defense-in-depth for the cross-conversation guard (#1095). A shared/single
+   * global MCP session is pinned to the originating chat per turn via
+   * bindActiveGlobalMcpConversation(); the registry's cross-conversation guard
+   * relies on that binding to stop an injected tool call from targeting another
+   * chat. But the four turn-entry paths each call bind() separately — an
+   * unenforced invariant. This runs at the single turn-dispatch chokepoint
+   * (sendTurnToSession): it re-asserts the binding so a future path that forgets
+   * to bind cannot silently process an inbound turn under a stale/unbound key,
+   * and loudly flags any drift to a *different* conversation (the dangerous case).
+   * It does not touch per_chat sessions (already isolated) or the operator's
+   * passive/global socket clients (which never dispatch agent turns here).
+   */
+  private enforceGlobalConversationBinding(chatJid: string): void {
+    if (this.sessionScope === 'per_chat') return;
+    const expected = toConversationKey(chatJid);
+    const bound = this.singletonProviderToolSession?.conversationKey;
+    if (bound !== undefined && bound !== expected) {
+      log.error(
+        { chatJid, expected, bound, sessionScope: this.sessionScope },
+        'global MCP conversation-binding drift at turn dispatch — re-pinning fail-closed (#1095)',
+      );
+    }
+    this.bindActiveGlobalMcpConversation(chatJid);
   }
 
   /**

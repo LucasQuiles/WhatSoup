@@ -369,6 +369,8 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import type { SessionContext } from '../../../src/mcp/types.ts';
 // View onto the extracted AutoCompactController's bookkeeping (private runtime.autoCompact).
 // Loose value types (unknown) preserve the existing pokes (e.g. silentCompactScopes.set(key, 0)).
 type AutoCompactView = {
@@ -8921,6 +8923,59 @@ describe('AgentRuntime', () => {
       expect(targetSession.shutdown).toHaveBeenCalledWith(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
       expect(text).toBe(`_Session killed: ${dmKey} (DM)_`);
+    });
+  });
+
+  describe('cross-conversation binding invariant (#1095)', () => {
+    const ALICE_JID = '15550100001@s.whatsapp.net';
+    const BOB_JID = '15550100002@s.whatsapp.net';
+
+    type BindView = {
+      singletonProviderToolSession: SessionContext | null;
+      globalSocketServer: { updateConversationKey: (k: string | undefined) => void } | null;
+      enforceGlobalConversationBinding: (chatJid: string) => void;
+    };
+
+    function makeBindingRuntime(sessionScope: 'single' | 'shared' | 'per_chat'): {
+      view: BindView;
+      socketUpdates: Array<string | undefined>;
+    } {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope });
+      const view = runtime as unknown as BindView;
+      const socketUpdates: Array<string | undefined> = [];
+      view.singletonProviderToolSession = { tier: 'global' };
+      view.globalSocketServer = { updateConversationKey: (k) => { socketUpdates.push(k); } };
+      return { view, socketUpdates };
+    }
+
+    it('pins an unbound shared/global session to the originating chat at turn dispatch (no drift error)', () => {
+      const { view, socketUpdates } = makeBindingRuntime('shared');
+      view.enforceGlobalConversationBinding(ALICE_JID);
+      expect(view.singletonProviderToolSession?.conversationKey).toBe(toConversationKey(ALICE_JID));
+      expect(socketUpdates).toEqual([toConversationKey(ALICE_JID)]);
+      expect(mockRuntimeLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('re-pins fail-closed and loudly logs when the session is bound to a DIFFERENT chat (the dangerous drift)', () => {
+      const { view, socketUpdates } = makeBindingRuntime('single');
+      // Simulate an entry path that left the session pinned to a stale/other chat.
+      view.singletonProviderToolSession!.conversationKey = toConversationKey(BOB_JID);
+      view.enforceGlobalConversationBinding(ALICE_JID);
+      // Re-pinned to the chat this turn actually belongs to → a cross-send to BOB is rejected by the guard.
+      expect(view.singletonProviderToolSession?.conversationKey).toBe(toConversationKey(ALICE_JID));
+      expect(socketUpdates).toEqual([toConversationKey(ALICE_JID)]);
+      expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ expected: toConversationKey(ALICE_JID), bound: toConversationKey(BOB_JID) }),
+        expect.stringContaining('binding drift'),
+      );
+    });
+
+    it('leaves a per_chat session untouched (already isolated by forced deliveryJid)', () => {
+      const { view, socketUpdates } = makeBindingRuntime('per_chat');
+      view.enforceGlobalConversationBinding(ALICE_JID);
+      expect(view.singletonProviderToolSession?.conversationKey).toBeUndefined();
+      expect(socketUpdates).toEqual([]);
+      expect(mockRuntimeLogger.error).not.toHaveBeenCalled();
     });
   });
 });
