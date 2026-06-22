@@ -285,6 +285,16 @@ describe('LinkStep — qr event handling', () => {
 
 // ─── connected event ─────────────────────────────────────────────────────────
 describe('LinkStep — connected event', () => {
+  it('can render the already-linked connected state without opening EventSource', () => {
+    const onComplete = vi.fn()
+    render(<LinkStep lineName="my-line" onComplete={onComplete} alreadyLinked />)
+
+    expect(registry).toHaveLength(0)
+    expect(screen.getByText('Line is live!')).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: 'View Line' }))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
   it('transitions to the success screen showing "Line is live!"', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
     await waitFor(() => expect(registry).toHaveLength(1))

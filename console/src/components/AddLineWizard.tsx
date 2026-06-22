@@ -158,6 +158,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
       setShowConfirmExit(false)
       setInstanceCreated(false)
       setWizardCompleted(false)
+      setLineLinked(false)
       setLockedName(null)
     }
     prevOpenRef.current = open
@@ -173,6 +174,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
 
   const [instanceCreated, setInstanceCreated] = useState(false)
   const [wizardCompleted, setWizardCompleted] = useState(false)
+  const [lineLinked, setLineLinked] = useState(false)
 
   // Warn user about tab close when instance is created but wizard incomplete
   useEffect(() => {
@@ -302,7 +304,11 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
             {currentStep === 1 && (
               <LinkStep
                 lineName={formData.name as string}
-                onComplete={() => setCurrentStep(2)}
+                alreadyLinked={lineLinked}
+                onComplete={() => {
+                  setLineLinked(true)
+                  setCurrentStep(2)
+                }}
               />
             )}
             {currentStep === 2 && (

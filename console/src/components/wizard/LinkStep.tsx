@@ -8,12 +8,13 @@ import { Button } from '../primitives/Button'
 interface LinkStepProps {
   lineName: string
   onComplete: () => void
+  alreadyLinked?: boolean
 }
 
 type LinkStatus = 'waiting' | 'connected' | 'error'
 
-const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
-  const [status, setStatus] = useState<LinkStatus>('waiting')
+const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete, alreadyLinked = false }) => {
+  const [status, setStatus] = useState<LinkStatus>(alreadyLinked ? 'connected' : 'waiting')
   const [qrValue, setQrValue] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [retryKey, setRetryKey] = useState(0)
@@ -24,6 +25,19 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   useEffect(() => {
     let es: EventSource | null = null
     let cancelled = false
+
+    function clearQrTimer(): void {
+      if (!qrTimerRef.current) return
+      clearInterval(qrTimerRef.current)
+      qrTimerRef.current = null
+    }
+
+    if (alreadyLinked) {
+      return () => {
+        cancelled = true
+        clearQrTimer()
+      }
+    }
 
     async function openEventSource(): Promise<void> {
       let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
@@ -50,7 +64,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
         if (!nextQr) {
           setStatus('error')
           setErrorMsg('Received an invalid QR code from the authentication server.')
-          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+          clearQrTimer()
           source.close()
           return
         }
@@ -58,13 +72,13 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
         setStatus('waiting')
         setErrorMsg('')
         setQrAge(0)
-        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        clearQrTimer()
         qrTimerRef.current = setInterval(() => setQrAge((a) => a + 1), 1000)
       })
 
       source.addEventListener('connected', () => {
         setStatus('connected')
-        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        clearQrTimer()
         source.close()
       })
 
@@ -72,7 +86,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
       source.addEventListener('error', (e: MessageEvent) => {
         setStatus('error')
         setErrorMsg(parseAuthErrorMessage(e.data))
-        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        clearQrTimer()
         source.close()
       })
 
@@ -80,7 +94,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
       source.onerror = () => {
         if (cancelled || es !== source) return
         source.close()
-        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        clearQrTimer()
         retryCountRef.current++
         if (retryCountRef.current >= 5) {
           setStatus('error')
@@ -102,9 +116,9 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
     return () => {
       cancelled = true
       if (es) es.close()
-      if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+      clearQrTimer()
     }
-  }, [lineName, retryKey])
+  }, [alreadyLinked, lineName, retryKey])
 
   const handleRetry = useCallback(() => {
     setStatus('waiting')
