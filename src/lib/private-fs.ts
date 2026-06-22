@@ -13,6 +13,7 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  fsyncSync,
   ftruncateSync,
   lstatSync,
   mkdirSync,
@@ -101,4 +102,22 @@ export function forceEnsurePrivateDirectorySync(dirPath: string, label: string):
     throw privateWriteError(`refusing to use ${label} over non-directory path: ${dirPath}`, 'EINVAL');
   }
   chmodSync(dirPath, 0o700);
+}
+
+/**
+ * Best-effort fsync of a directory so a freshly created/renamed entry survives a
+ * crash. Some platforms/filesystems reject directory fsync; the preceding file
+ * fsync is the durability guarantee, and directory fsync is the extra
+ * crash-survival guarantee where the platform supports it. Errors are swallowed.
+ */
+export function fsyncDirectory(path: string): void {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, 'r');
+    fsyncSync(fd);
+  } catch {
+    // Directory fsync is best-effort on some filesystems.
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }

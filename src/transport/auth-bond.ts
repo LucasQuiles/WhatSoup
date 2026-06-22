@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
-import { forceEnsurePrivateDirectorySync, privateWriteError } from '../lib/private-fs.ts';
+import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { errorMessage } from '../lib/error-message.ts';
 
@@ -131,18 +131,6 @@ function isHistoryStagingDirName(name: string): boolean {
 
 function modeString(mode: number): string {
   return (mode & 0o777).toString(8);
-}
-
-function fsyncDirectory(path: string): void {
-  let fd: number | null = null;
-  try {
-    fd = openSync(path, 'r');
-    fsyncSync(fd);
-  } catch {
-    // Directory fsync is best-effort on some filesystems.
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
 }
 
 function fileSnapshot(path: string, includeHash = false): AuthBondFileSnapshot {

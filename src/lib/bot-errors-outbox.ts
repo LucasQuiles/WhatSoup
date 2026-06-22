@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { forceEnsurePrivateDirectorySync } from './private-fs.ts';
+import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -179,19 +179,6 @@ function writeFileDurable(path: string, payload: string): void {
     fsyncSync(fd);
   } finally {
     closeSync(fd);
-  }
-}
-
-function fsyncDirectory(path: string): void {
-  let fd: number | null = null;
-  try {
-    fd = openSync(path, 'r');
-    fsyncSync(fd);
-  } catch {
-    // Some platforms/filesystems reject directory fsync. The file fsync still
-    // happened; directory fsync is the extra crash-survival guarantee where available.
-  } finally {
-    if (fd !== null) closeSync(fd);
   }
 }
 
