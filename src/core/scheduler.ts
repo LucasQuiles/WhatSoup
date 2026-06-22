@@ -88,13 +88,61 @@ export class MessageScheduler {
 
   /** Recover rows stuck in 'processing' after a crash without blindly replaying uncertain sends. */
   recoverStale(): void {
+    // Recurring rows caught mid-send by a crash must NOT be killed wholesale.
+    // Fail closed on REPLAY (never re-send the uncertain occurrence) but keep
+    // the schedule alive by skipping to the next slot — mirroring the in-tick
+    // retry-exhaustion path. A blanket 'failed' would silently destroy the
+    // entire recurring schedule on a single crash (#1069 asymmetry).
+    const recurringUncertain = this.db.raw
+      .prepare(
+        `SELECT id, recurrence, next_run_at, timezone
+         FROM scheduled_messages
+         WHERE status = 'processing' AND send_started_at IS NOT NULL AND recurrence IS NOT NULL`,
+      )
+      .all() as unknown as Array<{
+        id: number;
+        recurrence: string;
+        next_run_at: number | null;
+        timezone: string | null;
+      }>;
+    for (const row of recurringUncertain) {
+      const now = nowUnixSec();
+      let nextRun: number | null = null;
+      try {
+        nextRun = advanceRecurringRun(row.recurrence, row.next_run_at ?? now, now, row.timezone ?? 'UTC').nextRun;
+      } catch {
+        nextRun = null;
+      }
+      if (nextRun !== null) {
+        this.db.raw
+          .prepare(
+            `UPDATE scheduled_messages
+             SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?, send_started_at = NULL
+             WHERE id = ?`,
+          )
+          .run(nextRun, 'Occurrence skipped after crash during send (uncertain delivery); recurring schedule kept alive', row.id);
+        log.warn({ id: row.id, nextRun }, 'scheduler: recurring occurrence uncertain after crash, skipped to next slot');
+      } else {
+        this.db.raw
+          .prepare(
+            `UPDATE scheduled_messages
+             SET status = 'failed', error = ?, send_started_at = NULL
+             WHERE id = ?`,
+          )
+          .run('Recurring failed after crash during send (cannot compute next slot from recurrence)', row.id);
+        log.warn({ id: row.id, recurrence: row.recurrence }, 'scheduler: recurring uncertain-send permanently failed (invalid cron)');
+      }
+    }
+
+    // One-shot uncertain sends stay fail-closed: we cannot know whether the
+    // single delivery happened, so manual verification is required before retry.
     const uncertainCount = this.db.raw
       .prepare(
         `UPDATE scheduled_messages
          SET status = 'failed',
              error = 'Recovered after crash during scheduled send; manual verification required before retry',
              send_started_at = NULL
-         WHERE status = 'processing' AND send_started_at IS NOT NULL`,
+         WHERE status = 'processing' AND send_started_at IS NOT NULL AND recurrence IS NULL`,
       )
       .run().changes;
     if (uncertainCount > 0) {
