@@ -462,6 +462,14 @@ function formatClockForUser(epochMs: number): string {
   });
 }
 
+function contextOverflowNotice(): string {
+  return renderUserMessage('context-overflow', {
+    hasContinuation: false,
+    bundle: null,
+    formatClock: formatClockForUser,
+  });
+}
+
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   return reason === 'auth-required';
 }
@@ -4078,7 +4086,7 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'context-overflow') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
-            queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+            queue.enqueueText(contextOverflowNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -6111,7 +6119,7 @@ export class AgentRuntime implements Runtime {
     if (!wf.fallback.arms) {
       if (wf.userTemplate === 'context-overflow') {
         log.warn({ chatJid: logChatJid, textPreview }, 'prompt too long — killing session');
-        queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+        queue.enqueueText(contextOverflowNotice());
       } else {
         log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
       }
@@ -7660,7 +7668,7 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'context-overflow') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
-            queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+            queue.enqueueText(contextOverflowNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
