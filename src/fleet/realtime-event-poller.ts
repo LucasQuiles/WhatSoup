@@ -106,7 +106,16 @@ export class FleetRealtimeEventPoller {
               publishAccessChanged(this.deps.realtime, name);
               publishFeedEvent(this.deps.realtime, name);
             }
-            if (current.latestLogMtime !== null && current.latestLogMtime !== previous.latestLogMtime) {
+            // A log change is either a newer mtime OR a rotation to a different
+            // active file. pino-roll can rotate to a new numbered file that lands
+            // on an identical mtimeMs (coarse FS granularity / same-tick rotation);
+            // an mtime-only predicate would silently miss it and the dashboard
+            // would go stale (#1086). The path-change clause closes that gap.
+            if (
+              current.latestLogMtime !== null &&
+              (current.latestLogMtime !== previous.latestLogMtime ||
+                current.lastLogPath !== previous.lastLogPath)
+            ) {
               publishLogChanged(this.deps.realtime, name);
               publishFeedEvent(this.deps.realtime, name);
             }

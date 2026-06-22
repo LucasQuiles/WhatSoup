@@ -106,6 +106,36 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     poller.stop();
   });
 
+  it('emits log_entry when pino-roll rotates to a new file with an identical mtime (#1086)', async () => {
+    // pino-roll rotation creates a NEW numbered file. When the new file lands on
+    // the same mtimeMs as the prior one (coarse FS granularity, or rotation +
+    // first write within one mtime tick), an mtime-only predicate misses the
+    // rotation entirely and the dashboard goes stale. The active log PATH
+    // changing is itself a change worth emitting.
+    const logDir = '/tmp/test-logs';
+
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
+    });
+    const dbReader = makeDbReader({ latestMessagePk: 1, latestAccessMarker: 'a' });
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    // First poll — baseline on the pre-rotation file.
+    mockFindLatestLogFile.mockReturnValueOnce({ path: `${logDir}/app.log.1`, mtimeMs: 1000 });
+    await poller.poll();
+    publisher.calls.length = 0;
+
+    // Second poll — rotated to a NEW file but with the SAME mtimeMs.
+    mockFindLatestLogFile.mockReturnValueOnce({ path: `${logDir}/app.log.2`, mtimeMs: 1000 });
+    await poller.poll();
+
+    const types = publisher.calls.map((e: any) => e.type);
+    expect(types).toContain('log_entry');
+    expect(types).toContain('feed_event');
+
+    poller.stop();
+  });
+
   it('does not emit log events when no log file exists for an instance', async () => {
     const logDir = '/tmp/empty-logs';
 
