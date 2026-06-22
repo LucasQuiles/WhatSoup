@@ -35,7 +35,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 import { extractFrames, extractFramesDetailed } from '../../../../src/runtimes/chat/media/video.ts';
-import { cleanupTempFile } from '../../../../src/core/media-download.ts';
+import { cleanupTempFile, writeTempFile } from '../../../../src/core/media-download.ts';
 
 // The module uses promisify(execFile). promisify-wrapped callbacks expect node-style
 // (err, value) callbacks. We simulate this by implementing execFile as a function
@@ -188,8 +188,8 @@ describe('extractFrames — long-video threshold (> 200s)', () => {
       );
 
     mockReaddir.mockResolvedValue([
-      'frames_1000000000000_001.jpg',
-      'frames_1000000000000_002.jpg',
+      'frames_test-video_001.jpg',
+      'frames_test-video_002.jpg',
     ]);
     mockReadFile
       .mockResolvedValueOnce(Buffer.from('frame-one'))
@@ -214,8 +214,8 @@ describe('extractFrames — long-video threshold (> 200s)', () => {
           cb(null, { stdout: '', stderr: '' }),
       );
     mockReaddir.mockResolvedValue([
-      'frames_1000000000000_001.jpg',
-      'frames_1000000000000_002.jpg',
+      'frames_test-video_001.jpg',
+      'frames_test-video_002.jpg',
       'unrelated.jpg',
     ]);
     mockReadFile
@@ -233,10 +233,10 @@ describe('extractFrames — long-video threshold (> 200s)', () => {
       fallbackUsed: false,
       durationSeconds: duration,
     });
-    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_1000000000000_001.jpg');
-    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_1000000000000_002.jpg');
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_002.jpg');
+    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_test-video_001.jpg');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_test-video_002.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video_002.jpg');
     expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/test-video.mp4');
   });
 });
@@ -285,8 +285,8 @@ describe('extractFrames — short-video frame-count cap', () => {
           cb(null, { stdout: '', stderr: '' }),
       );
     mockReaddir.mockResolvedValue([
-      'frames_1000000000000_001.jpg',
-      'frames_1000000000000_002.jpg',
+      'frames_test-video_001.jpg',
+      'frames_test-video_002.jpg',
       'frames_9999999999999_001.jpg',
     ]);
     mockReadFile
@@ -303,12 +303,15 @@ describe('extractFrames — short-video frame-count cap', () => {
       fallbackUsed: false,
       durationSeconds: 25,
     });
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_002.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video_002.jpg');
   });
 
-  it('uses the broad frames prefix when the output timestamp is not numeric', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(Number.NaN);
+  it('collects only frames under its own input-stem prefix, ignoring a concurrent task and non-jpg files (#1073)', async () => {
+    // The output dir is shared across concurrent extractions. Frames are keyed
+    // off this task's unique input stem (writeTempFile mock → /tmp/test-video.mp4
+    // → prefix `frames_test-video`), so a concurrent task's frames (a different
+    // stem) and non-jpg files must be ignored even when Date.now collides.
     mockExecFile
       .mockImplementationOnce(
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
@@ -319,9 +322,10 @@ describe('extractFrames — short-video frame-count cap', () => {
           cb(null, { stdout: '', stderr: '' }),
       );
     mockReaddir.mockResolvedValue([
-      'frames_001.jpg',
-      'frames_extra.jpg',
-      'frames_ignored.txt',
+      'frames_test-video_001.jpg',
+      'frames_test-video_002.jpg',
+      'frames_other-task_001.jpg', // a concurrent extraction's frame — must be ignored
+      'frames_test-video_ignored.txt', // right prefix, wrong extension
       'unrelated.jpg',
     ]);
     mockReadFile
@@ -339,8 +343,38 @@ describe('extractFrames — short-video frame-count cap', () => {
       fallbackUsed: false,
       durationSeconds: 12,
     });
-    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_001.jpg');
-    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_extra.jpg');
+    expect(mockReadFile).toHaveBeenCalledTimes(2);
+    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/tmp/frames_test-video_001.jpg');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/tmp/frames_test-video_002.jpg');
+    // The concurrent task's frame is never read or cleaned up by this task.
+    expect(mockReadFile).not.toHaveBeenCalledWith('/tmp/frames_other-task_001.jpg');
+    expect(cleanupTempFile).not.toHaveBeenCalledWith('/tmp/frames_other-task_001.jpg');
+  });
+
+  it('keys the ffmpeg frame prefix off the unique input stem, not Date.now — same-ms tasks never collide (#1073)', async () => {
+    // Date.now is pinned to a single constant in beforeEach (two tasks in the
+    // same millisecond). The fix derives the frame prefix from writeTempFile's
+    // unique random stem, so the two extractions MUST produce different prefixes.
+    vi.mocked(writeTempFile)
+      .mockReturnValueOnce('/tmp/aaaaaaaa.mp4')
+      .mockReturnValueOnce('/tmp/bbbbbbbb.mp4');
+
+    const framePatterns: string[] = [];
+    mockExecFile.mockImplementation(
+      (_b: string, args: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) => {
+        const last = args[args.length - 1];
+        if (typeof last === 'string' && last.includes('frames_')) framePatterns.push(last);
+        cb(null, { stdout: '5\n', stderr: '' }); // duration probe + extraction both resolve
+      },
+    );
+    mockReaddir.mockResolvedValue([]);
+
+    await extractFramesDetailed(Buffer.from('video-a'));
+    await extractFramesDetailed(Buffer.from('video-b'));
+
+    const prefixes = framePatterns.map((p) => p.replace(/_%03d\.jpg$/, ''));
+    expect(prefixes).toEqual(['/tmp/frames_aaaaaaaa', '/tmp/frames_bbbbbbbb']);
+    expect(prefixes[0]).not.toBe(prefixes[1]); // same ms → still distinct → no frame theft
   });
 });
 
@@ -418,8 +452,8 @@ describe('extractFrames — ffmpeg failure recovery', () => {
           cb(null, { stdout: '', stderr: '' }),
       );
     mockReaddir.mockResolvedValue([
-      'frames_1000000000000_001.jpg',
-      'frames_1000000000000_002.jpg',
+      'frames_test-video-fb_001.jpg',
+      'frames_test-video-fb_002.jpg',
     ]);
     mockReadFile.mockResolvedValue(Buffer.from('fallback-frame'));
 
@@ -434,14 +468,11 @@ describe('extractFrames — ffmpeg failure recovery', () => {
       durationSeconds: 30,
     });
     expect(mockReadFile).toHaveBeenCalledTimes(1);
-    expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
   });
 
-  it('filters fallback frames to the fallback invocation prefix', async () => {
-    vi.spyOn(Date, 'now')
-      .mockReturnValueOnce(1_000_000_000_000)
-      .mockReturnValueOnce(1_000_000_000_001);
+  it('filters fallback frames to the fallback (-fb) prefix and leaves main-pass partials alone', async () => {
     mockExecFile
       .mockImplementationOnce(
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
@@ -455,9 +486,11 @@ describe('extractFrames — ffmpeg failure recovery', () => {
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
           cb(null, { stdout: '', stderr: '' }),
       );
+    // The failed main pass may have left a partial frame under the main prefix;
+    // the fallback must read/clean only its own `-fb` frame, not the partial.
     mockReaddir.mockResolvedValue([
-      'frames_1000000000000_001.jpg',
-      'frames_1000000000001_001.jpg',
+      'frames_test-video_001.jpg', // main-pass partial — must be left alone
+      'frames_test-video-fb_001.jpg', // the fallback's frame
     ]);
     mockReadFile.mockResolvedValue(Buffer.from('fallback-frame'));
 
@@ -472,9 +505,9 @@ describe('extractFrames — ffmpeg failure recovery', () => {
       durationSeconds: 30,
     });
     expect(mockReadFile).toHaveBeenCalledTimes(1);
-    expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_1000000000001_001.jpg');
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000001_001.jpg');
-    expect(cleanupTempFile).not.toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(mockReadFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
+    expect(cleanupTempFile).not.toHaveBeenCalledWith('/tmp/frames_test-video_001.jpg');
   });
 
   it('marks fallback no-frame when the fallback frame cannot be read', async () => {
@@ -491,7 +524,7 @@ describe('extractFrames — ffmpeg failure recovery', () => {
         (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
           cb(null, { stdout: '', stderr: '' }),
       );
-    mockReaddir.mockResolvedValue(['frames_1000000000000_001.jpg']);
+    mockReaddir.mockResolvedValue(['frames_test-video-fb_001.jpg']);
     mockReadFile.mockRejectedValue(new Error('fallback frame unreadable'));
 
     const details = await extractFramesDetailed(Buffer.from('fake-video'));
@@ -502,7 +535,7 @@ describe('extractFrames — ffmpeg failure recovery', () => {
       fallbackUsed: true,
       durationSeconds: 30,
     });
-    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_1000000000000_001.jpg');
+    expect(cleanupTempFile).toHaveBeenCalledWith('/tmp/frames_test-video-fb_001.jpg');
   });
 
   it('returns empty array when both primary and fallback ffmpeg calls reject', async () => {
