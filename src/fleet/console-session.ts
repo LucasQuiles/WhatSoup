@@ -8,8 +8,11 @@
  * session cookie plus same-origin proof in place of the root Bearer.
  *
  * Sessions are deliberately in-memory: a fleet restart relocks the console.
- * The cookie omits `Secure` because the supported default deployment is
- * loopback HTTP; non-loopback binds are gated by bind-guard.ts.
+ * The cookie carries `Secure` when the unlock request arrived over TLS — e.g.
+ * fronted by `tailscale serve` or a reverse proxy that sets
+ * X-Forwarded-Proto=https — and omits it for a direct loopback-HTTP unlock
+ * (localhost is a secure context, so the cookie is still sent). Non-loopback
+ * plain-HTTP binds are gated by bind-guard.ts.
  */
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -80,8 +83,9 @@ export function createConsoleSessionStore(opts: {
   };
 }
 
-export function buildSessionCookie(sessionId: string): string {
-  return `${CONSOLE_SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}`;
+export function buildSessionCookie(sessionId: string, opts: { secure?: boolean } = {}): string {
+  const secure = opts.secure ? '; Secure' : '';
+  return `${CONSOLE_SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}${secure}`;
 }
 
 export function buildSessionClearCookie(): string {
@@ -117,4 +121,24 @@ export function isSameOriginRequest(req: IncomingMessage): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * True when the request reached us over a confidential transport, so the
+ * session cookie can safely carry `Secure`. Two signals:
+ *   - a TLS-terminating front (e.g. `tailscale serve` or a reverse proxy)
+ *     sets `X-Forwarded-Proto: https`;
+ *   - a direct TLS socket exposes `req.socket.encrypted === true`.
+ * Spoofing `X-Forwarded-Proto` only makes the spoofer's own cookie MORE
+ * restrictive (Secure), so it is not a downgrade vector. A plain loopback-HTTP
+ * unlock yields neither signal → no `Secure` (and localhost is a secure
+ * context regardless, so the cookie is still delivered).
+ */
+export function isSecureRequestTransport(req: IncomingMessage): boolean {
+  const xfp = req.headers['x-forwarded-proto'];
+  if (typeof xfp === 'string' && xfp.split(',')[0].trim().toLowerCase() === 'https') {
+    return true;
+  }
+  const socket = req.socket as { encrypted?: boolean };
+  return socket?.encrypted === true;
 }

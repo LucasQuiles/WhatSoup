@@ -14,6 +14,7 @@ import {
   buildSessionClearCookie,
   parseSessionCookie,
   isSameOriginRequest,
+  isSecureRequestTransport,
 } from '../../src/fleet/console-session.ts';
 
 describe('createConsoleSessionStore', () => {
@@ -60,6 +61,15 @@ describe('session cookie helpers', () => {
     expect(cookie).toContain(`Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}`);
   });
 
+  it('omits Secure by default and on an explicit insecure transport', () => {
+    expect(buildSessionCookie('a'.repeat(64))).not.toContain('Secure');
+    expect(buildSessionCookie('a'.repeat(64), { secure: false })).not.toContain('Secure');
+  });
+
+  it('appends Secure only when the transport is confidential', () => {
+    expect(buildSessionCookie('a'.repeat(64), { secure: true })).toContain('; Secure');
+  });
+
   it('builds a clearing cookie with Max-Age=0', () => {
     const cookie = buildSessionClearCookie();
     expect(cookie).toContain(`${CONSOLE_SESSION_COOKIE}=`);
@@ -97,5 +107,32 @@ describe('isSameOriginRequest', () => {
 
   it('rejects malformed Origin values', () => {
     expect(isSameOriginRequest(req({ origin: 'not a url', host: '127.0.0.1:9099' }))).toBe(false);
+  });
+});
+
+describe('isSecureRequestTransport', () => {
+  function req(
+    headers: Record<string, string | undefined>,
+    socket: { encrypted?: boolean } = {},
+  ) {
+    return { headers, socket } as unknown as import('node:http').IncomingMessage;
+  }
+
+  it('treats X-Forwarded-Proto: https as confidential (TLS-terminating front)', () => {
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'https' }))).toBe(true);
+  });
+
+  it('reads only the first proto in a comma-joined forwarded chain', () => {
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'https, http' }))).toBe(true);
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'http, https' }))).toBe(false);
+  });
+
+  it('treats a direct encrypted socket as confidential', () => {
+    expect(isSecureRequestTransport(req({}, { encrypted: true }))).toBe(true);
+  });
+
+  it('treats plain loopback HTTP (no signals) as not confidential', () => {
+    expect(isSecureRequestTransport(req({}))).toBe(false);
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'http' }, { encrypted: false }))).toBe(false);
   });
 });

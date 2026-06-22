@@ -62,6 +62,7 @@ import {
   buildSessionClearCookie,
   parseSessionCookie,
   isSameOriginRequest,
+  isSecureRequestTransport,
 } from './console-session.ts';
 
 export interface FleetDeps {
@@ -854,7 +855,7 @@ export function createFleetServer(deps: FleetDeps) {
         }
         const { sessionId, expiresIn } = consoleSessions.issue();
         log.info({ event: 'console_session_bootstrap', expiresIn, liveSessions: consoleSessions.size() }, 'console session issued');
-        res.setHeader('Set-Cookie', buildSessionCookie(sessionId));
+        res.setHeader('Set-Cookie', buildSessionCookie(sessionId, { secure: isSecureRequestTransport(req) }));
         jsonResponse(res, 200, { expiresIn });
         return;
       }
