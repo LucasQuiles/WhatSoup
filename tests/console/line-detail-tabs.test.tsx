@@ -128,6 +128,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 import LineDetail from '../../console/src/pages/LineDetail';
+import ErrorBoundary from '../../console/src/components/ErrorBoundary';
 
 // ---------------------------------------------------------------------------
 // Test data factories + render helper
@@ -176,7 +177,9 @@ function renderLineDetailRoute(routeName: string) {
     <QueryClientProvider client={client}>
       <ToastContext.Provider value={toastValue}>
         <MemoryRouter initialEntries={[`/lines/${routeName}`]}>
-          <LineDetail />
+          <ErrorBoundary>
+            <LineDetail />
+          </ErrorBoundary>
         </MemoryRouter>
       </ToastContext.Provider>
     </QueryClientProvider>,
@@ -347,5 +350,43 @@ describe('LineDetail tab query error states', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LineDetail tab render boundaries', () => {
+  it('contains a render crash to the active tab and resets the boundary on tab switch', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    useAccessMock.mockReturnValue({
+      data: [null],
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    try {
+      await act(async () => {
+        renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('tab', { name: /Access/ }));
+      });
+
+      await waitFor(() => expect(screen.getByRole('alert')).toBeDefined());
+      expect(screen.getByRole('heading', { level: 1, name: 'test-line' })).toBeDefined();
+      expect(screen.getByRole('tablist', { name: 'Line detail tabs' })).toBeDefined();
+      expect(screen.getByText('This page crashed')).toBeDefined();
+      expect(screen.getByText(/Cannot read properties/)).toBeDefined();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('tab', { name: /Summary/ }));
+      });
+
+      await waitFor(() => expect(screen.queryByText(/Cannot read properties/)).toBeNull());
+      expect(screen.getByRole('tabpanel').id).toBe('tabpanel-summary');
+      expect(screen.getByRole('tablist', { name: 'Line detail tabs' })).toBeDefined();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

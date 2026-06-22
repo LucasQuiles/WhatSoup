@@ -16,6 +16,7 @@ import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
+import ErrorBoundary from '../components/ErrorBoundary'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
@@ -263,77 +264,79 @@ export default function LineDetail() {
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
             className="flex-1 min-h-0 min-w-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
           >
-            {activeTab === 'summary' && (
-              <SummaryTab
-                line={line}
-                onEditConfig={() => setShowConfigEditor(true)}
-                onChangeMode={() => setShowModeSwitch(true)}
-              />
-            )}
-            {activeTab === 'mode' && (
-              <ModeTab
-                mode={line.mode}
-                line={line}
-                onEditConfig={() => setShowConfigEditor(true)}
-                onChangeMode={() => setShowModeSwitch(true)}
-              />
-            )}
-            {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
-            {activeTab === 'access' && (
-              accessLoading ? (
-                <EmptyState title="Loading access list..." description="Fetching access decisions for this line." />
-              ) : accessError ? (
-                <EmptyState
-                  variant="error"
-                  title="Failed to load access list"
-                  description={accessError.message}
-                  onRetry={() => { void refetchAccess() }}
+            <ErrorBoundary key={activeTab}>
+              {activeTab === 'summary' && (
+                <SummaryTab
+                  line={line}
+                  onEditConfig={() => setShowConfigEditor(true)}
+                  onChangeMode={() => setShowModeSwitch(true)}
                 />
-              ) : (
-                <AccessTab access={access ?? []} lineName={name || ''} />
-              )
-            )}
-            {activeTab === 'history' && (
-              <HistoryTab
-                chats={chats || []}
-                messages={messages || []}
-                selectedChat={selectedChat}
-                onSelectChat={setSelectedChat}
-                mode={line.mode}
-                lineName={name || ''}
-                typingJids={typingJids}
-              />
-            )}
-            {activeTab === 'logs' && (
-              logsLoading ? (
-                <EmptyState title="Loading logs..." description="Fetching recent log entries for this line." />
-              ) : logsError ? (
-                <EmptyState
-                  variant="error"
-                  title="Failed to load logs"
-                  description={logsError.message}
-                  onRetry={() => { void refetchLogs() }}
+              )}
+              {activeTab === 'mode' && (
+                <ModeTab
+                  mode={line.mode}
+                  line={line}
+                  onEditConfig={() => setShowConfigEditor(true)}
+                  onChangeMode={() => setShowModeSwitch(true)}
                 />
-              ) : (
-                <LogsTab logs={logs ?? []} filter={logFilter} onFilterChange={setLogFilter} />
-              )
-            )}
-            {activeTab === 'metrics' && (
-              <MetricsTab
-                metrics={metrics}
-                metricsLoading={metricsLoading}
-                metricsError={metricsError}
-                metricsRange={metricsRange}
-                setMetricsRange={setMetricsRange}
-                lineName={name}
-                line={line}
-                onRetry={refetchMetrics}
-              />
-            )}
-            {activeTab === 'scheduled' && (
-              <ScheduledTab lineName={name || ''} />
-            )}
-            {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
+              )}
+              {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
+              {activeTab === 'access' && (
+                accessLoading ? (
+                  <EmptyState title="Loading access list..." description="Fetching access decisions for this line." />
+                ) : accessError ? (
+                  <EmptyState
+                    variant="error"
+                    title="Failed to load access list"
+                    description={accessError.message}
+                    onRetry={() => { void refetchAccess() }}
+                  />
+                ) : (
+                  <AccessTab access={access ?? []} lineName={name || ''} />
+                )
+              )}
+              {activeTab === 'history' && (
+                <HistoryTab
+                  chats={chats || []}
+                  messages={messages || []}
+                  selectedChat={selectedChat}
+                  onSelectChat={setSelectedChat}
+                  mode={line.mode}
+                  lineName={name || ''}
+                  typingJids={typingJids}
+                />
+              )}
+              {activeTab === 'logs' && (
+                logsLoading ? (
+                  <EmptyState title="Loading logs..." description="Fetching recent log entries for this line." />
+                ) : logsError ? (
+                  <EmptyState
+                    variant="error"
+                    title="Failed to load logs"
+                    description={logsError.message}
+                    onRetry={() => { void refetchLogs() }}
+                  />
+                ) : (
+                  <LogsTab logs={logs ?? []} filter={logFilter} onFilterChange={setLogFilter} />
+                )
+              )}
+              {activeTab === 'metrics' && (
+                <MetricsTab
+                  metrics={metrics}
+                  metricsLoading={metricsLoading}
+                  metricsError={metricsError}
+                  metricsRange={metricsRange}
+                  setMetricsRange={setMetricsRange}
+                  lineName={name}
+                  line={line}
+                  onRetry={refetchMetrics}
+                />
+              )}
+              {activeTab === 'scheduled' && (
+                <ScheduledTab lineName={name || ''} />
+              )}
+              {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
+            </ErrorBoundary>
           </motion.div>
         </AnimatePresence>
         {/* Bottom fade to indicate scrollable content */}
