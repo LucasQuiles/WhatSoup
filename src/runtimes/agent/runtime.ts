@@ -6056,25 +6056,35 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Probe whether the primary provider can serve again. Key-service primaries
-   * are a synchronous key-presence check; binary primaries spawn
-   * `<binary> auth status --json` asynchronously (5 s timeout + SIGKILL
-   * escalation in probeBinaryAuthStatus) so a slow or wedged binary can never
-   * freeze the event loop — the previous spawnSync blocked the whole process
-   * for up to 5 s per recheck, forever on a dead auth primary. Never rejects.
+   * are a synchronous key-presence check; binary primaries run a real
+   * model-usability probe (timeout-bounded, never blocks the event loop) and
+   * recover only on a `usable` verdict.
+   *
+   * A binary primary must NOT be judged by `<binary> auth status`: an
+   * expired-but-present OAuth credential makes claude-cli report
+   * `loggedIn:true` while live inference returns 401 Invalid authentication
+   * credentials. auth-status checks credential *presence*, not *validity*, so
+   * it falsely reports recovery and flaps the fallback window onto a dead
+   * primary. The usability probe spawns one minimal inference turn that
+   * genuinely exercises auth. Never rejects.
    */
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
     if (service) return lookupCredential(service) !== null;
-    const binary = getProviderBinary(this.agentProvider);
+    let binary: string | null;
+    try {
+      binary = getProviderBinary(this.agentProvider);
+    } catch {
+      // getProviderBinary throws on an unknown provider; honor the never-rejects
+      // contract the revert-timer relies on by treating that as not-recovered.
+      return false;
+    }
     if (!binary) return false;
-    const result = await probeBinaryAuthStatus(binary, ['auth', 'status', '--json'], {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      USER: process.env.USER,
-      NO_COLOR: '1',
-    });
-    if (result.status !== 'ok') return false;
-    return !isProviderAuthRequiredMessage(result.output);
+    const result = await probePrimaryModelUsability(
+      { provider: this.agentProvider, model: this.model ?? null },
+      createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+    );
+    return result.status === 'usable';
   }
 
   /**

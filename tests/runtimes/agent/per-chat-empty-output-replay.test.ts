@@ -234,8 +234,9 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     // Drive the THRESHOLD-th empty turn: this must arm the fallback AND replay.
     rv.handleEventPerChat(mapKey, { type: 'result', text: null }, mapKey);
 
-    // Allow the void promise chain inside scheduleFallbackReplay to settle.
-    await vi.runAllTimersAsync();
+    // Allow the void promise chain inside scheduleFallbackReplay to settle
+    // without advancing unrelated fallback recovery timers.
+    await Promise.resolve();
 
     // The replay must have been dispatched with the interrupted turn text.
     expect(rv.replayTurnOnFallback).toHaveBeenCalledTimes(1);
@@ -299,7 +300,7 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     // Drive the threshold turn.
     rv.handleEvent({ type: 'result', text: null });
-    await vi.runAllTimersAsync();
+    await Promise.resolve();
 
     expect(rv.replayTurnOnFallback).toHaveBeenCalledTimes(1);
     const args = (rv.replayTurnOnFallback as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
