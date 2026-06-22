@@ -66,6 +66,12 @@ describe('agent failure taxonomy detectors', () => {
   it('covers provider detector synonyms used by runtime classification', () => {
     expect(isPromptTooLongMessage('Provider rejected the request: token budget limit exceeded.')).toBe(true);
     expect(isProviderAuthRequiredMessage('OAuth token expired; reconnect the provider account.')).toBe(true);
+    // Live claude-cli 401 body (mini1/ana-bot, 2026-06-22): must classify as auth so it
+    // demotes to the fallback chain instead of the default-deny unknown-terminal branch.
+    expect(isProviderAuthRequiredMessage('Failed to authenticate. API Error: 401 Invalid authentication credentials')).toBe(true);
+    expect(isProviderAuthRequiredMessage('Invalid authentication credentials')).toBe(true);
+    // Bare numeric status must NEVER match on its own (prevents the prior false-storm).
+    expect(isProviderAuthRequiredMessage('build step returned 401 lines of output')).toBe(false);
     expect(isProviderPolicyBlockMessage('The request was blocked by policy.')).toBe(true);
     expect(isProviderModelUnavailableMessage('Issue with the selected model: it may not exist or you may not have access.')).toBe(true);
     expect(isProviderModelUnavailableMessage('Unknown model from provider registry.')).toBe(true);
@@ -76,6 +82,7 @@ describe('agent failure taxonomy detectors', () => {
     ['Prompt is too long: context_length_exceeded', 'context-overflow'],
     ['Quota exceeded; Claude resets at 9pm.', 'usage-limit'],
     ['Authentication required before provider call.', 'auth-required'],
+    ['Failed to authenticate. API Error: 401 Invalid authentication credentials', 'auth-required'],
     ['HTTP 429 from provider', 'rate-limit'],
     ['Request blocked by policy.', 'policy-block'],
     ['Unknown model from provider registry.', 'model-unavailable'],
