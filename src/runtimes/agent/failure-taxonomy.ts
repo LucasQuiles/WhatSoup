@@ -275,6 +275,12 @@ export function isProviderAuthRequiredMessage(text: string): boolean {
     // OpenAI invalid_api_key (401).
     lower.includes('authentication_error') ||
     lower.includes('invalid_api_key') ||
+    // Canonical 401 bodies surfaced by claude-cli / Google-style auth: the literal
+    // phrase, never the bare numeric status (the bare '401' substring is deliberately
+    // NOT matched — that produced the prior multi-day false storm). These are specific
+    // multi-word auth phrases, safe from the substring false-positive.
+    lower.includes('invalid authentication credentials') ||
+    lower.includes('failed to authenticate') ||
     (lower.includes('oauth') && lower.includes('expired'))
   );
 }
