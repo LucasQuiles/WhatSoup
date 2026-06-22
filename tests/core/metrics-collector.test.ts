@@ -13,12 +13,13 @@ function insertMessage(db: Database, opts: {
   conversationKey?: string
   senderJid?: string
   messageId?: string
+  deletedAt?: string | null
 }) {
   db.raw.prepare(`
     INSERT INTO messages (
       chat_jid, conversation_key, sender_jid, sender_name, message_id,
-      content, content_type, is_from_me, timestamp, content_text
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      content, content_type, is_from_me, timestamp, content_text, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     `${opts.conversationKey ?? 'chat'}@s.whatsapp.net`,
     opts.conversationKey ?? 'chat',
@@ -30,6 +31,7 @@ function insertMessage(db: Database, opts: {
     opts.fromMe ? 1 : 0,
     opts.timestamp,
     'hello',
+    opts.deletedAt ?? null,
   )
 }
 
@@ -170,6 +172,50 @@ describe('metrics collector', () => {
       { bucket, metric: 'messages_out', value: 2 },
       { bucket, metric: 'sessions_active', value: 0 },
       { bucket, metric: 'sessions_started', value: 0 },
+    ])
+  })
+
+  it('excludes soft-deleted messages from current-hour message volume metrics', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z')
+    const bucket = '2026-04-05T15:00:00.000Z'
+
+    insertMessage(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:01:00.000Z'),
+      fromMe: false,
+      contentType: 'text',
+      messageId: 'active-in',
+    })
+    insertMessage(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:02:00.000Z'),
+      fromMe: true,
+      contentType: 'text',
+      messageId: 'active-out',
+    })
+    insertMessage(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:03:00.000Z'),
+      fromMe: false,
+      contentType: 'image',
+      messageId: 'deleted-in-media',
+      deletedAt: '2026-04-05T15:30:00.000Z',
+    })
+    insertMessage(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:04:00.000Z'),
+      fromMe: true,
+      contentType: 'video',
+      messageId: 'deleted-out-media',
+      deletedAt: '2026-04-05T15:31:00.000Z',
+    })
+
+    collectHourlyMetrics(db, now)
+
+    const rows = db.raw.prepare(
+      "SELECT metric, value FROM metrics_hourly WHERE bucket = ? AND metric IN ('messages_in', 'messages_out', 'messages_media') ORDER BY metric",
+    ).all(bucket) as Array<{ metric: string; value: number }>
+
+    expect(rows).toEqual([
+      { metric: 'messages_in', value: 1 },
+      { metric: 'messages_media', value: 0 },
+      { metric: 'messages_out', value: 1 },
     ])
   })
 

@@ -13,6 +13,7 @@ const METRIC_NAMES = [
   'sessions_started', 'sessions_active',
 ] as const;
 type MetricName = typeof METRIC_NAMES[number];
+const ACTIVE_MESSAGE_SQL = 'deleted_at IS NULL';
 
 function toHourWindow(now: Date): HourWindow {
   const start = new Date(now);
@@ -142,7 +143,9 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
     db,
     `SELECT COUNT(*) AS cnt
        FROM messages
-      WHERE timestamp >= ? AND timestamp < ? AND is_from_me = 0`,
+      WHERE timestamp >= ? AND timestamp < ?
+        AND ${ACTIVE_MESSAGE_SQL}
+        AND is_from_me = 0`,
     startSec,
     endSec,
   );
@@ -151,7 +154,9 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
     db,
     `SELECT COUNT(*) AS cnt
        FROM messages
-      WHERE timestamp >= ? AND timestamp < ? AND is_from_me = 1`,
+      WHERE timestamp >= ? AND timestamp < ?
+        AND ${ACTIVE_MESSAGE_SQL}
+        AND is_from_me = 1`,
     startSec,
     endSec,
   );
@@ -161,6 +166,7 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
     `SELECT COUNT(*) AS cnt
        FROM messages
       WHERE timestamp >= ? AND timestamp < ?
+        AND ${ACTIVE_MESSAGE_SQL}
         AND content_type IN ('image', 'audio', 'document', 'video', 'sticker')`,
     startSec,
     endSec,
@@ -254,6 +260,7 @@ export function backfillMetrics(db: Database, days = 30, now = new Date()): void
     SELECT DISTINCT CAST(timestamp / 3600 AS INTEGER) AS hour_bucket
       FROM messages
      WHERE timestamp >= ? AND timestamp < ?
+       AND ${ACTIVE_MESSAGE_SQL}
      ORDER BY hour_bucket
   `).all(lookbackStartSec, currentHour.endSec) as Array<{ hour_bucket: number }>;
 
