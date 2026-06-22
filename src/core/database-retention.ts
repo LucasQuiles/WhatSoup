@@ -71,10 +71,16 @@ export function runDatabaseRetention(
 
   // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
   // (written via toISOString()); datetime(bucket) normalizes it for comparison.
+  // A malformed/unparseable bucket makes datetime(bucket) NULL, and `NULL < x`
+  // is falsy — so without the explicit NULL branch a junk row would NEVER be
+  // pruned (a fail-open leak, the inverse of the bug this retention fixes). Junk
+  // buckets are unreadable by the dashboard (it compares ISO strings), so prune
+  // them too.
   const metricsCutoff = daysModifier(retention.metricsHourlyDays);
   const metricsHourly = changes(db.raw.prepare(`
     DELETE FROM metrics_hourly
-     WHERE datetime(bucket) < datetime('now', ?)
+     WHERE datetime(bucket) IS NULL
+        OR datetime(bucket) < datetime('now', ?)
   `).run(metricsCutoff));
 
   const result = { inboundEvents, outboundOps, toolCalls, factExportQueue, metricsHourly };

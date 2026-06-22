@@ -98,6 +98,42 @@ describe('database retention', () => {
     );
   });
 
+  it('prunes a malformed/unparseable bucket rather than leaking it forever (#1108 hardening)', () => {
+    // datetime('not-a-date') → NULL, and `NULL < cutoff` is falsy, so a junk
+    // bucket would otherwise NEVER be pruned — the exact unbounded-growth leak
+    // the retention prevents, inverted for bad data. Junk buckets are unreadable
+    // (the dashboard reader compares ISO strings), so pruning them is correct.
+    const isoAgo = (mod: string): string =>
+      (db.raw.prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', ?) AS b`).get(mod) as { b: string }).b;
+    const insert = db.raw.prepare(
+      `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', ?)`,
+    );
+    insert.run('not-a-date', 1); // malformed → must be pruned, not leaked
+    insert.run('', 2); // empty-string bucket → also unparseable
+    insert.run(isoAgo('-5 days'), 3); // valid recent → kept
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result.metricsHourly).toBe(2);
+    expect(rowCount('metrics_hourly')).toBe(1);
+    expect(columnValues('metrics_hourly', 'value')).toEqual([3]);
+  });
+
+  it('keeps a bucket exactly at the retention boundary (strict <) (#1108 hardening)', () => {
+    const exactCutoff = (db.raw
+      .prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-180 days') AS b`)
+      .get() as { b: string }).b;
+    db.raw.prepare(
+      `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', 9)`,
+    ).run(exactCutoff);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    // `datetime(bucket) < datetime('now','-180 days')` is false at exact equality → kept.
+    expect(result.metricsHourly).toBe(0);
+    expect(rowCount('metrics_hourly')).toBe(1);
+  });
+
   it('preserves recoverable and unexported rows regardless of age', () => {
     db.raw.prepare(`
       INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, received_at)
