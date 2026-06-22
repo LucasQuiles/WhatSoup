@@ -67,9 +67,50 @@ import AddLineWizard from '../../console/src/components/AddLineWizard'
 // Helpers
 // ---------------------------------------------------------------------------
 
+type WizardESListener = (event: MessageEvent | Event) => void
+
+class WizardFakeEventSource {
+  url: string
+  readyState = 1
+  onmessage: ((e: MessageEvent) => void) | null = null
+  onerror: ((e: Event) => void) | null = null
+  private readonly listeners: Map<string, WizardESListener[]> = new Map()
+
+  constructor(url: string) {
+    this.url = url
+    wizardEventSources.push(this)
+  }
+
+  addEventListener(type: string, handler: WizardESListener): void {
+    if (!this.listeners.has(type)) this.listeners.set(type, [])
+    this.listeners.get(type)!.push(handler)
+  }
+
+  removeEventListener(type: string, handler: WizardESListener): void {
+    const handlers = this.listeners.get(type)
+    if (!handlers) return
+    const index = handlers.indexOf(handler)
+    if (index >= 0) handlers.splice(index, 1)
+  }
+
+  close(): void {
+    this.readyState = 2
+  }
+
+  emit(type: string, data?: string): void {
+    const event = data !== undefined
+      ? new MessageEvent(type, { data })
+      : new Event(type)
+    for (const handler of this.listeners.get(type) ?? []) handler(event)
+  }
+}
+
+let wizardEventSources: WizardFakeEventSource[] = []
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   mockCreateLine.mockReset()
   mockUpdateConfig.mockReset()
   mockDeleteLine.mockReset()
@@ -82,17 +123,12 @@ beforeEach(() => {
   mockUpdateConfig.mockResolvedValue({})
   mockDeleteLine.mockResolvedValue({ deleted: 'test-line' })
   mockCheckExists.mockResolvedValue({ exists: false })
+  wizardEventSources = []
   // jsdom has no EventSource; LinkStep (mounted when tests advance past
   // Identity) opens one in an effect, which otherwise raises unhandled
   // rejections. Inert stub — LinkStep's SSE behavior is pinned by its own
   // suite (wizard-link-step.test.tsx) with a controllable FakeEventSource.
-  vi.stubGlobal('EventSource', class {
-    onmessage: ((e: MessageEvent) => void) | null = null
-    onerror: ((e: Event) => void) | null = null
-    addEventListener(): void {}
-    removeEventListener(): void {}
-    close(): void {}
-  })
+  vi.stubGlobal('EventSource', WizardFakeEventSource)
 })
 
 /** Wrapper that manages the open prop for the latched-mount contract (C-B3W4-3). */
@@ -328,6 +364,36 @@ describe('AddLineWizard — footer absent on step 1 (Link)', () => {
     // On step 1: no Next or Back button in footer
     expect(screen.queryByRole('button', { name: /^next$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^back$/i })).toBeNull()
+  })
+
+  it('does not reopen the LinkStep EventSource after returning from the model step', async () => {
+    render(<WizardWrapper />)
+    await fillIdentityStep()
+
+    const nextBtn = screen.getByRole('button', { name: /next/i })
+    await act(async () => { fireEvent.click(nextBtn) })
+    await waitFor(() => expect(mockCreateLine).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(wizardEventSources).toHaveLength(1))
+
+    await act(async () => {
+      wizardEventSources[0].emit('connected')
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'View Line' }))
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^back$/i }))
+    })
+
+    expect(screen.getByText('Line is live!')).toBeDefined()
+    expect(screen.queryByText('Generating QR code...')).toBeNull()
+    expect(wizardEventSources).toHaveLength(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'View Line' }))
+    })
+    expect(screen.getByRole('button', { name: /^back$/i })).toBeDefined()
   })
 })
 
