@@ -414,8 +414,8 @@ export class ChatRuntime implements Runtime {
     // 8a. Valid empty completion (#1064): the provider returned successfully
     // with no text — the model chose to stay silent. Send nothing; this is NOT
     // a failure, so no failure message and no fallback alert.
-    if (responseText === '') {
-      log.info({ traceId, model: modelUsed }, 'llm returned a valid empty completion — no reply sent');
+    if (responseText !== null && responseText.trim() === '') {
+      log.info({ traceId, model: modelUsed }, 'llm returned a valid empty/whitespace completion — no reply sent');
       return;
     }
 

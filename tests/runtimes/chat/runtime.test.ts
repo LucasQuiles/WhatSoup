@@ -524,9 +524,10 @@ describe('Provider chain', () => {
     await expect(drainQueue()).resolves.toBeUndefined();
   });
 
-  it('primary returns empty string content → valid empty completion, no message sent (#1064)', async () => {
+  it('primary returns empty string content → valid empty completion, no message + no side effects (#1064)', async () => {
     // #1064: an empty completion is the model choosing to stay silent — NOT a
-    // failure. The bot sends nothing rather than the old generic failure message.
+    // failure. The bot sends nothing, does not store a reply, does not charge
+    // the response rate-limit, and emits no failure alert.
     const { handler, messenger, primary } = makeHandler();
     vi.mocked(primary.generate).mockResolvedValue({
       content: '',
@@ -539,6 +540,27 @@ describe('Provider chain', () => {
     await handleAndDrain(handler, makeIncomingMessage());
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(mockStoreMessage).not.toHaveBeenCalled();
+    expect(mockRecordResponse).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+  });
+
+  it('whitespace-only completion → treated as silence, no junk message sent (#1064 hardening)', async () => {
+    // A model returning only whitespace ('\n', spaces, tabs) must not produce a
+    // junk WhatsApp message; trim → silence, same as an empty completion.
+    const { handler, messenger, primary } = makeHandler();
+    vi.mocked(primary.generate).mockResolvedValue({
+      content: '   \n\t ',
+      inputTokens: 10,
+      outputTokens: 1,
+      model: 'claude-opus-4-6',
+      durationMs: 200,
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(mockRecordResponse).not.toHaveBeenCalled();
   });
 });
 
