@@ -1,7 +1,7 @@
 import { execFile as _execFile, type ExecFileOptions } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readdir } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { writeTempFile, cleanupTempFile } from '../../../core/media-download.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
@@ -61,8 +61,11 @@ function formatTimestamp(seconds: number): string {
 }
 
 function framePrefixFromPattern(pattern: string): string {
-  const tsMatch = pattern.match(/frames_(\d+)/);
-  return `frames_${tsMatch?.[1] ?? ''}`;
+  // The prefix is everything before ffmpeg's frame-number suffix (`_%03d.jpg`).
+  // It is keyed off the input file's unique random stem (see frameToken below),
+  // so concurrent extractions never share a prefix — even within the same
+  // millisecond (#1073). Works for any token, not just digit timestamps.
+  return basename(pattern).replace(/_%03d\.jpg$/, '');
 }
 
 export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> {
@@ -73,7 +76,13 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
 export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoFrameExtractionDetails> {
   const inputPath = writeTempFile(videoBuffer, 'mp4');
   const outputDir = dirname(inputPath);
-  const outputPattern = join(outputDir, `frames_${Date.now()}_%03d.jpg`);
+  // Key the frame prefix off the input file's unique random stem (writeTempFile
+  // uses randomBytes), NOT Date.now(): the output dir is shared across concurrent
+  // video tasks, so two extractions in the same millisecond would otherwise share
+  // a `frames_<ts>` prefix and steal/clean up each other's frames (#1073). The
+  // input stem is already unique per task — reuse it, no new entropy.
+  const frameToken = basename(inputPath).replace(/\.[^.]+$/, '');
+  const outputPattern = join(outputDir, `frames_${frameToken}_%03d.jpg`);
 
   try {
     const duration = await getVideoDuration(inputPath);
@@ -101,7 +110,9 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
     } catch (ffmpegErr) {
       // Fallback: extract a single first frame
       log.warn({ err: ffmpegErr }, 'ffmpeg frame extraction failed — attempting single frame fallback');
-      const fallbackPattern = join(outputDir, `frames_${Date.now()}_%03d.jpg`);
+      // Distinct `-fb` suffix so the fallback never picks up partial frames the
+      // failed main pass may have written under `frames_${frameToken}`.
+      const fallbackPattern = join(outputDir, `frames_${frameToken}-fb_%03d.jpg`);
       try {
         const opts: ExecFileOptions = { timeout: FFMPEG_TIMEOUT_MS };
         await execFile('ffmpeg', [
