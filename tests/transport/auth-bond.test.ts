@@ -136,6 +136,41 @@ describe('AuthBondGuard', () => {
     expect(skipped).toMatchObject({ ok: true, captured: false, path: result.path });
   });
 
+  it('sweeps an orphaned credential-bearing staging temp dir left by a dead process, keeping its own in-flight + non-temp entries (#1076/#1078)', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    writeAuth(authDir);
+
+    // Pre-seed staging the way a SIGKILL mid-capture leaves it: a credential-
+    // bearing `.tmp-<deadpid>` orphan that never got cleaned up.
+    const stagingRoot = join(stateRoot, 'auth-bond-backups', 'sweep-bot', 'staging');
+    mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+    const orphan = join(stagingRoot, '20260101T000000Z.connection-open.deadbeefdeadbeef.tmp-999999');
+    mkdirSync(join(orphan, 'auth'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(orphan, 'auth', 'creds.json'), JSON.stringify({ leaked: 'secret' }));
+    // Our own in-flight staging for THIS process must never be swept.
+    const ownPid = join(stagingRoot, `inflight.tmp-${process.pid}`);
+    mkdirSync(ownPid, { recursive: true, mode: 0o700 });
+    // A non-`.tmp-<pid>` entry must be left untouched (precise filter).
+    const keep = join(stagingRoot, 'not-a-temp-dir');
+    mkdirSync(keep, { recursive: true, mode: 0o700 });
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'sweep-bot',
+      now: () => new Date('2026-06-09T12:00:00Z'),
+    });
+
+    const result = guard.capture('connection-open');
+    expect(result.ok).toBe(true); // capture still succeeds
+
+    expect(existsSync(orphan)).toBe(false); // dead-pid credential residue swept
+    expect(existsSync(ownPid)).toBe(true); // our own in-flight staging preserved
+    expect(existsSync(keep)).toBe(true); // non-temp entry untouched
+  });
+
   it('uses the default state root when none is configured', () => {
     const root = makeRoot();
     const instanceRoot = join(root, 'instance');
