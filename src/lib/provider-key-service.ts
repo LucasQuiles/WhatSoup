@@ -33,6 +33,7 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   google: 'GOOGLE_API_KEY',
+  glm: 'ZAI_API_KEY',
   'fireworks-ai': 'FIREWORKS_API_KEY',
   togetherai: 'TOGETHER_API_KEY',
   pinecone: 'PINECONE_API_KEY',
