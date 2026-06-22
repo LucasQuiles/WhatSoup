@@ -98,14 +98,17 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(async () => 'unknown'),
 }));
 
-// the usability probe — the validity signal recovery must follow.
-const probePrimaryModelUsabilityMock = vi.fn<() => Promise<PrimaryModelUsabilityResult>>();
+// the usability probe — the validity signal recovery must follow. Mocks forward
+// their call arguments so tests can assert the runtime passes the intended
+// target/config (behavior), not merely that a branch executed.
+const probePrimaryModelUsabilityMock = vi.fn<(...args: unknown[]) => Promise<PrimaryModelUsabilityResult>>();
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts')>();
-  return { ...actual, probePrimaryModelUsability: () => probePrimaryModelUsabilityMock() };
+  return { ...actual, probePrimaryModelUsability: (...args: unknown[]) => probePrimaryModelUsabilityMock(...args) };
 });
+const createAdaptersMock = vi.fn<(...args: unknown[]) => Record<string, unknown>>(() => ({}));
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
-  createPrimaryModelProbeAdapters: vi.fn(() => ({})),
+  createPrimaryModelProbeAdapters: (...args: unknown[]) => createAdaptersMock(...args),
 }));
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -182,6 +185,7 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]', cwd: '/tmp/whatsoup-recovery-cwd' }) as AgentRuntime;
     const v = view(runtime);
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
+    expect(createAdaptersMock).toHaveBeenCalledWith(undefined, { cwd: '/tmp/whatsoup-recovery-cwd' });
   });
 
   it('binary primary: tolerates an unset model (coalesces to null) and follows usability', async () => {
@@ -192,10 +196,19 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {}) as AgentRuntime;
     const v = view(runtime);
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledWith({ provider: 'claude-cli', model: null }, expect.anything());
   });
 
   it('binary primary: NOT recovered when no binary resolves', async () => {
     getProviderBinaryMock.mockReturnValue(null);
+    probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
+    const v = view(makeRuntime('claude-cli'));
+    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
+    expect(probePrimaryModelUsabilityMock).not.toHaveBeenCalled();
+  });
+
+  it('binary primary: never rejects when the binary resolver throws (honors the contract)', async () => {
+    getProviderBinaryMock.mockImplementation(() => { throw new Error('unknown provider'); });
     probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
     const v = view(makeRuntime('claude-cli'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);

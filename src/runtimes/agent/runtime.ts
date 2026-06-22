@@ -6063,7 +6063,14 @@ export class AgentRuntime implements Runtime {
   private async probePrimaryProviderRecovered(): Promise<boolean> {
     const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
     if (service) return lookupCredential(service) !== null;
-    const binary = getProviderBinary(this.agentProvider);
+    let binary: string | null;
+    try {
+      binary = getProviderBinary(this.agentProvider);
+    } catch {
+      // getProviderBinary throws on an unknown provider; honor the never-rejects
+      // contract the revert-timer relies on by treating that as not-recovered.
+      return false;
+    }
     if (!binary) return false;
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
