@@ -826,3 +826,85 @@ describe('scheduler.ts uncovered-branch coverage', () => {
   // mocking nextCronRun, because cron.ts only ever throws `new Error(...)`.
   // See the FINAL REPORT for the unreachable-branches rationale.
 });
+
+// ─── advanceRecurringRun catch-up / skip-count coverage (#1330) ────────────────
+// The missed-occurrence skip loop and its MISSED_OCCURRENCE_SCAN_CAP bound were
+// untested: the other recurring tests only exercise the immediate-next-slot case
+// (0–1 skips). These drive the catch-up path after real downtime.
+describe('MessageScheduler — recurring catch-up after downtime', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('skips all missed occurrences to the next future slot after downtime (sends once, run_count +1)', async () => {
+    const { mock: conn, sendRawCalls } = makeMockConnection();
+    const now = Math.floor(Date.now() / 1000);
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15551000001@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'every-minute, machine was down an hour' }),
+        now - 7200,
+        'pending',
+        0,
+        '* * * * *', // every minute
+        now - 3600, // next_run_at one hour in the past → ~60 missed occurrences
+        4,
+      );
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    // Catch-up must collapse the whole missed backlog into a SINGLE send, not
+    // one send per missed minute.
+    expect(sendRawCalls).toHaveLength(1);
+    const row = db.raw
+      .prepare('SELECT status, run_count, next_run_at FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string; run_count: number; next_run_at: number };
+    expect(row.status).toBe('pending');
+    expect(row.run_count).toBe(5); // exactly one increment despite ~60 skipped slots
+    expect(row.next_run_at).toBeGreaterThan(now); // advanced past every missed slot
+  });
+
+  it('reschedules a pathologically ancient backlog without unbounded work (MISSED_OCCURRENCE_SCAN_CAP)', async () => {
+    const { mock: conn, sendRawCalls } = makeMockConnection();
+    const now = Math.floor(Date.now() / 1000);
+    // next_run_at far enough back that the missed count exceeds the 10,000 scan
+    // cap, forcing the capped branch (compute next slot directly from sentAt).
+    db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15551000002@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'every-minute, weeks of downtime' }),
+        now - 10_001 * 60,
+        'pending',
+        0,
+        '* * * * *',
+        now - 10_001 * 60, // > 10,000 every-minute occurrences in the past
+        0,
+      );
+
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendRawCalls).toHaveLength(1);
+    const row = db.raw
+      .prepare('SELECT status, run_count, next_run_at FROM scheduled_messages WHERE id = ?')
+      .get(1) as { status: string; run_count: number; next_run_at: number };
+    expect(row.status).toBe('pending'); // schedule survives the cap path
+    expect(row.run_count).toBe(1);
+    expect(row.next_run_at).toBeGreaterThan(now); // still re-armed into the future
+  });
+});
