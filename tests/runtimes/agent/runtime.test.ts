@@ -369,6 +369,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 // View onto the extracted AutoCompactController's bookkeeping (private runtime.autoCompact).
@@ -3078,6 +3079,26 @@ describe('AgentRuntime', () => {
     const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
     expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('context-overflow provider result sends the template notice instead of raw provider text', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Error: prompt is too long for the context window';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    const expected = renderUserMessage('context-overflow', {
+      hasContinuation: false,
+      bundle: null,
+      formatClock: () => 'unused',
+    });
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expected));
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    expect(mockSession.shutdown).toHaveBeenCalled();
   });
 
   it('model-unavailable result is not forwarded raw to the user (single path)', async () => {
