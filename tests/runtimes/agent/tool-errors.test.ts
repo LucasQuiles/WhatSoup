@@ -3,6 +3,8 @@ import {
   classifyToolError,
   isOperatorActionableToolError,
   shouldEmitToolFailureAlert,
+  stripToolErrorTags,
+  isParallelSiblingCancellation,
 } from '../../../src/runtimes/agent/runtime.ts';
 
 describe('classifyToolError', () => {
@@ -222,5 +224,39 @@ describe('shouldEmitToolFailureAlert', () => {
   it('emits error category only when an operator-actionable signature is present', () => {
     expect(shouldEmitToolFailureAlert('error', 'ENOSPC: no space left on device')).toBe(true);
     expect(shouldEmitToolFailureAlert('error', 'connect ECONNREFUSED 127.0.0.1:5432')).toBe(true);
+  });
+});
+
+describe('stripToolErrorTags', () => {
+  it('strips both <tool_use_error> and <error> wrappers and trims', () => {
+    expect(stripToolErrorTags('<tool_use_error>boom</tool_use_error>')).toBe('boom');
+    expect(stripToolErrorTags('<error>nope</error>')).toBe('nope');
+    expect(stripToolErrorTags('  <tool_use_error> spaced </tool_use_error>  ')).toBe('spaced');
+  });
+
+  it('is a no-op (modulo trim) for content without wrappers', () => {
+    expect(stripToolErrorTags('plain message')).toBe('plain message');
+    expect(stripToolErrorTags('')).toBe('');
+  });
+});
+
+describe('isParallelSiblingCancellation', () => {
+  it('matches the benign parallel-batch sibling cancellation, wrapped or bare', () => {
+    expect(
+      isParallelSiblingCancellation('Cancelled: parallel tool call Bash(python3 cli.py list) errored'),
+    ).toBe(true);
+    expect(
+      isParallelSiblingCancellation(
+        '<tool_use_error>Cancelled: parallel tool call Bash(cd /home/q) errored</tool_use_error>',
+      ),
+    ).toBe(true);
+    // case-insensitive on the leading marker
+    expect(isParallelSiblingCancellation('CANCELLED: parallel tool call Read(x) errored')).toBe(true);
+  });
+
+  it('does NOT match genuine user/abort cancellations', () => {
+    expect(isParallelSiblingCancellation('Cancelled')).toBe(false);
+    expect(isParallelSiblingCancellation('Tool call was cancelled by the user')).toBe(false);
+    expect(isParallelSiblingCancellation('')).toBe(false);
   });
 });
