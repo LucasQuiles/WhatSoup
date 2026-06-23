@@ -1,0 +1,191 @@
+{
+  "schema": "whatsoup-fault-taxonomy-registry-v1",
+  "faultClasses": [
+    {
+      "id": "auth_terminal",
+      "description": "Terminal provider or WhatsApp auth loss that needs durable recovery proof before clear.",
+      "sources": [
+        "provider_unknown_terminal"
+      ],
+      "messagePrefixes": [
+        "suppressed unclassified terminal provider error from result"
+      ],
+      "recoveryProof": "confirmed_outbound_within_window",
+      "owner": "src/lib/fault-classifier.ts",
+      "tests": [
+        "tests/lib/fault-classifier.test.ts",
+        "tests/runtimes/agent/runtime.test.ts",
+        "deploy/scripts/tests/test_bot_errors_fault_taxonomy_registry.py"
+      ]
+    }
+  ],
+  "authFailureClasses": [
+    "pairing_required",
+    "serverside_logout_irreversible"
+  ],
+  "failureClassDispositions": {
+    "git_remote_auth_failed": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_remote_dns_failed": {
+      "disposition": "transient_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_remote_network_failed": {
+      "disposition": "transient_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_remote_not_found": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_remote_timeout": {
+      "disposition": "transient_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_remote_unreachable": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_repository_missing": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "git_unavailable": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_auth_required": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_compatibility_degraded": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_compatibility_unsupported": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_credential_missing": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_probe_failed": {
+      "disposition": "operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_rate_limit": {
+      "disposition": "time_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_timeout": {
+      "disposition": "transient_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "provider_usage_limit": {
+      "disposition": "time_or_operator_recoverable",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    }
+  },
+  "sourceDispositions": {
+    "health_body_degraded": {
+      "disposition": "transient_when_connected_else_outage",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
+    },
+    "health_probe_auth_failed": {
+      "disposition": "suppressed_by_auth_root_when_present",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_dispatcher_test_leak.py"
+    },
+    "instance_degraded": {
+      "disposition": "symptom_or_outage",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
+    },
+    "instance_logged_out": {
+      "disposition": "auth_root_requires_physical_confirmation",
+      "owner": "src/fleet/health-poller.ts",
+      "test": "tests/fleet/health-poller.test.ts"
+    },
+    "instance_never_reachable": {
+      "disposition": "symptom_or_outage",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
+    },
+    "instance_unreachable": {
+      "disposition": "host_or_instance_outage",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
+    },
+    "local_health": {
+      "disposition": "prefix_source_for_local_health_instance",
+      "owner": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
+      "test": "deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_local_health_retry.py"
+    },
+    "outbound_quarantined": {
+      "disposition": "auth_symptom_clear_gated",
+      "owner": "src/lib/fleet-health-gate.ts",
+      "test": "tests/lib/fleet-health-gate.test.ts"
+    },
+    "outbound_send_failed": {
+      "disposition": "suppressed_by_auth_root_when_present",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_dispatcher_test_leak.py"
+    },
+    "provider_transient_network": {
+      "disposition": "warning_transient_provider_runtime",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime.test.ts"
+    },
+    "provider_unknown_terminal": {
+      "disposition": "fault_class_auth_terminal",
+      "faultClass": "auth_terminal",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime.test.ts"
+    },
+    "relay_host_down": {
+      "disposition": "transient_until_promoted",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_relay_flap_coalesce.py"
+    },
+    "relay_host_recovered": {
+      "disposition": "recovery_for_relay_host_down",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_relay_flap_coalesce.py"
+    },
+    "source_update": {
+      "disposition": "source_update_probe_failure",
+      "owner": "deploy/scripts/bot-errors-health-check.py",
+      "test": "tests/scripts/bot-errors-health-check.test.ts"
+    },
+    "whatsapp_auth_bond_local_failure": {
+      "disposition": "auth_bond_local_failure",
+      "owner": "src/fleet/health-poller.ts",
+      "test": "tests/fleet/health-poller.test.ts"
+    },
+    "whatsapp_device_bond_lost": {
+      "disposition": "auth_root_requires_physical_confirmation",
+      "owner": "src/transport/connection.ts",
+      "test": "tests/transport/auth-bond.test.ts"
+    }
+  }
+}
