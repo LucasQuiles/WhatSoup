@@ -4,6 +4,7 @@ import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
+import { readArcBindingHealth } from './arc-binding-health.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
@@ -1044,6 +1045,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const body = JSON.stringify({
         status,
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
+        arc: readArcBindingHealth(process.env.WHATSOUP_REPO_ROOT ?? process.cwd()),
         instance: {
           name: deps.instanceName,
           mode: deps.instanceType,

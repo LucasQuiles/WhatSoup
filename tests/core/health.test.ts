@@ -7,6 +7,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { request } from 'node:http';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Mock config and logger
@@ -201,6 +204,45 @@ describe('GET /health', () => {
     expect(json.status).toBe('healthy');
     expect(json.whatsapp.connected).toBe(true);
     expect(typeof json.uptime_seconds).toBe('number');
+  });
+
+  it('surfaces safe ARC binding metadata from runtime health', async () => {
+    const repoRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-health-arc.'));
+    mkdirSync(path.join(repoRoot, '.arc'));
+    writeFileSync(path.join(repoRoot, '.arc', 'arc.toml'), [
+      'arc_version = "0.1.0"',
+      'consumer = "whatsoup"',
+      'modules = ["app-runtime", "telemetry", "verification"]',
+      'emits = ["verification-record"]',
+      '',
+      '[source]',
+      'binding = "bindings/whatsoup.arc.json"',
+      `payload_sha = "sha256:${'b'.repeat(64)}"`,
+      'generated_by = "arc adopt"',
+      '',
+    ].join('\n'), 'utf8');
+    const prev = process.env.WHATSOUP_REPO_ROOT;
+    process.env.WHATSOUP_REPO_ROOT = repoRoot;
+    try {
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(200);
+      const json = JSON.parse(body);
+      expect(json.arc).toEqual({
+        loaded: true,
+        consumer: 'whatsoup',
+        arcVersion: '0.1.0',
+        modules: ['app-runtime', 'telemetry', 'verification'],
+        emits: ['verification-record'],
+        binding: 'bindings/whatsoup.arc.json',
+        payloadSha: `sha256:${'b'.repeat(64)}`,
+      });
+    } finally {
+      if (prev === undefined) {
+        delete process.env.WHATSOUP_REPO_ROOT;
+      } else {
+        process.env.WHATSOUP_REPO_ROOT = prev;
+      }
+    }
   });
 
   it('suppresses stale disconnect metadata when the current connection is connected', async () => {
@@ -3512,4 +3554,3 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     expect(json.runtime).toEqual({});
   });
 });
-
