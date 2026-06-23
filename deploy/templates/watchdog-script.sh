@@ -109,22 +109,52 @@ connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
 
+STALE_PONG_SECONDS = 360
+RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
+
+# Parse the pong age once. `None` means absent; `pong_parse_failed` means a
+# value was present but unparseable (fail closed — never silently pass).
+pong_age = None
+pong_parse_failed = False
+if last_pong:
+    try:
+        parsed = dt.datetime.fromisoformat(str(last_pong).replace("Z", "+00:00"))
+        pong_age = (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()
+    except (ValueError, TypeError):
+        pong_parse_failed = True
+
+# A bot that is disconnected but actively *recovering* (connecting/reconnecting/
+# cooldown) with FRESH liveness (a recent pong) is making progress on its own.
+# Restarting it interrupts the reconnect, resets the cold-start clock, and (on
+# agent bots) replays the startup notification — the self-sustaining restart
+# loop observed on rb-bot/mini7. Such a bot is exempt from the connectivity
+# triggers below; its only restart paths remain a stale pong or a hard status.
+recovering_with_fresh_pong = (
+    not connected
+    and state in RECOVERING_STATES
+    and pong_age is not None
+    and not pong_parse_failed
+    and pong_age <= STALE_PONG_SECONDS
+)
+
 reasons = []
 # `degraded` is a soft signal (e.g. binary-model-probe-failed) that a restart
 # cannot fix; restarting on it just resets the cold-start clock and re-fires the
-# alert burst. Only a hard-down status warrants a restart here — the
-# connectivity checks below are the authoritative liveness triggers.
+# alert burst. Only a hard-down status warrants a restart here.
 if status not in ("healthy", "degraded"):
     reasons.append(f"status={status!r}")
-if not connected:
-    reasons.append("whatsapp.connected=false")
-if state != "connected":
-    reasons.append(f"state={state!r}")
-if last_pong:
-    parsed = dt.datetime.fromisoformat(last_pong.replace("Z", "+00:00"))
-    age = (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()
-    if age > 360:
-        reasons.append(f"last_pong_age={age:.0f}s")
+# Connectivity triggers — suppressed only while recovering with a fresh pong.
+if not recovering_with_fresh_pong:
+    if not connected:
+        reasons.append("whatsapp.connected=false")
+    if state != "connected":
+        reasons.append(f"state={state!r}")
+# A stale pong is an authoritative liveness failure regardless of state; a
+# malformed pong fails closed and is treated as restart-worthy.
+if pong_age is not None and pong_age > STALE_PONG_SECONDS:
+    reasons.append(f"last_pong_age={pong_age:.0f}s")
+elif pong_parse_failed:
+    reasons.append("last_pong_unparseable")
 
 if reasons:
     print("; ".join(reasons), file=sys.stderr)
