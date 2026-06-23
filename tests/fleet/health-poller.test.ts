@@ -124,7 +124,10 @@ function expectEmitAlertSourceNotCalled(instance: string, source: string): void 
   ).toBe(false);
 }
 
-function serverRevokedAssetMatcher(confidence: 'confirmed' | 'probable' = 'confirmed') {
+function loggedOutAssetMatcher(
+  code: 'WA_AUTH_BOND_SERVER_REVOKED' | 'WEAK_LOGGED_OUT_SIGNAL',
+  confidence: 'confirmed' | 'probable' = 'confirmed',
+) {
   return expect.objectContaining({
     asset: expect.objectContaining({
       kind: 'whatsapp_linked_device',
@@ -132,12 +135,16 @@ function serverRevokedAssetMatcher(confidence: 'confirmed' | 'probable' = 'confi
       owner: 'whatsoup',
     }),
     failure: expect.objectContaining({
-      code: 'WA_AUTH_BOND_SERVER_REVOKED',
+      code,
       domain: 'account_linkage',
       recoverability: 'manual_relink_required',
       confidence,
     }),
   });
+}
+
+function serverRevokedAssetMatcher(confidence: 'confirmed' | 'probable' = 'confirmed') {
+  return loggedOutAssetMatcher('WA_AUTH_BOND_SERVER_REVOKED', confidence);
 }
 
 function relinkVerifiedAssetMatcher() {
@@ -2280,7 +2287,7 @@ describe('HealthPoller', () => {
       'whatsoup@remote-1 appears logged out',
       expect.stringContaining('weak_signal_polls=3'),
       'critical',
-      serverRevokedAssetMatcher('probable'),
+      loggedOutAssetMatcher('WEAK_LOGGED_OUT_SIGNAL', 'probable'),
     );
 
     poller.stop();
@@ -2366,7 +2373,7 @@ describe('HealthPoller', () => {
       'whatsoup@remote-1 appears logged out',
       expect.stringContaining('weak_signal_polls=3'),
       'critical',
-      serverRevokedAssetMatcher('probable'),
+      loggedOutAssetMatcher('WEAK_LOGGED_OUT_SIGNAL', 'probable'),
     );
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
@@ -2374,7 +2381,7 @@ describe('HealthPoller', () => {
       'whatsoup@remote-1 appears logged out',
       expect.stringContaining('uptime_seconds=120'),
       'critical',
-      serverRevokedAssetMatcher('probable'),
+      loggedOutAssetMatcher('WEAK_LOGGED_OUT_SIGNAL', 'probable'),
     );
 
     poller.stop();

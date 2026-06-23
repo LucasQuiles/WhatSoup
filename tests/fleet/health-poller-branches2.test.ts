@@ -14,7 +14,12 @@
  *   npx vitest run --pool=forks tests/fleet/health-poller-branches2.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
+import {
+  HealthPoller,
+  LOGGED_OUT_CONFIRMATION_CONTRACT,
+  type InstanceHealth,
+  type LoggedOutConfirmation,
+} from '../../src/fleet/health-poller.ts';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(() => true),
@@ -56,6 +61,23 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 type AlertMockCall = [string, string, ...unknown[]];
+type AlertCriticalAsset = {
+  failure?: {
+    code?: string;
+    confidence?: string;
+  };
+};
+
+type LoggedOutConfirmationContract = {
+  confirmed: boolean;
+  weak: boolean;
+  reason: string;
+  failureCode: string;
+  confidence: 'confirmed' | 'inferred' | 'ambiguous';
+  evidence: string;
+};
+const loggedOutConfirmationContract: LoggedOutConfirmation extends LoggedOutConfirmationContract ? true : false = true;
+void loggedOutConfirmationContract;
 
 function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
   return {
@@ -82,6 +104,13 @@ function findAlertEvidence(instance: string, source: string): string {
     ([i, s]) => i === instance && s === source,
   );
   return String(call?.[3] ?? '');
+}
+
+function findAlertCriticalAsset(instance: string, source: string): AlertCriticalAsset | undefined {
+  const call = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+    ([i, s]) => i === instance && s === source,
+  );
+  return call?.[5] as AlertCriticalAsset | undefined;
 }
 
 describe('HealthPoller — branch coverage supplement #2', () => {
@@ -112,6 +141,36 @@ describe('HealthPoller — branch coverage supplement #2', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  describe('logged-out confirmation contract', () => {
+    it('pins the named confirmation result fields and known reason/failure-code set', () => {
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.requiredFields)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.reasons)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes)).toBe(true);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.requiredFields).toEqual([
+        'confirmed',
+        'weak',
+        'reason',
+        'failureCode',
+        'confidence',
+        'evidence',
+      ]);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.reasons).toEqual([
+        'explicit_auth_loss',
+        'connected',
+        'not_weak_signal',
+        'weak_signal_inside_settle_grace',
+        'weak_signal_waiting_for_persistence',
+        'weak_signal_persisted',
+      ]);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes).toEqual([
+        'WA_AUTH_BOND_SERVER_REVOKED',
+        'WEAK_LOGGED_OUT_SIGNAL',
+        'NONE',
+      ]);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -190,6 +249,10 @@ describe('HealthPoller — branch coverage supplement #2', () => {
       expect(evidence).toContain('state=unknown');
       expect(evidence).toContain('uptime_seconds=600');
       expect(evidence).toContain('weak_signal_polls=3');
+      expect(findAlertCriticalAsset('remote-1', 'instance_logged_out')?.failure).toMatchObject({
+        code: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'probable',
+      });
     });
   });
 
@@ -253,7 +316,7 @@ describe('HealthPoller — branch coverage supplement #2', () => {
   // Line 419-421: HTTP 200 body that is NOT caught by the loggedOutSignal
   // heuristic but IS classified as logged_out by classifyHealthSnapshot. This
   // exercises the `classification.status === 'logged_out'` arm on the 200 path
-  // (distinct from the loggedOutSignal.loggedOut arm at 415).
+  // (distinct from the loggedOutSignal.confirmed arm).
   // -------------------------------------------------------------------------
   describe('200-OK body classified logged_out by snapshot (not heuristic)', () => {
     it('routes through updateFromHealthSnapshot for a logged_out classification', async () => {

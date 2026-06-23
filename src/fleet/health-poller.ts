@@ -83,6 +83,43 @@ export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus[
 
 type StatusConfidence = InstanceStatus['statusConfidence'];
 
+export const LOGGED_OUT_CONFIRMATION_CONTRACT = Object.freeze({
+  requiredFields: Object.freeze([
+    'confirmed',
+    'weak',
+    'reason',
+    'failureCode',
+    'confidence',
+    'evidence',
+  ] as const),
+  reasons: Object.freeze([
+    'explicit_auth_loss',
+    'connected',
+    'not_weak_signal',
+    'weak_signal_inside_settle_grace',
+    'weak_signal_waiting_for_persistence',
+    'weak_signal_persisted',
+  ] as const),
+  failureCodes: Object.freeze([
+    'WA_AUTH_BOND_SERVER_REVOKED',
+    'WEAK_LOGGED_OUT_SIGNAL',
+    'NONE',
+  ] as const),
+} as const);
+
+export type LoggedOutConfirmationReason = typeof LOGGED_OUT_CONFIRMATION_CONTRACT.reasons[number];
+export type LoggedOutFailureCode = typeof LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes[number];
+type LoggedOutAlertFailureCode = Exclude<LoggedOutFailureCode, 'NONE'>;
+
+export interface LoggedOutConfirmation {
+  confirmed: boolean;
+  weak: boolean;
+  reason: LoggedOutConfirmationReason;
+  failureCode: LoggedOutFailureCode;
+  confidence: InstanceStatus['statusConfidence'];
+  evidence: string;
+}
+
 interface HealthSnapshotClassification {
   status: 'online' | 'degraded' | 'logged_out';
   confidence: StatusConfidence;
@@ -388,8 +425,8 @@ export class HealthPoller {
             }
             if (failureHealth !== null) {
               const loggedOutSignal = this.classifyLoggedOutSignal(name, failureHealth);
-              if (loggedOutSignal.loggedOut) {
-                this.updateDegraded(name, failureHealth, 'logged_out', loggedOutSignal.evidence, true, 'instance_logged_out', undefined, true, loggedOutSignal.weak);
+              if (loggedOutSignal.confirmed) {
+                this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
               const classification = classifyHealthSnapshot(failureHealth);
@@ -413,8 +450,8 @@ export class HealthPoller {
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
 
         // HTTP 200 but body signals degraded/unhealthy → treat as degraded
-        if (loggedOutSignal.loggedOut) {
-          this.updateDegraded(name, health, 'logged_out', loggedOutSignal.evidence, true, 'instance_logged_out', undefined, true, loggedOutSignal.weak);
+        if (loggedOutSignal.confirmed) {
+          this.updateLoggedOutFromConfirmation(name, health, loggedOutSignal);
           return;
         }
         if (classification.status === 'logged_out') {
@@ -502,11 +539,7 @@ export class HealthPoller {
     }
   }
 
-  private classifyLoggedOutSignal(name: string, health: Record<string, unknown>): {
-    loggedOut: boolean;
-    evidence: string;
-    weak: boolean;
-  } {
+  private classifyLoggedOutSignal(name: string, health: Record<string, unknown>): LoggedOutConfirmation {
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
     const connected = whatsapp?.['connected'] === true && connection?.['state'] === 'connected';
@@ -531,7 +564,11 @@ export class HealthPoller {
     if (explicit) {
       this.weakLoggedOutPolls.delete(name);
       return {
-        loggedOut: true,
+        confirmed: true,
+        weak: false,
+        reason: 'explicit_auth_loss',
+        failureCode: 'WA_AUTH_BOND_SERVER_REVOKED',
+        confidence: 'confirmed',
         evidence: this.loggedOutEvidence(health, [
           `connected=${String(whatsapp?.['connected'])}`,
           `state=${String(connection?.['state'] ?? 'unknown')}`,
@@ -542,36 +579,67 @@ export class HealthPoller {
           `reconnect_phase=${String(reconnectPhase ?? 'unknown')}`,
           `reconnect_attempts=${String(reconnectAttempts ?? 'unknown')}`,
         ]),
-        weak: false,
       };
     }
 
     if (connected) {
       this.weakLoggedOutPolls.delete(name);
-      return { loggedOut: false, evidence: '', weak: false };
+      return {
+        confirmed: false,
+        weak: false,
+        reason: 'connected',
+        failureCode: 'NONE',
+        confidence: 'confirmed',
+        evidence: '',
+      };
     }
 
     const weak = reconnectPhase === 'backoff' && reconnectAttempts === 0;
     if (!weak) {
       this.weakLoggedOutPolls.delete(name);
-      return { loggedOut: false, evidence: '', weak: false };
+      return {
+        confirmed: false,
+        weak: false,
+        reason: 'not_weak_signal',
+        failureCode: 'NONE',
+        confidence: 'confirmed',
+        evidence: '',
+      };
     }
 
     if (uptimeSeconds === null || uptimeSeconds < LOGGED_OUT_SETTLE_GRACE_SECONDS) {
       this.weakLoggedOutPolls.delete(name);
       log.info({ name, uptimeSeconds }, 'weak logged-out signal observed inside settle grace; waiting');
-      return { loggedOut: false, evidence: '', weak: true };
+      return {
+        confirmed: false,
+        weak: true,
+        reason: 'weak_signal_inside_settle_grace',
+        failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'ambiguous',
+        evidence: '',
+      };
     }
 
     const samples = (this.weakLoggedOutPolls.get(name) ?? 0) + 1;
     this.weakLoggedOutPolls.set(name, samples);
     if (samples < WEAK_LOGGED_OUT_POLLS) {
       log.info({ name, samples, uptimeSeconds }, 'weak logged-out signal observed; waiting for persistence');
-      return { loggedOut: false, evidence: '', weak: true };
+      return {
+        confirmed: false,
+        weak: true,
+        reason: 'weak_signal_waiting_for_persistence',
+        failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'ambiguous',
+        evidence: '',
+      };
     }
 
     return {
-      loggedOut: true,
+      confirmed: true,
+      weak: true,
+      reason: 'weak_signal_persisted',
+      failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+      confidence: 'inferred',
       evidence: this.loggedOutEvidence(health, [
         `connected=${String(whatsapp?.['connected'])}`,
         `state=${String(connection?.['state'] ?? 'unknown')}`,
@@ -581,7 +649,6 @@ export class HealthPoller {
         `uptime_seconds=${uptimeSeconds === null ? 'unknown' : String(uptimeSeconds)}`,
         `weak_signal_polls=${samples}`,
       ]),
-      weak: true,
     };
   }
 
@@ -596,6 +663,34 @@ export class HealthPoller {
     this.appendLifecycleEvidence(evidence, lifecycle);
     this.appendAuthBondEvidence(evidence, healthAuthBond ?? lifecycleAuthBond);
     return this.uniqueEvidence(evidence).join(' ');
+  }
+
+  private updateLoggedOutFromConfirmation(
+    name: string,
+    health: Record<string, unknown>,
+    confirmation: LoggedOutConfirmation,
+  ): void {
+    this.updateDegraded(
+      name,
+      health,
+      'logged_out',
+      confirmation.evidence,
+      true,
+      'instance_logged_out',
+      undefined,
+      true,
+      confirmation.weak,
+      confirmation.confidence,
+      'instance_logged_out',
+      confirmation.evidence.split(/\s+/).filter(Boolean),
+      this.loggedOutAlertFailureCode(confirmation),
+    );
+  }
+
+  private loggedOutAlertFailureCode(confirmation: LoggedOutConfirmation): LoggedOutAlertFailureCode {
+    return confirmation.failureCode === 'NONE'
+      ? 'WA_AUTH_BOND_SERVER_REVOKED'
+      : confirmation.failureCode;
   }
 
   private appendLifecycleEvidence(evidence: string[], lifecycle: Record<string, unknown> | null): void {
@@ -925,6 +1020,7 @@ export class HealthPoller {
     statusConfidence: StatusConfidence = loggedOutWeak ? 'inferred' : 'confirmed',
     statusReason = alertSource,
     statusEvidence: string[] = evidence.split(/\s+/).filter(Boolean),
+    loggedOutFailureCode: LoggedOutAlertFailureCode = 'WA_AUTH_BOND_SERVER_REVOKED',
   ): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
@@ -968,7 +1064,7 @@ export class HealthPoller {
         `whatsoup@${name} appears logged out`,
         evidence,
         'critical',
-        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak),
+        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak, loggedOutFailureCode),
       );
       this.trackActiveAlertSource(name, 'instance_logged_out', emitted);
       if (emitted) this.dropSupersededAlertSources(name, ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT);
@@ -1110,6 +1206,7 @@ export class HealthPoller {
     name: string,
     evidence: string,
     weak: boolean,
+    failureCode: LoggedOutAlertFailureCode,
   ): BotErrorsCriticalAssetDiagnostic {
     return {
       asset: {
@@ -1118,7 +1215,7 @@ export class HealthPoller {
         owner: 'whatsoup',
       },
       failure: {
-        code: 'WA_AUTH_BOND_SERVER_REVOKED',
+        code: failureCode,
         domain: 'account_linkage',
         recoverability: 'manual_relink_required',
         confidence: weak ? 'probable' : 'confirmed',
