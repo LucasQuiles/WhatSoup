@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 162 MCP tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, and `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer). No build step. Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 162 MCP tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, and `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to `console/dist/`). Probably too many MCP tools.
 
 ## What It Does
 
@@ -12,7 +12,7 @@ Each WhatsApp number gets its own isolated process with its own runtime mode:
 |------|-------------|----------|
 | **passive** | Stores messages. Does nothing else. Manual read/reply via MCP tools. | Personal number — just want the data accessible |
 | **chat** | Calls an LLM API (Anthropic/OpenAI) with optional RAG via Pinecone. Stateless request-response. | Customer support bot, Q&A assistant |
-| **agent** | Spawns a Claude Code SDK subprocess with tool access, file I/O, and multi-turn sessions. | Autonomous task execution, research, project work |
+| **agent** | Spawns an agent-CLI subprocess with tool access, file I/O, and multi-turn sessions. `claude-cli` is the default provider; `codex-cli`, `gemini-cli`, and `opencode-cli` and the direct OpenAI/Anthropic APIs are also supported, with fallback chains and primary-model probes. | Autonomous task execution, research, project work |
 
 These are not configuration flags on one bot. They are different codepaths with different message flows, different dependencies, and different failure modes. Treating them as settings on the same runtime was the mistake the previous two repos made.
 
@@ -76,7 +76,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 ### Host deployment (systemd / launchd)
 
-- **Node.js >= 24.0** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
+- **Node.js >= 24.0.0 and < 26** (pinned to `24.15.0` via `.nvmrc` / `volta` / `packageManager`) — native `--experimental-strip-types`, no transpilation (`node -v` to check)
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
 - **macOS with launchd** — per-user `LaunchAgents` plists for the fleet and each instance; see the [macOS subsection](#macos-launchd) below
 - **GNOME Keyring** (`libsecret-tools`) on Linux, macOS Keychain on Darwin, or environment variables for API keys — the Linux setup script checks GNOME Keyring; the macOS runbook covers Keychain-backed secrets
@@ -148,13 +148,13 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 
 ```
 src/
-  core/           DB, access control, messages, durability engine, JID handling
-  transport/      Baileys v7 — auth, reconnection, parsing, event routing
+  core/           DB, access control, messages, durability engine, reply-guarantee, JID handling
+  transport/      Baileys v7 (default) — auth, reconnection, parsing, event routing; optional Twilio SMS transport (webhook + voicemail)
   mcp/            Tool registry (162 documented tools; 160 always registered + 2 conditional), Unix socket server, 20 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
-    agent/        Claude Code subprocess — sessions, sandbox, outbound queue
+    agent/        Agent-CLI subprocess (claude-cli default; codex/gemini/opencode-cli, openai/anthropic-api) — providers, fallback chains, sessions, sandbox, outbound queue
   fleet/          Fleet management server — discovery, health polling, API routes, WebSocket
     routes/       REST API handlers (lines, ops, data, feed, metrics)
     discovery.ts  Config-dir scanner, instance registry
@@ -170,7 +170,7 @@ src/
 console/
   src/
     components/   30+ React components (modals, cards, badges, charts, forms, wizards)
-    pages/        4 pages (SoupKitchen, Ops, Inbox, LineDetail)
+    pages/        6 lazy-loaded pages (SoupKitchen, LineDetail, Inbox, Metrics, Operator, Landing); `/ops` redirects to `/operator`
     hooks/        React Query data hooks, WebSocket realtime, toast system
     lib/          API client with mock fallback, chart utils, formatting
     index.css     Design system — @theme tokens, @layer base/utilities, component classes
@@ -237,6 +237,15 @@ The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the 
 | `POST` | `/api/lines/:name/groups/:jid/requests` | Approve or reject pending join requests |
 | `GET` | `/api/lid-mappings` | List cross-instance LID to phone JID mappings |
 | `POST` | `/api/lid-mappings/sync` | Sync LID mappings from another instance |
+| `GET` | `/api/providers` | List the agent provider catalog and per-provider availability |
+| `GET` | `/api/lines/:name/provider-status` | Provider readiness + fallback status for one instance |
+| `PUT` | `/api/credentials/:name` | Store a provider credential (write-only) |
+| `DELETE` | `/api/credentials/:name` | Delete a stored provider credential |
+| `POST` | `/api/credentials/:name/verify` | Verify a stored credential against its provider |
+| `GET` | `/api/credentials/:name` | Returns `405` — credentials are write-only and never read back |
+| `GET` | `/api/fleet/silences` | List active fleet alert silences |
+| `POST` | `/api/fleet/silence` | Add a fleet alert silence |
+| `DELETE` | `/api/fleet/silence/:name` | Remove a fleet alert silence |
 | `GET` | `/api/version` | Report fleet server build version |
 | `POST` | `/api/update` | Trigger a fleet self-update |
 
@@ -311,6 +320,8 @@ Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm`
 
 **linkedStatus** — Each instance in the fleet API includes `linkedStatus: 'linked' | 'unlinked'` based on whether Baileys auth credentials exist. Unlinked instances show a "Re-link" button instead of "Restart" since they need QR authentication before they can run.
 
+**Reply Guarantee Protocol (RGP)** — Reliability layer ensuring every inbound user message eventually produces either a terminal echoed outbound response or an explicit fallback notice. Layered above the durability journal: a transcript-visibility parser, hook-tier queue + MCP client, a Stop hook, a drain daemon (timer/launchd), and the runtime watchdog (`ReplyGuaranteeManager`) that arms per inbound event and disarms when delivery is confirmed. See [docs/reply-guarantee.md](docs/reply-guarantee.md).
+
 ## Health & Monitoring
 
 Each instance runs an HTTP health server:
@@ -325,6 +336,22 @@ The health server also exposes operational endpoints: `/send` (send messages), `
 
 The fleet server's health poller probes each instance every 5 seconds and tracks consecutive failures to determine status: `online` → `degraded` (1-2 failures) → `unreachable` (3+). The console displays this as a color-coded heartbeat strip.
 
+## Providers & Credentials
+
+The agent runtime supports a catalog of providers (`src/runtimes/agent/providers/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
+
+Provider credentials are **write-only**: `PUT /api/credentials/:name` stores a secret, `POST /api/credentials/:name/verify` checks it against its provider, `DELETE /api/credentials/:name` removes it, and `GET /api/credentials/:name` deliberately returns `405` — credentials are never read back through the API. Secrets live in the keyring (or env) per the [Configuration Reference](docs/configuration.md).
+
+## Transports
+
+Baileys v7 (one WhatsApp connection per line) is the default transport. An instance may instead select the optional **Twilio SMS** transport via `twilioConfig`, which adds webhook ingestion and voicemail handling for SMS-reachable numbers. See [docs/runbooks/twilio-transport.md](docs/runbooks/twilio-transport.md) and the `twilioConfig` section of [docs/configuration.md](docs/configuration.md) for supported features and limitations.
+
+## Reliability & Alerting
+
+- **Reply Guarantee Protocol** — every inbound message yields a reply or an explicit fallback (see [Key Concepts](#key-concepts) and [docs/reply-guarantee.md](docs/reply-guarantee.md)).
+- **BOT ERRORS pipeline** — `deploy/scripts/` collector/dispatcher/sentinel daemons capture, redact, and route runtime errors; alert throttling and runtime manifests pin the hardened surface. See [deploy/scripts/README-bot-errors.md](deploy/scripts/README-bot-errors.md).
+- **Fleet silences** — `GET/POST/DELETE /api/fleet/silence(s)` suppress alerts for known-noisy instances during maintenance.
+
 ## Testing
 
 ```bash
@@ -336,6 +363,22 @@ npm run typecheck     # tsc --noEmit
 Integration tests favor real infrastructure — real SQLite (`:memory:` or temp files) and real Unix sockets — rather than faking the layer under test, so a passing integration test reflects real behavior. Unit tests do mock at module boundaries (e.g. the WhatsApp/Baileys transport and some DB modules) where the real dependency isn't what's being exercised.
 
 Coverage includes: ingest backpressure (semaphore + overflow queue), relay guardrails (config gate + payload size cap), mark-read API (health handler + fleet proxy), realtime event poller (log mtime tracking, snapshot-diff), and design system compliance (14 regression tests + 40+ ESLint rules).
+
+## Quality Gates
+
+- `npm run verify:push:branch` — the local pre-push gate: typecheck, targeted tests, and the source/doc/surface guards. It is a **subset** of CI; some gates (the BOT ERRORS sentinel + deployer mutation gate) run only in CI, so reproduce them with `GITHUB_ACTIONS=1` when touching pinned runtime files.
+- `npm run verify:release` / `verify:publish` — broader release/publish gates.
+- Drift guards: `guard:doc-drift`, `guard:public-surface-drift` ([docs/public-surface.md](docs/public-surface.md) is the generated public-surface SSOT), `guard:work-index`, and the ESLint architectural-fitness ring (`guard:lint:src`, see [docs/architecture/fitness-taxonomy.md](docs/architecture/fitness-taxonomy.md)).
+- **Deploy-pin caveat:** `src/lib/bot-errors-outbox.ts` is hash-pinned in *two* places — `deploy/bot-errors-runtime-manifest.json` and `deploy/scripts/whatsoup-bot-errors-deploy.sh`. Any edit must bump both, and only `deploy/scripts/run-sentinel-tests.sh` (CI-only) catches the deployer pin locally.
+
+## Auxiliary Packages
+
+| Package | Purpose |
+|---------|---------|
+| [`tools/agent-runtime-probes`](tools/agent-runtime-probes) | Secret-safe diagnostic probes for agent CLI runtimes (`claude-cli`, `codex`, `opencode`, `pi`) |
+| [`tools/whatsoup_guard`](tools/whatsoup_guard) | Universal protection-layer package — drift detection, guard-event recording, deployment-neutral protection workflows |
+| [`plugins/tokenomics`](plugins/tokenomics) | Token-budget watchdog, browser-loop interrupt, instruction-surface gates, and observability for bot instances |
+| [`plugins/q-image`](plugins/q-image) | `/image` and `/image-edit` slash commands over WhatsApp (OpenAI image models + Pillow) |
 
 ## Documentation
 
@@ -349,6 +392,11 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
+| [Reply Guarantee Protocol](docs/reply-guarantee.md) | RGP architecture and its shipped layers (parser, hooks, drain daemon, runtime watchdog) |
+| [Public Surface](docs/public-surface.md) | Generated SSOT for the HTTP API and generated artifacts (guard-checked) |
+| [Twilio Transport](docs/runbooks/twilio-transport.md) | Optional Twilio SMS transport — setup, webhook, voicemail, limitations |
+| [BOT ERRORS Pipeline](deploy/scripts/README-bot-errors.md) | Error collector/dispatcher/sentinel daemons, redaction, runtime manifests |
+| [Fitness Taxonomy](docs/architecture/fitness-taxonomy.md) | ESLint architectural-fitness ring and quality-guardrail taxonomy |
 
 ## License
 

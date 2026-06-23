@@ -13,10 +13,17 @@ The invariant is:
 > echoed outbound response for that turn or a fallback notification delivered to
 > the originating chat.
 
-This document records the architecture target. The first shipped piece is the
-pure transcript parser in `deploy/hooks/lib/transcript-walk.mjs`; hook
-execution, queue state, daemons, and runtime watchdogs are intentionally split
-into later PRs.
+This document records the architecture and its shipped state. All five layers
+below are now implemented: the pure transcript parser
+(`deploy/hooks/lib/transcript-walk.mjs`), the hook-tier state and MCP client
+helpers (`deploy/hooks/lib/rgp-state.mjs`, `deploy/hooks/lib/whatsoup-mcp-call.mjs`),
+the Stop hook (`deploy/hooks/stop-ensure-reply.mjs`), the drain daemon
+(`deploy/hooks/drain-stuck-replies.mjs`, driven by
+`deploy/scripts/reply-guarantee-drain.sh` on the
+`whatsoup-reply-guarantee.timer`/`.service` systemd units and the
+`com.whatsoup.reply-guarantee.plist` launchd agent), and the runtime watchdog
+(`ReplyGuaranteeManager` in `src/core/reply-guarantee.ts`, armed from the agent
+runtime). Layer-level status is noted inline below.
 
 
 > **Rate-limit layering note:** two independent throttles guard the fallback message, both keyed per chat — the in-process watchdog (1 per 15 min, in-memory, resets on restart) and the hook-tier drain (3 per hour, persisted per instance in `fallback-rate-limit.json`). They differ in window, threshold, and persistence; a fallback is sent only when the layer handling that path admits it. Tune them together.
@@ -35,29 +42,36 @@ state machine, duplicate chat/JID normalization, or write a second audit store.
 
 ## Layered Design
 
-RGP is decomposed into independently reviewable layers:
+RGP is decomposed into independently reviewable layers, all now shipped:
 
-1. Transcript visibility parser.
-   A pure hook-tier helper reads Claude transcript JSONL and decides whether the
-   assistant produced a visible reply after the most recent human user turn.
+1. Transcript visibility parser (shipped).
+   A pure hook-tier helper (`deploy/hooks/lib/transcript-walk.mjs`) reads Claude
+   transcript JSONL and decides whether the assistant produced a visible reply
+   after the most recent human user turn.
 
-2. Hook-tier state and MCP client helpers.
-   Later hook PRs will need a per-instance queue and a small UNIX-socket JSON-RPC
-   client. Those helpers stay under `deploy/hooks/lib/` because hook processes
-   cannot import runtime TypeScript modules.
+2. Hook-tier state and MCP client helpers (shipped).
+   A per-instance queue (`deploy/hooks/lib/rgp-state.mjs`) and a small UNIX-socket
+   JSON-RPC client (`deploy/hooks/lib/whatsoup-mcp-call.mjs`). Those helpers stay
+   under `deploy/hooks/lib/` because hook processes cannot import runtime
+   TypeScript modules.
 
-3. Stop and PostToolUse hooks.
-   The Stop hook will use transcript visibility to enqueue a fallback intent when
-   a session ends without a visible reply. The PostToolUse hook will capture
-   bounded tool-error context for that fallback.
+3. Stop hook (shipped).
+   The Stop hook (`deploy/hooks/stop-ensure-reply.mjs`) uses transcript
+   visibility to enqueue a fallback intent when a session ends without a visible
+   reply, capturing bounded tool-error context for that fallback.
 
-4. Drain daemon.
-   A daemon will retry queued fallback intents when the in-session hook could not
-   send immediately.
+4. Drain daemon (shipped).
+   `deploy/hooks/drain-stuck-replies.mjs` retries queued fallback intents when the
+   in-session hook could not send immediately. It is driven by
+   `deploy/scripts/reply-guarantee-drain.sh` on the
+   `whatsoup-reply-guarantee.timer`/`.service` systemd units (and the
+   `com.whatsoup.reply-guarantee.plist` launchd agent on macOS).
 
-5. Runtime watchdog.
-   The runtime-owned manager will arm per inbound event and disarm when the
-   existing durability journal observes a terminal echoed outbound response.
+5. Runtime watchdog (shipped).
+   The runtime-owned manager (`ReplyGuaranteeManager` in
+   `src/core/reply-guarantee.ts`, armed from the agent runtime) arms per inbound
+   event and disarms when the existing durability journal observes a terminal
+   echoed outbound response.
 
 The runtime watchdog is the root guarantee. Hooks and daemons are recovery
 coverage for agent/session boundaries.
@@ -107,5 +121,6 @@ For the transcript parser:
 - Tool-result-only user messages are ignored.
 - Malformed transcript lines are tolerated.
 
-Later PRs add queue, daemon, runtime, and integration tests without widening the
-scope of this parser PR.
+The queue, daemon, runtime watchdog, and their tests have since shipped as
+separate layers (see the Layered Design section); runtime watchdog behavior is
+covered by `tests/core/reply-guarantee.test.ts`.
