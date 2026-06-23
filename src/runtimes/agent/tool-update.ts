@@ -183,6 +183,14 @@ export function humanizeError(_toolName: string, text: string): string | null {
 
   return null;
 }
+/** Strip Claude's internal XML-like wrapper tags from tool_result error content. */
+export function stripToolErrorTags(content: string): string {
+  return content
+    .replace(/<\/?tool_use_error>/g, '')
+    .replace(/<\/?error>/g, '')
+    .trim();
+}
+
 /**
  * Classify a tool_result error as either a blocked tool (permission/hook denial),
  * cancelled, or a genuine execution error. Returns an appropriate ToolUpdate with
@@ -190,10 +198,7 @@ export function humanizeError(_toolName: string, text: string): string | null {
  */
 export function classifyToolError(toolName: string, content: string): ToolUpdate {
   // Strip internal XML-like tags from Claude error content
-  const cleaned = content
-    .replace(/<\/?tool_use_error>/g, '')
-    .replace(/<\/?error>/g, '')
-    .trim();
+  const cleaned = stripToolErrorTags(content);
 
   const lower = cleaned.toLowerCase();
 
@@ -265,6 +270,18 @@ export function isOperatorActionableToolError(content: string): boolean {
     lower.includes('context length') ||
     lower.includes('max_tokens')
   );
+}
+
+/**
+ * A `cancelled` tool_result that is a parallel-batch *sibling* cancellation:
+ * when one tool in a parallel call errors, the runtime cancels the remaining
+ * siblings, each emitting `Cancelled: parallel tool call <Tool>(...) errored`.
+ * The originating error pages on its own merits; the sibling cancellation is a
+ * derivative with no operator action. Genuine user/abort cancellations (bare
+ * `Cancelled`, "was cancelled by the user") are NOT matched and still page.
+ */
+export function isParallelSiblingCancellation(content: string): boolean {
+  return stripToolErrorTags(content).toLowerCase().startsWith('cancelled: parallel tool call');
 }
 
 /**
