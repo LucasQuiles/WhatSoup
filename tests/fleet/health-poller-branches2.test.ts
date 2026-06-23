@@ -61,6 +61,12 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 type AlertMockCall = [string, string, ...unknown[]];
+type AlertCriticalAsset = {
+  failure?: {
+    code?: string;
+    confidence?: string;
+  };
+};
 
 type LoggedOutConfirmationContract = {
   confirmed: boolean;
@@ -98,6 +104,13 @@ function findAlertEvidence(instance: string, source: string): string {
     ([i, s]) => i === instance && s === source,
   );
   return String(call?.[3] ?? '');
+}
+
+function findAlertCriticalAsset(instance: string, source: string): AlertCriticalAsset | undefined {
+  const call = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+    ([i, s]) => i === instance && s === source,
+  );
+  return call?.[5] as AlertCriticalAsset | undefined;
 }
 
 describe('HealthPoller — branch coverage supplement #2', () => {
@@ -236,6 +249,10 @@ describe('HealthPoller — branch coverage supplement #2', () => {
       expect(evidence).toContain('state=unknown');
       expect(evidence).toContain('uptime_seconds=600');
       expect(evidence).toContain('weak_signal_polls=3');
+      expect(findAlertCriticalAsset('remote-1', 'instance_logged_out')?.failure).toMatchObject({
+        code: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'probable',
+      });
     });
   });
 
@@ -299,7 +316,7 @@ describe('HealthPoller — branch coverage supplement #2', () => {
   // Line 419-421: HTTP 200 body that is NOT caught by the loggedOutSignal
   // heuristic but IS classified as logged_out by classifyHealthSnapshot. This
   // exercises the `classification.status === 'logged_out'` arm on the 200 path
-  // (distinct from the loggedOutSignal.loggedOut arm at 415).
+  // (distinct from the loggedOutSignal.confirmed arm).
   // -------------------------------------------------------------------------
   describe('200-OK body classified logged_out by snapshot (not heuristic)', () => {
     it('routes through updateFromHealthSnapshot for a logged_out classification', async () => {

@@ -109,6 +109,7 @@ export const LOGGED_OUT_CONFIRMATION_CONTRACT = Object.freeze({
 
 export type LoggedOutConfirmationReason = typeof LOGGED_OUT_CONFIRMATION_CONTRACT.reasons[number];
 export type LoggedOutFailureCode = typeof LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes[number];
+type LoggedOutAlertFailureCode = Exclude<LoggedOutFailureCode, 'NONE'>;
 
 export interface LoggedOutConfirmation {
   confirmed: boolean;
@@ -425,7 +426,7 @@ export class HealthPoller {
             if (failureHealth !== null) {
               const loggedOutSignal = this.classifyLoggedOutSignal(name, failureHealth);
               if (loggedOutSignal.confirmed) {
-                this.updateDegraded(name, failureHealth, 'logged_out', loggedOutSignal.evidence, true, 'instance_logged_out', undefined, true, loggedOutSignal.weak);
+                this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
               const classification = classifyHealthSnapshot(failureHealth);
@@ -450,7 +451,7 @@ export class HealthPoller {
 
         // HTTP 200 but body signals degraded/unhealthy → treat as degraded
         if (loggedOutSignal.confirmed) {
-          this.updateDegraded(name, health, 'logged_out', loggedOutSignal.evidence, true, 'instance_logged_out', undefined, true, loggedOutSignal.weak);
+          this.updateLoggedOutFromConfirmation(name, health, loggedOutSignal);
           return;
         }
         if (classification.status === 'logged_out') {
@@ -662,6 +663,34 @@ export class HealthPoller {
     this.appendLifecycleEvidence(evidence, lifecycle);
     this.appendAuthBondEvidence(evidence, healthAuthBond ?? lifecycleAuthBond);
     return this.uniqueEvidence(evidence).join(' ');
+  }
+
+  private updateLoggedOutFromConfirmation(
+    name: string,
+    health: Record<string, unknown>,
+    confirmation: LoggedOutConfirmation,
+  ): void {
+    this.updateDegraded(
+      name,
+      health,
+      'logged_out',
+      confirmation.evidence,
+      true,
+      'instance_logged_out',
+      undefined,
+      true,
+      confirmation.weak,
+      confirmation.confidence,
+      'instance_logged_out',
+      confirmation.evidence.split(/\s+/).filter(Boolean),
+      this.loggedOutAlertFailureCode(confirmation),
+    );
+  }
+
+  private loggedOutAlertFailureCode(confirmation: LoggedOutConfirmation): LoggedOutAlertFailureCode {
+    return confirmation.failureCode === 'NONE'
+      ? 'WA_AUTH_BOND_SERVER_REVOKED'
+      : confirmation.failureCode;
   }
 
   private appendLifecycleEvidence(evidence: string[], lifecycle: Record<string, unknown> | null): void {
@@ -991,6 +1020,7 @@ export class HealthPoller {
     statusConfidence: StatusConfidence = loggedOutWeak ? 'inferred' : 'confirmed',
     statusReason = alertSource,
     statusEvidence: string[] = evidence.split(/\s+/).filter(Boolean),
+    loggedOutFailureCode: LoggedOutAlertFailureCode = 'WA_AUTH_BOND_SERVER_REVOKED',
   ): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
@@ -1034,7 +1064,7 @@ export class HealthPoller {
         `whatsoup@${name} appears logged out`,
         evidence,
         'critical',
-        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak),
+        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak, loggedOutFailureCode),
       );
       this.trackActiveAlertSource(name, 'instance_logged_out', emitted);
       if (emitted) this.dropSupersededAlertSources(name, ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT);
@@ -1176,6 +1206,7 @@ export class HealthPoller {
     name: string,
     evidence: string,
     weak: boolean,
+    failureCode: LoggedOutAlertFailureCode,
   ): BotErrorsCriticalAssetDiagnostic {
     return {
       asset: {
@@ -1184,7 +1215,7 @@ export class HealthPoller {
         owner: 'whatsoup',
       },
       failure: {
-        code: 'WA_AUTH_BOND_SERVER_REVOKED',
+        code: failureCode,
         domain: 'account_linkage',
         recoverability: 'manual_relink_required',
         confidence: weak ? 'probable' : 'confirmed',
