@@ -43,7 +43,7 @@ describe('process lock ownership', () => {
       bootId: 'boot-current',
     });
 
-    expect(handle).toEqual({ path: lockPath, pid: 11111, token: 'owned-token' });
+    expect(handle).toEqual({ path: lockPath, pid: 11111, token: 'owned-token', reclaimedPreviousBoot: false });
     expect(readProcessLockPayload(lockPath)).toEqual({
       pid: 11111,
       token: 'owned-token',
@@ -71,6 +71,56 @@ describe('process lock ownership', () => {
       pid: 22222,
       token: 'other-token',
     });
+  });
+
+  it('does not unlink a lock replaced AFTER the ownership check (release race)', () => {
+    const lockPath = makeLockPath();
+    const handle = acquireProcessLock(lockPath, {
+      pid: 11111,
+      token: 'owned-token',
+      now: new Date('2026-06-13T00:00:00.000Z'),
+      bootId: 'boot-current',
+    });
+
+    // After we confirm ownership, a different holder replaces the lock before the
+    // unlink. The identity-checked unlink must re-read and refuse to delete it.
+    const released = releaseProcessLock(handle, {
+      beforeReleaseUnlink: () => {
+        writeFileSync(lockPath, JSON.stringify({
+          pid: 22222,
+          token: 'other-token',
+          startedAt: '2026-06-13T00:05:00.000Z',
+          bootId: 'boot-current',
+        }), { flag: 'w' });
+      },
+    });
+
+    expect(released).toBe(false);
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: 22222,
+      token: 'other-token',
+    });
+  });
+
+  it('treats a non-positive, fractional, or unsafe pid as corrupt (null payload)', () => {
+    const lockPath = makeLockPath();
+    for (const badPid of [0, -1, 3.5, Number.MAX_SAFE_INTEGER + 1]) {
+      writeFileSync(lockPath, JSON.stringify({
+        pid: badPid,
+        token: 'tok',
+        startedAt: '2026-06-13T00:00:00.000Z',
+        bootId: 'boot-current',
+      }), { flag: 'w' });
+      expect(readProcessLockPayload(lockPath)).toBeNull();
+    }
+    // A valid positive integer pid still parses.
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 4321,
+      token: 'tok',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-current',
+    }), { flag: 'w' });
+    expect(readProcessLockPayload(lockPath)?.pid).toBe(4321);
   });
 
   it('fails closed on a same-boot stale lock instead of deleting and stealing it', () => {
@@ -135,13 +185,93 @@ describe('process lock boot-id reclaim', () => {
       isProcessAlive: () => false,
     });
 
-    expect(handle).toEqual({ path: lockPath, pid: 44444, token: 'new-token' });
+    expect(handle).toEqual({ path: lockPath, pid: 44444, token: 'new-token', reclaimedPreviousBoot: true });
     expect(readProcessLockPayload(lockPath)).toEqual({
       pid: 44444,
       token: 'new-token',
       startedAt: '2026-06-21T00:00:00.000Z',
       bootId: 'boot-B',
     });
+  });
+
+  it('does not unlink a lock replaced during reclaim (concurrent post-reboot start)', () => {
+    const lockPath = makeLockPath();
+    // A prior-boot, dead-holder lock — eligible for reclaim.
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'prior-boot-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-A',
+    }));
+
+    // Simulate a concurrent same-instance starter that wins the reclaim and
+    // installs its own LIVE lock between our read and our unlink. The
+    // identity-checked unlink must NOT delete the winner's lock (that would be
+    // split-brain); we must fail closed as active instead.
+    let replaced = false;
+    const err = catchError(() => acquireProcessLock(lockPath, {
+      pid: 44444,
+      token: 'loser-token',
+      bootId: 'boot-B',
+      isProcessAlive: (pid) => pid === 55555,
+      beforeReclaimUnlink: () => {
+        if (replaced) return;
+        replaced = true;
+        writeFileSync(lockPath, JSON.stringify({
+          pid: 55555,
+          token: 'winner-token',
+          startedAt: '2026-06-21T00:00:00.000Z',
+          bootId: 'boot-B',
+        }), { flag: 'w' });
+      },
+    }));
+
+    expect(replaced).toBe(true);
+    expect(isProcessLockError(err)).toBe(true);
+    if (!isProcessLockError(err)) throw new Error('expected process lock error');
+    expect(err.reason).toBe('active');
+    expect(err.existingPid).toBe(55555);
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({
+      pid: 55555,
+      token: 'winner-token',
+    });
+  });
+
+  it('reclaim identity check compares the full payload, not just token+bootId', () => {
+    const lockPath = makeLockPath();
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'prior-boot-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-A',
+    }));
+
+    // Between read and unlink the lock is replaced by one sharing token+bootId but
+    // differing in pid/startedAt. A token+bootId-only check would unlink it and
+    // steal a LIVE holder's lock; full-identity comparison must refuse.
+    let replaced = false;
+    const err = catchError(() => acquireProcessLock(lockPath, {
+      pid: 44444,
+      token: 'new-token',
+      bootId: 'boot-B',
+      isProcessAlive: (pid) => pid === 99999,
+      beforeReclaimUnlink: () => {
+        if (replaced) return;
+        replaced = true;
+        writeFileSync(lockPath, JSON.stringify({
+          pid: 99999,
+          token: 'prior-boot-token',
+          startedAt: '2026-06-21T00:00:00.000Z',
+          bootId: 'boot-A',
+        }), { flag: 'w' });
+      },
+    }));
+
+    expect(replaced).toBe(true);
+    expect(isProcessLockError(err)).toBe(true);
+    if (!isProcessLockError(err)) throw new Error('expected process lock error');
+    expect(err.reason).toBe('active');
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ pid: 99999 });
   });
 
   it('blocks as active when a previous-boot lock pid is still alive (liveness beats boot-id)', () => {
