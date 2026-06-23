@@ -3,10 +3,10 @@
 
 - Binding: `bindings/whatsoup.arc.json`
 - ARC version: `0.1.0`
-- Payload SHA: `sha256:a85e5c499312342a8618548f785b4536b21ff957755f5e78d5e43584bc4cbf5b`
+- Payload SHA: `sha256:d0cb914deae836b459a6ea0c70ca0d5d0997eed332939c817dec5c490aba73b6`
 - Modules: app-runtime, telemetry, verification
 - Owns: per-instance-config, provider-fallback-state, runtime-health, generated-workspace, plugin-scope, mcp-tool-scope, sandbox-policy
-- Emits: none
+- Emits: verification-record
 
 This shim is a generated pointer, not live runtime proof. Runtime claims still require
 source, probe, test, log, or verification-record evidence.
