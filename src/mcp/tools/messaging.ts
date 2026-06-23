@@ -25,7 +25,9 @@ import {
   evaluateOutboundMessageSafety,
   redactInternalArtifacts,
   resolveOutboundAudience,
+  type OutboundMessageSafetyDecision,
 } from '../../core/outbound-message-safety.ts';
+import { emitAlert } from '../../lib/emit-alert.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
@@ -59,6 +61,29 @@ function sanitizeError(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Client-safety: route diverted false-claim evidence to ops
+// ---------------------------------------------------------------------------
+
+// When a client-bound message is diverted (the agent made a false infra-block
+// self-diagnosis), route the sanitized original diagnostic to BOT ERRORS so ops
+// learns the agent malfunctioned. The original incident was invisible to ops
+// until the client reported it; this closes that loop. emitAlert is sync, never
+// throws, and durably queues — safe to call inline on the send path.
+function routeDivertToOps(
+  decision: OutboundMessageSafetyDecision | null,
+  instanceName: string | undefined,
+): void {
+  if (!decision || decision.action !== 'divert' || !decision.opsEvidence) return;
+  emitAlert(
+    instanceName ?? 'unknown',
+    'outbound_message_guard',
+    'agent emitted a false infra-status claim to a client; diverted to a generic reply',
+    decision.opsEvidence,
+    'warning',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Deps interface
 // ---------------------------------------------------------------------------
 
@@ -79,6 +104,8 @@ export interface MessagingDeps {
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
   pollRegistrar?: PollRegistrar;
+  /** Instance/bot name, used to attribute outbound-guard ops alerts. */
+  instanceName?: string;
 }
 
 const POLL_QUESTION_MAX_CHARS = 900;
@@ -161,6 +188,7 @@ export function registerMessagingTools(
     }),
     handler: async (params, session: SessionContext) => {
       let formattedText = '';
+      let guardDecision: OutboundMessageSafetyDecision | null = null;
       try {
         await sendPipeline.executeSend(params, async (prepared) => {
           const viewOnce = params['viewOnce'] as boolean | undefined;
@@ -184,13 +212,13 @@ export function registerMessagingTools(
           // addressed to the configured BOT ERRORS ops channel are treated as
           // ops (verbatim). Everything else defaults to `client` — the
           // conservative direction (a false-positive redaction on an operator
-          // message is low-harm; a leak to a client is high-harm).
-          // NOTE: routing decision.opsEvidence to BOT ERRORS is deferred to a
-          // follow-up (needs the instance name via register-all) — see plan
-          // Lane 2 / OPERATIONAL_PLAN Task 5. This PR delivers leak prevention.
+          // message is low-harm; a leak to a client is high-harm). On divert,
+          // routeDivertToOps (after the send) routes the sanitized diagnostic to
+          // BOT ERRORS so ops learns the agent malfunctioned.
           transformPrepared(prepared: PreparedTextSend): PreparedTextSend {
             const audience = resolveOutboundAudience(prepared.chatJid);
             const decision = evaluateOutboundMessageSafety({ text: prepared.text, audience });
+            guardDecision = decision;
             if (decision.action === 'allow') return prepared;
             return {
               ...prepared,
@@ -231,6 +259,7 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
+      routeDivertToOps(guardDecision, deps.instanceName);
       return { sent: true, text: formattedText };
     },
   });
@@ -261,14 +290,14 @@ export function registerMessagingTools(
       // Client-safety guardrail: reply_message sends agent free-text straight to
       // transport (it does not use the send pipeline), so it must apply the same
       // guard as send_message or it is a trivial bypass.
-      const safeText = evaluateOutboundMessageSafety({
+      const replyDecision = evaluateOutboundMessageSafety({
         text,
         audience: resolveOutboundAudience(chatJid),
-      }).text;
+      });
 
       try {
         const content: Record<string, unknown> = {
-          text: safeText,
+          text: replyDecision.text,
           contextInfo: {
             stanzaId: row!.message_id,
             participant: row!.sender_jid,
@@ -281,6 +310,7 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
+      routeDivertToOps(replyDecision, deps.instanceName);
       return { sent: true, quotedMessageId: messageId };
     },
   });
@@ -389,10 +419,11 @@ export function registerMessagingTools(
 
       // Client-safety guardrail: an edit replaces sent client text, so it is
       // another agent free-text vector and must apply the same guard.
-      const safeText = evaluateOutboundMessageSafety({
+      const editDecision = evaluateOutboundMessageSafety({
         text: newText,
         audience: resolveOutboundAudience(chatJid),
-      }).text;
+      });
+      const safeText = editDecision.text;
 
       try {
         await connection.sendRaw(chatJid, {
@@ -407,6 +438,7 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
+      routeDivertToOps(editDecision, deps.instanceName);
       return { edited: true, messageId, newText: safeText };
     },
   });

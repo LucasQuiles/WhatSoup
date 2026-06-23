@@ -8,6 +8,11 @@ import { registerMessagingTools, type MessagingDeps, type PollRegistrar } from '
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { emitAlert } from '../../../src/lib/emit-alert.ts';
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -170,6 +175,7 @@ describe('registerMessagingTools', () => {
   let deps: MessagingDeps;
 
   beforeEach(() => {
+    vi.mocked(emitAlert).mockClear();
     registry = new ToolRegistry();
     db = makeDb();
     calls = makeCalls();
@@ -177,6 +183,7 @@ describe('registerMessagingTools', () => {
     deps = {
       connection,
       db,
+      instanceName: 'test-bot',
       profiles: createProfileRegistry({
         satellite: { prefix: '[SAT] ', tag: ' #satellite', linkPreview: 'off' },
       }),
@@ -230,6 +237,38 @@ describe('registerMessagingTools', () => {
       expect(sent).not.toContain('agent-sandbox.sh');
       expect(sent).not.toContain('sandbox-policy.json');
       expect(sent).toContain('temporary issue');
+    });
+
+    it('alerts ops with sanitized diagnostic evidence when a client message is diverted', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        { text: 'All tools are blocked because agent-sandbox.sh is failing closed.' },
+        session,
+      );
+      expect(vi.mocked(emitAlert)).toHaveBeenCalledTimes(1);
+      const [instance, source, , evidence, severity] = vi.mocked(emitAlert).mock.calls[0];
+      expect(instance).toBe('test-bot');
+      expect(source).toBe('outbound_message_guard');
+      expect(severity).toBe('warning');
+      // the diagnostic is preserved for ops (that is the point), client never saw it
+      expect(evidence).toContain('agent-sandbox.sh');
+    });
+
+    it('does not alert ops for benign client text', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call('send_message', { text: 'See you Tuesday at 3pm.' }, session);
+      expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    });
+
+    it('does not alert ops for a mere internal-path redaction (no false claim)', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        { text: 'Config is at /Users/testuser/.claude/settings.json.' },
+        session,
+      );
+      expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
     });
 
     it('does not rewrite a send addressed to the configured BOT_ERRORS ops channel', async () => {
