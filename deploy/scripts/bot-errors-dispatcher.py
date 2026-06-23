@@ -98,6 +98,16 @@ INCIDENT_STALE_SWEEP_MAX_EVENTS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SW
 # Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
 # Default-on; fail-open (any classifier error falls through to send).
 SUPPRESS_STALE_INFO_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_STALE_INFO_RENOTIFY", True)
+# A2 / §10 C2 — liveness-gated auto-close. Do NOT auto-close a daily-health
+# incident as "aged out" while that machine's OWN daily-health monitoring is
+# itself stale: when the monitoring path is down, the incident going quiet is
+# uninformative (silence is not proof of repair). Bounded by a hold cap so
+# openIncidents still cannot grow without limit if monitoring never returns
+# (preserves the §10 C5 invariant). Fail-open: any error falls through to close.
+AUTOCLOSE_LIVENESS_GATE = env_flag("BOT_ERRORS_AUTOCLOSE_LIVENESS_GATE", True)
+AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS = positive_env_int(
+    "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS", INCIDENT_ESCALATE_SECONDS
+)
 # Explicit extra sources to force-suppress on stale renotify (CSV), beyond the
 # built-in recovery/no-op pattern set and the SSOT action==none signal.
 STALE_RENOTIFY_SUPPRESS_SOURCES = {
@@ -2278,7 +2288,10 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
         "stale_autoclose=true",
         f"closed_count={len(keys)}",
         f"closed_keys={preview}",
-        "reason=non-actionable self-healed incidents past escalate horizon; removed from open state",
+        "reason=non-actionable incidents AGED OUT past escalate horizon; "
+        "removed from open state to bound incident state. recovery UNVERIFIED "
+        "(silence is not proof of repair — esp. if the monitoring path was down); "
+        "each will REOPEN automatically if the condition still fails on the next run.",
     ]
     return {
         "schemaVersion": 1,
@@ -2289,7 +2302,10 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
         "machine": "bot-errors",
         "instance": "dispatcher",
         "source": "stale-autoclose",
-        "summary": f"Auto-closed {len(keys)} non-actionable stale incident(s)",
+        "summary": (
+            f"Auto-closed {len(keys)} non-actionable stale incident(s) — "
+            "aged out, recovery unverified (reopens if still failing)"
+        ),
         "evidence": "\n".join(additions),
         "diagnostics": {
             "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
@@ -2700,6 +2716,33 @@ def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
     return resolved, errors
 
 
+def _machine_of_key(key: str) -> str:
+    parts = str(key).split("|")
+    return parts[0] if parts else str(key)
+
+
+def _source_of_key(key: str) -> str:
+    parts = str(key).split("|")
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) -> bool:
+    """A2 / §10 C2: is this machine's OWN daily-health cadence currently flagged
+    stale by the heartbeat-watchdog?
+
+    Signalled by an open incident whose source segment is
+    ``heartbeat-watchdog:daily_health:<machine>`` (the watchdog tracks per-machine
+    daily-health cadence). When that is open, the monitoring path that would emit a
+    FRESH failure for any of this machine's daily-health incidents is itself down,
+    so a daily-health incident going quiet is NOT evidence of recovery.
+    """
+    target = f"heartbeat-watchdog:daily_health:{machine}".lower()
+    for k in open_incidents:
+        if _source_of_key(k).lower() == target:
+            return True
+    return False
+
+
 def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
     incident_state = load_incident_state(paths)
     open_incidents = incident_state.setdefault("openIncidents", {})
@@ -2738,15 +2781,64 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 # Safety valve / §10 C5 terminal removal: a non-actionable stale
                 # incident past the escalate horizon is auto-closed (removed from
                 # open state) and reported ONCE in a consolidated summary below.
-                if age >= INCIDENT_ESCALATE_SECONDS:
+                will_close = age >= INCIDENT_ESCALATE_SECONDS
+                held_for_liveness = False
+                # A2 / §10 C2: do not close a daily-health incident as "aged out"
+                # while this machine's own daily-health monitoring is stale — the
+                # silence is uninformative, not proof of repair. Hold it (still
+                # suppressed, not sent) until monitoring returns OR the bounded hold
+                # cap elapses (§10 C5: openIncidents must stay bounded). Fail-open.
+                if will_close and AUTOCLOSE_LIVENESS_GATE:
+                    try:
+                        if _source_of_key(str(key)).startswith("daily-health") and \
+                                daily_health_monitoring_stale(
+                                    _machine_of_key(str(key)), open_incidents
+                                ):
+                            machine = _machine_of_key(str(key))
+                            # Bound the hold from when holding BEGAN (not the
+                            # incident's own age): a long-quiet incident that only
+                            # just lost monitoring should still ride out the outage.
+                            first_held = int_field(record, "autocloseFirstHeldAt")
+                            if first_held <= 0:
+                                first_held = current
+                                record["autocloseFirstHeldAt"] = first_held
+                            held_seconds = max(0, current - first_held)
+                            if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
+                                will_close = False
+                                held_for_liveness = True
+                                record["autocloseHeldForLiveness"] = True
+                                record["lastAutocloseHoldAt"] = current
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_held_for_liveness",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "reason": "daily_health_monitoring_stale",
+                                    "ageSeconds": age,
+                                    "heldSeconds": held_seconds,
+                                })
+                            else:
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_liveness_hold_cap_reached",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "heldSeconds": held_seconds,
+                                })
+                    except Exception as exc:  # fail-open: never leak the close on a bug
+                        append_dispatch_log(paths, {
+                            "type": "autoclose_liveness_gate_error",
+                            "incidentKey": key,
+                            "error": str(exc),
+                        })
+                if will_close:
                     auto_closed.append(str(key))
                 append_dispatch_log(paths, {
                     "type": "stale_renotify_suppressed",
                     "incidentKey": key,
-                    "reason": "nonactionable_self_healed",
+                    "reason": "nonactionable_aged_out_unverified",
                     "staleSuppressedCount": record.get("staleSuppressedCount"),
                     "ageSeconds": age,
-                    "willAutoClose": age >= INCIDENT_ESCALATE_SECONDS,
+                    "willAutoClose": will_close,
+                    "heldForLiveness": held_for_liveness,
                 })
                 continue
         if sent + failed >= INCIDENT_STALE_SWEEP_MAX_EVENTS:
