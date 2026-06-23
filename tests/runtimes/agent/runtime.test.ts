@@ -3575,6 +3575,7 @@ describe('AgentRuntime', () => {
       'runtime-tool-error:claude-cli:Bash',
       'Agent tool failure: Bash',
       expect.stringContaining('runtime_source=src/runtimes/agent/runtime.ts:tool_result'),
+      'warning',
     );
     const evidence = mockEmitAlert.mock.calls[0]?.[3] as string;
     expect(evidence).toContain('provider=claude-cli');
