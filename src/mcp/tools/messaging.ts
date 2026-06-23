@@ -27,7 +27,7 @@ import {
   resolveOutboundAudience,
   type OutboundMessageSafetyDecision,
 } from '../../core/outbound-message-safety.ts';
-import { emitAlert } from '../../lib/emit-alert.ts';
+import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
@@ -74,7 +74,9 @@ function routeDivertToOps(
   instanceName: string | undefined,
 ): void {
   if (!decision || decision.action !== 'divert' || !decision.opsEvidence) return;
-  emitAlert(
+  // emitAlertChecked (not raw emitAlert) per the BOT ERRORS governance contract —
+  // production callers must use the checked wrapper (adds emission telemetry).
+  emitAlertChecked(
     instanceName ?? 'unknown',
     'outbound_message_guard',
     'agent emitted a false infra-status claim to a client; diverted to a generic reply',
