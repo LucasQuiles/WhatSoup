@@ -29,6 +29,7 @@ export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert';
 
 export type RedactionCategory =
   | 'home_path'
+  | 'internal_path'
   | 'internal_identifier'
   | 'tailnet_ip'
   | 'provider_secret';
@@ -81,6 +82,15 @@ export function resolveOutboundAudience(chatJid: string): OutboundAudience {
 const HOME_PATH = /\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*/g;
 // The home-prefix alone, for ops evidence (mask the username, keep structure).
 const HOME_PATH_USER = /(\/(?:Users|home)\/)[A-Za-z0-9._-]+/g;
+// Tilde-rooted home paths (`~/...`) — NOT covered by HOME_PATH. Requires `~/`
+// followed by at least one path segment so a bare `~` or `~5` is left alone.
+const TILDE_PATH = /~(?:\/[A-Za-z0-9._-]+)+/g;
+// The WhatSoup internal config/state/credential tree when it appears without a
+// home prefix (e.g. a bare `.config/whatsoup/instances/<x>/auth`). Mirrors the
+// path shapes the BOT ERRORS outbox redacts (`src/lib/bot-errors-outbox.ts`
+// CREDENTIAL_PATH); if a third consumer appears, extract a shared module.
+const WHATSOUP_TREE =
+  /(?:\.config\/whatsoup|\.local\/share\/whatsoup|auth-bond-backups)(?:\/[A-Za-z0-9._-]+)*/g;
 // Standalone runtime identifiers that should never reach a client verbatim.
 const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
   { re: /agent-sandbox\.sh/g, label: 'sandbox-hook' },
@@ -121,11 +131,20 @@ export function redactInternalArtifacts(text: string): { text: string; redaction
     out = sanitized;
   }
 
-  // Full home paths first so a path + dotfile tail collapses to one marker
-  // before the standalone-identifier pass can fire inside it.
+  // Full paths first so a path + dotfile tail collapses to one marker before the
+  // standalone-identifier pass can fire inside it. Order: absolute home paths,
+  // then tilde-rooted, then the bare WhatSoup config/state tree.
   if (HOME_PATH.test(out)) {
     out = out.replace(HOME_PATH, '[internal-path]');
     redactions.push({ category: 'home_path', label: 'home-path' });
+  }
+  if (TILDE_PATH.test(out)) {
+    out = out.replace(TILDE_PATH, '[internal-path]');
+    redactions.push({ category: 'internal_path', label: 'tilde-path' });
+  }
+  if (WHATSOUP_TREE.test(out)) {
+    out = out.replace(WHATSOUP_TREE, '[internal-path]');
+    redactions.push({ category: 'internal_path', label: 'whatsoup-tree' });
   }
 
   for (const { re, label } of INTERNAL_IDENTIFIERS) {

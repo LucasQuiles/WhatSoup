@@ -53,6 +53,35 @@ describe('redactInternalArtifacts', () => {
     expect(text).not.toContain(TAILNET_IP);
   });
 
+  it('masks tilde-rooted home paths (the WhatSoup config/state tree leaks the instance label)', () => {
+    const { text, redactions } = redactInternalArtifacts(
+      'creds at ~/.config/whatsoup/instances/personal/auth/creds.json on disk',
+    );
+    expect(text).not.toContain('~/.config/whatsoup');
+    expect(text).not.toContain('instances/personal');
+    expect(text).not.toContain('auth/creds.json');
+    expect(redactions.length).toBeGreaterThan(0);
+  });
+
+  it('masks a tilde-rooted state-dir path', () => {
+    const { text } = redactInternalArtifacts('db at ~/.local/share/whatsoup/instances/x/bot.db');
+    expect(text).not.toContain('~/.local/share/whatsoup');
+    expect(text).not.toContain('bot.db');
+  });
+
+  it('masks the WhatSoup internal config tree even without a home prefix', () => {
+    const { text } = redactInternalArtifacts('look in .config/whatsoup/instances/personal/auth here');
+    expect(text).not.toContain('.config/whatsoup');
+    expect(text).not.toContain('instances/personal');
+  });
+
+  it('does not treat a bare tilde or "~N" as a path', () => {
+    const input = 'Your order ships in ~5 days, see you ~ thanks!';
+    const { text, redactions } = redactInternalArtifacts(input);
+    expect(text).toBe(input);
+    expect(redactions).toHaveLength(0);
+  });
+
   it('redacts provider tokens and emails via the shared sanitizer', () => {
     const { text } = redactInternalArtifacts(
       `auth failed: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL}`,
