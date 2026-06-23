@@ -777,6 +777,27 @@ describe('AgentRuntime', () => {
       expect.stringContaining('.claude'),
       'agent',
       undefined, // no enabledPlugins configured
+      { hasSandbox: false }, // no sandbox config → reconciler strips any orphaned sandbox hook
+    );
+  });
+
+  it('start() also reconciles the user-level ~/.claude orphan when cwd != home', async () => {
+    const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
+    const { homedir } = await import('node:os');
+    const { join } = await import('node:path');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
+    // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
+    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
+    await runtime.start();
+
+    expect(ensurePermissionsSettings).toHaveBeenCalledWith(
+      join(homedir(), '.claude'),
+      'agent',
+      undefined,
+      { hasSandbox: false },
     );
   });
 

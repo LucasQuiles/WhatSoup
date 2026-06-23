@@ -130,4 +130,131 @@ describe('ensurePermissionsSettings', () => {
     expect(settings.enabledPlugins).toEqual(plugins);
     expect(settings.permissions.defaultMode).toBe('bypassPermissions');
   });
+
+  // --- Orphaned sandbox-hook reconciliation (hasSandbox option) ---
+  // An agent whose config no longer carries a `sandbox` block must not keep a
+  // stale fail-closed agent-sandbox PreToolUse hook in settings.json: writeSandboxArtifacts
+  // never runs for it, so the hook is unmanaged and, if its policy file goes missing,
+  // bricks every tool. ensurePermissionsSettings is the always-run reconciler that
+  // must strip such an orphan when told the instance has no sandbox.
+
+  it('strips an orphaned agent-sandbox PreToolUse hook when the agent has no sandbox config', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const existing = {
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/agent-sandbox.sh' }] },
+        ],
+        PostToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/post-tool-use-log.sh' }] },
+        ],
+        Stop: [
+          { matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/stop-ensure-reply.sh' }] },
+        ],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent', undefined, { hasSandbox: false });
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    // PreToolUse held only the orphan → key removed entirely
+    expect(settings.hooks.PreToolUse).toBeUndefined();
+    // Unrelated operational hooks preserved
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain('post-tool-use-log.sh');
+    expect(settings.hooks.Stop[0].hooks[0].command).toContain('stop-ensure-reply.sh');
+    // Permissions untouched
+    expect(settings.permissions.allow).toEqual(['Bash']);
+  });
+
+  it('only strips the agent-sandbox hook, leaving other PreToolUse hooks intact', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const existing = {
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/agent-sandbox.sh' }] },
+          { matcher: 'Bash', hooks: [{ type: 'command', command: '/x/deploy/hooks/other-guard.sh' }] },
+        ],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent', undefined, { hasSandbox: false });
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain('other-guard.sh');
+  });
+
+  it('strips the orphan AND applies enabledPlugins in one coherent write', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const existing = {
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+      enabledPlugins: { 'old@old': true },
+      hooks: {
+        PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/agent-sandbox.sh' }] }],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent', { 'new@new': true }, { hasSandbox: false });
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse).toBeUndefined(); // orphan stripped
+    expect(settings.enabledPlugins).toEqual({ 'new@new': true }); // plugins synced
+  });
+
+  it('strips the orphan AND adds default permissions when settings lacked a permissions block', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    // No permissions block — only hooks (mirrors a writeSandboxArtifacts-style file)
+    const existing = {
+      hooks: {
+        PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/agent-sandbox.sh' }] }],
+        PostToolUse: [{ matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/post-tool-use-log.sh' }] }],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent', undefined, { hasSandbox: false });
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse).toBeUndefined(); // orphan stripped
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain('post-tool-use-log.sh'); // kept
+    expect(settings.permissions.defaultMode).toBe('bypassPermissions'); // defaults added
+  });
+
+  it('preserves the agent-sandbox PreToolUse hook when the agent IS sandboxed', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    mkdirSync(claudeDir, { recursive: true });
+
+    const existing = {
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+      hooks: {
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: '/x/deploy/hooks/agent-sandbox.sh' }] },
+        ],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(existing));
+
+    ensurePermissionsSettings(claudeDir, 'agent', undefined, { hasSandbox: true });
+
+    const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain('agent-sandbox.sh');
+  });
 });

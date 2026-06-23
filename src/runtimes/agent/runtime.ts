@@ -1752,7 +1752,17 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = join(cwd, '.claude');
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins);
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        // Non-sandbox agents whose cwd != home also carry the user-level ~/.claude
+        // settings (cwd-independent, applied to every Claude session). An orphaned
+        // fail-closed agent-sandbox hook there is not covered by the cwd-derived
+        // reconcile above, so sweep it too. No-op when cwd == home (same dir).
+        if (!this.sandbox) {
+          const homeClaudeDir = join(homedir(), '.claude');
+          if (homeClaudeDir !== claudeDir) {
+            ensurePermissionsSettings(homeClaudeDir, 'agent', undefined, { hasSandbox: false });
+          }
+        }
       } catch (err) {
         log.error({ err, cwd }, 'failed to ensure permissions settings during startup');
         throw err;
