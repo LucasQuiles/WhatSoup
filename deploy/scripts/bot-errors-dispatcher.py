@@ -107,7 +107,22 @@ STALE_RENOTIFY_SUPPRESS_SOURCES = {
 }
 # Recovery / no-op source signatures: definitionally non-actionable once stale.
 STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
-STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
+# runtime-tool-error:* — an agent's own tool call failed and was self-corrected
+# inline. These are point-in-time, auto-recovered events, NOT a persistent open
+# condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
+# events (which renotify normally and trip flap-storm). Once a runtime-tool-error
+# incident goes stale (no fresh occurrence), it is definitionally non-actionable
+# → Pattern A suppresses the renotify and auto-closes it. flap_storm stays exempt
+# (handled above), so a truly stuck agent still escalates on intensity.
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
+# Pattern A (open variant) — suppress the periodic still-open renotify/age-escalation
+# for sources that are never operator-actionable even while live. A runtime-tool-error:*
+# incident is a collapsed bucket of self-corrected tool failures; the 6h "still open"
+# renotify and the age-based escalation re-page it forever with no action to take. The
+# genuine stuck-agent signal is flap-storm (intensity), handled earlier via
+# force_notify_level, so suppressing the time-based renotify here loses no real signal.
+# Default-on; fail-open (any classifier error falls through to send).
+SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY", True)
 # Pattern F — flap-storm detection (consolidate AND escalate). Default-on;
 # fail-open (any flap error falls through to normal per-event handling).
 FLAP_DETECTION = env_flag("BOT_ERRORS_FLAP_DETECTION", True)
@@ -1849,6 +1864,27 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 else age_seconds >= INCIDENT_ESCALATE_SECONDS or suppressed >= INCIDENT_ESCALATE_SUPPRESSED
             )
             if since_notified >= renotify_seconds:
+                try:
+                    suppress_open_renotify = (
+                        SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY
+                        and open_renotify_is_nonactionable(event, key)
+                    )
+                except Exception:
+                    suppress_open_renotify = False  # fail-open: send on classifier error
+                if suppress_open_renotify:
+                    # Absorb the fresh occurrence silently: keep the audit counter and
+                    # the lastSeen bookkeeping (already updated above), but do NOT
+                    # re-page or age-escalate. flap-storm (force_notify_level, handled
+                    # earlier) remains the only escalation path for a stuck agent.
+                    open_record["openRenotifySuppressedCount"] = (
+                        int_field(open_record, "openRenotifySuppressedCount") + 1
+                    )
+                    open_record["lastOpenRenotifySuppressedAt"] = current
+                    open_record["lastOpenRenotifySuppressedIso"] = now_iso()
+                    return (
+                        f"open renotify suppressed (non-actionable source) for {key}; "
+                        f"flap-storm still escalates"
+                    )
                 open_record["lastNotifiedAt"] = current
                 open_record["lastNotifiedIso"] = now_iso()
                 open_record["renotifyCount"] = int_field(open_record, "renotifyCount") + 1
@@ -2159,6 +2195,30 @@ def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     # standing action (physical relink / manual intervention) resolves to a
     # different, real action string and is NOT caught here.
     return requested_action_text(event) in (NONACTIONABLE_ACTION, stale_action_text())
+
+
+def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
+    """Pattern A (open variant): suppress the periodic still-open renotify for a
+    source that is never operator-actionable even while the incident is live.
+
+    Scope = the same non-actionable prefixes as the stale path (runtime-tool-error:*,
+    provider_fallback_*) plus any explicitly configured suppress source. A
+    runtime-tool-error incident is the agent's OWN tool call failing and
+    self-correcting inline; the time-based renotify/escalation has no remediation
+    behind it. flap_storm is EXEMPT — a genuinely stuck agent still escalates
+    through force_notify_level, which is evaluated BEFORE this branch. Callers
+    wrap this fail-open: any exception => do not suppress (send).
+    """
+    source = str(event.get("source") or "")
+    alert_source = str(event.get("alertSource") or "")
+    if source == "flap_storm" or "flap_storm" in str(key):
+        return False
+    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+        return True
+    for cand in (source.lower(), alert_source.lower()):
+        if cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
+            return True
+    return False
 
 
 def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
