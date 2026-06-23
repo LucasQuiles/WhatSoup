@@ -331,6 +331,26 @@ describe('Happy path', () => {
     );
   });
 
+  // Client-safety: a chat-bot reply is a client-facing free-text path that does
+  // not go through the MCP send tools, so it must apply the same internal-artifact
+  // redaction or it is a guardrail bypass.
+  it('redacts an internal-artifact leak in the bot reply before sending', async () => {
+    const { handler, messenger, primary } = makeHandler();
+    vi.mocked(primary.generate).mockResolvedValue({
+      content: 'Sure — it is saved at /Users/testuser/.claude/settings.json on the server.',
+      inputTokens: 50,
+      outputTokens: 5,
+      model: 'claude-opus-4-6',
+      durationMs: 300,
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    const sentText = vi.mocked(messenger.sendMessage).mock.calls[0]?.[1] as string;
+    expect(sentText).not.toContain('/Users/testuser');
+    expect(sentText).not.toContain('settings.json');
+  });
+
   it('primary provider success — uses primary response, fallback never called', async () => {
     const { handler, messenger, primary, fallback } = makeHandler();
 
