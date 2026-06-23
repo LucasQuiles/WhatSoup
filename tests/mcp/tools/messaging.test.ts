@@ -600,6 +600,44 @@ describe('registerMessagingTools', () => {
       expect(call.content.contextInfo.stanzaId).toBe(messageId);
     });
 
+    // ── client-safety guardrail (Lane 2 — reply_message is the same audience
+    //    as send_message and must not be a bypass) ──────────────────────────
+    it('redacts an internal path leaked in reply text before sending', async () => {
+      const messageId = seedMessage(db, {
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        sender_jid: 'bob@s.whatsapp.net',
+        is_from_me: 0,
+      });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'reply_message',
+        { messageId, text: 'It is at /Users/testuser/.claude/settings.json on the box.' },
+        session,
+      );
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('/Users/testuser');
+      expect(sent).not.toContain('settings.json');
+    });
+
+    it('diverts a false infra-block claim in reply text to generic text', async () => {
+      const messageId = seedMessage(db, {
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        sender_jid: 'bob@s.whatsapp.net',
+        is_from_me: 0,
+      });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'reply_message',
+        { messageId, text: 'All tools are blocked because agent-sandbox.sh is failing closed.' },
+        session,
+      );
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('agent-sandbox.sh');
+      expect(sent).toContain('temporary issue');
+    });
+
     it('returns error for unknown message ID', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('reply_message', { messageId: 'nonexistent', text: 'hi' }, session);
@@ -903,6 +941,20 @@ describe('registerMessagingTools', () => {
       expect(call.content.edit.id).toBe(messageId);
     });
 
+    // ── client-safety guardrail: editing is another agent free-text vector ──
+    it('redacts an internal path in edited text before sending', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'edit_message',
+        { messageId, newText: 'actually it is /Users/testuser/.claude/settings.json' },
+        session,
+      );
+      const call = JSON.parse(calls[0]);
+      expect(call.content.text).not.toContain('/Users/testuser');
+      expect(call.content.text).not.toContain('settings.json');
+    });
+
     it('rejects editing a message not sent by me', async () => {
       const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 0 });
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
@@ -1179,6 +1231,23 @@ describe('registerMessagingTools', () => {
       expect(call.content.poll.values).toEqual(['Red', 'Blue', 'Green']);
       expect(call.content.poll.selectableCount).toBe(1);
       expect(JSON.parse(result.content[0].text).selectableCount).toBe(1);
+    });
+
+    // ── client-safety guardrail: poll question + options are agent free-text.
+    //    Redaction-only (divert/generic-replacement is nonsensical for a poll). ─
+    it('redacts an internal path leaked in a poll question and options', async () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+      await registry.call(
+        'send_poll',
+        {
+          question: 'Open /Users/testuser/.claude/settings.json?',
+          options: ['Yes', 'No, see agent-sandbox.sh'],
+        },
+        session,
+      );
+      const call = JSON.parse(calls[0]);
+      expect(call.content.poll.name).not.toContain('/Users/testuser');
+      expect(JSON.stringify(call.content.poll.values)).not.toContain('agent-sandbox.sh');
     });
 
     it('sends a multi-select poll when selectableCount allows multiple choices', async () => {
