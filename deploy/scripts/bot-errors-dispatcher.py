@@ -108,6 +108,17 @@ AUTOCLOSE_LIVENESS_GATE = env_flag("BOT_ERRORS_AUTOCLOSE_LIVENESS_GATE", True)
 AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS = positive_env_int(
     "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS", INCIDENT_ESCALATE_SECONDS
 )
+AUTOCLOSE_REOPEN_WINDOW_SECONDS = positive_env_int(
+    "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS", 30 * 24 * 60 * 60
+)
+AUTOCLOSE_REOPEN_SAMPLE_LIMIT = positive_env_int("BOT_ERRORS_AUTOCLOSE_REOPEN_SAMPLE_LIMIT", 100)
+AUTOCLOSE_PROTECTED_SOURCES = {
+    "whatsapp_device_bond_lost",
+    "instance_logged_out",
+}
+AUTOCLOSE_PROTECTED_FAILURE_CODES = {
+    "WA_AUTH_BOND_SERVER_REVOKED",
+}
 # Explicit extra sources to force-suppress on stale renotify (CSV), beyond the
 # built-in recovery/no-op pattern set and the SSOT action==none signal.
 STALE_RENOTIFY_SUPPRESS_SOURCES = {
@@ -661,6 +672,10 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # cross-run coalescing window resets every invocation and every sweep re-emits.
     if isinstance(loaded.get("staleAutocloseDigest"), dict):
         state["staleAutocloseDigest"] = loaded["staleAutocloseDigest"]
+    if isinstance(loaded.get("staleAutocloseHistory"), dict):
+        state["staleAutocloseHistory"] = loaded["staleAutocloseHistory"]
+    if isinstance(loaded.get("promotionSafety"), dict):
+        state["promotionSafety"] = loaded["promotionSafety"]
     return state
 
 
@@ -1177,6 +1192,93 @@ def int_field(record: dict[str, Any], key: str, fallback: int = 0) -> int:
         return int(record.get(key) or fallback)
     except (TypeError, ValueError):
         return fallback
+
+
+def source_from_incident_key(key: str) -> str:
+    parts = str(key).split("|")
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def is_autoclose_protected(event: dict[str, Any], key: str) -> bool:
+    sources = {
+        str(event.get("source") or "").strip().lower(),
+        str(event.get("alertSource") or "").strip().lower(),
+        source_from_incident_key(key).strip().lower(),
+    }
+    if AUTOCLOSE_PROTECTED_SOURCES & sources:
+        return True
+    if critical_failure_code(event).strip().upper() in AUTOCLOSE_PROTECTED_FAILURE_CODES:
+        return True
+    return event_has_awaiting_physical_context(event) or is_physical_intervention_signal(event)
+
+
+def prune_stale_autoclose_history(incident_state: dict[str, Any], current: int) -> dict[str, Any]:
+    history = incident_state.get("staleAutocloseHistory")
+    if not isinstance(history, dict):
+        return {}
+    for key, record in list(history.items()):
+        closed_at = int_field(record, "closedAt") if isinstance(record, dict) else 0
+        if closed_at <= 0 or current - closed_at > AUTOCLOSE_REOPEN_WINDOW_SECONDS:
+            history.pop(str(key), None)
+    if not history:
+        incident_state.pop("staleAutocloseHistory", None)
+    return history
+
+
+def record_unverified_autoclose(incident_state: dict[str, Any], key: str, current: int) -> None:
+    history = prune_stale_autoclose_history(incident_state, current)
+    if not history:
+        history = {}
+        incident_state["staleAutocloseHistory"] = history
+    history[str(key)] = {
+        "closedAt": current,
+        "closedIso": now_iso(),
+        "reason": "nonactionable_aged_out_unverified",
+        "source": source_from_incident_key(key),
+    }
+
+
+def record_autoclose_reopen_if_recent(
+    event: dict[str, Any],
+    incident_state: dict[str, Any],
+    key: str,
+    current: int,
+) -> dict[str, Any] | None:
+    history = prune_stale_autoclose_history(incident_state, current)
+    prior = history.get(key)
+    if not isinstance(prior, dict):
+        return None
+    closed_at = int_field(prior, "closedAt")
+    if closed_at <= 0:
+        history.pop(key, None)
+        return None
+    seconds_since = max(0, current - closed_at)
+    if seconds_since > AUTOCLOSE_REOPEN_WINDOW_SECONDS:
+        history.pop(key, None)
+        return None
+    event_record = {
+        "incidentKey": key,
+        "reopenedAt": current,
+        "reopenedIso": now_iso(),
+        "closedAt": closed_at,
+        "closedIso": prior.get("closedIso"),
+        "secondsSinceAutoclose": seconds_since,
+        "source": source_from_incident_key(key),
+        "eventId": event.get("id"),
+        "summary": redacted_state_text(event.get("summary"), 500),
+    }
+    safety = incident_state.setdefault("promotionSafety", {})
+    safety["autoCloseThenReopenCount"] = int_field(safety, "autoCloseThenReopenCount") + 1
+    safety["lastAutoCloseThenReopen"] = event_record
+    samples = safety.get("autoCloseThenReopen")
+    if not isinstance(samples, list):
+        samples = []
+    samples.append(event_record)
+    safety["autoCloseThenReopen"] = samples[-AUTOCLOSE_REOPEN_SAMPLE_LIMIT:]
+    history.pop(key, None)
+    if not history:
+        incident_state.pop("staleAutocloseHistory", None)
+    return event_record
 
 
 def event_created_epoch(event: dict[str, Any]) -> int | None:
@@ -2051,6 +2153,9 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
         incident_state.setdefault("lastSentAt", {})[key] = current
         existing = incident_state.setdefault("openIncidents", {}).get(key)
         existing_record = existing if isinstance(existing, dict) else {}
+        reopen_record = None if existing_record else record_autoclose_reopen_if_recent(
+            event, incident_state, key, current
+        )
         opened_at = int_field(existing_record, "openedAt", current)
         opened_iso = existing_record.get("openedIso") or now_iso()
         event_created_at_epoch = event_created_epoch(event) or current
@@ -2095,6 +2200,12 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
         asset_instance = str(critical_asset_asset(event).get("instance") or "").strip()
         if asset_instance:
             updated_record["assetInstance"] = asset_instance
+        if reopen_record is not None:
+            updated_record["autoCloseReopened"] = True
+            updated_record["autoCloseReopenCount"] = int_field(
+                existing_record, "autoCloseReopenCount"
+            ) + 1
+            updated_record["lastAutoCloseReopen"] = reopen_record
         update_awaiting_physical_tracking(event, updated_record, current)
         incident_state.setdefault("openIncidents", {})[key] = updated_record
         legacy_key = legacy_unqualified_incident_key(event)
@@ -2249,6 +2360,8 @@ def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     alert_source = str(event.get("alertSource") or "")
     if source == "flap_storm" or "flap_storm" in str(key):
         return False
+    if is_autoclose_protected(event, key):
+        return False
     if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
         return True
     for cand in (source.lower(), alert_source.lower()):
@@ -2283,6 +2396,8 @@ def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     source = str(event.get("source") or "")
     alert_source = str(event.get("alertSource") or "")
     if source == "flap_storm" or "flap_storm" in str(key):
+        return False
+    if is_autoclose_protected(event, key):
         return False
     if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
         return True
@@ -2916,6 +3031,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         # Closure is unconditional and immediate — independent of digest cadence.
         last_sent_at = incident_state.get("lastSentAt")
         for closed_key in auto_closed:
+            record_unverified_autoclose(incident_state, closed_key, current)
             open_incidents.pop(closed_key, None)
             if isinstance(last_sent_at, dict):
                 last_sent_at.pop(closed_key, None)

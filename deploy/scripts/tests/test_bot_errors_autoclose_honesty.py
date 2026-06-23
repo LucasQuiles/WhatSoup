@@ -32,6 +32,8 @@ _ENV_KEYS = [
     "BOT_ERRORS_INCIDENT_STALE_SECONDS",
     "BOT_ERRORS_INCIDENT_ESCALATE_SECONDS",
     "BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS",
+    "BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES",
+    "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS",
 ]
 
 
@@ -80,6 +82,23 @@ def _quiet_drift_record(now: int) -> dict:
         "openedAt": now - 10 * 86400,
         "lastSeenAt": now - 8 * 86400,
         "lastSummary": "daily-health found issues",
+    }
+
+
+def _alert_for_key(key: str) -> dict:
+    machine, instance, source = key.split("|", 2)
+    return {
+        "schemaVersion": 1,
+        "id": "evt-reopen-001",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": "2026-06-23T00:00:00Z",
+        "machine": machine,
+        "instance": instance,
+        "source": source,
+        "summary": "same incident reopened",
+        "evidence": "fresh failure after unverified stale auto-close",
+        "delivery": {"attempts": 1, "status": "queued"},
     }
 
 
@@ -182,3 +201,76 @@ def test_gate_off_closes_even_when_monitoring_down(tmp_path):
     # Gate off -> legacy behavior: aged-out incident is closed regardless.
     open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
     assert drift_key not in open_now
+
+
+def test_autoclose_records_reopen_history_for_promotion_backstop(tmp_path):
+    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS": str(30 * 86400)})
+    now = int(time.time())
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    _write_state(mod, {key: _quiet_drift_record(now)})
+    _capture_sends(mod)
+
+    mod.sweep_stale_incidents(mod.state_paths())
+    state = json.loads((mod.state_paths()["incident_state"]).read_text())
+    history = state["staleAutocloseHistory"][key]
+    assert history["reason"] == "nonactionable_aged_out_unverified"
+    assert history["closedAt"] > 0
+
+    mod.mark_incident_sent(_alert_for_key(key), state)
+
+    metrics = state["promotionSafety"]
+    assert metrics["autoCloseThenReopenCount"] == 1
+    assert metrics["lastAutoCloseThenReopen"]["incidentKey"] == key
+    assert metrics["lastAutoCloseThenReopen"]["secondsSinceAutoclose"] >= 0
+    reopened = state["openIncidents"][key]
+    assert reopened["autoCloseReopened"] is True
+    assert reopened["autoCloseReopenCount"] == 1
+
+
+def test_autoclose_reopen_history_expires_outside_window(tmp_path):
+    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS": "60"})
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    state = {
+        "version": 1,
+        "openIncidents": {},
+        "lastSentAt": {},
+        "staleAutocloseHistory": {
+            key: {
+                "closedAt": int(time.time()) - 3600,
+                "reason": "nonactionable_aged_out_unverified",
+            },
+        },
+    }
+
+    mod.mark_incident_sent(_alert_for_key(key), state)
+
+    assert "promotionSafety" not in state
+    assert state["openIncidents"][key].get("autoCloseReopened") is not True
+    assert key not in state.get("staleAutocloseHistory", {})
+
+
+@pytest.mark.parametrize("source", ["whatsapp_device_bond_lost", "instance_logged_out"])
+def test_bond_lost_family_is_not_unverified_autoclosed_even_if_suppression_config_matches(
+    tmp_path,
+    source: str,
+):
+    mod = _load(tmp_path, {"BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES": source})
+    now = int(time.time())
+    key = f"host-a|instance-x|{source}"
+    _write_state(mod, {
+        key: {
+            "status": "stale",
+            "openedAt": now - 10 * 86400,
+            "lastSeenAt": now - 8 * 86400,
+            "lastSummary": f"{source} still requires confirmation",
+        },
+    })
+    sends = _capture_sends(mod)
+
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 1 and failed == 0 and err is None
+    assert sends, "protected source should renotify instead of silently auto-closing"
+    state = json.loads((mod.state_paths()["incident_state"]).read_text())
+    assert key in state["openIncidents"]
+    assert key not in state.get("staleAutocloseHistory", {})
