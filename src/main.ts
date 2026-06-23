@@ -73,6 +73,9 @@ let lockHandle: ProcessLockHandle | null = null;
 function acquireLock(): void {
   try {
     lockHandle = acquireProcessLock(config.lockPath);
+    if (lockHandle.reclaimedPreviousBoot) {
+      log.warn({ path: config.lockPath }, 'reclaimed a stale lock left by a previous boot');
+    }
     log.info({ path: config.lockPath }, 'lock acquired');
   } catch (err: unknown) {
     if (!isProcessLockError(err)) throw err;

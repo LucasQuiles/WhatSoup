@@ -466,9 +466,14 @@ kill -9 <PID>
 # 3. Check for orphaned lock file
 ls -la ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
-# 4. The lock file is self-healing: on next startup, WhatSoup checks if the PID
-# in the lock is still alive. If not, it removes the stale lock and continues.
-# Force-remove only if you're sure the process is dead:
+# 4. The lock self-heals across reboots only: on startup WhatSoup reclaims a
+# lock whose recorded bootId differs from the current boot AND whose holder PID
+# is dead (the holder is provably gone); the reclaim is logged as "reclaimed a
+# stale lock left by a previous boot". A dead-pid lock from the SAME boot stays
+# fail-closed (to avoid stealing a lock from a transiently-unsignalable holder),
+# and the rare case where a reboot recycled the holder's PID onto an unrelated
+# live process also stays fail-closed (reported "active") — both still need a
+# manual removal once you're sure no real bot is running:
 rm ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
 # 5. Restart
@@ -503,19 +508,39 @@ kill <PID>
 
 ### 5.6 Lock File Prevents Startup
 
-**Symptoms:** Log shows `another instance is already running` and process exits immediately.
+**Symptoms:** Log shows `another instance is already running` (pid alive — do NOT
+remove the lock) or `lock file requires manual removal before startup` (a
+same-boot stale/corrupt lock — see below) and the process exits immediately.
+
+A lock left behind by a **reboot** is reclaimed automatically: the lock records
+the OS bootId, and on startup WhatSoup reclaims any lock whose bootId differs
+from the current boot **and whose holder PID is dead** (a successful reclaim is
+logged as `reclaimed a stale lock left by a previous boot`). The manual steps
+below are needed for a **same-boot** stale lock (a crash/SIGKILL with no reboot),
+a corrupt lock, or the rare reboot edge below.
+
+**Rare edge — `another instance is already running` after a reboot.** The
+automatic reclaim is intentionally gated on the prior holder's PID being
+**dead**. Liveness is trusted over bootId so a *false* bootId mismatch — e.g. a
+macOS `kern.boottime` shift from a post-boot NTP correction — can never evict a
+genuinely live bot (that would risk two bots on one WhatsApp account). The cost:
+if a reboot recycled the prior holder's PID onto an **unrelated live process**,
+startup reports `another instance is already running` even though no second bot
+exists. Confirm the PID is not actually a WhatSoup process (`ps -p <pid> -o
+command=`), then remove the lock manually using the steps below.
 
 ```bash
 # 1. Check who holds the lock
 cat ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
-# Output: {"pid":12345,"startedAt":"2026-03-30T10:00:00.000Z"}
+# Output: {"pid":12345,"token":"…","startedAt":"…","bootId":"…"}
 
 # 2. Check if that PID is alive
 kill -0 12345 2>&1
-# "No such process" = stale lock
+# "No such process" = the holder is dead
 
-# 3. If stale, WhatSoup removes it automatically on the next startup attempt.
-# If it doesn't (e.g. permission issue), remove manually:
+# 3. If the holder is dead and you have NOT rebooted since (same-boot stale or a
+# corrupt/legacy lock with no bootId), WhatSoup will NOT auto-remove it. Confirm
+# no live instance owns it, then remove manually:
 rm ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
 # 4. Start the service
