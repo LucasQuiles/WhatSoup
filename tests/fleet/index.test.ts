@@ -845,6 +845,40 @@ describe('fleet server -- audience-scoped auth tickets (#313)', () => {
     const res = await fetch(`${baseUrl}/api/lines?ticket=not.a.real.ticket`);
     expect(res.status).toBe(401);
   });
+
+  // C1 dependency: shell callers (whatsapp-notify/-alert) mint an `api`
+  // ticket and POST it to /api/lines/:name/send?ticket=. Lock that the
+  // audience gate admits an api ticket on the send route and rejects an
+  // sse ticket there. (The send handler itself fails on the non-running
+  // test instance — we assert only that the ticket gate did/didn't 401.)
+  it('an api-audience ticket passes the audience gate on POST /api/lines/:name/send', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(
+      `${baseUrl}/api/lines/${INST_A}/send?ticket=${encodeURIComponent(ticket)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatJid: '1111111000000000@g.us', text: 'audience-gate probe' }),
+      },
+    );
+    // 401 would mean the audience gate rejected the ticket; any other status
+    // means it reached the send handler (which then errors on the offline
+    // test instance). We assert only that the gate let it through.
+    expect(res.status).not.toBe(401);
+  });
+
+  it('an sse-audience ticket is REJECTED on POST /api/lines/:name/send (audience mismatch)', async () => {
+    const ticket = await mintApiTicket('sse');
+    const res = await fetch(
+      `${baseUrl}/api/lines/${INST_A}/send?ticket=${encodeURIComponent(ticket)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatJid: '1111111000000000@g.us', text: 'audience-gate probe' }),
+      },
+    );
+    expect(res.status).toBe(401);
+  });
 });
 
 // ---------------------------------------------------------------------------
