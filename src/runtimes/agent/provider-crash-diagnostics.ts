@@ -41,6 +41,8 @@ export function classifyProviderCrash(text: string): AgentFailureClass | undefin
     lower.includes('missing api key') ||
     lower.includes('no api key') ||
     lower.includes('unauthorized') ||
+    lower.includes('invalid authentication credentials') ||
+    lower.includes('failed to authenticate') ||
     (lower.includes('oauth') && lower.includes('expired'))
   ) {
     return 'provider_auth_required';

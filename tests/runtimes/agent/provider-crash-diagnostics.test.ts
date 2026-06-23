@@ -32,6 +32,11 @@ describe('provider crash diagnostics', () => {
     ['Please run /login before using provider CLI', 'provider_auth_required'],
     ['Invalid API key provided', 'provider_auth_required'],
     ['OAuth token expired; reconnect the provider account.', 'provider_auth_required'],
+    // 401 bodies surfaced on the crash/stderr path (parity with
+    // isProviderAuthRequiredMessage on the result-text path, #1368): a provider
+    // CLI that prints these and exits non-zero must still demote to fallback.
+    ['Failed to authenticate. API Error: 401', 'provider_auth_required'],
+    ['Invalid authentication credentials', 'provider_auth_required'],
     ['Session limit reached until 5pm', 'provider_usage_limit'],
     ['429 Too Many Requests', 'provider_rate_limit'],
     ['spawn claude ENOENT', 'provider_binary_missing'],
