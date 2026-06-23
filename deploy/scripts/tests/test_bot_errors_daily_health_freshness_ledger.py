@@ -51,7 +51,10 @@ def _load(name: str, path: Path):
 _disp = _load("bot_errors_dispatcher_freshness", _DISPATCHER)
 _wd = _load("bot_errors_watchdog_freshness", _WATCHDOG)
 
-from lib.bot_errors_daily_health import daily_health_host_from_payload  # noqa: E402
+from lib.bot_errors_daily_health import (  # noqa: E402
+    daily_health_host_from_payload,
+    normalize_hub_host,
+)
 
 
 def _daily_health_event(**kwargs: Any) -> dict[str, Any]:
@@ -100,6 +103,37 @@ def test_dispatcher_and_watchdog_derive_same_key_from_payload():
 def test_watchdog_filename_first_still_wins():
     path = Path(f"20260623T112005Z.relay-{_HOST_A}.bot-errors-health.daily-health.x.json")
     assert _wd.daily_health_event_host(path, None) == _HOST_A
+
+
+# ---------------------------------------------------------------------------
+# 1b. Hub-normalization rule (single source of truth; no drift across callers)
+# ---------------------------------------------------------------------------
+
+def test_normalize_hub_host_collapses_suffixed_hub():
+    hub = "nuc" "les"
+    assert normalize_hub_host(hub) == hub
+    assert normalize_hub_host(hub + "-32") == hub
+    assert normalize_hub_host(hub.upper()) == hub
+
+
+def test_normalize_hub_host_passes_through_non_hub():
+    assert normalize_hub_host("Relay-Alpha") == "relay-alpha"
+    assert normalize_hub_host("  spaced-host  ") == "spaced-host"
+
+
+def test_normalize_hub_host_coerces_empty_and_none():
+    assert normalize_hub_host(None) == ""
+    assert normalize_hub_host("") == ""
+
+
+def test_canonical_local_host_uses_shared_rule(monkeypatch):
+    # The watchdog's local-host resolver routes through the shared hub rule, so a
+    # suffixed/domain-qualified hub hostname collapses to the canonical key.
+    hub = "nuc" "les"
+    monkeypatch.setattr(_wd.socket, "gethostname", lambda: f"{hub}-32.local")
+    assert _wd.canonical_local_host() == hub
+    monkeypatch.setattr(_wd.socket, "gethostname", lambda: "Relay-Bravo.lan")
+    assert _wd.canonical_local_host() == "relay-bravo"
 
 
 # ---------------------------------------------------------------------------

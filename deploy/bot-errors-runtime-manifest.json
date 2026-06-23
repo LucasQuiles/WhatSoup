@@ -74,7 +74,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "beecbdabdcb9aa249ad5a7a1bd6a93b34137b5192429ae09f58f316e252a39d1",
+      "sha256": "54005e76acf3876772e53dd38e6d000df4c46938de210c683760697197d77bc4",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -169,9 +169,10 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "fd8d04eb1f3e0c95d32ea21c4823f47080510c93c55671dcb40f4d7150c8d1f8",
+      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
       "mustContain": [
         "daily_health_host_from_payload",
+        "normalize_hub_host",
         "remoteHost"
       ]
     },

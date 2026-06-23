@@ -24,6 +24,21 @@ from typing import Any
 _HUB_HOST = "nuc" "les"
 
 
+def normalize_hub_host(host: Any) -> str:
+    """Normalize a raw hostname to the canonical hub key, else return it cleaned.
+
+    The hub's hostname may carry a numeric/domain suffix (e.g. ``<hub>-32`` or
+    ``<hub>.local``); any such variant collapses to the single canonical hub key.
+    Non-hub hosts pass through stripped and lower-cased. This is the one place the
+    hub-prefix rule lives so callers (the local-host resolver and the payload host
+    derivation) cannot drift.
+    """
+    cleaned = str(host or "").strip().lower()
+    if cleaned.startswith(_HUB_HOST):
+        return _HUB_HOST
+    return cleaned
+
+
 def daily_health_host_from_payload(data: dict[str, Any] | None) -> str | None:
     """Return the canonical daily-health host key from an event/payload dict.
 
@@ -43,7 +58,6 @@ def daily_health_host_from_payload(data: dict[str, Any] | None) -> str | None:
                 host = remote_host.strip()
                 if host:
                     return host
-    machine = str(data.get("machine") or "").strip().lower()
-    if machine.startswith(_HUB_HOST):
+    if normalize_hub_host(data.get("machine")) == _HUB_HOST:
         return _HUB_HOST
     return None

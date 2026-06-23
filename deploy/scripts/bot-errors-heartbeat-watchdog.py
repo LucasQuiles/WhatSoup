@@ -22,7 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.bot_errors_daily_health import daily_health_host_from_payload
+from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 
 
@@ -596,10 +596,7 @@ def unique_hosts(hosts: list[str]) -> list[str]:
 
 
 def canonical_local_host() -> str:
-    host = socket.gethostname().split(".", 1)[0].lower()
-    if host.startswith("nucles"):
-        return "nucles"
-    return host
+    return normalize_hub_host(socket.gethostname().split(".", 1)[0])
 
 
 def local_daily_health_hosts() -> list[str]:
