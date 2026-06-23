@@ -14,6 +14,8 @@ import {
   buildSessionClearCookie,
   parseSessionCookie,
   isSameOriginRequest,
+  isSecureRequestTransport,
+  isLoopbackRequest,
 } from '../../src/fleet/console-session.ts';
 
 describe('createConsoleSessionStore', () => {
@@ -60,6 +62,15 @@ describe('session cookie helpers', () => {
     expect(cookie).toContain(`Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}`);
   });
 
+  it('omits Secure by default and on an explicit insecure transport', () => {
+    expect(buildSessionCookie('a'.repeat(64))).not.toContain('Secure');
+    expect(buildSessionCookie('a'.repeat(64), { secure: false })).not.toContain('Secure');
+  });
+
+  it('appends Secure only when the transport is confidential', () => {
+    expect(buildSessionCookie('a'.repeat(64), { secure: true })).toContain('; Secure');
+  });
+
   it('builds a clearing cookie with Max-Age=0', () => {
     const cookie = buildSessionClearCookie();
     expect(cookie).toContain(`${CONSOLE_SESSION_COOKIE}=`);
@@ -97,5 +108,61 @@ describe('isSameOriginRequest', () => {
 
   it('rejects malformed Origin values', () => {
     expect(isSameOriginRequest(req({ origin: 'not a url', host: '127.0.0.1:9099' }))).toBe(false);
+  });
+});
+
+describe('isSecureRequestTransport', () => {
+  function req(
+    headers: Record<string, string | undefined>,
+    socket: { encrypted?: boolean } = {},
+  ) {
+    return { headers, socket } as unknown as import('node:http').IncomingMessage;
+  }
+
+  it('treats X-Forwarded-Proto: https as confidential (TLS-terminating front)', () => {
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'https' }))).toBe(true);
+  });
+
+  it('reads only the first proto in a comma-joined forwarded chain', () => {
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'https, http' }))).toBe(true);
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'http, https' }))).toBe(false);
+  });
+
+  it('treats a direct encrypted socket as confidential', () => {
+    expect(isSecureRequestTransport(req({}, { encrypted: true }))).toBe(true);
+  });
+
+  it('treats plain loopback HTTP (no signals) as not confidential', () => {
+    expect(isSecureRequestTransport(req({}))).toBe(false);
+    expect(isSecureRequestTransport(req({ 'x-forwarded-proto': 'http' }, { encrypted: false }))).toBe(false);
+  });
+});
+
+describe('isLoopbackRequest', () => {
+  function req(remoteAddress: string | undefined) {
+    return { socket: { remoteAddress } } as unknown as import('node:http').IncomingMessage;
+  }
+
+  it('accepts IPv4 loopback (incl. the whole 127/8 block)', () => {
+    expect(isLoopbackRequest(req('127.0.0.1'))).toBe(true);
+    expect(isLoopbackRequest(req('127.1.2.3'))).toBe(true);
+  });
+
+  it('accepts IPv6 loopback and IPv4-mapped loopback (serve proxies to ::ffff:127.0.0.1)', () => {
+    expect(isLoopbackRequest(req('::1'))).toBe(true);
+    expect(isLoopbackRequest(req('::ffff:127.0.0.1'))).toBe(true);
+  });
+
+  it('rejects non-loopback sources (a direct remote peer after a bind regression)', () => {
+    expect(isLoopbackRequest(req('203.0.113.7'))).toBe(false);
+    expect(isLoopbackRequest(req('::ffff:203.0.113.7'))).toBe(false);
+    expect(isLoopbackRequest(req('10.0.0.5'))).toBe(false);
+    // not the loopback block despite the 127-ish prefix
+    expect(isLoopbackRequest(req('128.0.0.1'))).toBe(false);
+  });
+
+  it('fails closed on a missing/empty source address', () => {
+    expect(isLoopbackRequest(req(undefined))).toBe(false);
+    expect(isLoopbackRequest(req(''))).toBe(false);
   });
 });

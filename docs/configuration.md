@@ -179,7 +179,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS` | `0` disables | enabled | Master switch for the agent runtime's per-tool-failure operator alerts. When set to exactly `0`, `maybeEmitToolFailureAlert` returns early and no `runtime_tool_failure` alert is emitted regardless of the failure (`src/runtimes/agent/runtime.ts:868`). Any other value (including unset) leaves the alerts enabled, still subject to the downstream noise gate that pages only on infra/provider-health signatures. |
 | `BOT_ERRORS_EXPECTED_JID` | string | (unset) | Pinned expected destination group JID for the legacy alert helper (`src/lib/emit-alert.ts:101`). When set, the runtime-configured `BOT_ERRORS_JID` must equal it or the legacy helper is disabled (drift guard against misrouted alerts). When unset, the helper is disabled unless `BOT_ERRORS_REQUIRE_EXPECTED` is turned off — see below. |
 | `BOT_ERRORS_REQUIRE_EXPECTED` | boolean (`0`/`false`/`no`/`off` disables) | enabled | Whether an unset `BOT_ERRORS_EXPECTED_JID` disables the legacy alert helper (`src/lib/emit-alert.ts:95`). Default (any value other than `0`/`false`/`no`/`off`, including unset) is fail-closed: without a pinned expected JID the legacy helper stays disabled. Set to one of the disabling tokens to allow the legacy helper to run against `BOT_ERRORS_JID` without the pin. |
-| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. For Docker (`0.0.0.0`) or tailnet binds, set the override only on trusted private networks, and front the port with TLS: the console session cookie intentionally omits `Secure` (the supported default is loopback HTTP), so on a plain-HTTP remote bind both the unlock token and the cookie travel unencrypted. |
+| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. **The recommended way to reach the fleet from another host is to keep this loopback and front the port with `tailscale serve` (TLS), not to set the override** — see [Remote fleet access via tailscale serve](#remote-fleet-access-via-tailscale-serve). When a request arrives over TLS (a TLS-terminating front sets `X-Forwarded-Proto: https`, or the socket is directly encrypted) the console session cookie now carries `Secure`; a plain loopback-HTTP unlock omits it (localhost is a secure context, so the cookie still delivers). The root-token mint endpoints (`POST /api/console-session`, `/api/auth-ticket`, `/api/ws-ticket`) additionally refuse any non-loopback TCP source — behind `tailscale serve` the proxy connects from loopback, so legitimate remote mints still pass while a direct peer after a bind regression is rejected. |
 
 ### Docker Volume Layout
 
@@ -192,6 +192,62 @@ The container uses XDG base directories under `/home/whatsoup/`:
 | `state` | `/home/whatsoup/.local/state/whatsoup` | Lock files (ephemeral) |
 
 The `config` volume is critical — losing it requires re-scanning the QR code for each instance.
+
+### Remote fleet access via tailscale serve
+
+The fleet server binds loopback (`FLEET_BIND_ADDRESS=127.0.0.1`). Co-located
+callers (same host) reach it directly at `http://127.0.0.1:9099`. Remote hosts
+reach it over TLS through `tailscale serve`, which is tailnet-private (unlike
+Funnel, it is **not** exposed to the public internet), auto-provisions a
+certificate, and reverse-proxies to the loopback port. This keeps the bind
+guard satisfied with no `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE` override and
+preserves cross-host delivery.
+
+**Enable (run once on the fleet host):**
+
+```bash
+# Front the loopback fleet port with TLS on a tailnet-private 8443 listener.
+# 8443 avoids any in-use 443/10000 Funnel listeners.
+tailscale serve --bg --https=8443 http://127.0.0.1:9099
+
+# Confirm it is `serve` (private), not `funnel` (public):
+tailscale serve status
+```
+
+The endpoint is `https://<host>.<tailnet>.ts.net:8443`.
+
+**Point a remote caller at it:**
+
+```bash
+# On the remote host:
+printf 'https://<host>.<tailnet>.ts.net:8443\n' > ~/.config/whatsoup/fleet-api
+```
+
+Shell callers resolve the base URL through `~/.local/lib/whatsoup-fleet-api.sh`
+(`~/.config/whatsoup/fleet-api`), so no code change is needed per host.
+
+**Verify from a second tailnet host:**
+
+```bash
+# The console root is served unauthenticated (the HTML carries no token);
+# a 200 proves the TLS front reaches the loopback fleet.
+curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>.<tailnet>.ts.net:8443/
+```
+
+Because the unlock arrives over HTTPS, the console session cookie carries
+`Secure`; because `tailscale serve` connects to the app from loopback, the
+loopback-only mint gate still admits the request.
+
+**Rollback:**
+
+```bash
+tailscale serve reset                      # tear down the TLS front
+# restore the previous ~/.config/whatsoup/fleet-api on each remote host
+```
+
+`tailscale serve --bg` configuration persists across `tailscaled` restarts. If
+the serve proxy fails, only *remote* delivery degrades — local loopback callers
+are unaffected.
 
 ### Internal / Bootstrap
 

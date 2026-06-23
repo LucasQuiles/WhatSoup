@@ -8,8 +8,11 @@
  * session cookie plus same-origin proof in place of the root Bearer.
  *
  * Sessions are deliberately in-memory: a fleet restart relocks the console.
- * The cookie omits `Secure` because the supported default deployment is
- * loopback HTTP; non-loopback binds are gated by bind-guard.ts.
+ * The cookie carries `Secure` when the unlock request arrived over TLS — e.g.
+ * fronted by `tailscale serve` or a reverse proxy that sets
+ * X-Forwarded-Proto=https — and omits it for a direct loopback-HTTP unlock
+ * (localhost is a secure context, so the cookie is still sent). Non-loopback
+ * plain-HTTP binds are gated by bind-guard.ts.
  */
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -80,8 +83,9 @@ export function createConsoleSessionStore(opts: {
   };
 }
 
-export function buildSessionCookie(sessionId: string): string {
-  return `${CONSOLE_SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}`;
+export function buildSessionCookie(sessionId: string, opts: { secure?: boolean } = {}): string {
+  const secure = opts.secure ? '; Secure' : '';
+  return `${CONSOLE_SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}${secure}`;
 }
 
 export function buildSessionClearCookie(): string {
@@ -117,4 +121,51 @@ export function isSameOriginRequest(req: IncomingMessage): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * True when the request reached us over a confidential transport, so the
+ * session cookie can safely carry `Secure`. Two signals:
+ *   - a TLS-terminating front (e.g. `tailscale serve` or a reverse proxy)
+ *     sets `X-Forwarded-Proto: https`;
+ *   - a direct TLS socket exposes `req.socket.encrypted === true`.
+ * Spoofing `X-Forwarded-Proto` only makes the spoofer's own cookie MORE
+ * restrictive (Secure), so it is not a downgrade vector. A plain loopback-HTTP
+ * unlock yields neither signal → no `Secure` (and localhost is a secure
+ * context regardless, so the cookie is still delivered).
+ */
+export function isSecureRequestTransport(req: IncomingMessage): boolean {
+  const xfp = req.headers['x-forwarded-proto'];
+  if (typeof xfp === 'string' && xfp.split(',')[0].trim().toLowerCase() === 'https') {
+    return true;
+  }
+  const socket = req.socket as { encrypted?: boolean };
+  return socket?.encrypted === true;
+}
+
+/**
+ * True when the TCP peer is the loopback interface (defense-in-depth gate for
+ * the root-token bootstrap endpoints — C2).
+ *
+ * This checks the kernel-reported socket source address, NOT a forwardable
+ * header, so it cannot be spoofed by a remote peer. Behind `tailscale serve`
+ * (Phase B) the proxy reverse-proxies to `127.0.0.1`, so a legitimate remote
+ * mint arrives with a loopback source and is allowed — the tailnet identity is
+ * enforced at the WireGuard layer and the root token is still required on top.
+ * The gate's purpose is to fail closed if the bind ever regresses to a
+ * non-loopback address (bind-guard.ts handles startup; this handles per-request
+ * mint exposure): a direct tailnet peer hitting the raw port is refused.
+ *
+ * A missing/unparseable source address is treated as NON-loopback (fail
+ * closed). Covers IPv4 `127.0.0.0/8`, IPv6 `::1`, and IPv4-mapped
+ * `::ffff:127.x.x.x`.
+ */
+export function isLoopbackRequest(req: IncomingMessage): boolean {
+  const addr = req.socket?.remoteAddress;
+  if (typeof addr !== 'string' || addr.length === 0) return false;
+  // Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to its IPv4 tail.
+  const v4 = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
+  if (v4 === '::1') return true;
+  // 127.0.0.0/8 — any octet form starting with 127.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
 }
