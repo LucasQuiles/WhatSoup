@@ -1541,6 +1541,36 @@ def requested_action_text(event: dict[str, Any]) -> str:
     return INVESTIGATE_ACTION
 
 
+def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
+    """A4: on a RE-delivery (attempts > 1), stamp how old the event is at send
+    time and that the underlying condition was NOT re-validated before re-sending.
+
+    The dispatcher has no per-source re-probe, so a re-sent alert can describe a
+    condition that already self-healed (the "attempts=5, already false" problem).
+    These markers let a reader judge currency instead of trusting a stale echo.
+    First deliveries (attempts <= 1) are left clean. Fail-open: any error is
+    swallowed — freshness telemetry must never block or corrupt a real send.
+    """
+    try:
+        delivery = event.get("delivery")
+        if not isinstance(delivery, dict):
+            return
+        if int(delivery.get("attempts") or 0) <= 1:
+            return
+        created = event.get("createdAt")
+        if isinstance(created, str) and created.strip():
+            try:
+                created_epoch = int(
+                    datetime.fromisoformat(created.strip().replace("Z", "+00:00")).timestamp()
+                )
+                delivery["ageAtDeliverySeconds"] = max(0, current - created_epoch)
+            except Exception:
+                pass
+        delivery["revalidated"] = False
+    except Exception:
+        return
+
+
 def format_event(event: dict[str, Any]) -> str:
     event_type = str(event.get("eventType") or "alert")
     severity = str(event.get("severity") or "").lower()
@@ -1600,6 +1630,13 @@ def format_event(event: dict[str, Any]) -> str:
             900,
         ),
         event_line("dispatcher_attempts", delivery.get("attempts")),
+        event_line("delivery_age_seconds", delivery.get("ageAtDeliverySeconds")),
+        event_line(
+            "revalidated",
+            ("no — condition not re-probed before re-send (may be stale)"
+             if delivery.get("revalidated") is False else None),
+            120,
+        ),
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
         event_line("cwd", process_info.get("cwd")),
@@ -4000,6 +4037,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         return True, "suppressed"
 
     append_clear_context(event, incident_state)
+    stamp_delivery_freshness(event, int(time.time()))
     text = format_event(event)
     try:
         send_whatsapp(text)
