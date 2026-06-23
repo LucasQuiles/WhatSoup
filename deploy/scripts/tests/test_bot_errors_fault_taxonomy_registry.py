@@ -1,4 +1,5 @@
-import ast
+from __future__ import annotations
+
 import importlib.util
 import json
 import sys
@@ -24,17 +25,8 @@ def _load_script_module(script: str):
     return mod
 
 
-def _return_strings(script: str, function_name: str) -> set[str]:
-    path = ROOT / "deploy" / "scripts" / script
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == function_name:
-            values: set[str] = set()
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Constant) and isinstance(sub.value.value, str):
-                    values.add(sub.value.value)
-            return values
-    raise AssertionError(f"{script}:{function_name} not found")
+def _non_null(values: list[str | None]) -> set[str]:
+    return {value for value in values if value is not None}
 
 
 class FaultTaxonomyRegistryTest(unittest.TestCase):
@@ -53,16 +45,34 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
     def test_provider_and_source_update_failure_classes_have_registry_dispositions(self):
         registry = _load_registry()
         dispositions = set(registry["failureClassDispositions"])
+        health = _load_script_module("bot-errors-health-check.py")
 
-        emitted = set()
-        emitted |= _return_strings("bot-errors-health-check.py", "classify_source_update_failure")
-        emitted |= _return_strings("bot-errors-health-check.py", "classify_provider_probe_failure")
-        emitted |= {
+        emitted = _non_null([
+            health.classify_source_update_failure("", 1, True),
+            health.classify_source_update_failure("", 0, False),
+            health.classify_source_update_failure("Permission denied (publickey)", 1, False),
+            health.classify_source_update_failure("Could not resolve host: github.com", 1, False),
+            health.classify_source_update_failure("Network is unreachable", 1, False),
+            health.classify_source_update_failure("fatal: not a git repository", 1, False),
+            health.classify_source_update_failure("remote: Repository not found.", 1, False),
+            health.classify_source_update_failure("ssh: connect failed", 1, False),
+            health.classify_provider_probe_failure("", 1, True),
+            health.classify_provider_probe_failure("not logged in", 1, False),
+            health.classify_provider_probe_failure("usage limit reached; reset tomorrow", 1, False),
+            health.classify_provider_probe_failure("rate limit 429", 1, False),
+            health.classify_provider_probe_failure("unexpected failure", 1, False),
+            health.classify_provider_probe_failure("", 0, False),
+        ])
+        # These classes are emitted as structured health lines outside the two
+        # classifier helpers above. Keep the line-emission classes explicit so the
+        # registry cannot silently drop their disposition metadata.
+        line_embedded_classes = {
             "git_unavailable",
             "provider_compatibility_degraded",
             "provider_compatibility_unsupported",
             "provider_credential_missing",
         }
+        emitted |= line_embedded_classes
 
         missing = sorted(emitted - dispositions)
         self.assertEqual(missing, [], f"missing failureClassDispositions: {missing}")
@@ -82,6 +92,29 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
 
         missing = sorted(emitted - dispositions)
         self.assertEqual(missing, [], f"missing sourceDispositions: {missing}")
+
+    def test_registry_owner_and_test_references_exist(self):
+        registry = _load_registry()
+        missing: list[str] = []
+
+        for entry in registry["faultClasses"]:
+            owner = ROOT / entry["owner"]
+            if not owner.exists():
+                missing.append(f"faultClasses.{entry['id']}.owner={entry['owner']}")
+            for test_path in entry["tests"]:
+                if not (ROOT / test_path).exists():
+                    missing.append(f"faultClasses.{entry['id']}.tests={test_path}")
+
+        for section in ("failureClassDispositions", "sourceDispositions"):
+            for key, entry in registry[section].items():
+                owner = ROOT / entry["owner"]
+                test_path = ROOT / entry["test"]
+                if not owner.exists():
+                    missing.append(f"{section}.{key}.owner={entry['owner']}")
+                if not test_path.exists():
+                    missing.append(f"{section}.{key}.test={entry['test']}")
+
+        self.assertEqual(missing, [], f"missing registry references: {missing}")
 
 
 if __name__ == "__main__":
