@@ -1377,6 +1377,111 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('keeps agent health healthy on a boot empty-output artifact before the first successful turn', async () => {
+    // Regression: the boot/recovery sequence stamps lastTurnErrorClass='empty-output'
+    // ~1s after restart while the bot is idle. Because lastSuccessfulTurnAt stays null
+    // (no real turn yet) the sticky flag never clears, falsely degrading the instance
+    // forever. A genuinely-broken model is still caught independently via
+    // model_usable===false (the usability probe), so empty-output before the first
+    // proven turn must NOT degrade health.
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,            // probe not (yet) flagging the model
+              modelUsabilityStatus: 'unknown',
+              lastSuccessfulTurnAt: null,   // never proven a turn → boot artifact
+              lastTurnErrorClass: 'empty-output',
+              lastTurnErrorAt: 1_781_316_000_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    expect(json.turn_capability).toEqual({
+      model_usable: null,
+      model_usability_status: 'unknown',
+      last_successful_turn_at: null,
+      last_turn_error_class: 'empty-output',
+      last_turn_error_at: 1_781_316_000_000,
+    });
+    db2.close();
+  });
+
+  it('degrades agent health on empty-output AFTER a successful turn (real regression, not a boot artifact)', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: 1_781_316_030_000, // proved a turn → grace no longer applies
+              lastTurnErrorClass: 'empty-output',
+              lastTurnErrorAt: 1_781_316_060_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
+  it('degrades agent health on a non-empty-output error class even before the first successful turn', async () => {
+    // The boot-grace relaxation is scoped to empty-output ONLY. A real provider
+    // failure at boot (e.g. auth-required) must still degrade.
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'unknown',
+              lastSuccessfulTurnAt: null,
+              lastTurnErrorClass: 'auth-required',
+              lastTurnErrorAt: 1_781_316_000_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
   it('sanitizes agent turn capability strings before exposing them in health', async () => {
     db.close();
     const db2 = makeDb();
