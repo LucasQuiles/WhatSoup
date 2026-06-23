@@ -36,6 +36,7 @@ export interface GateDeps {
   confirmedOutboundWithinSeconds(seconds: number): boolean;
   emitClear(): void;
   emitEscalation(evidence: string): void;
+  emitGateFailure?(evidence: string): void;
 }
 
 export interface GateDecision {
@@ -64,39 +65,45 @@ export function gateQuarantineClear(host: string, deps: GateDeps): GateDecision 
     return { action: 'clear', mode, tripped: false, evidence: 'mode=off' };
   }
 
-  const now = deps.now();
-  const state = loadBreakerState(deps.stateDir, host, 'auth_terminal');
-  const proof = proveAuthRecovery(
-    { confirmedOutboundWithinSeconds: deps.confirmedOutboundWithinSeconds },
-    deps.recentWindowSeconds,
-  );
+  try {
+    const now = deps.now();
+    const state = loadBreakerState(deps.stateDir, host, 'auth_terminal');
+    const proof = proveAuthRecovery(
+      { confirmedOutboundWithinSeconds: deps.confirmedOutboundWithinSeconds },
+      deps.recentWindowSeconds,
+    );
 
-  if (proof.recovered) {
-    clearIncident(state);
+    if (proof.recovered) {
+      clearIncident(state);
+      saveBreakerState(deps.stateDir, state);
+      deps.emitClear();
+      return { action: 'clear', mode, tripped: false, evidence: proof.evidence };
+    }
+
+    // Proof failed -> this is a cosmetic clear over a still-broken fault.
+    registerOnset(state, now);
+    recordAttempt(state, now);
+    const attempts = attemptsInWindow(state, now, deps.attemptWindowSeconds);
+
+    if (mode === 'shadow') {
+      saveBreakerState(deps.stateDir, state);
+      deps.emitClear(); // shadow never changes behavior
+      log.warn({ host, attempts, proof: proof.evidence }, 'fleet-health-gate: would suppress cosmetic clear (shadow)');
+      return { action: 'clear_shadow', mode, tripped: false, evidence: proof.evidence };
+    }
+
+    if (mode === 'enforce' && attempts >= deps.tripThreshold) state.tripped = true;
+
+    const escalationEvidence = `${proof.evidence} onset=${state.onset} attempts=${attempts} tripped=${state.tripped}`;
+    if (!state.escalated) {
+      state.escalated = true;
+      deps.emitEscalation(escalationEvidence);
+    }
     saveBreakerState(deps.stateDir, state);
-    deps.emitClear();
-    return { action: 'clear', mode, tripped: false, evidence: proof.evidence };
+    return { action: 'suppress_and_escalate', mode, tripped: state.tripped, evidence: escalationEvidence };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.emitGateFailure?.(`mode=${mode} error=${message}`);
+    throw err;
   }
-
-  // Proof failed → this is a cosmetic clear over a still-broken fault.
-  registerOnset(state, now);
-  recordAttempt(state, now);
-  const attempts = attemptsInWindow(state, now, deps.attemptWindowSeconds);
-
-  if (mode === 'shadow') {
-    saveBreakerState(deps.stateDir, state);
-    deps.emitClear(); // shadow never changes behavior
-    log.warn({ host, attempts, proof: proof.evidence }, 'fleet-health-gate: would suppress cosmetic clear (shadow)');
-    return { action: 'clear_shadow', mode, tripped: false, evidence: proof.evidence };
-  }
-
-  if (mode === 'enforce' && attempts >= deps.tripThreshold) state.tripped = true;
-
-  const escalationEvidence = `${proof.evidence} onset=${state.onset} attempts=${attempts} tripped=${state.tripped}`;
-  if (!state.escalated) {
-    state.escalated = true;
-    deps.emitEscalation(escalationEvidence);
-  }
-  saveBreakerState(deps.stateDir, state);
-  return { action: 'suppress_and_escalate', mode, tripped: state.tripped, evidence: escalationEvidence };
 }

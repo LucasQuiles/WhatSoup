@@ -77,4 +77,23 @@ describe('gateQuarantineClear', () => {
     expect(calls(deps).clears).toBe(0);
     expect(calls(deps).escalations).toHaveLength(1);
   });
+
+  it('reports active-mode gate dependency failures before fail-safe fallback', () => {
+    process.env['FLEET_HEALTH_VERIFY_GATE'] = 'enforce';
+    const failures: string[] = [];
+    const deps = makeDeps({
+      confirmed: false,
+      confirmedOutboundWithinSeconds: () => {
+        throw new Error('probe unavailable');
+      },
+    });
+    (deps as GateDeps & { emitGateFailure: (evidence: string) => void }).emitGateFailure = (evidence) => {
+      failures.push(evidence);
+    };
+
+    expect(() => gateQuarantineClear('ml-bot', deps)).toThrow('probe unavailable');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain('mode=enforce');
+    expect(failures[0]).toContain('probe unavailable');
+  });
 });

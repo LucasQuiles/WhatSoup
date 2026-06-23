@@ -811,6 +811,14 @@ export class DurabilityEngine {
             `HUMAN_REQUIRED ${evidence}`,
             'critical',
           ),
+        emitGateFailure: (evidence: string) =>
+          emitAlertChecked(
+            config.botName,
+            'fleet_health_verify_gate_failed',
+            `whatsoup@${config.botName} verify gate failed — legacy clear fallback used`,
+            `FLEET_HEALTH_VERIFY_GATE failure: ${evidence}; legacy_clear_fallback=true`,
+            'warning',
+          ),
       });
       log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
     } catch (err) {
