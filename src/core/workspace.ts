@@ -202,6 +202,36 @@ export function writePermissionsSettings(
 }
 
 /**
+ * Remove an orphaned agent-sandbox PreToolUse hook from a parsed settings object.
+ * Mutates `settings.hooks.PreToolUse` in place; returns true if anything was removed.
+ *
+ * Only the WhatSoup-managed `agent-sandbox.sh` hook is targeted — unrelated PreToolUse
+ * hooks are preserved. If PreToolUse becomes empty, the key is deleted so the shape
+ * matches a fresh non-sandbox agent.
+ */
+function stripOrphanSandboxHook(settings: Record<string, unknown>): boolean {
+  const hooks = settings.hooks as
+    | { PreToolUse?: Array<{ hooks?: Array<{ command?: unknown }> }> }
+    | undefined;
+  if (!hooks || !Array.isArray(hooks.PreToolUse)) return false;
+  const before = hooks.PreToolUse.length;
+  const filtered = hooks.PreToolUse.filter(
+    entry =>
+      !(
+        Array.isArray(entry.hooks) &&
+        entry.hooks.some(h => typeof h.command === 'string' && h.command.includes('agent-sandbox.sh'))
+      ),
+  );
+  if (filtered.length === before) return false;
+  if (filtered.length === 0) {
+    delete hooks.PreToolUse;
+  } else {
+    hooks.PreToolUse = filtered;
+  }
+  return true;
+}
+
+/**
  * Ensure a settings.json with a permissions block exists in claudeDir.
  * - If settings.json doesn't exist, writes the default for the instance type.
  * - If settings.json exists but has no permissions block, adds the default.
@@ -216,6 +246,7 @@ export function ensurePermissionsSettings(
   claudeDir: string,
   type: string,
   enabledPlugins?: Record<string, boolean>,
+  opts?: { hasSandbox?: boolean },
 ): void {
   try {
     if (type !== 'agent') return;
@@ -229,6 +260,14 @@ export function ensurePermissionsSettings(
     if (existsSync(settingsPath)) {
       try {
         const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        // Reconcile an orphaned fail-closed agent-sandbox PreToolUse hook: when the
+        // instance has no sandbox config, writeSandboxArtifacts never runs, so a hook
+        // left over from a prior sandboxed config is unmanaged and bricks every tool
+        // if its policy file goes missing. Strip it here (the always-run reconciler).
+        let strippedOrphanHook = false;
+        if (opts?.hasSandbox === false) {
+          strippedOrphanHook = stripOrphanSandboxHook(existing);
+        }
         // Apply enabledPlugins from config — always overwrite to stay in sync
         if (enabledPlugins) {
           existing.enabledPlugins = enabledPlugins;
@@ -240,8 +279,13 @@ export function ensurePermissionsSettings(
             };
           }
           writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
+          strippedOrphanHook = false; // persisted above
         }
-        if (existing.permissions) return; // Already has permissions — don't overwrite
+        if (existing.permissions) {
+          // Already has permissions — don't overwrite, but persist a hook strip if one happened.
+          if (strippedOrphanHook) writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
+          return;
+        }
         // Has settings (e.g. hooks) but no permissions — add them
         const merged = { ...existing, permissions: defaults.permissions };
         writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
