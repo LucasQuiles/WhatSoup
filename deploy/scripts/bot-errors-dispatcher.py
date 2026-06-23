@@ -198,6 +198,42 @@ INHIBITION_ENABLED = env_flag("BOT_ERRORS_INHIBITION_ENABLED", True)
 # FAIL-OPEN: when the gate is off, or on any ambiguity, alerts are NOT silenced.
 MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 
+# Pattern D — transient-vs-outage severity tiering. Default-on. A failure that
+# classifies as transient (recoverable soft-fault: SSH timeout to a peer that is
+# still online, a health body that degrades while the WhatsApp link stays
+# connected, a provider rate-limit/fallback) is held at warning tier and NOT
+# pushed to WhatsApp unless it persists past TRANSIENT_PROMOTE_SECONDS — at which
+# point it promotes to the hard-outage (critical) tier and sends. A transient
+# that recovers before promotion never reaches WhatsApp at all, and its recovery
+# clear stays silent too. Hard outages (host offline, unit crash, logout, bond
+# revoked) are never downgraded. FAIL-OPEN: gate off or any classification error
+# sends as before — a real alert is never lost to a tiering bug.
+TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
+TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
+
+# Reachability diagnoses (collector reachabilityDiagnosis, or source suffix) that
+# represent a transient soft-fault: the host is up, a single probe timed out.
+TRANSIENT_REACHABILITY_DIAGNOSES = frozenset({"tailscale_online_ssh_timeout"})
+
+
+def _load_transient_sources() -> frozenset[str]:
+    """Exact event-source strings that classify transient, operator-extensible.
+
+    The two concrete classifiers below (reachability timeout, health-body
+    degraded while WhatsApp-connected) are verified against real emitted events.
+    Provider rate-limit/fallback source names are not yet confirmed against a
+    live emitter, so the seed is empty rather than shipping identifiers that
+    match nothing (dead config). Operators add confirmed source names via
+    BOT_ERRORS_TRANSIENT_SOURCES (comma-separated).
+    """
+    raw = os.environ.get("BOT_ERRORS_TRANSIENT_SOURCES")
+    if not raw:
+        return frozenset()
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+TRANSIENT_SOURCES = _load_transient_sources()
+
 
 def _load_inhibition_map() -> dict[str, set[str]]:
     """Seed inhibition map, optionally merged with BOT_ERRORS_INHIBITION_MAP.
@@ -551,6 +587,12 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # accumulates. Keyed by incident_key.
     if isinstance(loaded.get("flapState"), dict):
         state["flapState"] = loaded["flapState"]
+    # Pattern D — transient tiering bookkeeping must survive across invocations
+    # for the same reason as flapState: the promote window (transientSince anchor)
+    # spans multiple one-shot runs. Without this load, every run resets the anchor
+    # and a sustained soft-fault is held silently forever and never promotes.
+    if isinstance(loaded.get("transientState"), dict):
+        state["transientState"] = loaded["transientState"]
     return state
 
 
@@ -712,6 +754,140 @@ def active_maintenance_window(event: dict[str, Any]) -> str | None:
 def evidence_field(text: str, key: str) -> str | None:
     match = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", text)
     return match.group(1) if match else None
+
+
+def _truthy_token(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def classify_failure_mode(event: dict[str, Any]) -> str:
+    """Classify an alert as ``"transient"`` (recoverable soft-fault) or ``"outage"``.
+
+    Conservative by design: only well-understood soft-faults classify transient.
+    Everything else — including anything ambiguous or unknown — classifies
+    ``"outage"`` so a real failure is never silently downgraded (fail toward
+    visibility). Pattern D.
+    """
+    source = str(event.get("source") or "")
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    evidence = str(event.get("evidence") or "")
+
+    # SSH timeout to a peer Tailscale still reports online: host is up, the probe
+    # timed out — transient.
+    diagnosis = str(diagnostics.get("reachabilityDiagnosis") or "")
+    if diagnosis in TRANSIENT_REACHABILITY_DIAGNOSES:
+        return "transient"
+    if source.endswith("_online_ssh_timeout"):
+        return "transient"
+
+    # Health body briefly degraded while the WhatsApp link stayed connected: the
+    # bond never dropped and the app self-recovers — transient. This is the
+    # observed ``health_body_degraded`` recurring false-positive class.
+    if source == "health_body_degraded":
+        connected = diagnostics.get("whatsappConnected")
+        if connected is None:
+            # Last-wins: a multi-poll evidence block may carry several
+            # whatsapp_connected= readings; the most recent one decides. A later
+            # =false must not be masked by an earlier =true (would mis-hold a real
+            # disconnect as transient).
+            tokens = re.findall(r"(?:^|\s)whatsapp_connected=([^\s]+)", evidence)
+            connected = _truthy_token(tokens[-1]) if tokens else False
+        else:
+            connected = bool(connected)
+        if connected:
+            return "transient"
+
+    # Operator-confirmed transient source names (provider rate-limit/fallback,
+    # model-unknown) via BOT_ERRORS_TRANSIENT_SOURCES.
+    if source in TRANSIENT_SOURCES:
+        return "transient"
+
+    return "outage"
+
+
+def apply_transient_tiering(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> str | None:
+    """Hold or promote a transient alert (Pattern D).
+
+    Returns a suppress-reason string to HOLD the alert (transient still inside the
+    soft window — not pushed to WhatsApp), or ``None`` to SEND it (not transient,
+    or persisted past the promote window so it is now a hard outage, or any
+    classification error → fail-open send).
+
+    Bookkeeping lives in ``incident_state['transientState'][key]`` — a sidecar
+    that never touches ``flapState``, so Pattern F accumulation is preserved
+    (design constraint C1). Mutates ``event['severity']`` to ``warning`` while
+    held and restores ``critical`` on promotion.
+    """
+    try:
+        if classify_failure_mode(event) != "transient":
+            return None
+        transient_state = incident_state.setdefault("transientState", {})
+        if not isinstance(transient_state, dict):
+            return None
+        record = transient_state.get(key)
+        if not isinstance(record, dict):
+            record = {
+                "transientSince": current,
+                "firstSeverity": str(event.get("severity") or ""),
+            }
+            transient_state[key] = record
+        since = int_field(record, "transientSince", current)
+        record["lastSeenAt"] = current
+        elapsed = max(0, current - since)
+        diagnostics = event.setdefault("diagnostics", {})
+
+        if record.get("promoted") or elapsed >= TRANSIENT_PROMOTE_SECONDS:
+            # Persisted past the promote window (or already promoted): a slow
+            # outage masquerading as transient. Restore the hard-outage tier and
+            # let normal open-incident handling send it. Guards the false-negative
+            # direction (a real outage misread as transient).
+            record["promoted"] = True
+            record["promotedAt"] = int_field(record, "promotedAt", current)
+            event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            diagnostics["failureClass"] = "outage_promoted"
+            diagnostics["transientPromoted"] = True
+            return None
+
+        # Still inside the soft window: hold at warning tier, do not push.
+        event["severity"] = "warning"
+        held = int_field(record, "heldCount") + 1
+        record["heldCount"] = held
+        diagnostics["failureClass"] = "transient"
+        diagnostics["transientHeld"] = True
+        return (
+            f"transient_held: {key} warning-tier "
+            f"({elapsed}s/{TRANSIENT_PROMOTE_SECONDS}s to promote, held x{held})"
+        )
+    except Exception:
+        # FAIL-OPEN: never lose a real alert to a tiering bug.
+        return None
+
+
+def resolve_transient_on_clear(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str
+) -> str | None:
+    """Retire transient bookkeeping on a clear (Pattern D).
+
+    Returns a suppress-reason when the transient was HELD (never surfaced) so its
+    recovery stays silent too; ``None`` when it had PROMOTED to an outage (let
+    normal clear handling close the surfaced incident) or no transient record
+    exists. Fail-open: any error → ``None`` (let the clear flow).
+    """
+    try:
+        transient_state = incident_state.get("transientState")
+        if not isinstance(transient_state, dict):
+            return None
+        record = transient_state.pop(key, None)
+        if not isinstance(record, dict):
+            return None
+        if record.get("promoted"):
+            return None  # promoted to outage — normal clear closes the open incident
+        event.setdefault("diagnostics", {})["transientAutoresolved"] = True
+        return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
+    except Exception:
+        return None
 
 
 def evidence_epoch(text: str, key: str) -> int | None:
@@ -1551,6 +1727,13 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             f"{stronger_key} remains open (inhibited_by:{root_source})"
         )
     if is_incident_alert(event):
+        # Pattern D — hold a transient soft-fault at warning tier; only a
+        # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
+        # the hard-outage tier and falls through to normal send handling.
+        if TRANSIENT_TIERING_ENABLED:
+            transient_reason = apply_transient_tiering(event, incident_state, key, current)
+            if transient_reason is not None:
+                return transient_reason
         open_record = open_incidents.get(key)
         if isinstance(open_record, dict):
             if str(open_record.get("status") or "") == "stale":
@@ -1605,6 +1788,12 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 return None
             return f"incident cooldown active for {key}; last sent {current - last_sent}s ago"
     if is_incident_clear(event):
+        # Pattern D — a held transient that recovers before promotion: retire its
+        # bookkeeping and keep the recovery silent (we never surfaced the alert).
+        if TRANSIENT_TIERING_ENABLED:
+            transient_clear = resolve_transient_on_clear(event, incident_state, key)
+            if transient_clear is not None:
+                return transient_clear
         open_record = open_incidents.get(key)
         if not isinstance(open_record, dict):
             recovered_keys = daily_health_recovered_incident_keys(event, incident_state)
@@ -1737,6 +1926,12 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
     elif is_incident_clear(event):
         incident_state.setdefault("openIncidents", {}).pop(key, None)
         incident_state.setdefault("lastSentAt", {}).pop(key, None)
+        # Pattern D — retire any transient bookkeeping for this key on close, so a
+        # promoted record cannot persist and collapse the promote window for a
+        # future re-opened incident on the same key.
+        transient_state = incident_state.get("transientState")
+        if isinstance(transient_state, dict):
+            transient_state.pop(key, None)
         close_recovered_daily_health_incidents(event, incident_state)
 
 
