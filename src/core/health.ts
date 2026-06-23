@@ -909,9 +909,28 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const turnCapability = deps.instanceType === 'agent'
         ? normalizeAgentTurnCapability(runtimeSnapshot?.details ?? null)
         : null;
+      // A boot/recovery empty-output artifact is benign for degrade purposes:
+      // the boot sequence stamps last_turn_error_class='empty-output' ~1s after
+      // restart while the bot is idle, and because last_successful_turn_at stays
+      // null (no real turn yet) the sticky flag never self-clears — falsely
+      // degrading the instance forever. This mirrors the pre-first-turn half of
+      // the runtime's EMPTY_OUTPUT_ARM_STARTUP_GRACE gate (see runtime.ts),
+      // applied without the time-box because health is a steady-state signal, not
+      // a fast fallback trigger. Safety: a genuinely-broken-at-boot model is still
+      // caught independently via model_usable===false (the startup usability
+      // probe), any non-empty-output error class still degrades, and empty-output
+      // AFTER a proven turn (a real regression) still degrades.
+      const bootEmptyOutputArtifact =
+        turnCapability !== null &&
+        turnCapability.last_turn_error_class === 'empty-output' &&
+        turnCapability.last_successful_turn_at === null;
+      const turnCapabilityErrorIsDegraded =
+        turnCapability !== null &&
+        turnCapability.last_turn_error_class !== null &&
+        !bootEmptyOutputArtifact;
       const turnCapabilityIsDegraded =
         turnCapability !== null &&
-        (turnCapability.model_usable === false || turnCapability.last_turn_error_class !== null);
+        (turnCapability.model_usable === false || turnCapabilityErrorIsDegraded);
 
       // Determine health status.
       // Enrichment staleness only matters if enrichment has actually run before
