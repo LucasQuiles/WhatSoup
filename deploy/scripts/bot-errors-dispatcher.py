@@ -123,6 +123,29 @@ STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
 # force_notify_level, so suppressing the time-based renotify here loses no real signal.
 # Default-on; fail-open (any classifier error falls through to send).
 SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY", True)
+# Pattern A (digest coalescing) — the auto-close summary is consolidated WITHIN a
+# single sweep run, but the sweep runs every ~30s, so a draining backlog emits one
+# "Auto-closed N" digest per tick (the digest itself becomes the noise). These are
+# strictly informational (requested_action: none). Coalesce the digest across runs:
+# closures still happen immediately (so renotify stops), but the WhatsApp summary is
+# emitted at most once per window — or sooner if the pending batch is large, so a real
+# flood is still reported promptly. Set the window to 0 to restore per-run digests.
+def _nonneg_env_int(name: str, default: int) -> int:
+    # Like positive_env_int but allows 0 (used as a "disabled" sentinel). Defined
+    # inline because env_int is declared later in the module than this constant block.
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# 0 disables coalescing (legacy per-sweep digest).
+STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS = _nonneg_env_int(
+    "BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS", 60 * 60
+)
+STALE_AUTOCLOSE_DIGEST_MAX_PENDING = max(
+    1, _nonneg_env_int("BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_MAX_PENDING", 50)
+)
 # Pattern F — flap-storm detection (consolidate AND escalate). Default-on;
 # fail-open (any flap error falls through to normal per-event handling).
 FLAP_DETECTION = env_flag("BOT_ERRORS_FLAP_DETECTION", True)
@@ -623,6 +646,11 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # and a sustained soft-fault is held silently forever and never promotes.
     if isinstance(loaded.get("transientState"), dict):
         state["transientState"] = loaded["transientState"]
+    # Pattern A (digest coalescing): the auto-close digest accumulator (pending
+    # closed-key batch + lastDigestAt) must survive across one-shot runs, else the
+    # cross-run coalescing window resets every invocation and every sweep re-emits.
+    if isinstance(loaded.get("staleAutocloseDigest"), dict):
+        state["staleAutocloseDigest"] = loaded["staleAutocloseDigest"]
     return state
 
 
@@ -2271,6 +2299,29 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
     }
 
 
+def should_emit_autoclose_digest(accum: dict[str, Any], current: int) -> bool:
+    """Decide whether the coalesced auto-close digest is due this sweep.
+
+    Emit when: coalescing is disabled (window<=0), OR the pending batch has reached
+    the burst cap (report a flood promptly), OR the coalescing window has elapsed
+    since the last digest. A first-ever digest (lastDigestAt==0) fires immediately so
+    the operator still gets prompt first notice; subsequent trickle is then absorbed.
+    Fail-open: any malformed accumulator falls through to emit.
+    """
+    try:
+        pending = int(accum.get("pendingCount") or 0)
+        if pending <= 0:
+            return False
+        if STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS <= 0:
+            return True
+        if pending >= STALE_AUTOCLOSE_DIGEST_MAX_PENDING:
+            return True
+        last_digest_at = int(accum.get("lastDigestAt") or 0)
+        return (current - last_digest_at) >= STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
+    except Exception:
+        return True
+
+
 def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict[str, Any] | None:
     previous_status = str(record.get("status") or "open")
     opened = int_field(record, "openedAt", current)
@@ -2731,32 +2782,75 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             "status": record.get("status"),
             "staleRenotifyCount": record.get("staleRenotifyCount"),
         })
-    # Terminal removal + ONE consolidated auto-close summary (§10 C5 + Pattern A
-    # safety valve): non-actionable stale incidents past the escalate horizon are
-    # removed from open state so openIncidents cannot grow unbounded, and the
-    # batch is reported once rather than as N individual messages.
+    # Terminal removal + coalesced auto-close summary (§10 C5 + Pattern A safety
+    # valve): non-actionable stale incidents past the escalate horizon are removed
+    # from open state immediately (so openIncidents cannot grow unbounded and the
+    # renotify stops), but the WhatsApp digest is coalesced ACROSS sweep runs. The
+    # sweep ticks every ~30s; without cross-run coalescing a draining backlog emits
+    # one "Auto-closed N" message per tick, and the digest itself becomes the noise.
     if auto_closed:
-        summary_event = stale_autoclose_summary_event(auto_closed, current)
-        try:
-            send_whatsapp(format_event(summary_event))
-            append_dispatch_log(paths, {
-                "type": "stale_autoclosed",
-                "count": len(auto_closed),
-                "keys": auto_closed,
-            })
-        except Exception as exc:
-            last_error = str(exc)
-            append_dispatch_log(paths, {
-                "type": "stale_autoclose_summary_failed",
-                "count": len(auto_closed),
-                "error": str(exc),
-            })
+        # Closure is unconditional and immediate — independent of digest cadence.
         last_sent_at = incident_state.get("lastSentAt")
         for closed_key in auto_closed:
             open_incidents.pop(closed_key, None)
             if isinstance(last_sent_at, dict):
                 last_sent_at.pop(closed_key, None)
         changed = True
+
+        # Accumulate into the persisted digest batch.
+        accum = incident_state.get("staleAutocloseDigest")
+        if not isinstance(accum, dict):
+            accum = {}
+            incident_state["staleAutocloseDigest"] = accum
+        pending_keys = accum.get("pendingKeys")
+        if not isinstance(pending_keys, list):
+            pending_keys = []
+        # Keep a bounded sample of keys for the digest preview; count is exact.
+        pending_keys.extend(auto_closed)
+        accum["pendingKeys"] = pending_keys[-200:]
+        accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
+        if not accum.get("firstPendingAt"):
+            accum["firstPendingAt"] = current
+
+        if should_emit_autoclose_digest(accum, current):
+            digest_keys = list(accum.get("pendingKeys") or auto_closed)
+            digest_count = int(accum.get("pendingCount") or len(digest_keys))
+            summary_event = stale_autoclose_summary_event(digest_keys, current)
+            # Report the exact coalesced total even when the key sample was trimmed.
+            summary_event["summary"] = (
+                f"Auto-closed {digest_count} non-actionable stale incident(s)"
+            )
+            try:
+                send_whatsapp(format_event(summary_event))
+                append_dispatch_log(paths, {
+                    "type": "stale_autoclosed",
+                    "count": digest_count,
+                    "keysSample": digest_keys[:20],
+                    "coalescedWindowSeconds": STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS,
+                })
+                accum["pendingKeys"] = []
+                accum["pendingCount"] = 0
+                accum["firstPendingAt"] = 0
+                accum["lastDigestAt"] = current
+            except Exception as exc:
+                # Keep the batch pending so it retries on the next sweep (no loss).
+                last_error = str(exc)
+                append_dispatch_log(paths, {
+                    "type": "stale_autoclose_summary_failed",
+                    "count": digest_count,
+                    "error": str(exc),
+                })
+        else:
+            append_dispatch_log(paths, {
+                "type": "stale_autoclose_digest_coalesced",
+                "pendingCount": accum.get("pendingCount"),
+                "closedThisSweep": len(auto_closed),
+                "nextDigestInSeconds": max(
+                    0,
+                    STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
+                    - (current - int(accum.get("lastDigestAt") or 0)),
+                ),
+            })
     if suppressed:
         append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
     if changed:
