@@ -80,7 +80,7 @@ def _open_incidents(mod) -> dict:
 def test_nonactionable_stale_is_suppressed_and_autoclosed(tmp_path):
     mod = _load(tmp_path)
     now = int(time.time())
-    key = "host-a|instance-x|runtime-agent-failure:claude-cli:provider_auth_required"
+    key = "host-a|instance-x|runtime-agent-failure:provider-cli:provider_auth_required"
     _write_state(mod, {
         key: {
             "status": "stale",
@@ -169,7 +169,7 @@ def test_actionable_stale_still_sent(tmp_path):
 def test_gate_off_sends_nonactionable_stale(tmp_path):
     mod = _load(tmp_path, {"BOT_ERRORS_SUPPRESS_STALE_INFO_RENOTIFY": "0"})
     now = int(time.time())
-    key = "host-a|instance-x|runtime-agent-failure:claude-cli:provider_auth_required"
+    key = "host-a|instance-x|runtime-agent-failure:provider-cli:provider_auth_required"
     _write_state(mod, {
         key: {
             "status": "stale",
@@ -198,7 +198,7 @@ def test_fail_open_on_classifier_error(tmp_path):
 
     mod.stale_renotify_is_nonactionable = _boom  # type: ignore[assignment]
     now = int(time.time())
-    key = "host-a|instance-x|runtime-agent-failure:claude-cli:provider_auth_required"
+    key = "host-a|instance-x|runtime-agent-failure:provider-cli:provider_auth_required"
     _write_state(mod, {
         key: {
             "status": "stale",
