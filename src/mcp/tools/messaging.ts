@@ -21,6 +21,7 @@ import {
   type PreparedTextSend,
 } from '../../core/send-pipeline.ts';
 import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.ts';
+import { evaluateOutboundMessageSafety } from '../../core/outbound-message-safety.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
@@ -174,6 +175,26 @@ export function registerMessagingTools(
           const receipt = await connection.sendRaw(prepared.chatJid, content);
           return { transportId: receipt.waMessageId };
         }, {
+          // Client-safety guardrail: never let agent free-text leak internal
+          // artifacts or a false infra-block self-diagnosis to a client. Sends
+          // addressed to the configured BOT ERRORS ops channel are treated as
+          // ops (verbatim). Everything else defaults to `client` — the
+          // conservative direction (a false-positive redaction on an operator
+          // message is low-harm; a leak to a client is high-harm).
+          // NOTE: routing decision.opsEvidence to BOT ERRORS is deferred to a
+          // follow-up (needs the instance name via register-all) — see plan
+          // Lane 2 / OPERATIONAL_PLAN Task 5. This PR delivers leak prevention.
+          transformPrepared(prepared: PreparedTextSend): PreparedTextSend {
+            const opsJid = process.env['BOT_ERRORS_JID']?.trim();
+            const audience = opsJid && prepared.chatJid === opsJid ? 'ops' : 'client';
+            const decision = evaluateOutboundMessageSafety({ text: prepared.text, audience });
+            if (decision.action === 'allow') return prepared;
+            return {
+              ...prepared,
+              text: decision.text,
+              audit: { ...prepared.audit, textLength: decision.text.length },
+            };
+          },
           beforeAudit(prepared: PreparedTextSend): void {
             if (session.tier !== 'global' || !session.conversationKey) return;
 
