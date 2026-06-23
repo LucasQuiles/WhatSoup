@@ -23,8 +23,20 @@ import { errorMessage } from './error-message.ts';
 
 export { SERVICE_ENV_MAP, resolveProviderKeyService } from './provider-key-service.ts';
 
+// Alias map: a WhatSoup service name (SERVICE_ENV_MAP key) → the keyring
+// service name(s) the live key is actually stored under. lookupCredential tries
+// the canonical service first, then these in order. This is the single
+// source-of-truth bridge between WhatSoup's provider naming and the keyring's
+// historical storage names — without it, a provider whose key was stored under
+// a divergent service name silently resolves to nothing ("lost" credential).
+//   glm   → zai-api-key : opencode derives service "glm" from model glm/glm-5.2,
+//           but the Z.ai coding-plan key is stored under service "zai-api-key".
+//   google → gemini     : SERVICE_ENV_MAP maps google→GOOGLE_API_KEY, but the
+//           live Gemini key is stored under service "gemini".
 const SERVICE_MIGRATION_FALLBACKS: Record<string, string[]> = {
   'whatsoup-health-token': ['whatsoup_health'],
+  glm: ['zai-api-key'],
+  google: ['gemini'],
 };
 
 export interface CredentialLookupOptions {
