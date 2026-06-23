@@ -14,7 +14,12 @@
  *   npx vitest run --pool=forks tests/fleet/health-poller-branches2.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
+import {
+  HealthPoller,
+  LOGGED_OUT_CONFIRMATION_CONTRACT,
+  type InstanceHealth,
+  type LoggedOutConfirmation,
+} from '../../src/fleet/health-poller.ts';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(() => true),
@@ -56,6 +61,17 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 type AlertMockCall = [string, string, ...unknown[]];
+
+type LoggedOutConfirmationContract = {
+  confirmed: boolean;
+  weak: boolean;
+  reason: string;
+  failureCode: string;
+  confidence: 'confirmed' | 'inferred' | 'ambiguous';
+  evidence: string;
+};
+const loggedOutConfirmationContract: LoggedOutConfirmation extends LoggedOutConfirmationContract ? true : false = true;
+void loggedOutConfirmationContract;
 
 function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
   return {
@@ -112,6 +128,36 @@ describe('HealthPoller — branch coverage supplement #2', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  describe('logged-out confirmation contract', () => {
+    it('pins the named confirmation result fields and known reason/failure-code set', () => {
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.requiredFields)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.reasons)).toBe(true);
+      expect(Object.isFrozen(LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes)).toBe(true);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.requiredFields).toEqual([
+        'confirmed',
+        'weak',
+        'reason',
+        'failureCode',
+        'confidence',
+        'evidence',
+      ]);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.reasons).toEqual([
+        'explicit_auth_loss',
+        'connected',
+        'not_weak_signal',
+        'weak_signal_inside_settle_grace',
+        'weak_signal_waiting_for_persistence',
+        'weak_signal_persisted',
+      ]);
+      expect(LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes).toEqual([
+        'WA_AUTH_BOND_SERVER_REVOKED',
+        'WEAK_LOGGED_OUT_SIGNAL',
+        'NONE',
+      ]);
+    });
   });
 
   // -------------------------------------------------------------------------
