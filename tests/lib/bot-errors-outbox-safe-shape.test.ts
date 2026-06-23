@@ -1,0 +1,47 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
+
+// B1 — safe-shape credential-path redaction (TS mirror of the Python behavior).
+// Gated behind BOT_ERRORS_SAFE_SHAPE_CRED_PATH so default output (the bare
+// `[REDACTED CREDENTIAL PATH]` marker) and its parity tests stay unchanged.
+
+function evidenceFor(text: string): string {
+  const event = buildBotErrorsEvent({
+    eventType: 'alert',
+    instance: 'whatsoup-prod',
+    source: 'cred_path_check',
+    summary: 'check',
+    evidence: text,
+  });
+  return event.evidence;
+}
+
+describe('B1 safe-shape credential-path redaction (TS)', () => {
+  afterEach(() => {
+    delete process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'];
+  });
+
+  it('default-off keeps the legacy bare marker', () => {
+    delete process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'];
+    const out = evidenceFor('expected_path=~/.config/whatsoup/fleet-tokens.json');
+    expect(out).toContain('[REDACTED CREDENTIAL PATH]');
+    expect(out).not.toContain('fleet-tokens.json');
+  });
+
+  it('safe-shape preserves the dir category and marks the leaf', () => {
+    process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'] = '1';
+    const out = evidenceFor('expected_path=~/.config/whatsoup/fleet-tokens.json');
+    expect(out).toContain('.config/whatsoup/[REDACTED]');
+    expect(out).not.toContain('[REDACTED CREDENTIAL PATH]');
+    expect(out).not.toContain('fleet-tokens.json');
+  });
+
+  it('safe-shape still fully redacts a real token value', () => {
+    process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'] = '1';
+    const secret = `ghp_${'z'.repeat(30)}`;
+    const out = evidenceFor(`path=~/.config/whatsoup/creds.json secret_value ${secret} here`);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('[REDACTED GITHUB TOKEN]');
+    expect(out).toContain('.config/whatsoup/[REDACTED]');
+  });
+});

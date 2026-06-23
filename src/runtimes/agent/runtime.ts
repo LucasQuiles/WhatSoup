@@ -945,6 +945,7 @@ export class AgentRuntime implements Runtime {
         source,
         `Agent tool failure: ${args.toolName}`,
         evidence,
+        'warning',
       );
     } catch (err) {
       log.warn({

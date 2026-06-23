@@ -729,18 +729,210 @@ def service_is_active(status: str) -> bool:
     return normalized == "active" or normalized.startswith("active ")
 
 
+_SYSTEMD_CRASH_RESULTS = {
+    "exit-code",
+    "signal",
+    "core-dump",
+    "watchdog",
+    "oom-kill",
+    "timeout",
+    "start-limit-hit",
+    "resources",
+    "protocol",
+}
+
+
+def intent_detection_enabled() -> bool:
+    raw = os.environ.get("BOT_ERRORS_WATCHDOG_INTENT_DETECTION", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def restart_grace_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_RESTART_GRACE_SECONDS", "45")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 45.0
+    return max(0.0, value) if math.isfinite(value) else 45.0
+
+
+def monotonic_now_seconds() -> float:
+    return time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+def dry_service_intent() -> dict[str, dict[str, str]]:
+    raw = os.environ.get("BOT_ERRORS_DRY_SERVICE_INTENT", "").strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for key, value in loaded.items():
+        if isinstance(value, dict):
+            result[str(key)] = {str(prop_key): str(prop_value) for prop_key, prop_value in value.items()}
+    return result
+
+
+def service_intent_properties(service: str) -> dict[str, str]:
+    dry = dry_service_intent()
+    if service in dry:
+        return dict(dry[service])
+    proc = subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            service,
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "StateChangeTimestampMonotonic",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=service_check_timeout(),
+        check=False,
+    )
+    props: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        props[key.strip()] = value.strip()
+    if proc.returncode != 0 and not props:
+        props["_showError"] = (proc.stderr.strip() or f"rc={proc.returncode}")[:160]
+    return props
+
+
+def activating_elapsed_seconds(props: dict[str, str], monotonic_now: float) -> float | None:
+    raw = props.get("StateChangeTimestampMonotonic")
+    try:
+        ts_us = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if ts_us <= 0:
+        return None
+    return max(0.0, monotonic_now - ts_us / 1_000_000.0)
+
+
+def classify_service_intent(
+    props: dict[str, str],
+    grace_seconds: float,
+    monotonic_now: float,
+) -> tuple[str, str]:
+    active_state = props.get("ActiveState", "").strip().lower()
+    sub_state = props.get("SubState", "").strip().lower()
+    result = props.get("Result", "").strip().lower()
+    exec_status = props.get("ExecMainStatus", "").strip()
+
+    if active_state in {"active", "reloading"}:
+        return "active", f"ActiveState={active_state} SubState={sub_state or 'running'}"
+
+    if active_state == "activating":
+        elapsed = activating_elapsed_seconds(props, monotonic_now)
+        if elapsed is None or elapsed < grace_seconds:
+            rendered = "unknown" if elapsed is None else round(elapsed, 1)
+            return (
+                "activating_grace",
+                f"restart in flight: elapsed={rendered}s grace={grace_seconds}s SubState={sub_state}",
+            )
+        return (
+            "crash",
+            f"restart stalled: activating elapsed={round(elapsed, 1)}s >= grace={grace_seconds}s "
+            f"SubState={sub_state}",
+        )
+
+    if active_state == "failed" or result in _SYSTEMD_CRASH_RESULTS:
+        return (
+            "crash",
+            f"ActiveState={active_state or 'unknown'} Result={result or 'unknown'} "
+            f"ExecMainStatus={exec_status or '?'} SubState={sub_state}",
+        )
+
+    if active_state in {"inactive", "deactivating"}:
+        if result in {"", "success"} and exec_status in {"", "0"}:
+            return (
+                "planned",
+                f"clean stop: ActiveState={active_state} SubState={sub_state or 'dead'} "
+                f"Result={result or 'success'}",
+            )
+        return (
+            "crash",
+            f"unclean stop: ActiveState={active_state} Result={result or 'unknown'} "
+            f"ExecMainStatus={exec_status or '?'} SubState={sub_state}",
+        )
+
+    detail = f"unclassified: ActiveState={active_state or 'unknown'} Result={result or 'unknown'}"
+    if props.get("_showError"):
+        detail += f" probe_error={props['_showError']}"
+    return "crash", detail
+
+
+def log_intent_skip(service: str, name: str, classification: str, detail: str) -> None:
+    print(
+        f"[watchdog] intent-skip service={service} instance={name} "
+        f"classification={classification} {detail}",
+        file=sys.stderr,
+    )
+
+
 def local_service_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
+    legacy_states = dry_service_states()
+    dry_intent = dry_service_intent()
+    use_intent = intent_detection_enabled() and (sys.platform != "darwin" or bool(dry_intent))
+    grace = restart_grace_seconds()
+    monotonic_now = monotonic_now_seconds() if use_intent else 0.0
     for item in expected_local_services():
         service = item["service"]
-        status = local_service_status(service)
-        if service_is_active(status):
-            continue
+        name = item["name"]
         key = f"local_service:{service}"
+        if service in legacy_states:
+            status = legacy_states[service]
+            if service_is_active(status):
+                continue
+            problems[key] = (
+                f"local service inactive: service={service} instance={name} "
+                f"status={status} expected=always_on profile={profile}"
+            )
+            continue
+        if not use_intent:
+            status = local_service_status(service)
+            if service_is_active(status):
+                continue
+            problems[key] = (
+                f"local service inactive: service={service} instance={name} "
+                f"status={status} expected=always_on profile={profile}"
+            )
+            continue
+        try:
+            props = service_intent_properties(service)
+            classification, detail = classify_service_intent(props, grace, monotonic_now)
+        except Exception as exc:  # noqa: BLE001 - ambiguity must alert, not hide.
+            problems[key] = (
+                f"local service intent check failed: service={service} instance={name} "
+                f"error={str(exc)[:160]} expected=always_on profile={profile}"
+            )
+            continue
+        if classification in {"active", "planned", "activating_grace"}:
+            if classification != "active":
+                log_intent_skip(service, name, classification, detail)
+            continue
         problems[key] = (
-            f"local service inactive: service={service} instance={item['name']} "
-            f"status={status} expected=always_on profile={profile}"
+            f"local service crash: service={service} instance={name} "
+            f"intent={classification} {detail} expected=always_on profile={profile}"
         )
     return problems
 
@@ -752,6 +944,24 @@ def local_health_timeout() -> float:
     except ValueError:
         return 3
     return max(0.1, value) if math.isfinite(value) else 3
+
+
+def local_health_retries() -> int:
+    raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_RETRIES", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return max(0, value)
+
+
+def local_health_retry_backoff() -> float:
+    raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_RETRY_BACKOFF_SECONDS", "0.75")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.75
+    return max(0.0, value) if math.isfinite(value) else 0.75
 
 
 def dry_local_health_responses() -> dict[str, Any]:
@@ -791,17 +1001,23 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
             status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
             return status, status_error or entry, url
     req = Request(url, method="GET")
-    try:
-        with urlopen(req, timeout=local_health_timeout()) as response:
-            body = response.read(64 * 1024).decode("utf-8", errors="replace")
-            return int(response.status), body, url
-    except HTTPError as exc:
-        body = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return int(exc.code), body, url
-    except URLError as exc:
-        return 0, str(exc.reason), url
-    except Exception as exc:  # noqa: BLE001 - watchdog should report probe failures.
-        return 0, str(exc), url
+    attempts = local_health_retries() + 1
+    last_failure: tuple[int, str, str] = (0, "no attempts", url)
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=local_health_timeout()) as response:
+                body = response.read(64 * 1024).decode("utf-8", errors="replace")
+                return int(response.status), body, url
+        except HTTPError as exc:
+            body = exc.read(64 * 1024).decode("utf-8", errors="replace")
+            return int(exc.code), body, url
+        except URLError as exc:
+            last_failure = (0, str(exc.reason), url)
+        except Exception as exc:  # noqa: BLE001 - watchdog should report probe failures.
+            last_failure = (0, str(exc), url)
+        if attempt + 1 < attempts:
+            time.sleep(local_health_retry_backoff())
+    return last_failure
 
 
 def compact_health_field(value: Any) -> str:

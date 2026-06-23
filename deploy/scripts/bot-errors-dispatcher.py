@@ -95,6 +95,76 @@ INCIDENT_STALE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SECONDS", I
 INCIDENT_STALE_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_RENOTIFY_SECONDS", 24 * 60 * 60)
 INCIDENT_STALE_FAILURE_RETRY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_FAILURE_RETRY_SECONDS", 15 * 60)
 INCIDENT_STALE_SWEEP_MAX_EVENTS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SWEEP_MAX_EVENTS", 3)
+# Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
+# Default-on; fail-open (any classifier error falls through to send).
+SUPPRESS_STALE_INFO_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_STALE_INFO_RENOTIFY", True)
+# A2 / §10 C2 — liveness-gated auto-close. Do NOT auto-close a daily-health
+# incident as "aged out" while that machine's OWN daily-health monitoring is
+# itself stale: when the monitoring path is down, the incident going quiet is
+# uninformative (silence is not proof of repair). Bounded by a hold cap so
+# openIncidents still cannot grow without limit if monitoring never returns
+# (preserves the §10 C5 invariant). Fail-open: any error falls through to close.
+AUTOCLOSE_LIVENESS_GATE = env_flag("BOT_ERRORS_AUTOCLOSE_LIVENESS_GATE", True)
+AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS = positive_env_int(
+    "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS", INCIDENT_ESCALATE_SECONDS
+)
+# Explicit extra sources to force-suppress on stale renotify (CSV), beyond the
+# built-in recovery/no-op pattern set and the SSOT action==none signal.
+STALE_RENOTIFY_SUPPRESS_SOURCES = {
+    part.strip()
+    for part in os.environ.get("BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES", "").split(",")
+    if part.strip()
+}
+# Recovery / no-op source signatures: definitionally non-actionable once stale.
+STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
+# runtime-tool-error:* — an agent's own tool call failed and was self-corrected
+# inline. These are point-in-time, auto-recovered events, NOT a persistent open
+# condition: if the agent were genuinely stuck the SAME call would re-emit FRESH
+# events (which renotify normally and trip flap-storm). Once a runtime-tool-error
+# incident goes stale (no fresh occurrence), it is definitionally non-actionable
+# → Pattern A suppresses the renotify and auto-closes it. flap_storm stays exempt
+# (handled above), so a truly stuck agent still escalates on intensity.
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_", "runtime-tool-error:")
+# Pattern A (open variant) — suppress the periodic still-open renotify/age-escalation
+# for sources that are never operator-actionable even while live. A runtime-tool-error:*
+# incident is a collapsed bucket of self-corrected tool failures; the 6h "still open"
+# renotify and the age-based escalation re-page it forever with no action to take. The
+# genuine stuck-agent signal is flap-storm (intensity), handled earlier via
+# force_notify_level, so suppressing the time-based renotify here loses no real signal.
+# Default-on; fail-open (any classifier error falls through to send).
+SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY", True)
+# Pattern A (digest coalescing) — the auto-close summary is consolidated WITHIN a
+# single sweep run, but the sweep runs every ~30s, so a draining backlog emits one
+# "Auto-closed N" digest per tick (the digest itself becomes the noise). These are
+# strictly informational (requested_action: none). Coalesce the digest across runs:
+# closures still happen immediately (so renotify stops), but the WhatsApp summary is
+# emitted at most once per window — or sooner if the pending batch is large, so a real
+# flood is still reported promptly. Set the window to 0 to restore per-run digests.
+def _nonneg_env_int(name: str, default: int) -> int:
+    # Like positive_env_int but allows 0 (used as a "disabled" sentinel). Defined
+    # inline because env_int is declared later in the module than this constant block.
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# 0 disables coalescing (legacy per-sweep digest).
+STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS = _nonneg_env_int(
+    "BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS", 60 * 60
+)
+STALE_AUTOCLOSE_DIGEST_MAX_PENDING = max(
+    1, _nonneg_env_int("BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_MAX_PENDING", 50)
+)
+# Pattern F — flap-storm detection (consolidate AND escalate). Default-on;
+# fail-open (any flap error falls through to normal per-event handling).
+FLAP_DETECTION = env_flag("BOT_ERRORS_FLAP_DETECTION", True)
+FLAP_TRIP_THRESHOLD = positive_env_int("BOT_ERRORS_FLAP_TRIP_THRESHOLD", 5)
+FLAP_WINDOW_SECONDS = positive_env_int("BOT_ERRORS_FLAP_WINDOW_SECONDS", 600)
+FLAP_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_PROMOTE_SECONDS", 1800)
+FLAP_CRITICAL_COUNT = positive_env_int("BOT_ERRORS_FLAP_CRITICAL_COUNT", 50)
+FLAP_STABLE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_STABLE_SECONDS", 3600)
+FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
@@ -115,6 +185,21 @@ DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES = {
     "whatsapp_device_bond_lost",
     "instance_logged_out",
 }
+# Pattern C — inhibition table (root cause suppresses symptom).
+#
+# Direction: root source -> set of downstream SYMPTOM sources it suppresses
+# while the root incident is OPEN for the same scope (machine|instance). This is
+# the same map consulted by stronger_open_incident_for(); Pattern C extends the
+# seed edges so a single root-cause alert (bond loss, logout, host unreachable)
+# collapses the per-instance health symptoms that fan out from it.
+#
+# Source-string convention matches incident_source() output: bare sources
+# (e.g. "whatsapp_device_bond_lost", "instance_logged_out") and qualified
+# per-instance health symptoms emitted by the watchdog as "local_health:<name>".
+# The bare token "local_health" is listed in symptom sets and matched against
+# any "local_health:<instance>" source via prefix-aware membership (see
+# symptom_source_matches); scope already pins machine|instance, so the
+# <instance> suffix is redundant for scoping but is part of the literal source.
 SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
     "instance_logged_out": {
         "health_body_degraded",
@@ -124,10 +209,14 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
         "instance_unreachable",
         "instance_never_reachable",
         "instance_degraded",
+        # Pattern C: a logged-out instance cannot pass its local health probe.
+        "local_health",
     },
     "instance_unreachable": {
         "instance_never_reachable",
         "instance_degraded",
+        # Pattern C: an unreachable host's per-instance health probe will fail.
+        "local_health",
     },
     "instance_degraded": {
         "instance_never_reachable",
@@ -141,8 +230,125 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
         "instance_degraded",
         "outbound_quarantined",
         "outbound_send_failed",
+        # Pattern C: bond loss takes the instance offline; its health probe and
+        # downstream logout symptom are collapsed into the single bond alert.
+        "local_health",
     },
 }
+
+# Pattern C env gate. Default-on; "0/false/no/off" turns the inhibition lookup
+# into a no-op so prior (non-inhibited) behavior is restored. FAIL-OPEN: when
+# the gate is off, or on any ambiguity, symptoms are NOT suppressed.
+INHIBITION_ENABLED = env_flag("BOT_ERRORS_INHIBITION_ENABLED", True)
+
+# Pattern B (Part 2) env gate. Default-on; "0/false/no/off" disables the
+# maintenance-window suppression gate, restoring prior (always-alert) behavior.
+# FAIL-OPEN: when the gate is off, or on any ambiguity, alerts are NOT silenced.
+MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
+
+# Pattern D — transient-vs-outage severity tiering. Default-on. A failure that
+# classifies as transient (recoverable soft-fault: SSH timeout to a peer that is
+# still online, a health body that degrades while the WhatsApp link stays
+# connected, a provider rate-limit/fallback) is held at warning tier and NOT
+# pushed to WhatsApp unless it persists past TRANSIENT_PROMOTE_SECONDS — at which
+# point it promotes to the hard-outage (critical) tier and sends. A transient
+# that recovers before promotion never reaches WhatsApp at all, and its recovery
+# clear stays silent too. Hard outages (host offline, unit crash, logout, bond
+# revoked) are never downgraded. FAIL-OPEN: gate off or any classification error
+# sends as before — a real alert is never lost to a tiering bug.
+TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
+TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
+
+# Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
+# (warning) when a peer probe misses and a paired relay_host_recovered (info) when
+# it returns. Observed flaps recover in ~6 min — one missed probe interval, not an
+# outage — yet fan out per host (×N), paging a down AND an up for every blip.
+# With the gate on: relay_host_down classifies transient (held by Pattern D's
+# machinery, never surfaced unless it persists past TRANSIENT_PROMOTE_SECONDS), and
+# a relay_host_recovered whose paired down was held-and-unsurfaced is suppressed
+# too — so a self-healed flap pages neither leg. If the down PROMOTED to a real
+# outage (or has a surfaced open incident), the recovery is meaningful and sends.
+# Default-on. FAIL-OPEN: gate off → relay_host_down classifies outage and the
+# recovered sends, exactly as before; any handler error falls through to send.
+RELAY_FLAP_COALESCE = env_flag("BOT_ERRORS_RELAY_FLAP_COALESCE", True)
+RELAY_DOWN_SOURCE = "relay_host_down"
+RELAY_RECOVERED_SOURCE = "relay_host_recovered"
+
+# Reachability diagnoses (collector reachabilityDiagnosis, or source suffix) that
+# represent a transient soft-fault: the host is up, a single probe timed out.
+TRANSIENT_REACHABILITY_DIAGNOSES = frozenset({"tailscale_online_ssh_timeout"})
+
+
+def _load_transient_sources() -> frozenset[str]:
+    """Exact event-source strings that classify transient, operator-extensible.
+
+    The two concrete classifiers below (reachability timeout, health-body
+    degraded while WhatsApp-connected) are verified against real emitted events.
+    Provider rate-limit/fallback source names are not yet confirmed against a
+    live emitter, so the seed is empty rather than shipping identifiers that
+    match nothing (dead config). Operators add confirmed source names via
+    BOT_ERRORS_TRANSIENT_SOURCES (comma-separated).
+    """
+    raw = os.environ.get("BOT_ERRORS_TRANSIENT_SOURCES")
+    if not raw:
+        return frozenset()
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+TRANSIENT_SOURCES = _load_transient_sources()
+
+
+def _load_inhibition_map() -> dict[str, set[str]]:
+    """Seed inhibition map, optionally merged with BOT_ERRORS_INHIBITION_MAP.
+
+    The override is JSON mapping root_source -> list/array of symptom sources.
+    Each listed symptom set is UNION-merged over the seed (additive; never
+    removes seed edges). Malformed JSON or wrong shape logs to stderr and falls
+    back to the pure seed — it never crashes the dispatcher.
+    """
+    seed: dict[str, set[str]] = {
+        root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()
+    }
+    raw = os.environ.get("BOT_ERRORS_INHIBITION_MAP", "").strip()
+    if not raw:
+        return seed
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("BOT_ERRORS_INHIBITION_MAP must be a JSON object")
+        for root, symptoms in parsed.items():
+            if not isinstance(root, str) or not isinstance(symptoms, (list, tuple, set)):
+                raise ValueError(f"invalid inhibition edge for root={root!r}")
+            bucket = seed.setdefault(str(root), set())
+            for symptom in symptoms:
+                if not isinstance(symptom, str):
+                    raise ValueError(f"non-string symptom for root={root!r}")
+                bucket.add(symptom)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(
+            f"[bot-errors-dispatcher] BOT_ERRORS_INHIBITION_MAP ignored "
+            f"(malformed; falling back to seed): {exc}",
+            file=sys.stderr,
+        )
+        return {root: set(symptoms) for root, symptoms in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items()}
+    return seed
+
+
+# Effective root->symptom inhibition map (seed merged with env override).
+INHIBITION_MAP = _load_inhibition_map()
+
+
+def symptom_source_matches(source: str, symptom_sources: set[str]) -> bool:
+    """True if ``source`` is a member of ``symptom_sources``.
+
+    Exact match, plus prefix-aware match for the per-instance health symptom:
+    a source like "local_health:sample" matches the bare token "local_health".
+    """
+    if source in symptom_sources:
+        return True
+    if "local_health" in symptom_sources and source.startswith("local_health:"):
+        return True
+    return False
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
 TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-test-auth(?:/|\s|$)", re.I)
 
@@ -438,6 +644,23 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
     # whitelist would drop it and the once-per-day summary would re-fire every run.
     if isinstance(loaded.get("testLeakDaily"), dict):
         state["testLeakDaily"] = loaded["testLeakDaily"]
+    # Pattern F (§10 C0): flap-storm trip state must survive across dispatcher
+    # invocations (each run loads → processes → saves → exits), else an in-memory
+    # sliding-window counter resets every run and a sustained burst never
+    # accumulates. Keyed by incident_key.
+    if isinstance(loaded.get("flapState"), dict):
+        state["flapState"] = loaded["flapState"]
+    # Pattern D — transient tiering bookkeeping must survive across invocations
+    # for the same reason as flapState: the promote window (transientSince anchor)
+    # spans multiple one-shot runs. Without this load, every run resets the anchor
+    # and a sustained soft-fault is held silently forever and never promotes.
+    if isinstance(loaded.get("transientState"), dict):
+        state["transientState"] = loaded["transientState"]
+    # Pattern A (digest coalescing): the auto-close digest accumulator (pending
+    # closed-key batch + lastDigestAt) must survive across one-shot runs, else the
+    # cross-run coalescing window resets every invocation and every sweep re-emits.
+    if isinstance(loaded.get("staleAutocloseDigest"), dict):
+        state["staleAutocloseDigest"] = loaded["staleAutocloseDigest"]
     return state
 
 
@@ -538,9 +761,251 @@ def is_daily_health_clear(event: dict[str, Any]) -> bool:
     return is_incident_clear(event) and str(event.get("source") or "") == "daily-health"
 
 
+def maintenance_state_path() -> Path:
+    """Path to the maintenance-window state file.
+
+    MUST match ``bot-errors-maintenance.py``'s resolution so the CLI and the
+    dispatcher agree on a single file (``BOT_ERRORS_STATE_DIR`` honored).
+    """
+    return state_root() / "maintenance.json"
+
+
+def _load_maintenance_windows() -> dict[str, dict[str, Any]]:
+    """Read active maintenance windows keyed by ``machine|instance``.
+
+    FAIL-OPEN: missing / corrupt / non-dict file -> ``{}``. Expired entries are
+    dropped at read time so a stale window never silences alerts.
+    """
+    path = maintenance_state_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    current = int(time.time())
+    out: dict[str, dict[str, Any]] = {}
+    for key, win in parsed.items():
+        if not isinstance(win, dict):
+            continue
+        expires = win.get("expiresAt")
+        try:
+            if expires is not None and int(expires) > current:
+                out[str(key)] = win
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def active_maintenance_window(event: dict[str, Any]) -> str | None:
+    """Reason string if an active maintenance window covers the event's scope.
+
+    Scope is derived via ``incident_scope`` (``machine|instance``) — the same
+    derivation incidents use — so the CLI and dispatcher key on identical
+    scopes. Returns None when no active window covers the scope.
+    """
+    scope = incident_scope(event)
+    windows = _load_maintenance_windows()
+    win = windows.get(scope)
+    if not isinstance(win, dict):
+        return None
+    reason = win.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return f"planned maintenance for {scope}: {reason.strip()}"
+    return f"planned maintenance for {scope}"
+
+
 def evidence_field(text: str, key: str) -> str | None:
     match = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", text)
     return match.group(1) if match else None
+
+
+def _truthy_token(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def classify_failure_mode(event: dict[str, Any]) -> str:
+    """Classify an alert as ``"transient"`` (recoverable soft-fault) or ``"outage"``.
+
+    Conservative by design: only well-understood soft-faults classify transient.
+    Everything else — including anything ambiguous or unknown — classifies
+    ``"outage"`` so a real failure is never silently downgraded (fail toward
+    visibility). Pattern D.
+    """
+    source = str(event.get("source") or "")
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    evidence = str(event.get("evidence") or "")
+
+    # SSH timeout to a peer Tailscale still reports online: host is up, the probe
+    # timed out — transient.
+    diagnosis = str(diagnostics.get("reachabilityDiagnosis") or "")
+    if diagnosis in TRANSIENT_REACHABILITY_DIAGNOSES:
+        return "transient"
+    if source.endswith("_online_ssh_timeout"):
+        return "transient"
+
+    # Health body briefly degraded while the WhatsApp link stayed connected: the
+    # bond never dropped and the app self-recovers — transient. This is the
+    # observed ``health_body_degraded`` recurring false-positive class.
+    if source == "health_body_degraded":
+        connected = diagnostics.get("whatsappConnected")
+        if connected is None:
+            # Last-wins: a multi-poll evidence block may carry several
+            # whatsapp_connected= readings; the most recent one decides. A later
+            # =false must not be masked by an earlier =true (would mis-hold a real
+            # disconnect as transient).
+            tokens = re.findall(r"(?:^|\s)whatsapp_connected=([^\s]+)", evidence)
+            connected = _truthy_token(tokens[-1]) if tokens else False
+        else:
+            connected = bool(connected)
+        if connected:
+            return "transient"
+
+    # Operator-confirmed transient source names (provider rate-limit/fallback,
+    # model-unknown) via BOT_ERRORS_TRANSIENT_SOURCES.
+    if source in TRANSIENT_SOURCES:
+        return "transient"
+
+    # Pattern H — a relay-host probe miss is a recoverable soft-fault: hold it so a
+    # ~6-min self-healing flap never surfaces; Pattern D promotes it to an outage
+    # only if the host stays down past the promote window.
+    if RELAY_FLAP_COALESCE and source == RELAY_DOWN_SOURCE:
+        return "transient"
+
+    return "outage"
+
+
+def apply_transient_tiering(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> str | None:
+    """Hold or promote a transient alert (Pattern D).
+
+    Returns a suppress-reason string to HOLD the alert (transient still inside the
+    soft window — not pushed to WhatsApp), or ``None`` to SEND it (not transient,
+    or persisted past the promote window so it is now a hard outage, or any
+    classification error → fail-open send).
+
+    Bookkeeping lives in ``incident_state['transientState'][key]`` — a sidecar
+    that never touches ``flapState``, so Pattern F accumulation is preserved
+    (design constraint C1). Mutates ``event['severity']`` to ``warning`` while
+    held and restores ``critical`` on promotion.
+    """
+    try:
+        if classify_failure_mode(event) != "transient":
+            return None
+        transient_state = incident_state.setdefault("transientState", {})
+        if not isinstance(transient_state, dict):
+            return None
+        record = transient_state.get(key)
+        if not isinstance(record, dict):
+            record = {
+                "transientSince": current,
+                "firstSeverity": str(event.get("severity") or ""),
+            }
+            transient_state[key] = record
+        since = int_field(record, "transientSince", current)
+        record["lastSeenAt"] = current
+        elapsed = max(0, current - since)
+        diagnostics = event.setdefault("diagnostics", {})
+
+        if record.get("promoted") or elapsed >= TRANSIENT_PROMOTE_SECONDS:
+            # Persisted past the promote window (or already promoted): a slow
+            # outage masquerading as transient. Restore the hard-outage tier and
+            # let normal open-incident handling send it. Guards the false-negative
+            # direction (a real outage misread as transient).
+            record["promoted"] = True
+            record["promotedAt"] = int_field(record, "promotedAt", current)
+            event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            diagnostics["failureClass"] = "outage_promoted"
+            diagnostics["transientPromoted"] = True
+            return None
+
+        # Still inside the soft window: hold at warning tier, do not push.
+        event["severity"] = "warning"
+        held = int_field(record, "heldCount") + 1
+        record["heldCount"] = held
+        diagnostics["failureClass"] = "transient"
+        diagnostics["transientHeld"] = True
+        return (
+            f"transient_held: {key} warning-tier "
+            f"({elapsed}s/{TRANSIENT_PROMOTE_SECONDS}s to promote, held x{held})"
+        )
+    except Exception:
+        # FAIL-OPEN: never lose a real alert to a tiering bug.
+        return None
+
+
+def resolve_transient_on_clear(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str
+) -> str | None:
+    """Retire transient bookkeeping on a clear (Pattern D).
+
+    Returns a suppress-reason when the transient was HELD (never surfaced) so its
+    recovery stays silent too; ``None`` when it had PROMOTED to an outage (let
+    normal clear handling close the surfaced incident) or no transient record
+    exists. Fail-open: any error → ``None`` (let the clear flow).
+    """
+    try:
+        transient_state = incident_state.get("transientState")
+        if not isinstance(transient_state, dict):
+            return None
+        record = transient_state.pop(key, None)
+        if not isinstance(record, dict):
+            return None
+        if record.get("promoted"):
+            return None  # promoted to outage — normal clear closes the open incident
+        event.setdefault("diagnostics", {})["transientAutoresolved"] = True
+        return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
+    except Exception:
+        return None
+
+
+def coalesce_relay_recovered(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+    """Suppress a relay_host_recovered whose paired down was held silently (Pattern H).
+
+    relay_host_recovered is emitted as an ``info`` alert (not a clear), so it never
+    matches the same-key Pattern D clear path. We pair it to its ``relay_host_down``
+    incident by source-segment substitution and decide:
+
+    - paired down is a SURFACED open incident → the recovery is news → ``None`` (send).
+    - paired down is a HELD, unpromoted transient → never surfaced → suppress the
+      recovery and retire the held record (a self-healed flap pages neither leg).
+    - paired down PROMOTED to an outage → recovery is meaningful → ``None`` (send).
+    - no record at all → fail toward visibility → ``None`` (send): we cannot prove
+      the down was held, so we never silence a recovery the operator may have been
+      waiting on.
+
+    FAIL-OPEN: gate off or any error → ``None`` (send), exactly as before.
+    """
+    try:
+        if not RELAY_FLAP_COALESCE:
+            return None
+        if str(event.get("source") or "") != RELAY_RECOVERED_SOURCE:
+            return None
+        recovered_key = incident_key(event)
+        down_key = recovered_key.replace(RELAY_RECOVERED_SOURCE, RELAY_DOWN_SOURCE, 1)
+        # A surfaced (open) down means the operator saw the outage — let recovery send.
+        open_incidents = incident_state.get("openIncidents")
+        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(down_key), dict):
+            return None
+        transient_state = incident_state.get("transientState")
+        record = transient_state.get(down_key) if isinstance(transient_state, dict) else None
+        if not isinstance(record, dict):
+            return None  # no held record — fail toward visibility, send the recovery
+        if record.get("promoted"):
+            return None  # outage was surfaced — recovery is meaningful
+        transient_state.pop(down_key, None)  # retire the held flap
+        event.setdefault("diagnostics", {})["relayFlapCoalesced"] = True
+        return (
+            f"relay_flap_coalesced: {down_key} recovered before promotion; "
+            f"held flap not surfaced (down+up both silent)"
+        )
+    except Exception:
+        return None  # FAIL-OPEN: never lose a recovery to a coalescing bug
 
 
 def evidence_epoch(text: str, key: str) -> int | None:
@@ -836,9 +1301,6 @@ def append_still_open_context(
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
     status = str(open_record.get("status") or "open")
     awaiting_physical = status == "awaiting_physical"
-    action = physical_action_text() if awaiting_physical else (
-        "Q investigate persistent incident; duplicate suppression threshold exceeded."
-    )
     additions = [
         "incident_still_open=true",
         f"incident_key={key}",
@@ -848,7 +1310,6 @@ def append_still_open_context(
         f"suppressed_duplicates={suppressed}",
         f"last_notified={open_record.get('lastNotifiedIso') or open_record.get('lastSentIso') or last_notified}",
         f"escalated={str(escalated).lower()}",
-        f"requested_action={action}",
     ]
     if digest:
         additions.insert(0, "still_open_digest=true")
@@ -1043,6 +1504,69 @@ def event_line(label: str, value: Any, limit: int = 700) -> str | None:
     return f"  > {label}: {truncate(rendered, limit)}"
 
 
+# Pattern E SSOT / Pattern A: the single "no remediation" action sentinel.
+# format_event renders it for non-actionable info events, and Pattern A keys on
+# it (the incident-level SSOT field, per §10 C4) to decide a stale renotify is
+# non-actionable and may be suppressed.
+NONACTIONABLE_ACTION = "none — informational event; no Q remediation required."
+INVESTIGATE_ACTION = "Q investigate, remediate, and report disposition in BOT ERRORS."
+
+
+def requested_action_text(event: dict[str, Any]) -> str:
+    """Single source of truth for an event's requested_action (Pattern E).
+
+    Precedence derives the action from the event's real state. A real action
+    (physical / operator) wins over the informational "none" fallback EVEN on
+    info severity — otherwise an info-severity awaiting_physical digest renders
+    "none" and loses its action (false negative). "none" is honest only for an
+    info event with no real standing action (e.g. a self-healed stale digest).
+    Returned WITHOUT the "  > requested_action: " line prefix.
+    """
+    severity = str(event.get("severity") or "").lower()
+    if event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
+        return physical_action_text()
+    if is_physical_intervention_signal(event):
+        return physical_candidate_action_text()
+    operator_action = critical_operator_action(event)
+    if operator_action:
+        return redact(operator_action).replace("@", " at ")
+    if severity == "info":
+        return NONACTIONABLE_ACTION
+    if event_has_stale_context(event):
+        return stale_action_text()
+    return INVESTIGATE_ACTION
+
+
+def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
+    """A4: on a RE-delivery (attempts > 1), stamp how old the event is at send
+    time and that the underlying condition was NOT re-validated before re-sending.
+
+    The dispatcher has no per-source re-probe, so a re-sent alert can describe a
+    condition that already self-healed (the "attempts=5, already false" problem).
+    These markers let a reader judge currency instead of trusting a stale echo.
+    First deliveries (attempts <= 1) are left clean. Fail-open: any error is
+    swallowed — freshness telemetry must never block or corrupt a real send.
+    """
+    try:
+        delivery = event.get("delivery")
+        if not isinstance(delivery, dict):
+            return
+        if int(delivery.get("attempts") or 0) <= 1:
+            return
+        created = event.get("createdAt")
+        if isinstance(created, str) and created.strip():
+            try:
+                created_epoch = int(
+                    datetime.fromisoformat(created.strip().replace("Z", "+00:00")).timestamp()
+                )
+                delivery["ageAtDeliverySeconds"] = max(0, current - created_epoch)
+            except Exception:
+                pass
+        delivery["revalidated"] = False
+    except Exception:
+        return
+
+
 def format_event(event: dict[str, Any]) -> str:
     event_type = str(event.get("eventType") or "alert")
     severity = str(event.get("severity") or "").lower()
@@ -1102,6 +1626,13 @@ def format_event(event: dict[str, Any]) -> str:
             900,
         ),
         event_line("dispatcher_attempts", delivery.get("attempts")),
+        event_line("delivery_age_seconds", delivery.get("ageAtDeliverySeconds")),
+        event_line(
+            "revalidated",
+            ("no — condition not re-probed before re-send (may be stale)"
+             if delivery.get("revalidated") is False else None),
+            120,
+        ),
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
         event_line("cwd", process_info.get("cwd")),
@@ -1117,20 +1648,8 @@ def format_event(event: dict[str, Any]) -> str:
     ]
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
-    operator_action = critical_operator_action(event)
     clear_requirement = critical_clear_requirement(event)
-    if severity == "info":
-        requested_action = "  > requested_action: none — informational event; no Q remediation required."
-    elif operator_action:
-        requested_action = f"  > requested_action: {redact(operator_action).replace('@', ' at ')}"
-    elif event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
-        requested_action = f"  > requested_action: {physical_action_text()}"
-    elif is_physical_intervention_signal(event):
-        requested_action = f"  > requested_action: {physical_candidate_action_text()}"
-    elif event_has_stale_context(event):
-        requested_action = f"  > requested_action: {stale_action_text()}"
-    else:
-        requested_action = "  > requested_action: Q investigate, remediate, and report disposition in BOT ERRORS."
+    requested_action = f"  > requested_action: {requested_action_text(event)}"
     lines.extend([
         event_line("queue", diagnostics.get("queue")),
         event_line("dispatch_log", diagnostics.get("dispatchLog")),
@@ -1320,18 +1839,60 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
         return "daily-health info events are retained for heartbeat freshness but not posted to BOT ERRORS"
+    # Pattern H — a relay_host_recovered (info alert) whose paired relay_host_down
+    # was held-and-unsurfaced is a self-healed flap; suppress it so the blip pages
+    # neither leg. Handled here because the info severity means it never reaches the
+    # is_incident_alert / is_incident_clear branches below.
+    if source == RELAY_RECOVERED_SOURCE:
+        relay_reason = coalesce_relay_recovered(event, incident_state)
+        if relay_reason is not None:
+            return relay_reason
+    # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
+    # maintenance window. CLEAR events are never gated here: a recovery during
+    # maintenance must still close the incident. FAIL-OPEN: gate off, or any
+    # ambiguity in the window file, sends as before.
+    if (
+        MAINTENANCE_ENABLED
+        and is_incident_alert(event)
+        and not is_incident_clear(event)
+    ):
+        maintenance_reason = active_maintenance_window(event)
+        if maintenance_reason is not None:
+            event.setdefault("diagnostics", {})["maintenanceSilenced"] = True
+            return f"maintenance_silenced: {maintenance_reason}"
     migrate_legacy_unqualified_incident(event, incident_state)
     key = incident_key(event)
     current = int(time.time())
     open_incidents = incident_state.setdefault("openIncidents", {})
+    # Pattern F — suppress individual members of an OPEN flap storm; the
+    # consolidated flap_storm alert (emitted by the pre-collapse scan) already
+    # carries the count/rate. The storm itself never routes through here
+    # (it is sent directly), so this cannot suppress the storm alert.
+    if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
+        flap_state = incident_state.get("flapState")
+        if isinstance(flap_state, dict):
+            flap_rec = flap_state.get(key)
+            if isinstance(flap_rec, dict) and flap_rec.get("stormAt"):
+                return f"flap_storm_member: {key} consolidated into open flap storm"
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)
+        root_source = stronger_key.rsplit("|", 1)[-1]
         if is_incident_clear(event):
             return f"clear for {key} suppressed because stronger incident {stronger_key} remains open"
-        return f"symptom incident {key} suppressed because stronger incident {stronger_key} remains open"
+        return (
+            f"symptom incident {key} suppressed because stronger incident "
+            f"{stronger_key} remains open (inhibited_by:{root_source})"
+        )
     if is_incident_alert(event):
+        # Pattern D — hold a transient soft-fault at warning tier; only a
+        # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
+        # the hard-outage tier and falls through to normal send handling.
+        if TRANSIENT_TIERING_ENABLED:
+            transient_reason = apply_transient_tiering(event, incident_state, key, current)
+            if transient_reason is not None:
+                return transient_reason
         open_record = open_incidents.get(key)
         if isinstance(open_record, dict):
             if str(open_record.get("status") or "") == "stale":
@@ -1374,6 +1935,27 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 else age_seconds >= INCIDENT_ESCALATE_SECONDS or suppressed >= INCIDENT_ESCALATE_SUPPRESSED
             )
             if since_notified >= renotify_seconds:
+                try:
+                    suppress_open_renotify = (
+                        SUPPRESS_OPEN_NONACTIONABLE_RENOTIFY
+                        and open_renotify_is_nonactionable(event, key)
+                    )
+                except Exception:
+                    suppress_open_renotify = False  # fail-open: send on classifier error
+                if suppress_open_renotify:
+                    # Absorb the fresh occurrence silently: keep the audit counter and
+                    # the lastSeen bookkeeping (already updated above), but do NOT
+                    # re-page or age-escalate. flap-storm (force_notify_level, handled
+                    # earlier) remains the only escalation path for a stuck agent.
+                    open_record["openRenotifySuppressedCount"] = (
+                        int_field(open_record, "openRenotifySuppressedCount") + 1
+                    )
+                    open_record["lastOpenRenotifySuppressedAt"] = current
+                    open_record["lastOpenRenotifySuppressedIso"] = now_iso()
+                    return (
+                        f"open renotify suppressed (non-actionable source) for {key}; "
+                        f"flap-storm still escalates"
+                    )
                 open_record["lastNotifiedAt"] = current
                 open_record["lastNotifiedIso"] = now_iso()
                 open_record["renotifyCount"] = int_field(open_record, "renotifyCount") + 1
@@ -1386,6 +1968,12 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 return None
             return f"incident cooldown active for {key}; last sent {current - last_sent}s ago"
     if is_incident_clear(event):
+        # Pattern D — a held transient that recovers before promotion: retire its
+        # bookkeeping and keep the recovery silent (we never surfaced the alert).
+        if TRANSIENT_TIERING_ENABLED:
+            transient_clear = resolve_transient_on_clear(event, incident_state, key)
+            if transient_clear is not None:
+                return transient_clear
         open_record = open_incidents.get(key)
         if not isinstance(open_record, dict):
             recovered_keys = daily_health_recovered_incident_keys(event, incident_state)
@@ -1518,6 +2106,12 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
     elif is_incident_clear(event):
         incident_state.setdefault("openIncidents", {}).pop(key, None)
         incident_state.setdefault("lastSentAt", {}).pop(key, None)
+        # Pattern D — retire any transient bookkeeping for this key on close, so a
+        # promoted record cannot persist and collapse the promote window for a
+        # future re-opened incident on the same key.
+        transient_state = incident_state.get("transientState")
+        if isinstance(transient_state, dict):
+            transient_state.pop(key, None)
         close_recovered_daily_health_incidents(event, incident_state)
 
 
@@ -1533,17 +2127,42 @@ def close_superseded_incidents(event: dict[str, Any], incident_state: dict[str, 
         old_key = f"{scope}|{old_source}"
         open_incidents.pop(old_key, None)
         last_sent.pop(old_key, None)
+    # Prefix-aware close for per-instance health symptoms. Stored health
+    # incidents use the QUALIFIED key form "{scope}|local_health:<instance>"
+    # (incident_source() qualifies them), so the exact-key pop above is a no-op
+    # for them. When a bare "local_health" token is in the symptom set, also
+    # close any open incident in the SAME scope whose stored source matches via
+    # symptom_source_matches (i.e. "{scope}|local_health:*"). Reuses the same
+    # prefix logic as the inhibition path; exact-match behavior for all other
+    # sources is unchanged. Collect keys first to avoid mutating while iterating.
+    if "local_health" in superseded_sources:
+        scope_prefix = f"{scope}|"
+        prefixed_keys = [
+            key
+            for key in open_incidents
+            if key.startswith(scope_prefix)
+            and symptom_source_matches(key[len(scope_prefix):], superseded_sources)
+        ]
+        for key in prefixed_keys:
+            open_incidents.pop(key, None)
+            last_sent.pop(key, None)
 
 
 def stronger_open_incident_for(
     event: dict[str, Any],
     incident_state: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
+    # Pattern C gate — FAIL-OPEN. When inhibition is disabled, never suppress.
+    if not INHIBITION_ENABLED:
+        return None
     source = incident_source(event)
     scope = incident_scope(event)
     open_incidents = incident_state.setdefault("openIncidents", {})
-    for stronger_source, superseded_sources in SUPERSEDED_SOURCES_BY_ALERT_SOURCE.items():
-        if source not in superseded_sources:
+    for stronger_source, superseded_sources in INHIBITION_MAP.items():
+        if not symptom_source_matches(source, superseded_sources):
+            continue
+        # A root incident must never suppress itself.
+        if source == stronger_source:
             continue
         stronger_key = f"{scope}|{stronger_source}"
         record = open_incidents.get(stronger_key)
@@ -1579,6 +2198,13 @@ def mark_suppressed_by_stronger(
     if critical_failure_code(event):
         stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(event)
     stronger_record["suppressedCount"] = int_field(stronger_record, "suppressedCount") + 1
+    # Pattern C — tag the suppressed symptom with inhibited_by:<root_source>,
+    # mirroring how Pattern F tags flap_storm members. The root source is the
+    # last segment of the stronger_key (scope|root_source). Auto-release is
+    # automatic: this reason is derived at decision time from open-incident
+    # state, so it disappears once the root incident clears (NO persistent flag).
+    root_source = stronger_key.rsplit("|", 1)[-1]
+    stronger_record["lastSuppressedSymptomReason"] = f"inhibited_by:{root_source}"
 
 
 def incident_event_fields_from_key(key: str) -> dict[str, str]:
@@ -1604,6 +2230,145 @@ def incident_event_fields_from_key(key: str) -> dict[str, str]:
         fields["source"], remote = source.split(":", 1)
         fields["diagnostics"] = {"remote": remote}
     return fields
+
+
+def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
+    """Pattern A: is this stale renotify safe to suppress (non-actionable)?
+
+    Suppress a self-healed / no-op stale incident when ANY of:
+    - explicit configured suppress source (BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES);
+    - a recovery / no-op source signature (*_restored/_recovered/_reverted/_unknown/
+      _cleared, provider_fallback_*) — definitionally non-actionable once stale;
+    - the SSOT requested_action (Pattern E) resolves to the non-actionable sentinel,
+      i.e. format_event would render "none — informational" (§10 C4).
+
+    flap_storm incidents are EXEMPT (§10 C4) — they always renotify on their own
+    cadence. Callers wrap this fail-open: any exception => do not suppress (send).
+    """
+    source = str(event.get("source") or "")
+    alert_source = str(event.get("alertSource") or "")
+    if source == "flap_storm" or "flap_storm" in str(key):
+        return False
+    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+        return True
+    for cand in (source.lower(), alert_source.lower()):
+        if not cand:
+            continue
+        if cand.endswith(STALE_RENOTIFY_SUPPRESS_SUFFIXES) or cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
+            return True
+    # SSOT signal: the derived action is non-actionable. This covers both the
+    # plain info "none" sentinel AND the stale "verify whether it recovered —
+    # unless fresh alerts resume" filler that stale_incident_event bakes as the
+    # operatorAction for any stale incident carrying a failure_code (e.g. a
+    # daily-health provider_probe quiet for days). That filler describes a no-op
+    # by definition: if the source were still broken it would re-emit FRESH
+    # events (which renotify normally) instead of going silent. A genuine
+    # standing action (physical relink / manual intervention) resolves to a
+    # different, real action string and is NOT caught here.
+    return requested_action_text(event) in (NONACTIONABLE_ACTION, stale_action_text())
+
+
+def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
+    """Pattern A (open variant): suppress the periodic still-open renotify for a
+    source that is never operator-actionable even while the incident is live.
+
+    Scope = the same non-actionable prefixes as the stale path (runtime-tool-error:*,
+    provider_fallback_*) plus any explicitly configured suppress source. A
+    runtime-tool-error incident is the agent's OWN tool call failing and
+    self-correcting inline; the time-based renotify/escalation has no remediation
+    behind it. flap_storm is EXEMPT — a genuinely stuck agent still escalates
+    through force_notify_level, which is evaluated BEFORE this branch. Callers
+    wrap this fail-open: any exception => do not suppress (send).
+    """
+    source = str(event.get("source") or "")
+    alert_source = str(event.get("alertSource") or "")
+    if source == "flap_storm" or "flap_storm" in str(key):
+        return False
+    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+        return True
+    for cand in (source.lower(), alert_source.lower()):
+        if cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
+            return True
+    return False
+
+
+def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+    """Pattern A: record a suppressed (non-sent) stale renotify for audit.
+
+    The incident stays in state (audit trail preserved); only the WhatsApp push
+    is gated. lastStaleRenotifiedAt is intentionally NOT advanced — we did not
+    notify — so the existing renotify cadence still governs if it later becomes
+    actionable.
+    """
+    if not record.get("staleAt"):
+        record["staleAt"] = current
+        record["staleIso"] = now_iso()
+    record["staleSuppressed"] = True
+    record["lastStaleSuppressedAt"] = current
+    record["lastStaleSuppressedIso"] = now_iso()
+    record["lastStaleSuppressedEventId"] = event.get("id")
+    record["staleSuppressedCount"] = int_field(record, "staleSuppressedCount") + 1
+
+
+def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, Any]:
+    """One consolidated digest for a batch of auto-closed non-actionable stale
+    incidents (Pattern A safety valve + §10 C5). Recoveries are summarized and
+    consolidated — never 200 individual alerts."""
+    preview = ", ".join(keys[:10])
+    if len(keys) > 10:
+        preview += f", +{len(keys) - 10} more"
+    additions = [
+        "stale_autoclose=true",
+        f"closed_count={len(keys)}",
+        f"closed_keys={preview}",
+        "reason=non-actionable incidents AGED OUT past escalate horizon; "
+        "removed from open state to bound incident state. recovery UNVERIFIED "
+        "(silence is not proof of repair — esp. if the monitoring path was down); "
+        "each will REOPEN automatically if the condition still fails on the next run.",
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"stale-autoclose-{current}",
+        "eventType": "alert",
+        "severity": "info",
+        "createdAt": now_iso(),
+        "machine": "bot-errors",
+        "instance": "dispatcher",
+        "source": "stale-autoclose",
+        "summary": (
+            f"Auto-closed {len(keys)} non-actionable stale incident(s) — "
+            "aged out, recovery unverified (reopens if still failing)"
+        ),
+        "evidence": "\n".join(additions),
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "stale-autoclose", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def should_emit_autoclose_digest(accum: dict[str, Any], current: int) -> bool:
+    """Decide whether the coalesced auto-close digest is due this sweep.
+
+    Emit when: coalescing is disabled (window<=0), OR the pending batch has reached
+    the burst cap (report a flood promptly), OR the coalescing window has elapsed
+    since the last digest. A first-ever digest (lastDigestAt==0) fires immediately so
+    the operator still gets prompt first notice; subsequent trickle is then absorbed.
+    Fail-open: any malformed accumulator falls through to emit.
+    """
+    try:
+        pending = int(accum.get("pendingCount") or 0)
+        if pending <= 0:
+            return False
+        if STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS <= 0:
+            return True
+        if pending >= STALE_AUTOCLOSE_DIGEST_MAX_PENDING:
+            return True
+        last_digest_at = int(accum.get("lastDigestAt") or 0)
+        return (current - last_digest_at) >= STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
+    except Exception:
+        return True
 
 
 def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict[str, Any] | None:
@@ -1645,7 +2410,6 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
         f"quiet_seconds={quiet_seconds}",
         f"suppressed_duplicates={int_field(record, 'suppressedCount')}",
         f"renotify_cadence_seconds={renotify_seconds}",
-        f"requested_action={action}",
     ]
     fields = incident_event_fields_from_key(key)
     event = {
@@ -1714,14 +2478,313 @@ def mark_stale_incident_failed(record: dict[str, Any], event: dict[str, Any], cu
     record["staleRenotifyFailureCount"] = int_field(record, "staleRenotifyFailureCount") + 1
 
 
+# ---------------------------------------------------------------------------
+# Pattern F — flap-storm detection (design §9 + §10 C0/C1/C2/C4)
+#
+# A flapping source (self-heal-then-fail) is a fault signature, not just noise:
+# we CONSOLIDATE its member events into one alert AND ESCALATE on intensity.
+# Trip state is disk-persisted under incident_state["flapState"], keyed by
+# incident_key, because the dispatcher loads→processes→saves→exits and an
+# in-memory window counter would reset every run (C0). Timestamps are
+# dispatcher wall-clock (never author createdAt — collector clock skew, C0).
+# Trips are counted on raw INPUT before storm-collapse consumes members (C1).
+# ---------------------------------------------------------------------------
+
+def flap_entry(flap_state: dict[str, Any], key: str) -> dict[str, Any]:
+    entry = flap_state.get(key)
+    if not isinstance(entry, dict):
+        entry = {"tripTimestamps": [], "cumulativeCount": 0}
+        flap_state[key] = entry
+    if not isinstance(entry.get("tripTimestamps"), list):
+        entry["tripTimestamps"] = []
+    return entry
+
+
+def flap_trips_in_window(entry: dict[str, Any], now: int) -> int:
+    return sum(
+        1
+        for t in entry.get("tripTimestamps", [])
+        if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS
+    )
+
+
+def record_flap_trip(flap_state: dict[str, Any], key: str, now: int) -> dict[str, Any]:
+    """Record one raw trip for incident_key at wall-clock `now`, pruning the
+    sliding window. Counts input per raw trip (C1)."""
+    entry = flap_entry(flap_state, key)
+    pruned = [t for t in entry["tripTimestamps"] if isinstance(t, (int, float)) and 0 <= now - t <= FLAP_WINDOW_SECONDS]
+    pruned.append(now)
+    entry["tripTimestamps"] = pruned
+    entry["cumulativeCount"] = int(entry.get("cumulativeCount") or 0) + 1
+    entry["lastTripAt"] = now
+    if not entry.get("firstTripAt"):
+        entry["firstTripAt"] = now
+    return entry
+
+
+def flap_evaluate(entry: dict[str, Any], now: int) -> dict[str, Any]:
+    """Decide whether to emit a flap_storm alert for this entry now (after its
+    trip was recorded). Mutates storm lifecycle fields. Returns
+    {emit: bool, severity: str|None, reason: str}.
+
+    - First crossing of FLAP_TRIP_THRESHOLD in the window opens the storm at
+      `warning` and emits once; member events are then suppressed.
+    - Promote to `critical` when the storm persists FLAP_PROMOTE_SECONDS or the
+      cumulative count crosses FLAP_CRITICAL_COUNT (the 263-case). Re-emits once
+      on escalation, and on the FLAP_PROMOTE_SECONDS cadence while active.
+    """
+    trips = flap_trips_in_window(entry, now)
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    if not entry.get("stormAt"):
+        if trips >= FLAP_TRIP_THRESHOLD:
+            entry["stormAt"] = now
+            entry["stormSeverity"] = "warning"
+            entry["lastStormEmitAt"] = now
+            return {"emit": True, "severity": "warning", "reason": "flap_storm_opened"}
+        return {"emit": False, "severity": None, "reason": "below_threshold"}
+    storm_at = int(entry.get("stormAt") or now)
+    promoted = (now - storm_at >= FLAP_PROMOTE_SECONDS) or (cumulative >= FLAP_CRITICAL_COUNT)
+    new_severity = "critical" if promoted else "warning"
+    escalated = new_severity == "critical" and entry.get("stormSeverity") != "critical"
+    last_emit = int(entry.get("lastStormEmitAt") or storm_at)
+    cadence_due = now - last_emit >= FLAP_PROMOTE_SECONDS
+    entry["stormSeverity"] = new_severity
+    if escalated or cadence_due:
+        entry["lastStormEmitAt"] = now
+        return {
+            "emit": True,
+            "severity": new_severity,
+            "reason": "flap_storm_escalated" if escalated else "flap_storm_cadence",
+        }
+    return {"emit": False, "severity": new_severity, "reason": "flap_storm_member_suppressed"}
+
+
+def flap_should_resolve(entry: dict[str, Any], now: int) -> bool:
+    """An open storm resolves only after FLAP_STABLE_SECONDS of zero trips in the
+    window. (C2 notes liveness should also gate this; collector silence alone is
+    a weaker signal — tracked as a follow-up; time-stable is the Wave-1 gate.)"""
+    if not entry.get("stormAt"):
+        return False
+    last_trip = int(entry.get("lastTripAt") or 0)
+    return flap_trips_in_window(entry, now) == 0 and (now - last_trip) >= FLAP_STABLE_SECONDS
+
+
+def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -> dict[str, Any]:
+    """Build the consolidated flap_storm alert with Pattern E enrichment and a
+    real requested_action (never 'none'); exempt from Pattern A suppression."""
+    fields = incident_event_fields_from_key(key)
+    underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
+    trips = flap_trips_in_window(entry, now)
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    first = int(entry.get("firstTripAt") or now)
+    last = int(entry.get("lastTripAt") or now)
+    additions = [
+        "flap_storm=true",
+        f"incident_key={key}",
+        f"underlying_source={underlying}",
+        f"flap_trips_in_window={trips}",
+        f"flap_window_seconds={FLAP_WINDOW_SECONDS}",
+        f"flap_cumulative_count={cumulative}",
+        f"flap_first_seen={iso_from_epoch(first)}",
+        f"flap_last_seen={iso_from_epoch(last)}",
+        f"flap_rate_per_window={trips}",
+        "severity_rationale=" + (
+            f"critical: sustained ≥{FLAP_PROMOTE_SECONDS}s or count ≥{FLAP_CRITICAL_COUNT}"
+            if severity == "critical"
+            else f"warning: ≥{FLAP_TRIP_THRESHOLD} trips in {FLAP_WINDOW_SECONDS}s"
+        ),
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"flap-storm-{safe_segment(key)}-{now}",
+        "eventType": "alert",
+        "severity": severity,
+        "createdAt": now_iso(),
+        **fields,
+        "source": "flap_storm",
+        "alertSource": underlying,
+        "summary": f"Flap storm: {underlying} unstable — {cumulative} trips, {trips} in last {FLAP_WINDOW_SECONDS}s",
+        "evidence": "\n".join(additions),
+        "criticalAsset": {
+            "asset": {"kind": "monitored_source", "instance": fields.get("instance", "unknown"), "owner": "whatsoup"},
+            "failure": {
+                "code": "FLAP_STORM",
+                "domain": "operational_reliability",
+                "recoverability": "operator_recoverable",
+                "confidence": "confirmed",
+                "operatorAction": FLAP_STORM_ACTION,
+                "clearRequirement": f"source quiet ≥ {FLAP_STABLE_SECONDS}s",
+            },
+        },
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "flap-storm", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def flap_resolve_event(key: str, entry: dict[str, Any], now: int) -> dict[str, Any]:
+    """One terminal 'resolved after N flaps over Tm' summary (info)."""
+    fields = incident_event_fields_from_key(key)
+    underlying = str(fields.get("alertSource") or fields.get("source") or "unknown")
+    cumulative = int(entry.get("cumulativeCount") or 0)
+    first = int(entry.get("firstTripAt") or now)
+    storm_at = int(entry.get("stormAt") or first)
+    minutes = max(1, (now - storm_at) // 60)
+    additions = [
+        "flap_storm_resolved=true",
+        f"incident_key={key}",
+        f"underlying_source={underlying}",
+        f"flap_total_count={cumulative}",
+        f"flap_duration_minutes={minutes}",
+        f"flap_first_seen={iso_from_epoch(first)}",
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"flap-resolved-{safe_segment(key)}-{now}",
+        "eventType": "alert",
+        "severity": "info",
+        "createdAt": now_iso(),
+        **fields,
+        "source": "flap_storm_resolved",
+        "alertSource": underlying,
+        "summary": f"Flap storm resolved: {underlying} stable after {cumulative} flaps over {minutes}m",
+        "evidence": "\n".join(additions),
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "flap-resolved", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def flap_scan_outbox(paths: dict[str, Path]) -> int:
+    """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
+    event currently in the outbox, keyed by incident_key, and emit consolidated
+    flap_storm alerts when a key crosses threshold / promotes. Runs BEFORE
+    collapse_ready_storms so trips count raw input, not post-collapse survivors.
+    Member events are suppressed later in should_suppress_send via flapState.
+    Returns the number of storm alerts emitted. Fail-open throughout.
+    """
+    if not FLAP_DETECTION:
+        return 0
+    try:
+        incident_state = load_incident_state(paths)
+    except Exception:  # noqa: BLE001 - never block dispatch on a flap read
+        return 0
+    flap_state = incident_state.setdefault("flapState", {})
+    now = int(time.time())
+    emitted = 0
+    changed = False
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            if not ready(path, paths["quarantine"]):
+                continue
+            event = read_json(path)
+        except Exception:  # noqa: BLE001 - skip unreadable, process_one will quarantine
+            continue
+        if not is_incident_alert(event) or is_incident_clear(event):
+            continue
+        if str(event.get("source") or "") == "flap_storm":
+            continue
+        key = incident_key(event)
+        try:
+            entry = record_flap_trip(flap_state, key, now)
+            changed = True
+            decision = flap_evaluate(entry, now)
+            if decision.get("emit"):
+                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                emitted += 1
+                append_dispatch_log(paths, {
+                    "type": "flap_storm",
+                    "incidentKey": key,
+                    "severity": decision.get("severity"),
+                    "reason": decision.get("reason"),
+                    "cumulativeCount": entry.get("cumulativeCount"),
+                    "tripsInWindow": flap_trips_in_window(entry, now),
+                })
+        except Exception as exc:  # noqa: BLE001 - one bad event must not block the scan
+            append_dispatch_log(paths, {"type": "flap_scan_error", "incidentKey": key, "error": str(exc)})
+            continue
+    if changed:
+        save_incident_state(paths, incident_state)
+    return emitted
+
+
+def sweep_flap_storms(paths: dict[str, Path]) -> tuple[int, int]:
+    """Sweep open flap storms for resolution. Returns (resolved, errors).
+    Called from run_once after per-event processing. Fail-open per entry."""
+    if not FLAP_DETECTION:
+        return 0, 0
+    incident_state = load_incident_state(paths)
+    flap_state = incident_state.get("flapState")
+    if not isinstance(flap_state, dict) or not flap_state:
+        return 0, 0
+    now = int(time.time())
+    resolved = 0
+    errors = 0
+    changed = False
+    for key in sorted(flap_state.keys()):
+        entry = flap_state.get(key)
+        if not isinstance(entry, dict):
+            continue
+        try:
+            if flap_should_resolve(entry, now):
+                send_whatsapp(format_event(flap_resolve_event(str(key), entry, now)))
+                append_dispatch_log(paths, {
+                    "type": "flap_storm_resolved",
+                    "incidentKey": key,
+                    "cumulativeCount": entry.get("cumulativeCount"),
+                })
+                flap_state.pop(key, None)
+                resolved += 1
+                changed = True
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not block the sweep
+            errors += 1
+            append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
+    if changed:
+        save_incident_state(paths, incident_state)
+    return resolved, errors
+
+
+def _machine_of_key(key: str) -> str:
+    parts = str(key).split("|")
+    return parts[0] if parts else str(key)
+
+
+def _source_of_key(key: str) -> str:
+    parts = str(key).split("|")
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) -> bool:
+    """A2 / §10 C2: is this machine's OWN daily-health cadence currently flagged
+    stale by the heartbeat-watchdog?
+
+    Signalled by an open incident whose source segment is
+    ``heartbeat-watchdog:daily_health:<machine>`` (the watchdog tracks per-machine
+    daily-health cadence). When that is open, the monitoring path that would emit a
+    FRESH failure for any of this machine's daily-health incidents is itself down,
+    so a daily-health incident going quiet is NOT evidence of recovery.
+    """
+    target = f"heartbeat-watchdog:daily_health:{machine}".lower()
+    for k in open_incidents:
+        if _source_of_key(k).lower() == target:
+            return True
+    return False
+
+
 def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = None) -> tuple[int, int, str | None]:
     incident_state = load_incident_state(paths)
     open_incidents = incident_state.setdefault("openIncidents", {})
     current = int(time.time())
     sent = 0
     failed = 0
+    suppressed = 0
     last_error = None
     changed = False
+    auto_closed: list[str] = []
     for key, record in sorted(open_incidents.items()):
         if skip_keys and str(key) in skip_keys:
             continue
@@ -1730,6 +2793,86 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         event = stale_incident_event(str(key), record, current)
         if event is None:
             continue
+        # Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
+        if SUPPRESS_STALE_INFO_RENOTIFY:
+            try:
+                nonactionable = stale_renotify_is_nonactionable(event, str(key))
+            except Exception as exc:  # fail-open: never lose a real alert to the filter
+                nonactionable = False
+                append_dispatch_log(paths, {
+                    "type": "stale_suppress_classify_error",
+                    "incidentKey": key,
+                    "error": str(exc),
+                })
+            if nonactionable:
+                mark_stale_incident_suppressed(record, event, current)
+                suppressed += 1
+                changed = True
+                opened = int_field(record, "openedAt", current)
+                age = max(0, current - opened)
+                # Safety valve / §10 C5 terminal removal: a non-actionable stale
+                # incident past the escalate horizon is auto-closed (removed from
+                # open state) and reported ONCE in a consolidated summary below.
+                will_close = age >= INCIDENT_ESCALATE_SECONDS
+                held_for_liveness = False
+                # A2 / §10 C2: do not close a daily-health incident as "aged out"
+                # while this machine's own daily-health monitoring is stale — the
+                # silence is uninformative, not proof of repair. Hold it (still
+                # suppressed, not sent) until monitoring returns OR the bounded hold
+                # cap elapses (§10 C5: openIncidents must stay bounded). Fail-open.
+                if will_close and AUTOCLOSE_LIVENESS_GATE:
+                    try:
+                        if _source_of_key(str(key)).startswith("daily-health") and \
+                                daily_health_monitoring_stale(
+                                    _machine_of_key(str(key)), open_incidents
+                                ):
+                            machine = _machine_of_key(str(key))
+                            # Bound the hold from when holding BEGAN (not the
+                            # incident's own age): a long-quiet incident that only
+                            # just lost monitoring should still ride out the outage.
+                            first_held = int_field(record, "autocloseFirstHeldAt")
+                            if first_held <= 0:
+                                first_held = current
+                                record["autocloseFirstHeldAt"] = first_held
+                            held_seconds = max(0, current - first_held)
+                            if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
+                                will_close = False
+                                held_for_liveness = True
+                                record["autocloseHeldForLiveness"] = True
+                                record["lastAutocloseHoldAt"] = current
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_held_for_liveness",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "reason": "daily_health_monitoring_stale",
+                                    "ageSeconds": age,
+                                    "heldSeconds": held_seconds,
+                                })
+                            else:
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_liveness_hold_cap_reached",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "heldSeconds": held_seconds,
+                                })
+                    except Exception as exc:  # fail-open: never leak the close on a bug
+                        append_dispatch_log(paths, {
+                            "type": "autoclose_liveness_gate_error",
+                            "incidentKey": key,
+                            "error": str(exc),
+                        })
+                if will_close:
+                    auto_closed.append(str(key))
+                append_dispatch_log(paths, {
+                    "type": "stale_renotify_suppressed",
+                    "incidentKey": key,
+                    "reason": "nonactionable_aged_out_unverified",
+                    "staleSuppressedCount": record.get("staleSuppressedCount"),
+                    "ageSeconds": age,
+                    "willAutoClose": will_close,
+                    "heldForLiveness": held_for_liveness,
+                })
+                continue
         if sent + failed >= INCIDENT_STALE_SWEEP_MAX_EVENTS:
             append_dispatch_log(paths, {
                 "type": "stale_renotify_batch_cap_reached",
@@ -1763,6 +2906,77 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             "status": record.get("status"),
             "staleRenotifyCount": record.get("staleRenotifyCount"),
         })
+    # Terminal removal + coalesced auto-close summary (§10 C5 + Pattern A safety
+    # valve): non-actionable stale incidents past the escalate horizon are removed
+    # from open state immediately (so openIncidents cannot grow unbounded and the
+    # renotify stops), but the WhatsApp digest is coalesced ACROSS sweep runs. The
+    # sweep ticks every ~30s; without cross-run coalescing a draining backlog emits
+    # one "Auto-closed N" message per tick, and the digest itself becomes the noise.
+    if auto_closed:
+        # Closure is unconditional and immediate — independent of digest cadence.
+        last_sent_at = incident_state.get("lastSentAt")
+        for closed_key in auto_closed:
+            open_incidents.pop(closed_key, None)
+            if isinstance(last_sent_at, dict):
+                last_sent_at.pop(closed_key, None)
+        changed = True
+
+        # Accumulate into the persisted digest batch.
+        accum = incident_state.get("staleAutocloseDigest")
+        if not isinstance(accum, dict):
+            accum = {}
+            incident_state["staleAutocloseDigest"] = accum
+        pending_keys = accum.get("pendingKeys")
+        if not isinstance(pending_keys, list):
+            pending_keys = []
+        # Keep a bounded sample of keys for the digest preview; count is exact.
+        pending_keys.extend(auto_closed)
+        accum["pendingKeys"] = pending_keys[-200:]
+        accum["pendingCount"] = int(accum.get("pendingCount") or 0) + len(auto_closed)
+        if not accum.get("firstPendingAt"):
+            accum["firstPendingAt"] = current
+
+        if should_emit_autoclose_digest(accum, current):
+            digest_keys = list(accum.get("pendingKeys") or auto_closed)
+            digest_count = int(accum.get("pendingCount") or len(digest_keys))
+            summary_event = stale_autoclose_summary_event(digest_keys, current)
+            # Report the exact coalesced total even when the key sample was trimmed.
+            summary_event["summary"] = (
+                f"Auto-closed {digest_count} non-actionable stale incident(s)"
+            )
+            try:
+                send_whatsapp(format_event(summary_event))
+                append_dispatch_log(paths, {
+                    "type": "stale_autoclosed",
+                    "count": digest_count,
+                    "keysSample": digest_keys[:20],
+                    "coalescedWindowSeconds": STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS,
+                })
+                accum["pendingKeys"] = []
+                accum["pendingCount"] = 0
+                accum["firstPendingAt"] = 0
+                accum["lastDigestAt"] = current
+            except Exception as exc:
+                # Keep the batch pending so it retries on the next sweep (no loss).
+                last_error = str(exc)
+                append_dispatch_log(paths, {
+                    "type": "stale_autoclose_summary_failed",
+                    "count": digest_count,
+                    "error": str(exc),
+                })
+        else:
+            append_dispatch_log(paths, {
+                "type": "stale_autoclose_digest_coalesced",
+                "pendingCount": accum.get("pendingCount"),
+                "closedThisSweep": len(auto_closed),
+                "nextDigestInSeconds": max(
+                    0,
+                    STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS
+                    - (current - int(accum.get("lastDigestAt") or 0)),
+                ),
+            })
+    if suppressed:
+        append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
     if changed:
         save_incident_state(paths, incident_state)
     return sent, failed, last_error
@@ -2818,6 +4032,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         return True, "suppressed"
 
     append_clear_context(event, incident_state)
+    stamp_delivery_freshness(event, int(time.time()))
     text = format_event(event)
     try:
         send_whatsapp(text)
@@ -2896,6 +4111,10 @@ def run_once(max_events: int) -> dict[str, Any]:
         reclaimed = reclaim_processing(paths)
         test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
+        # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
+        # consumes members. Emits consolidated flap_storm alerts; members are
+        # suppressed downstream in should_suppress_send via persisted flapState.
+        flap_storms = flap_scan_outbox(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
@@ -2931,6 +4150,9 @@ def run_once(max_events: int) -> dict[str, Any]:
         if stale_failed:
             failed += stale_failed
             last_error = stale_error
+        # Pattern F: resolve flap storms quiet beyond the stable window (one
+        # terminal "resolved after N flaps" summary each, then terminal removal).
+        flap_resolved, flap_resolve_errors = sweep_flap_storms(paths)
 
         # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
         dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
@@ -2968,6 +4190,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             testProvenanceMetaAlerted=test_provenance_meta_alerted,
             recoveryDeduped=recovery_deduped,
             stormCollapsed=storm_collapsed,
+            flapStorms=flap_storms,
+            flapResolved=flap_resolved,
+            flapResolveErrors=flap_resolve_errors,
             suppressedPruned=suppressed_pruned,
             deadLetterMetaAlerted=dead_letter_meta_alerted,
             lastError=last_error,
@@ -2986,6 +4211,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testProvenanceMetaAlerted": test_provenance_meta_alerted,
             "recoveryDeduped": recovery_deduped,
             "stormCollapsed": storm_collapsed,
+            "flapStorms": flap_storms,
+            "flapResolved": flap_resolved,
+            "flapResolveErrors": flap_resolve_errors,
             "suppressedPruned": suppressed_pruned,
             "deadLetterMetaAlerted": dead_letter_meta_alerted,
             "lastError": last_error,

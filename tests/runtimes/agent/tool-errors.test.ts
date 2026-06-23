@@ -199,6 +199,15 @@ describe('shouldEmitToolFailureAlert', () => {
     expect(shouldEmitToolFailureAlert('error', 'No matches found')).toBe(false);
   });
 
+  it.each([
+    ['unanswered AskUserQuestion marker', '<error>Answer questions?</error>'],
+    ['tool input schema rejection', '<tool_use_error>InputValidationError: TaskUpdate missing required parameter `taskId`</tool_use_error>'],
+    ['unknown skill command typo', 'Unknown skill: typo-command'],
+    ['unknown slash command typo', 'Unknown slash command: /typo-command'],
+  ])('suppresses self-correctable %s', (_label, content) => {
+    expect(shouldEmitToolFailureAlert('error', content)).toBe(false);
+  });
+
   it('emits error category only when an operator-actionable signature is present', () => {
     expect(shouldEmitToolFailureAlert('error', 'ENOSPC: no space left on device')).toBe(true);
     expect(shouldEmitToolFailureAlert('error', 'connect ECONNREFUSED 127.0.0.1:5432')).toBe(true);
