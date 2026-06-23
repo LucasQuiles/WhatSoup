@@ -11,6 +11,7 @@ import {
   type ProviderParityProbeState,
   type ProviderParityReport,
 } from '../src/fleet/provider-parity.ts';
+import { assertNoSecretLike } from './artifact-redaction.ts';
 
 interface ProviderParityReportArgs {
   inputPath: string;
@@ -19,7 +20,6 @@ interface ProviderParityReportArgs {
   help: boolean;
 }
 
-const SECRET_LIKE_RE = /\b(?:Bearer\s+[A-Za-z0-9._-]{12,}|sk-[A-Za-z0-9._-]{12,}|[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)\s*[:=]\s*['"]?[A-Za-z0-9._/-]{8,})\b/;
 const EXPECTATION_VALUES: ReadonlySet<ProviderParityExpectation> = new Set([
   'always_on',
   'on_demand',
@@ -201,9 +201,7 @@ function readInput(file: string): ProviderParityInput {
 }
 
 function assertRedacted(text: string): void {
-  if (SECRET_LIKE_RE.test(text)) {
-    throw new Error('redaction_violation: provider parity artifacts must not contain secret-like values');
-  }
+  assertNoSecretLike(text, 'provider parity artifacts');
 }
 
 function markdownCell(value: unknown): string {
