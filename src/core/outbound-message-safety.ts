@@ -21,7 +21,7 @@
 // redactor; if a third consumer appears, extract a shared
 // `src/lib/internal-artifact-patterns.ts` (deferred per YAGNI — one consumer now).
 
-import { sanitizeProviderPreviewText } from '../runtimes/agent/provider-preview-sanitizer.ts';
+import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
 

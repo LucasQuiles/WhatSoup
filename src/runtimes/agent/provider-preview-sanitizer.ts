@@ -1,16 +1,4 @@
-// Shared provider preview redaction for structured logs.
-
-export function sanitizeProviderPreviewText(text: string): string {
-  return text
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(
-      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|pat|password|secret)\s*[:=]\s*['"]?)[^'"\s]{8,}/gi,
-      '$1[REDACTED]',
-    )
-    .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]')
-    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]');
-}
-
-export function providerPreview(text: string, maxLength: number): string {
-  return sanitizeProviderPreviewText(text).slice(0, maxLength);
-}
+// Back-compat re-export. The implementation moved to `src/lib` (lowest ring) so
+// `src/core` guardrails can reuse it without a core → runtimes import boundary
+// violation. Existing `./provider-preview-sanitizer.ts` importers are unchanged.
+export { sanitizeProviderPreviewText, providerPreview } from '../../lib/provider-preview-sanitizer.ts';
