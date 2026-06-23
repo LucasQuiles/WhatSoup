@@ -822,7 +822,31 @@ FALLBACK STATUS      # report effective provider, window expiry, turn counters
 
 Notes: on instances whose runtime has no fallback support (e.g. chat-mode), the bot replies "Fallback control not supported on this instance." A malformed duration (`FALLBACK ON 0m`, `FALLBACK ON tomorrow`) is not recognized as an admin command at all — the text falls through to normal message handling.
 
-### 7.3 Manage the Access List Directly
+### 7.3 Provider/Fallback Parity Report
+
+Before a rollout or alert-policy change, generate a redacted provider/fallback
+parity report from captured fleet provider-status and provider-probe data:
+
+```bash
+npm run provider:parity -- \
+  --input /path/to/provider-parity-input.json \
+  --json-out /tmp/provider-parity.json \
+  --md-out /tmp/provider-parity.md
+```
+
+The input must contain expected instance metadata, provider-status snapshots, and
+provider probe states. The report fails closed:
+
+- exit `0` — every in-scope row is `green` or `not_applicable`.
+- exit `1` — at least one row is `warn`, `blocked`, or `inconclusive`.
+- exit `2` — input parse/schema error or secret-like material detected before
+  writing outputs.
+
+Provider credentials are presence/probe evidence only. The report must never
+include raw API keys, bearer tokens, WhatsApp message bodies, or credential file
+contents.
+
+### 7.4 Manage the Access List Directly
 
 ```bash
 INSTANCE=sandbox-agent
