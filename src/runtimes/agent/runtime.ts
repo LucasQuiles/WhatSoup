@@ -5854,12 +5854,30 @@ export class AgentRuntime implements Runtime {
       reason,
     }, 'reverting to primary provider');
     this.fallbackMetrics.recordRevert();
+    // A revert is a RECOVERY, not a fault: the window ran its course (or was
+    // manually disabled) and new sessions are back on the primary provider.
+    // It carries useful per-window telemetry (turns served/empty, duration) so
+    // it stays an emitted source rather than a bare clear — but at `info`, not
+    // the emitAlertChecked `critical` default. Paging an operator to
+    // "investigate/remediate" a healthy revert is pure noise (it was firing
+    // critical for clean window-elapsed cycles). The matching FAULT alert —
+    // provider_fallback_activated — keeps its critical default.
     emitAlertChecked(
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
       `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
         + ` windowMs=${windowMs ?? 'unknown'}`,
+      'info',
+    );
+    // Recovery clears the activation incident this window opened. Mirrors the
+    // primary_model_unusable → clear pairing above; a clear of a non-open
+    // incident is a downstream no-op, so this is safe across restarts and
+    // manual disables alike.
+    clearAlertSourceChecked(
+      this.instanceName,
+      'provider_fallback_activated',
+      `reason=${reason} windowMs=${windowMs ?? 'unknown'}`,
     );
   }
 
