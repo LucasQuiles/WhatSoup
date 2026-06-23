@@ -255,6 +255,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.token-window` | `npm run token-window` | `package.json` | beta | active | Tokenomics pilot helper; reports rolling agent-token totals from an instance `bot.db` |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.arc-runtime-proof` | `npm run arc:runtime-proof` | `package.json` | beta | active | Emit the ARC runtime-enforcement `verification-record` from runtime health plus drift-free installed binding metadata; fails closed on missing emission contract, drift, or secret-like artifacts |
 | `cli:npm.provider-parity` | `npm run provider:parity` | `package.json` | beta | active | Read-only redacted provider/fallback parity report from captured provider-status and provider-probe inputs; exits 0/1/2 for green, non-green, and parse/redaction failures |
 | `cli:npm.release-snapshot` | `npm run release:snapshot` | `package.json` | beta | active | Read-only release snapshot planner and manifest-backed drift checker; live release mutation still requires separate approval |
 | `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
