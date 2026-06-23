@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { runCommand } from '../../../../src/runtimes/chat/providers/transcription/local-audio.ts';
 
 function isAlive(pid: number): boolean {
@@ -11,6 +11,15 @@ function isAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function waitForPid(pidPath: string): Promise<number> {
+  let pid = 0;
+  await vi.waitFor(async () => {
+    pid = Number((await readFile(pidPath, 'utf8')).trim());
+    expect(pid).toBeGreaterThan(0);
+  }, { timeout: 2_000, interval: 10 });
+  return pid;
 }
 
 describe('runCommand', () => {
@@ -23,13 +32,15 @@ describe('runCommand', () => {
     const dir = await mkdtemp(join(tmpdir(), 'whatsoup-local-audio-'));
     const pidPath = join(dir, 'pid.txt');
 
-    await expect(runCommand(
+    const command = runCommand(
       process.execPath,
       ['-e', 'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);', pidPath],
-      100,
-    )).rejects.toThrow(/timed out/i);
+      1_000,
+    );
+    const rejection = expect(command).rejects.toThrow(/timed out/i);
 
-    const pid = Number((await readFile(pidPath, 'utf8')).trim());
+    const pid = await waitForPid(pidPath);
+    await rejection;
     expect(isAlive(pid)).toBe(false);
 
     await rm(dir, { recursive: true, force: true });
@@ -45,16 +56,18 @@ describe('runCommand', () => {
     ].join('');
 
     const start = Date.now();
-    await expect(runCommand(
+    const command = runCommand(
       process.execPath,
       ['-e', script, pidPath],
-      100,
-    )).rejects.toThrow(/timed out/i);
+      1_000,
+    );
+    const rejection = expect(command).rejects.toThrow(/timed out/i);
+    const pid = await waitForPid(pidPath);
+    await rejection;
     const elapsed = Date.now() - start;
 
-    expect(elapsed).toBeGreaterThanOrEqual(2_000);
+    expect(elapsed).toBeGreaterThanOrEqual(3_000);
 
-    const pid = Number((await readFile(pidPath, 'utf8')).trim());
     expect(isAlive(pid)).toBe(false);
 
     await rm(dir, { recursive: true, force: true });
