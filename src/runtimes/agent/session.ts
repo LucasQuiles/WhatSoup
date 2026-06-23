@@ -161,13 +161,12 @@ export function buildChildEnv(
       // OpenCode reads from its own config or standard API keys
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-      // Forward the standard fleet fallback trio keys (deepseek/minimax/glm)
-      // from the standard keychain so `opencode run -m minimax/...` /
-      // `deepseek/...` / `glm/...` can auth — opencode's own catalog lets other
-      // models be invoked mid-session — PLUS the key for the session's
-      // configured model prefix (resolved via the shared resolver) so a
-      // primary/fallback model outside that trio (e.g. openai/gpt-4o) can auth
-      // too. The Set dedupes overlapping services.
+      // Forward the fleet fallback trio keys (deepseek/minimax/glm) from the
+      // standard keychain so `opencode run -m minimax/...` / `deepseek/...` /
+      // `glm/...` can auth (opencode's catalog still allows other models
+      // mid-session) — PLUS the session's configured model prefix key (via the
+      // shared resolver) so a primary/fallback outside the trio (e.g.
+      // openai/gpt-4o) can auth too. The Set dedupes overlapping services.
       // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
       // source of truth for the service→env-var mapping (no second copy).
       const services = new Set<string>(['deepseek', 'minimax', 'glm']);
