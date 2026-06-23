@@ -57,6 +57,22 @@ export interface OutboundMessageSafetyDecision {
 export const CLIENT_TEMPORARY_ISSUE_TEXT =
   'I hit a temporary issue and am retrying. I will follow up shortly.';
 
+/**
+ * Resolve the audience for an outbound agent send by its target chat. Sends
+ * addressed to the configured BOT ERRORS ops channel are `ops` (verbatim
+ * diagnostics preserved); everything else defaults to `client` — the
+ * conservative direction, since a false-positive redaction on an operator
+ * message is low-harm while a leak to a client is high-harm. Shared by every
+ * agent free-text send tool (send/reply/edit/poll/media) so none is a bypass.
+ *
+ * Reads `process.env.BOT_ERRORS_JID` — the one runtime dependency in this
+ * otherwise pure module; kept here so audience policy has a single home.
+ */
+export function resolveOutboundAudience(chatJid: string): OutboundAudience {
+  const opsJid = process.env['BOT_ERRORS_JID']?.trim();
+  return opsJid && chatJid === opsJid ? 'ops' : 'client';
+}
+
 // --- Internal-artifact shapes (linear / ReDoS-safe; no nested quantifiers) ---
 
 // Absolute home directory paths and everything that hangs off them. The user

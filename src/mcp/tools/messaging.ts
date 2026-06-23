@@ -24,7 +24,7 @@ import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.t
 import {
   evaluateOutboundMessageSafety,
   redactInternalArtifacts,
-  type OutboundAudience,
+  resolveOutboundAudience,
 } from '../../core/outbound-message-safety.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
@@ -56,21 +56,6 @@ function sanitizeError(err: unknown): string {
   }
   // Generic fallback — don't expose raw error details
   return 'Operation failed. Try again.';
-}
-
-// ---------------------------------------------------------------------------
-// Client-safety guardrail audience resolution
-// ---------------------------------------------------------------------------
-
-// Resolve the audience for an outbound agent text send. Sends addressed to the
-// configured BOT ERRORS ops channel are `ops` (verbatim diagnostics preserved);
-// everything else defaults to `client` — the conservative direction, since a
-// false-positive redaction on an operator message is low-harm while a leak to a
-// client is high-harm. Shared by send_message and reply_message so neither tool
-// is a guardrail bypass.
-function resolveOutboundAudience(chatJid: string): OutboundAudience {
-  const opsJid = process.env['BOT_ERRORS_JID']?.trim();
-  return opsJid && chatJid === opsJid ? 'ops' : 'client';
 }
 
 // ---------------------------------------------------------------------------

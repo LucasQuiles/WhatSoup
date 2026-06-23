@@ -18,6 +18,7 @@ import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 
 const log = createChildLogger('mcp:media');
 
@@ -140,7 +141,13 @@ export function registerMediaTools(
     handler: async (params, session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const filePath = params['filePath'] as string;
-      const caption = params['caption'] as string | undefined;
+      const rawCaption = params['caption'] as string | undefined;
+      // Client-safety guardrail: a media caption is agent free-text bound for the
+      // client, so mask internal-artifact leaks (redaction-only — there is no
+      // sensible "divert" for a media send). Ops-channel captions stay verbatim.
+      const caption = rawCaption !== undefined && resolveOutboundAudience(chatJid) === 'client'
+        ? redactInternalArtifacts(rawCaption).text
+        : rawCaption;
       const filenameOverride = params['filename'] as string | undefined;
       const ptt = params['ptt'] as boolean | undefined;
       const seconds = params['seconds'] as number | undefined;
