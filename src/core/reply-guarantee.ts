@@ -43,6 +43,7 @@ export interface ReplyGuaranteeManagerOptions {
 }
 
 interface ArmedTurn {
+  inboundSeq: number;
   chatJid: string;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -74,11 +75,34 @@ export class ReplyGuaranteeManager {
     if (input.inboundSeq === undefined) return;
     if (this.armed.has(input.inboundSeq)) return;
 
+    const timer = this.armTimer(input.inboundSeq, input.chatJid);
+    this.armed.set(input.inboundSeq, {
+      inboundSeq: input.inboundSeq,
+      chatJid: input.chatJid,
+      timer,
+    });
+  }
+
+  /**
+   * Reset the silence window for every armed turn on this chat. Called when
+   * user-visible output is emitted, so the fallback only fires after a full
+   * window of TRUE silence (no user-facing output) — not while a long turn is
+   * actively streaming replies. Mode-agnostic: keyed by chat, not inbound seq.
+   */
+  notifyActivity(chatJid: string): void {
+    for (const armed of this.armed.values()) {
+      if (armed.chatJid !== chatJid) continue;
+      this.clearTimer(armed.timer);
+      armed.timer = this.armTimer(armed.inboundSeq, armed.chatJid);
+    }
+  }
+
+  private armTimer(inboundSeq: number, chatJid: string): ReturnType<typeof setTimeout> {
     const timer = this.setTimer(() => {
-      void this.onTimeout(input.inboundSeq!, input.chatJid);
+      void this.onTimeout(inboundSeq, chatJid);
     }, this.timeoutMs);
     timer.unref?.();
-    this.armed.set(input.inboundSeq, { chatJid: input.chatJid, timer });
+    return timer;
   }
 
   disarm(inboundSeq: number | undefined): void {
@@ -112,9 +136,13 @@ export class ReplyGuaranteeManager {
       return;
     }
 
+    // Reserve the rate-limit slot BEFORE awaiting the send. onTimeout does a
+    // check-then-act across an await; concurrent same-chat timeouts would all
+    // pass the guard above before any of them recorded a send (TOCTOU), causing
+    // duplicate "still working" bursts. Reserving synchronously closes the race.
+    this.lastFallbackByChat.set(chatJid, now);
     try {
       await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
-      this.lastFallbackByChat.set(chatJid, now);
       this.durability.completeTurn({
         inbound: {
           seq: inboundSeq,
@@ -122,6 +150,12 @@ export class ReplyGuaranteeManager {
         },
       });
     } catch (err) {
+      // Send failed: release the reservation (only if no other send claimed the
+      // slot meanwhile) so a future legitimate fallback is not blocked by this
+      // failed attempt — preserves retry-after-failure behavior.
+      if (this.lastFallbackByChat.get(chatJid) === now) {
+        this.lastFallbackByChat.delete(chatJid);
+      }
       log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback send failed');
     }
   }
