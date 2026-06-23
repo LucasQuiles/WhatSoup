@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "075e0a511897fb102e4152c215068bf71bbced15138920e3ca8c35a2582b12e4",
+      "sha256": "a8c2ae6937c37d6967fe00e0d75f2e36ff80efe5364196f9400dda20ffa4e976",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",

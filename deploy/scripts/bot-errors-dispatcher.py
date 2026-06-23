@@ -1301,9 +1301,6 @@ def append_still_open_context(
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
     status = str(open_record.get("status") or "open")
     awaiting_physical = status == "awaiting_physical"
-    action = physical_action_text() if awaiting_physical else (
-        "Q investigate persistent incident; duplicate suppression threshold exceeded."
-    )
     additions = [
         "incident_still_open=true",
         f"incident_key={key}",
@@ -1313,7 +1310,6 @@ def append_still_open_context(
         f"suppressed_duplicates={suppressed}",
         f"last_notified={open_record.get('lastNotifiedIso') or open_record.get('lastSentIso') or last_notified}",
         f"escalated={str(escalated).lower()}",
-        f"requested_action={action}",
     ]
     if digest:
         additions.insert(0, "still_open_digest=true")
@@ -2414,7 +2410,6 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
         f"quiet_seconds={quiet_seconds}",
         f"suppressed_duplicates={int_field(record, 'suppressedCount')}",
         f"renotify_cadence_seconds={renotify_seconds}",
-        f"requested_action={action}",
     ]
     fields = incident_event_fields_from_key(key)
     event = {
