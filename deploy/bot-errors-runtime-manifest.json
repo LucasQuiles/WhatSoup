@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "e6f197909d881ed9099d855921ea3d55a5e0c448e21f6d47e2fcf3d58631edf4",
+      "sha256": "da66e8c8e4f86a754ad281dd65446fbcf78911d2d1da735a8a0db5e432210ae8",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -74,7 +74,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "5a8042a8f35ad9665f1aae68eee600c3ff068c76b5f339f5ab1e7f864796840e",
+      "sha256": "beecbdabdcb9aa249ad5a7a1bd6a93b34137b5192429ae09f58f316e252a39d1",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -165,6 +165,14 @@
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_daily_health.py",
+      "sha256": "fd8d04eb1f3e0c95d32ea21c4823f47080510c93c55671dcb40f4d7150c8d1f8",
+      "mustContain": [
+        "daily_health_host_from_payload",
+        "remoteHost"
       ]
     },
     {
