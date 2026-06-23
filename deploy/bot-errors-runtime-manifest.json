@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-14T18:17:51Z",
+  "generatedAt": "2026-06-23T01:40:11Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "9dde1cb136f609ab484827e4dadf9427f6c715be6f0582b8c5081f56eea95fd0",
+      "sha256": "8e9a43d4d1576e01b5d34aac8987ca8850359b690b36b4b72939f6f98ab09ec9",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -100,7 +100,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "1894573ced45e74ed1d69521e9ce37908fde4281086ddf14392d5ef87457be3e",
+      "sha256": "4605cea3c044d48637e96d96ac85c07b819ee2bc0d15833dc7242a46c0919ba0",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "Authorization: Bearer [REDACTED]",
@@ -131,7 +131,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "bb97461ae638d2fe395ca71cacc79dc804ca1e4c2b4e19540135978f1fef41ad",
+      "sha256": "bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
@@ -156,7 +156,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f",
+      "sha256": "a623cea3f40a5ad58b040a55930663cc7208decd4ecb1735950f2971339cede1",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",

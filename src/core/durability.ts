@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
+import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -155,11 +159,13 @@ type DurabilityStatements = {
   getQuarantinedOutboundCount: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   insertRecoveryRun: PreparedStatement;
+  selectNow: PreparedStatement;
 };
 
 export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
+  private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
     this.db = db;
     const prepare = db.raw.prepare.bind(db.raw);
@@ -309,7 +315,9 @@ export class DurabilityEngine {
            tool_calls_quarantined, sessions_restored, completed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `),
+      selectNow: prepare(`SELECT datetime('now') AS now`),
     };
+    this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
@@ -779,9 +787,36 @@ export class DurabilityEngine {
     // Step 3: Log recovery run
     this.logRecoveryRun('post_connect', stats);
 
-    // Clear quarantine alert source now that recovery is complete — prevents
-    // stale sweep retries when the instance is healthy.
-    clearAlertSourceChecked(config.botName, 'outbound_quarantined');
+    // Gate the quarantine clear behind a genuine-recovery proof. A drained queue
+    // is NOT proof auth recovered (ml-bot 401, 2026-06-21). The gate emits a real
+    // clear only when a confirmed outbound proves auth works; otherwise it
+    // suppresses the cosmetic clear and raises one durable HUMAN_REQUIRED escalation.
+    // Fail-safe: a gate failure must never break recovery — fall back to the legacy
+    // clear so a healthy instance is not left with a stale quarantine alert.
+    try {
+      const stateDir = join(homedir(), '.local', 'state', 'bot-errors', 'breaker');
+      const decision = gateQuarantineClear(config.botName, {
+        now: () => (this.statements.selectNow.get() as { now: string }).now,
+        stateDir,
+        recentWindowSeconds: 900,
+        attemptWindowSeconds: 1800,
+        tripThreshold: 5,
+        confirmedOutboundWithinSeconds: this.confirmedOutboundProbe,
+        emitClear: () => clearAlertSourceChecked(config.botName, 'outbound_quarantined'),
+        emitEscalation: (evidence: string) =>
+          emitAlertChecked(
+            config.botName,
+            'auth_terminal',
+            `whatsoup@${config.botName} authentication appears unresolved — repair lane cannot restore it`,
+            `HUMAN_REQUIRED ${evidence}`,
+            'critical',
+          ),
+      });
+      log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
+    } catch (err) {
+      log.warn({ err }, 'postConnectRecovery: verify gate failed; falling back to legacy clear');
+      clearAlertSourceChecked(config.botName, 'outbound_quarantined');
+    }
 
     log.info(stats, 'postConnectRecovery: complete');
     return stats;
@@ -875,4 +910,29 @@ export async function sendTracked(
     }
     throw err;
   }
+}
+
+/**
+ * Build a probe that answers "was any outbound op confirmed delivered within
+ * the last N seconds?". A delivered agent message implies a successful
+ * authenticated model completion — the genuine-recovery proof for auth_terminal.
+ *
+ * NOTE: this repo uses node:sqlite (DatabaseSync), not better-sqlite3. Pass the
+ * raw handle (`db.raw`). DatabaseSync prepared statements bind positional `?`
+ * params via `.get(...)` just like better-sqlite3.
+ */
+export function makeConfirmedOutboundProbe(
+  db: DatabaseSync,
+): (seconds: number) => boolean {
+  const stmt = db.prepare(
+    `SELECT 1 AS ok FROM outbound_ops
+      WHERE echoed_at IS NOT NULL AND echoed_at >= datetime('now', ?)
+      LIMIT 1`,
+  );
+  return (seconds: number) => {
+    const row = stmt.get(`-${Math.max(0, Math.floor(seconds))} seconds`) as
+      | { ok: number }
+      | undefined;
+    return row?.ok === 1;
+  };
 }

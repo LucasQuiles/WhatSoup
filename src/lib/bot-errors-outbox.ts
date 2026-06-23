@@ -92,10 +92,43 @@ function redactPhoneLike(value: string): string {
     });
 }
 
+// Recognizable, non-secret directory categories. When safe-shape is enabled we
+// preserve the leading category so an operator can tell WHICH file is missing,
+// while the secret leaf is reduced to a redacted marker. None of these prefixes
+// is itself a secret (well-known config locations). Mirror of the Python
+// _CRED_PATH_SAFE_PREFIXES in lib/bot_errors_redaction.py.
+const CRED_PATH_SAFE_PREFIXES = [
+  '.config/secrets/',
+  '.config/whatsoup/',
+  '.local/share/whatsoup/instances/',
+  'auth-bond-backups/',
+] as const;
+
+function safeShapeCredPathEnabled(): boolean {
+  const raw = (process.env['BOT_ERRORS_SAFE_SHAPE_CRED_PATH'] ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function safeShapeCredentialPath(matched: string): string {
+  for (const prefix of CRED_PATH_SAFE_PREFIXES) {
+    const idx = matched.indexOf(prefix);
+    if (idx !== -1) {
+      return `${matched.slice(0, idx)}${prefix}[REDACTED]`;
+    }
+  }
+  return '[REDACTED CREDENTIAL PATH]';
+}
+
+function redactCredentialPath(value: string): string {
+  if (safeShapeCredPathEnabled()) {
+    return value.replace(CREDENTIAL_PATH, (matched) => safeShapeCredentialPath(matched));
+  }
+  return value.replace(CREDENTIAL_PATH, '[REDACTED CREDENTIAL PATH]');
+}
+
 function redactText(value: string): string {
-  return redactPhoneLike(value
-    .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]')
-    .replace(CREDENTIAL_PATH, '[REDACTED CREDENTIAL PATH]')
+  return redactPhoneLike(redactCredentialPath(value
+    .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]'))
     .replace(WHATSAPP_JID, '[REDACTED WHATSAPP JID]')
     .replace(URL_USERINFO, '$1[REDACTED]@')
     .replace(AWS_ACCESS_KEY_ID, '[REDACTED AWS ACCESS KEY]')

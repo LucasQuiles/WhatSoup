@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -63,6 +64,37 @@ def redact_phone_like_match(match: re.Match[str], marker: str) -> str:
     return match.group(0)
 
 
+# Recognizable, non-secret directory categories. When safe-shape is enabled we
+# preserve the leading category so an operator can tell WHICH file is missing,
+# while the secret leaf is reduced to a redacted marker. None of these prefixes
+# is itself a secret (they are well-known config locations).
+_CRED_PATH_SAFE_PREFIXES = (
+    ".config/secrets/",
+    ".config/whatsoup/",
+    ".local/share/whatsoup/instances/",
+    "auth-bond-backups/",
+)
+
+
+def _safe_shape_cred_path_enabled() -> bool:
+    return os.environ.get("BOT_ERRORS_SAFE_SHAPE_CRED_PATH", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_shape_credential_path(matched: str, marker: str) -> str:
+    """Reduce a credential-adjacent path to an actionable shape.
+
+    Keeps the recognizable directory category (so the operator knows which file
+    is in play) and replaces the secret leaf with ``[REDACTED]``. Falls back to
+    the opaque marker when no known category is recognizable, so a real secret
+    value is never exposed.
+    """
+    for prefix in _CRED_PATH_SAFE_PREFIXES:
+        idx = matched.find(prefix)
+        if idx != -1:
+            return f"{matched[:idx]}{prefix}[REDACTED]"
+    return marker
+
+
 def redact_bot_errors_text(
     value: Any,
     *,
@@ -76,7 +108,12 @@ def redact_bot_errors_text(
 ) -> str:
     text = "" if value is None else str(value)
     text = PEM_PRIVATE_KEY_RE.sub(private_key_marker, text)
-    text = CREDENTIAL_PATH_RE.sub(credential_path_marker, text)
+    if _safe_shape_cred_path_enabled():
+        text = CREDENTIAL_PATH_RE.sub(
+            lambda m: _safe_shape_credential_path(m.group(0), credential_path_marker), text
+        )
+    else:
+        text = CREDENTIAL_PATH_RE.sub(credential_path_marker, text)
     text = WHATSAPP_JID_RE.sub(jid_marker, text)
     text = WHATSAPP_SERVICE_UNIT_RE.sub(lambda m: f"{m.group(1)}{phone_marker}{m.group(3) or ''}", text)
     text = URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)

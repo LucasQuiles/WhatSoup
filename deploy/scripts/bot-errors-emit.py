@@ -281,14 +281,138 @@ def log_hints(instance: str, explicit: list[str]) -> list[str]:
     return list(dict.fromkeys(hints))[:8]
 
 
-def read_evidence(args: argparse.Namespace) -> str:
+def evidence_sidecar_dir() -> Path:
+    return state_root() / "evidence"
+
+
+def write_evidence_sidecar(event_id: str, full_redacted: str) -> Path:
+    """Persist the full (already-redacted) evidence to a private sidecar file.
+
+    Reuses the same private-dir + atomic-write helpers (0o700 dir / 0o600 file,
+    O_EXCL + fsync) the outbox writer uses so perms and durability match.
+    """
+    directory = evidence_sidecar_dir()
+    name = f"{safe_segment(event_id)}.evidence.txt"
+    target = safe_child_path(directory, name)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    data = full_redacted.encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def inline_log_tail_enabled() -> bool:
+    raw = os.environ.get("BOT_ERRORS_INLINE_LOG_TAIL")
+    if raw is None:
+        return True  # default on
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def primary_local_log_candidates() -> list[Path]:
+    """Primary local log paths, most-specific first, for the inline tail.
+
+    Only locally-readable files — this is for locally-emitted events, so we read
+    LOG_DIR/whatsoup.log and the bot-errors state logs, never remote/journal.
+    """
+    candidates: list[Path] = []
+    log_dir = os.environ.get("LOG_DIR")
+    if log_dir and log_dir.strip():
+        candidates.append(Path(log_dir) / "whatsoup.log")
+    candidates.append(state_root() / "logs/dispatcher.out.log")
+    candidates.append(state_root() / "logs/collector.jsonl")
+    return candidates
+
+
+def capture_log_tail(instance: str, max_chars: int = 1200, max_lines: int = 20) -> str | None:
+    """Read the tail of the primary local log, redacted and bounded.
+
+    Returns a redacted string of at most ``max_lines`` lines and ``max_chars``
+    characters, or None when no local log is available / readable. Fail-open:
+    any error returns None rather than raising — a log tail is best-effort
+    enrichment, never load-bearing for the alert itself.
+    """
+    if not inline_log_tail_enabled():
+        return None
+    try:
+        for path in primary_local_log_candidates():
+            try:
+                if not path.is_file():
+                    continue
+                # Read a bounded tail without slurping huge logs.
+                with open(path, "rb") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    read_bytes = min(size, max(max_chars * 4, 4096))
+                    handle.seek(size - read_bytes, os.SEEK_SET)
+                    chunk = handle.read().decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            lines = chunk.splitlines()
+            if read_bytes < size and lines:
+                lines = lines[1:]  # drop the partial first line from the seek
+            tail_lines = [line for line in lines if line.strip()][-max_lines:]
+            if not tail_lines:
+                continue
+            tail = redact("\n".join(tail_lines))
+            if len(tail) > max_chars:
+                tail = tail[-max_chars:]
+            return tail or None
+    except Exception:  # noqa: BLE001 - best-effort enrichment must never raise.
+        return None
+    return None
+
+
+def read_evidence(args: argparse.Namespace) -> tuple[str, str | None]:
+    """Return (evidence_text, sidecar_ref).
+
+    When the full redacted evidence exceeds MAX_EVIDENCE_CHARS, the full text is
+    written to a private sidecar and its path is both appended to the truncated
+    text and returned as the ref. Fail-open: any sidecar write error degrades to
+    plain truncation with no ref — the alert is never lost.
+    """
     parts = [args.evidence or ""]
     for path in args.evidence_file or []:
         try:
             parts.append(Path(path).read_text(encoding="utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001 - diagnostics must survive bad evidence paths.
             parts.append(f"[failed to read evidence file {path}: {exc}]")
-    return truncate(redact("\n".join(part for part in parts if part)), MAX_EVIDENCE_CHARS)
+    full_redacted = redact("\n".join(part for part in parts if part))
+    if len(full_redacted) <= MAX_EVIDENCE_CHARS:
+        return full_redacted, None
+
+    truncated = truncate(full_redacted, MAX_EVIDENCE_CHARS)
+    try:
+        sidecar = write_evidence_sidecar(args.event_id or "unknown", full_redacted)
+    except Exception as exc:  # noqa: BLE001 - fail-open: never lose the alert to a sidecar bug.
+        try:
+            sys.stderr.write(f"[bot-errors] evidence sidecar write failed: {redact(str(exc))}\n")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        return truncated, None
+
+    ref = str(sidecar)
+    pointer = f"\n[full evidence in sidecar: {ref}]"
+    budget = MAX_EVIDENCE_CHARS - len(pointer)
+    if budget < 0:
+        budget = 0
+    truncated_with_ref = truncate(full_redacted, budget) + pointer
+    return truncated_with_ref, ref
 
 
 def parse_diagnostics(values: list[str] | None) -> dict[str, str]:
@@ -333,6 +457,13 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
         summary = f"alert source cleared: {source}"
     created = now_iso()
     event_id = args.event_id or str(uuid.uuid4())
+    args.event_id = event_id  # ensure read_evidence keys the sidecar to this id
+    log_tail = capture_log_tail(instance)
+    if log_tail:
+        base = args.evidence or ""
+        section = f"--- local log tail ({instance}) ---\n{log_tail}"
+        args.evidence = f"{base}\n\n{section}" if base else section
+    evidence_text, evidence_sidecar_ref = read_evidence(args)
     event = {
         "schemaVersion": 1,
         "id": event_id,
@@ -344,7 +475,7 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
         "instance": instance,
         "source": source,
         "summary": truncate(redact(summary or f"{event_type} event from {source}"), 500),
-        "evidence": read_evidence(args),
+        "evidence": evidence_text,
         "process": {
             "pid": os.getpid(),
             "ppid": os.getppid(),
@@ -371,6 +502,8 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
             "lastError": None,
         },
     }
+    if evidence_sidecar_ref:
+        event["evidenceSidecarRef"] = evidence_sidecar_ref
     critical_asset = parse_critical_asset(args.critical_asset_json)
     if critical_asset:
         event["criticalAsset"] = critical_asset

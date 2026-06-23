@@ -403,7 +403,13 @@ ensure_npm_version_eligible() {
   fi
   if [ "$rc" -eq 2 ]; then
     record_event "$pkg" "held" "target version is younger than the cooldown" "" "" "$version"
-    send_alert "warn" "Harness update held by npm cooldown" "$pkg@$version is younger than the configured cooldown. $out"
+    # A cooldown hold is the supply-chain defense working as designed: the target
+    # is simply too new (younger than min-release-age) and will install itself
+    # once it ages past the window. This is expected, self-resolving, and
+    # non-actionable — emit as info so it opens a transient (auto-expiring)
+    # incident instead of a persistent warn that bumps the run's info update
+    # incident to warn, blocks auto-expiry, and re-escalates every cycle.
+    send_alert "info" "Harness update held by npm cooldown" "$pkg@$version is younger than the configured cooldown. $out"
     return 2
   fi
   record_event "$pkg" "failed" "npm cooldown check failed: $out"
