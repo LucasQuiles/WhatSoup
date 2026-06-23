@@ -211,6 +211,21 @@ MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
 TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
 
+# Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
+# (warning) when a peer probe misses and a paired relay_host_recovered (info) when
+# it returns. Observed flaps recover in ~6 min — one missed probe interval, not an
+# outage — yet fan out per host (×N), paging a down AND an up for every blip.
+# With the gate on: relay_host_down classifies transient (held by Pattern D's
+# machinery, never surfaced unless it persists past TRANSIENT_PROMOTE_SECONDS), and
+# a relay_host_recovered whose paired down was held-and-unsurfaced is suppressed
+# too — so a self-healed flap pages neither leg. If the down PROMOTED to a real
+# outage (or has a surfaced open incident), the recovery is meaningful and sends.
+# Default-on. FAIL-OPEN: gate off → relay_host_down classifies outage and the
+# recovered sends, exactly as before; any handler error falls through to send.
+RELAY_FLAP_COALESCE = env_flag("BOT_ERRORS_RELAY_FLAP_COALESCE", True)
+RELAY_DOWN_SOURCE = "relay_host_down"
+RELAY_RECOVERED_SOURCE = "relay_host_recovered"
+
 # Reachability diagnoses (collector reachabilityDiagnosis, or source suffix) that
 # represent a transient soft-fault: the host is up, a single probe timed out.
 TRANSIENT_REACHABILITY_DIAGNOSES = frozenset({"tailscale_online_ssh_timeout"})
@@ -802,6 +817,12 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     if source in TRANSIENT_SOURCES:
         return "transient"
 
+    # Pattern H — a relay-host probe miss is a recoverable soft-fault: hold it so a
+    # ~6-min self-healing flap never surfaces; Pattern D promotes it to an outage
+    # only if the host stays down past the promote window.
+    if RELAY_FLAP_COALESCE and source == RELAY_DOWN_SOURCE:
+        return "transient"
+
     return "outage"
 
 
@@ -888,6 +909,50 @@ def resolve_transient_on_clear(
         return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
     except Exception:
         return None
+
+
+def coalesce_relay_recovered(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+    """Suppress a relay_host_recovered whose paired down was held silently (Pattern H).
+
+    relay_host_recovered is emitted as an ``info`` alert (not a clear), so it never
+    matches the same-key Pattern D clear path. We pair it to its ``relay_host_down``
+    incident by source-segment substitution and decide:
+
+    - paired down is a SURFACED open incident → the recovery is news → ``None`` (send).
+    - paired down is a HELD, unpromoted transient → never surfaced → suppress the
+      recovery and retire the held record (a self-healed flap pages neither leg).
+    - paired down PROMOTED to an outage → recovery is meaningful → ``None`` (send).
+    - no record at all → fail toward visibility → ``None`` (send): we cannot prove
+      the down was held, so we never silence a recovery the operator may have been
+      waiting on.
+
+    FAIL-OPEN: gate off or any error → ``None`` (send), exactly as before.
+    """
+    try:
+        if not RELAY_FLAP_COALESCE:
+            return None
+        if str(event.get("source") or "") != RELAY_RECOVERED_SOURCE:
+            return None
+        recovered_key = incident_key(event)
+        down_key = recovered_key.replace(RELAY_RECOVERED_SOURCE, RELAY_DOWN_SOURCE, 1)
+        # A surfaced (open) down means the operator saw the outage — let recovery send.
+        open_incidents = incident_state.get("openIncidents")
+        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(down_key), dict):
+            return None
+        transient_state = incident_state.get("transientState")
+        record = transient_state.get(down_key) if isinstance(transient_state, dict) else None
+        if not isinstance(record, dict):
+            return None  # no held record — fail toward visibility, send the recovery
+        if record.get("promoted"):
+            return None  # outage was surfaced — recovery is meaningful
+        transient_state.pop(down_key, None)  # retire the held flap
+        event.setdefault("diagnostics", {})["relayFlapCoalesced"] = True
+        return (
+            f"relay_flap_coalesced: {down_key} recovered before promotion; "
+            f"held flap not surfaced (down+up both silent)"
+        )
+    except Exception:
+        return None  # FAIL-OPEN: never lose a recovery to a coalescing bug
 
 
 def evidence_epoch(text: str, key: str) -> int | None:
@@ -1688,6 +1753,14 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
         return "daily-health info events are retained for heartbeat freshness but not posted to BOT ERRORS"
+    # Pattern H — a relay_host_recovered (info alert) whose paired relay_host_down
+    # was held-and-unsurfaced is a self-healed flap; suppress it so the blip pages
+    # neither leg. Handled here because the info severity means it never reaches the
+    # is_incident_alert / is_incident_clear branches below.
+    if source == RELAY_RECOVERED_SOURCE:
+        relay_reason = coalesce_relay_recovered(event, incident_state)
+        if relay_reason is not None:
+            return relay_reason
     # Pattern B (Part 2) — silence incident ALERTS for a scope under a planned
     # maintenance window. CLEAR events are never gated here: a recovery during
     # maintenance must still close the incident. FAIL-OPEN: gate off, or any
