@@ -137,7 +137,7 @@ export function registerAllTools(
   // propagate to runModule's catch directly.
   runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, {
     connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter,
-    pollRegistrar: options.pollRegistrar,
+    pollRegistrar: options.pollRegistrar, instanceName: config.botName,
   }));
   runModule('media', true, () => mediaTools.registerMediaTools(registry, { connection, db }));
   runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));

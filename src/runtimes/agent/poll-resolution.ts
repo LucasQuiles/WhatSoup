@@ -10,6 +10,7 @@
  * and the poll test suites are unchanged.
  */
 import { config } from '../../config.ts';
+import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting
@@ -249,6 +250,18 @@ export function formatPollQuestion(q: {
   needsFollowUp: boolean;
   followUpText: string | null;
 } {
+  // Client-safety: the AskUserQuestion → poll path bypasses the send_poll MCP
+  // tool (the agent runtime sends it directly), so redact internal-artifact
+  // leaks up front — before truncation — so every derived client surface
+  // (pollName, pollValues, followUpText) is clean. No-op on benign content.
+  q = {
+    question: redactInternalArtifacts(q.question).text,
+    options: q.options.map((o) => ({
+      label: redactInternalArtifacts(o.label).text,
+      description: redactInternalArtifacts(o.description).text,
+    })),
+  };
+
   // Question text: truncate to budget
   const pollName = q.question.length > POLL_QUESTION_MAX_CHARS
     ? q.question.slice(0, POLL_QUESTION_MAX_CHARS - 1) + '…'
@@ -427,6 +440,17 @@ export function formatTextFallbackQuestion(
   intro?: string,
   { includeDescriptions = true }: { includeDescriptions?: boolean } = {},
 ): string {
+  // Client-safety: this is the text fallback when the poll cannot be sent —
+  // another client-facing surface that bypasses the send_poll guard. Redact
+  // internal-artifact leaks in the question and option labels/descriptions.
+  q = {
+    ...q,
+    question: redactInternalArtifacts(q.question).text,
+    options: q.options.map((o) => ({
+      label: redactInternalArtifacts(o.label).text,
+      description: redactInternalArtifacts(o.description).text,
+    })),
+  };
   const optionLines = q.options.map((option, index) => {
     return formatOptionLine(option, index, { includeDescription: includeDescriptions });
   });

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Database } from '../../core/database.ts';
+import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { LLMProvider, GenerateRequest, ChatMessage } from './providers/types.ts';
 import type { PineconeMemory } from './providers/pinecone.ts';
@@ -431,6 +432,13 @@ export class ChatRuntime implements Runtime {
       }
       return;
     }
+
+    // Client-safety guardrail: a chat-bot reply is client-facing free text that
+    // bypasses the MCP send tools, so mask any internal-artifact leak before it
+    // is persisted to the durability op or sent. Redaction-only — the chat bot
+    // has no agent tooling/sandbox to make a false infra-block claim about — and
+    // a no-op on benign text. Reuses the shared core redactor.
+    responseText = redactInternalArtifacts(responseText).text;
 
     // 9. Send the response (with exponential-backoff retries on failure)
     const sendStart = Date.now();

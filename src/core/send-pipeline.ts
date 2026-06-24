@@ -21,6 +21,14 @@ export type TextSendTransport<T extends TextSendTransportResult = TextSendTransp
 ) => Promise<T>;
 
 export interface ExecuteSendOptions {
+  /**
+   * Rewrites the prepared send before it is audited and transmitted. Runs after
+   * preparation/profile application and before `beforeAudit`, so the audit row
+   * and transport both see the transformed text. A transform that changes the
+   * text MUST return a full `PreparedTextSend` with an updated
+   * `audit.textLength` so the audit reflects what was actually sent.
+   */
+  transformPrepared?: (prepared: PreparedTextSend) => PreparedTextSend | Promise<PreparedTextSend>;
   beforeAudit?: (prepared: PreparedTextSend) => void | Promise<void>;
 }
 
@@ -90,7 +98,10 @@ export function createSendPipeline({
       transport: TextSendTransport<T>,
       options: ExecuteSendOptions = {},
     ): Promise<T> {
-      const prepared = prepareTextSend(input, { chatResolver: resolver, profiles });
+      let prepared = prepareTextSend(input, { chatResolver: resolver, profiles });
+      if (options.transformPrepared) {
+        prepared = await options.transformPrepared(prepared);
+      }
       await options.beforeAudit?.(prepared);
 
       let auditId: number | undefined;

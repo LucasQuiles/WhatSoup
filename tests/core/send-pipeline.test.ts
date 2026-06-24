@@ -5,6 +5,7 @@ import {
   MissingTextError,
   createSendPipeline,
   prepareTextSend,
+  type PreparedTextSend,
 } from '../../src/core/send-pipeline.ts';
 import {
   MissingTargetError,
@@ -180,6 +181,101 @@ describe('executeSend outbound audit lifecycle', () => {
       .prepare('SELECT status, error FROM outbound_sends')
       .get() as Record<string, unknown>;
     expect(row).toEqual({ status: 'failed', error: 'string failure' });
+  });
+});
+
+describe('executeSend transformPrepared seam', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const toSafe = (p: PreparedTextSend): PreparedTextSend => ({
+    ...p,
+    text: 'SAFE',
+    audit: { ...p.audit, textLength: 'SAFE'.length },
+  });
+
+  it('applies transformPrepared after preparation and before transport', async () => {
+    const pipeline = createSendPipeline({ resolver: chatResolver });
+    let transportText = '';
+    await pipeline.executeSend(
+      { to: 'ops', text: 'RAW LEAKY ORIGINAL' },
+      async (prepared) => {
+        transportText = prepared.text;
+        return { transportId: 'x' };
+      },
+      { transformPrepared: toSafe },
+    );
+    expect(transportText).toBe('SAFE');
+  });
+
+  it('lets beforeAudit observe the transformed prepared value', async () => {
+    const pipeline = createSendPipeline({ resolver: chatResolver });
+    let seen = '';
+    await pipeline.executeSend(
+      { to: 'ops', text: 'RAW' },
+      async () => ({ transportId: 'x' }),
+      {
+        transformPrepared: toSafe,
+        beforeAudit: (prepared) => {
+          seen = prepared.text;
+        },
+      },
+    );
+    expect(seen).toBe('SAFE');
+  });
+
+  it('audits the transformed text length and hash, not the original', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const { createHash } = await import('node:crypto');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({ resolver: chatResolver, auditWriter: writer, caller: 'mcp' });
+
+    await pipeline.executeSend(
+      { to: 'ops', text: 'leaky original text' },
+      async () => ({ transportId: 'wamid.x' }),
+      { transformPrepared: toSafe },
+    );
+
+    const row = db.raw
+      .prepare('SELECT text_length, text_hash FROM outbound_sends')
+      .get() as Record<string, unknown>;
+    expect(row.text_length).toBe('SAFE'.length);
+    expect(row.text_hash).toBe(createHash('sha256').update('SAFE').digest('hex'));
+  });
+
+  it('awaits an async transformPrepared', async () => {
+    const pipeline = createSendPipeline({ resolver: chatResolver });
+    let transportText = '';
+    await pipeline.executeSend(
+      { to: 'ops', text: 'RAW' },
+      async (prepared) => {
+        transportText = prepared.text;
+        return { transportId: 'x' };
+      },
+      { transformPrepared: async (p) => toSafe(p) },
+    );
+    expect(transportText).toBe('SAFE');
+  });
+
+  it('sends the original prepared text when no transform is provided', async () => {
+    const pipeline = createSendPipeline({ resolver: chatResolver });
+    let transportText = '';
+    await pipeline.executeSend(
+      { to: 'ops', text: 'UNTOUCHED' },
+      async (prepared) => {
+        transportText = prepared.text;
+        return { transportId: 'x' };
+      },
+    );
+    expect(transportText).toBe('UNTOUCHED');
   });
 });
 

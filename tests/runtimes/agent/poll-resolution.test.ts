@@ -462,6 +462,22 @@ describe('formatTextFallbackQuestion', () => {
     expect(out).toContain('2. *B*');
   });
 
+  it('redacts internal-artifact leaks in the text fallback (client-safety)', () => {
+    const leaky: AskUserQuestion = {
+      question: 'Open /Users/testuser/.claude/settings.json?',
+      header: 'H',
+      options: [
+        { label: 'Yes', description: 'see agent-sandbox.sh' },
+        { label: 'No', description: '' },
+      ],
+      multiSelect: false,
+    };
+    const out = formatTextFallbackQuestion(leaky, undefined, { includeDescriptions: true });
+    expect(out).not.toContain('/Users/testuser');
+    expect(out).not.toContain('settings.json');
+    expect(out).not.toContain('agent-sandbox.sh');
+  });
+
   it('omits the intro when none is provided', () => {
     const out = formatTextFallbackQuestion(q);
     expect(out.startsWith('Pick one')).toBe(true);

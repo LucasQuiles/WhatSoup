@@ -21,6 +21,7 @@ template and running it under python3 — no duplicated decision code.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -29,6 +30,13 @@ import sys
 from pathlib import Path
 
 import pytest
+
+
+def _iso_ago(seconds: float) -> str:
+    """An ISO-8601 UTC timestamp `seconds` in the past (for pong-age fixtures)."""
+    return (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 _TEMPLATE = (
     Path(__file__).resolve().parents[2] / "templates" / "watchdog-script.sh"
@@ -87,7 +95,10 @@ class TestRestartOnLivenessFailure:
     def test_unhealthy_status_restarts(self):
         assert _run_decision(_health("unhealthy")) != 0
 
-    def test_disconnected_restarts_even_if_degraded(self):
+    def test_disconnected_without_pong_evidence_restarts(self):
+        # Disconnected + recovering state but NO pong to prove progress: the
+        # policy fails closed and restarts. Liveness cannot be established, so a
+        # kick is the safe action. (Formerly test_disconnected_restarts_even_if_degraded.)
         body = {
             "status": "degraded",
             "whatsapp": {
@@ -96,6 +107,82 @@ class TestRestartOnLivenessFailure:
             },
         }
         assert _run_decision(body) != 0
+
+    def test_disconnected_non_recovering_state_restarts_even_with_fresh_pong(self):
+        # A non-recovering state (close/disconnected) is NOT exempt: even a fresh
+        # pong does not excuse a hung/closed connection.
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "close", "last_pong_at": _iso_ago(5)},
+            },
+        }
+        assert _run_decision(body) != 0
+
+    def test_recovering_with_stale_pong_restarts(self):
+        # Disconnected + reconnecting but the last pong is ancient: the session is
+        # not actually making progress, so restart is still warranted.
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {
+                    "state": "reconnecting",
+                    "last_pong_at": "2000-01-01T00:00:00Z",
+                },
+            },
+        }
+        assert _run_decision(body) != 0
+
+    def test_unparseable_pong_fails_closed_and_restarts(self):
+        # A malformed pong timestamp must not silently pass; it fails closed.
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "reconnecting", "last_pong_at": "not-a-date"},
+            },
+        }
+        assert _run_decision(body) != 0
+
+
+class TestRecoveringConnectionNoRestart:
+    """The Lane 0b headline: a disconnected-but-actively-recovering bot with a
+    fresh pong is making progress on its own. Restarting it interrupts the
+    reconnect, resets the cold-start clock, and replays the startup notification
+    — a self-sustaining restart loop (observed on rb-bot/mini7). Such a bot must
+    NOT be restarted; its only restart paths are a stale pong or a hard status."""
+
+    def test_reconnecting_with_fresh_pong_no_restart(self):
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "reconnecting", "last_pong_at": _iso_ago(10)},
+            },
+        }
+        assert _run_decision(body) == 0
+
+    def test_connecting_with_fresh_pong_no_restart(self):
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "connecting", "last_pong_at": _iso_ago(30)},
+            },
+        }
+        assert _run_decision(body) == 0
+
+    def test_cooldown_with_fresh_pong_no_restart(self):
+        body = {
+            "status": "degraded",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "cooldown", "last_pong_at": _iso_ago(60)},
+            },
+        }
+        assert _run_decision(body) == 0
 
     def test_bad_connection_state_restarts(self):
         body = {

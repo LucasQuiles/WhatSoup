@@ -8,6 +8,11 @@ import { registerMessagingTools, type MessagingDeps, type PollRegistrar } from '
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlertChecked: vi.fn(() => true),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -170,6 +175,7 @@ describe('registerMessagingTools', () => {
   let deps: MessagingDeps;
 
   beforeEach(() => {
+    vi.mocked(emitAlertChecked).mockClear();
     registry = new ToolRegistry();
     db = makeDb();
     calls = makeCalls();
@@ -177,6 +183,7 @@ describe('registerMessagingTools', () => {
     deps = {
       connection,
       db,
+      instanceName: 'test-bot',
       profiles: createProfileRegistry({
         satellite: { prefix: '[SAT] ', tag: ' #satellite', linkPreview: 'off' },
       }),
@@ -196,6 +203,98 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.jid).toBe('main-chat@s.whatsapp.net');
       expect(call.content.text).toBe('Hello world');
+    });
+
+    // ── client-safety guardrail (Lane 2) ───────────────────────────────────
+    it('redacts an internal path leaked in client-facing text before sending', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      const result = await registry.call(
+        'send_message',
+        { text: 'Sorry, my config at /Users/testuser/.claude/settings.json is acting up.' },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('/Users/testuser');
+      expect(sent).not.toContain('settings.json');
+      // the handler's returned text mirrors what was actually sent
+      const body = JSON.parse(result.content[0].text);
+      expect(body.text).not.toContain('/Users/testuser');
+    });
+
+    it('diverts a false infra-block self-diagnosis to generic client text', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        {
+          text: 'All tools are blocked because agent-sandbox.sh is failing closed and sandbox-policy.json is missing.',
+        },
+        session,
+      );
+
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('agent-sandbox.sh');
+      expect(sent).not.toContain('sandbox-policy.json');
+      expect(sent).toContain('temporary issue');
+    });
+
+    it('alerts ops with sanitized diagnostic evidence when a client message is diverted', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        { text: 'All tools are blocked because agent-sandbox.sh is failing closed.' },
+        session,
+      );
+      expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledTimes(1);
+      const [instance, source, , evidence, severity] = vi.mocked(emitAlertChecked).mock.calls[0];
+      expect(instance).toBe('test-bot');
+      expect(source).toBe('outbound_message_guard');
+      expect(severity).toBe('warning');
+      // the diagnostic is preserved for ops (that is the point), client never saw it
+      expect(evidence).toContain('agent-sandbox.sh');
+    });
+
+    it('does not alert ops for benign client text', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call('send_message', { text: 'See you Tuesday at 3pm.' }, session);
+      expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
+    });
+
+    it('does not alert ops for a mere internal-path redaction (no false claim)', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        { text: 'Config is at /Users/testuser/.claude/settings.json.' },
+        session,
+      );
+      expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
+    });
+
+    it('does not rewrite a send addressed to the configured BOT_ERRORS ops channel', async () => {
+      const prev = process.env['BOT_ERRORS_JID'];
+      process.env['BOT_ERRORS_JID'] = 'main-chat@s.whatsapp.net';
+      try {
+        const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+        const raw = 'agent-sandbox.sh failing closed at /Users/testuser/.claude/sandbox-policy.json';
+        await registry.call('send_message', { text: raw }, session);
+        const sent = JSON.parse(calls[0]).content.text as string;
+        expect(sent).toBe(raw);
+      } finally {
+        if (prev === undefined) delete process.env['BOT_ERRORS_JID'];
+        else process.env['BOT_ERRORS_JID'] = prev;
+      }
+    });
+
+    it('leaves ordinary client text untouched', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_message',
+        { text: 'Your appointment is confirmed for Tuesday at 3pm.' },
+        session,
+      );
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).toBe('Your appointment is confirmed for Tuesday at 3pm.');
     });
 
     it('resolves to alias in a global session and sends to the aliased JID', async () => {
@@ -540,6 +639,44 @@ describe('registerMessagingTools', () => {
       expect(call.content.contextInfo.stanzaId).toBe(messageId);
     });
 
+    // ── client-safety guardrail (Lane 2 — reply_message is the same audience
+    //    as send_message and must not be a bypass) ──────────────────────────
+    it('redacts an internal path leaked in reply text before sending', async () => {
+      const messageId = seedMessage(db, {
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        sender_jid: 'bob@s.whatsapp.net',
+        is_from_me: 0,
+      });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'reply_message',
+        { messageId, text: 'It is at /Users/testuser/.claude/settings.json on the box.' },
+        session,
+      );
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('/Users/testuser');
+      expect(sent).not.toContain('settings.json');
+    });
+
+    it('diverts a false infra-block claim in reply text to generic text', async () => {
+      const messageId = seedMessage(db, {
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        sender_jid: 'bob@s.whatsapp.net',
+        is_from_me: 0,
+      });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'reply_message',
+        { messageId, text: 'All tools are blocked because agent-sandbox.sh is failing closed.' },
+        session,
+      );
+      const sent = JSON.parse(calls[0]).content.text as string;
+      expect(sent).not.toContain('agent-sandbox.sh');
+      expect(sent).toContain('temporary issue');
+    });
+
     it('returns error for unknown message ID', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('reply_message', { messageId: 'nonexistent', text: 'hi' }, session);
@@ -843,6 +980,20 @@ describe('registerMessagingTools', () => {
       expect(call.content.edit.id).toBe(messageId);
     });
 
+    // ── client-safety guardrail: editing is another agent free-text vector ──
+    it('redacts an internal path in edited text before sending', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'edit_message',
+        { messageId, newText: 'actually it is /Users/testuser/.claude/settings.json' },
+        session,
+      );
+      const call = JSON.parse(calls[0]);
+      expect(call.content.text).not.toContain('/Users/testuser');
+      expect(call.content.text).not.toContain('settings.json');
+    });
+
     it('rejects editing a message not sent by me', async () => {
       const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 0 });
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
@@ -1119,6 +1270,23 @@ describe('registerMessagingTools', () => {
       expect(call.content.poll.values).toEqual(['Red', 'Blue', 'Green']);
       expect(call.content.poll.selectableCount).toBe(1);
       expect(JSON.parse(result.content[0].text).selectableCount).toBe(1);
+    });
+
+    // ── client-safety guardrail: poll question + options are agent free-text.
+    //    Redaction-only (divert/generic-replacement is nonsensical for a poll). ─
+    it('redacts an internal path leaked in a poll question and options', async () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+      await registry.call(
+        'send_poll',
+        {
+          question: 'Open /Users/testuser/.claude/settings.json?',
+          options: ['Yes', 'No, see agent-sandbox.sh'],
+        },
+        session,
+      );
+      const call = JSON.parse(calls[0]);
+      expect(call.content.poll.name).not.toContain('/Users/testuser');
+      expect(JSON.stringify(call.content.poll.values)).not.toContain('agent-sandbox.sh');
     });
 
     it('sends a multi-select poll when selectableCount allows multiple choices', async () => {

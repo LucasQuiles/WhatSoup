@@ -258,4 +258,46 @@ describe('formatPollQuestion', () => {
       expect(result.needsFollowUp).toBe(true);
     });
   });
+
+  // Client-safety: the AskUserQuestion → poll path bypasses the send_poll MCP
+  // tool (the agent runtime sends it directly), so the formatter must redact
+  // internal-artifact leaks on every client-facing surface it produces.
+  describe('client-safety redaction', () => {
+    it('redacts an internal path in the poll question (pollName + followUpText)', () => {
+      const result = formatPollQuestion({
+        question: 'Open /Users/testuser/.claude/settings.json now?',
+        options: [
+          { label: 'Yes', description: 'd'.repeat(200) },
+          { label: 'No', description: 'e'.repeat(200) },
+        ],
+      });
+      expect(result.pollName).not.toContain('/Users/testuser');
+      expect(result.pollName).not.toContain('settings.json');
+      expect(result.needsFollowUp).toBe(true);
+      expect(result.followUpText ?? '').not.toContain('/Users/testuser');
+    });
+
+    it('redacts an internal identifier in a poll option value', () => {
+      const result = formatPollQuestion({
+        question: 'Pick one',
+        options: [
+          { label: 'agent-sandbox.sh', description: '' },
+          { label: 'normal option', description: '' },
+        ],
+      });
+      expect(JSON.stringify(result.pollValues)).not.toContain('agent-sandbox.sh');
+    });
+
+    it('leaves benign poll content unchanged', () => {
+      const result = formatPollQuestion({
+        question: 'Which colour?',
+        options: [
+          { label: 'Red', description: '' },
+          { label: 'Blue', description: '' },
+        ],
+      });
+      expect(result.pollName).toBe('Which colour?');
+      expect(result.pollValues).toEqual(['Red', 'Blue']);
+    });
+  });
 });

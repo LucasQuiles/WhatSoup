@@ -21,6 +21,13 @@ import {
   type PreparedTextSend,
 } from '../../core/send-pipeline.ts';
 import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.ts';
+import {
+  evaluateOutboundMessageSafety,
+  redactInternalArtifacts,
+  resolveOutboundAudience,
+  type OutboundMessageSafetyDecision,
+} from '../../core/outbound-message-safety.ts';
+import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
@@ -54,6 +61,31 @@ function sanitizeError(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Client-safety: route diverted false-claim evidence to ops
+// ---------------------------------------------------------------------------
+
+// When a client-bound message is diverted (the agent made a false infra-block
+// self-diagnosis), route the sanitized original diagnostic to BOT ERRORS so ops
+// learns the agent malfunctioned. The original incident was invisible to ops
+// until the client reported it; this closes that loop. emitAlert is sync, never
+// throws, and durably queues — safe to call inline on the send path.
+function routeDivertToOps(
+  decision: OutboundMessageSafetyDecision | null,
+  instanceName: string | undefined,
+): void {
+  if (!decision || decision.action !== 'divert' || !decision.opsEvidence) return;
+  // emitAlertChecked (not raw emitAlert) per the BOT ERRORS governance contract —
+  // production callers must use the checked wrapper (adds emission telemetry).
+  emitAlertChecked(
+    instanceName ?? 'unknown',
+    'outbound_message_guard',
+    'agent emitted a false infra-status claim to a client; diverted to a generic reply',
+    decision.opsEvidence,
+    'warning',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Deps interface
 // ---------------------------------------------------------------------------
 
@@ -74,6 +106,8 @@ export interface MessagingDeps {
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
   pollRegistrar?: PollRegistrar;
+  /** Instance/bot name, used to attribute outbound-guard ops alerts. */
+  instanceName?: string;
 }
 
 const POLL_QUESTION_MAX_CHARS = 900;
@@ -156,6 +190,7 @@ export function registerMessagingTools(
     }),
     handler: async (params, session: SessionContext) => {
       let formattedText = '';
+      let guardDecision: OutboundMessageSafetyDecision | null = null;
       try {
         await sendPipeline.executeSend(params, async (prepared) => {
           const viewOnce = params['viewOnce'] as boolean | undefined;
@@ -174,6 +209,25 @@ export function registerMessagingTools(
           const receipt = await connection.sendRaw(prepared.chatJid, content);
           return { transportId: receipt.waMessageId };
         }, {
+          // Client-safety guardrail: never let agent free-text leak internal
+          // artifacts or a false infra-block self-diagnosis to a client. Sends
+          // addressed to the configured BOT ERRORS ops channel are treated as
+          // ops (verbatim). Everything else defaults to `client` — the
+          // conservative direction (a false-positive redaction on an operator
+          // message is low-harm; a leak to a client is high-harm). On divert,
+          // routeDivertToOps (after the send) routes the sanitized diagnostic to
+          // BOT ERRORS so ops learns the agent malfunctioned.
+          transformPrepared(prepared: PreparedTextSend): PreparedTextSend {
+            const audience = resolveOutboundAudience(prepared.chatJid);
+            const decision = evaluateOutboundMessageSafety({ text: prepared.text, audience });
+            guardDecision = decision;
+            if (decision.action === 'allow') return prepared;
+            return {
+              ...prepared,
+              text: decision.text,
+              audit: { ...prepared.audit, textLength: decision.text.length },
+            };
+          },
           beforeAudit(prepared: PreparedTextSend): void {
             if (session.tier !== 'global' || !session.conversationKey) return;
 
@@ -207,6 +261,7 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
+      routeDivertToOps(guardDecision, deps.instanceName);
       return { sent: true, text: formattedText };
     },
   });
@@ -234,9 +289,17 @@ export function registerMessagingTools(
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return errorResult(error);
 
+      // Client-safety guardrail: reply_message sends agent free-text straight to
+      // transport (it does not use the send pipeline), so it must apply the same
+      // guard as send_message or it is a trivial bypass.
+      const replyDecision = evaluateOutboundMessageSafety({
+        text,
+        audience: resolveOutboundAudience(chatJid),
+      });
+
       try {
         const content: Record<string, unknown> = {
-          text,
+          text: replyDecision.text,
           contextInfo: {
             stanzaId: row!.message_id,
             participant: row!.sender_jid,
@@ -249,6 +312,7 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
+      routeDivertToOps(replyDecision, deps.instanceName);
       return { sent: true, quotedMessageId: messageId };
     },
   });
@@ -355,9 +419,17 @@ export function registerMessagingTools(
         return errorResult('Can only edit your own messages');
       }
 
+      // Client-safety guardrail: an edit replaces sent client text, so it is
+      // another agent free-text vector and must apply the same guard.
+      const editDecision = evaluateOutboundMessageSafety({
+        text: newText,
+        audience: resolveOutboundAudience(chatJid),
+      });
+      const safeText = editDecision.text;
+
       try {
         await connection.sendRaw(chatJid, {
-          text: newText,
+          text: safeText,
           edit: {
             remoteJid: chatJid,
             id: row!.message_id,
@@ -368,7 +440,8 @@ export function registerMessagingTools(
         return errorResult(sanitizeError(err));
       }
 
-      return { edited: true, messageId, newText };
+      routeDivertToOps(editDecision, deps.instanceName);
+      return { edited: true, messageId, newText: safeText };
     },
   });
 
@@ -573,6 +646,16 @@ export function registerMessagingTools(
         return errorResult('selectableCount cannot exceed the number of poll options');
       }
 
+      // Client-safety guardrail: poll question and options are agent free-text.
+      // Redaction-only — diverting a poll to a generic sentence is nonsensical,
+      // so we mask internal artifacts but keep the poll structure. Ops-channel
+      // polls are left verbatim.
+      const pollAudience = resolveOutboundAudience(chatJid);
+      const safeQuestion = pollAudience === 'client' ? redactInternalArtifacts(question).text : question;
+      const safeOptions = pollAudience === 'client'
+        ? options.map((option) => redactInternalArtifacts(option).text)
+        : options;
+
       const resolvedResolution = (params['resolution'] as ResolutionStrategy | undefined) ?? 'first-vote-wins';
       // Defense in depth: even though the zod schema enforces [1000, 86_400_000],
       // clamp at the handler too so any path that bypasses validation still gets safe bounds.
@@ -583,30 +666,30 @@ export function registerMessagingTools(
       const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;
 
       try {
-        const result = await connection.sendPollMessage(chatJid, question, options, resolvedSelectableCount);
+        const result = await connection.sendPollMessage(chatJid, safeQuestion, safeOptions, resolvedSelectableCount);
 
         if (awaitResult && result.waMessageId && result.hasSecret && deps.pollRegistrar) {
           const abortSignal = _session.abortSignal;
           if (abortSignal?.aborted) {
-            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, error: 'Poll cancelled before await began', awaitFailed: true };
+            return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, error: 'Poll cancelled before await began', awaitFailed: true };
           }
           try {
             const answer = await deps.pollRegistrar.register(
-              result.waMessageId, chatJid, options,
+              result.waMessageId, chatJid, safeOptions,
               resolvedResolution, resolvedTimeoutMs, abortSignal,
             );
-            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, answer };
+            return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, answer };
           } catch (err) {
-            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, error: 'Poll timed out or was cancelled', awaitFailed: true };
+            return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount, error: 'Poll timed out or was cancelled', awaitFailed: true };
           }
         }
 
         if (awaitResult && !(result.waMessageId && result.hasSecret && deps.pollRegistrar)) {
-          return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount,
+          return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount,
                    awaitFailed: true, error: 'Poll sent but vote tracking unavailable — cannot await result' };
         }
 
-        return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount };
+        return { sent: true, pollId: result.waMessageId, question: safeQuestion, options: safeOptions, selectableCount: resolvedSelectableCount };
       } catch (err) {
         return errorResult(sanitizeError(err));
       }

@@ -186,6 +186,26 @@ describe('registerMediaTools', () => {
     media.stream.destroy();
   });
 
+  // ── client-safety guardrail: a media caption is agent free-text too ──────
+  it('redacts an internal path leaked in a media caption before sending', async () => {
+    const filePath = writeFile('leaky.jpg');
+    // JID assembled at runtime so no literal user-JID appears in committed source.
+    const jid = `${'1234567890'}@${'s.whatsapp.net'}`;
+    const session = chatSession('1234567890', jid, workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, caption: 'saved at /Users/testuser/.claude/settings.json fyi' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as any;
+    expect(media.caption).not.toContain('/Users/testuser');
+    expect(media.caption).not.toContain('settings.json');
+    media.stream.destroy();
+  });
+
   it('retries Baileys encrypted tmp ENOENT with a fresh stream for file sends', async () => {
     const filePath = writeFile('photo.jpg');
     const session = chatSession('15551234567', '15551234567@s.whatsapp.net', workspace);

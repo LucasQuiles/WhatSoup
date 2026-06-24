@@ -142,6 +142,50 @@ Manual canary proof uses a short `FALLBACK ON` window and must show the reply is
 served by the fallback provider, then show the window ends or reverts. It does
 not substitute for a real primary-failure degrade/recover test.
 
+## Outbound Client-Safety Guard
+
+Mechanically enforces the Operating Rule that raw provider/runtime diagnostics
+and internal artifacts must never reach a user (see the diagnostics rule above
+and `docs/runbooks/release-deployment.md` live-acceptance item "no raw provider
+diagnostic text is sent to a user"). The guard is a content filter on the
+outbound send path, not a model behavior — it holds even while a bot runs on a
+degraded fallback model.
+
+Source of truth: `src/core/outbound-message-safety.ts` (pure, transport-free).
+Two concerns:
+
+- **Redact** — `redactInternalArtifacts` masks operator-local home paths,
+  internal runtime identifiers (sandbox hook/policy filenames, `.claude/`,
+  settings, hook events), tailnet/CGNAT addresses, and provider tokens/emails
+  (the last via the shared `sanitizeProviderPreviewText`).
+- **Divert** — `classifyInfraStatusClaim` detects a false self-infra-failure
+  claim ("tools are blocked", "failing closed", "sandbox policy missing"). On a
+  client-bound divert the user receives only a generic retry message; the
+  original sanitized diagnostic is routed to BOT ERRORS so ops learns the agent
+  malfunctioned. The classifier is deliberately high-precision (it ignores
+  legitimate single-tool/vendor limitations); it is not a general hallucination
+  detector.
+
+Audience: a send addressed to the configured `BOT_ERRORS_JID` is `ops`
+(verbatim diagnostics required there); every other send defaults to `client`
+(the conservative direction — a false-positive redaction on an operator message
+is low-harm, a leak to a client is high-harm).
+
+Coverage — every agent free-text path to a client must pass through the guard,
+or it is a bypass:
+
+- MCP tools (`src/mcp/tools/messaging.ts`, `media.ts`): `send_message`,
+  `reply_message`, `edit_message` (redact + divert); `send_poll` question/
+  options and `send_media` caption (redaction-only — no sensible divert for a
+  structured poll or a media send).
+- Chat-bot runtime (`src/runtimes/chat/runtime.ts`): the reply text is redacted
+  before the durability op and send (redaction-only — the chat bot has no agent
+  tooling/sandbox to make a false infra-block claim about).
+
+Out of scope by design: internal ops/alert paths (`emit-alert`,
+`bot-errors-outbox`, reply-guarantee, `/health/send`) are `ops` audience and
+keep verbatim diagnostics.
+
 ## Fleet Parity Row
 
 Every agent bot needs one current parity row before the class can be called
