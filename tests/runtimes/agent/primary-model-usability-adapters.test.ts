@@ -34,6 +34,51 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
+  it('forwards CLAUDE_CONFIG_DIR into the Claude CLI probe env when the parent sets it', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const prev = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = '/tmp/rachel/.claude';
+    try {
+      const adapters = createPrimaryModelProbeAdapters(undefined, {
+        getProviderBinary: vi.fn(() => 'claude'),
+        probeBinaryCommand,
+      });
+      await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prev;
+    }
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'claude',
+      expect.any(Array),
+      expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/rachel/.claude' }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('omits CLAUDE_CONFIG_DIR from the Claude CLI probe env when the parent does not set it', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const prev = process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_CONFIG_DIR;
+    try {
+      const adapters = createPrimaryModelProbeAdapters(undefined, {
+        getProviderBinary: vi.fn(() => 'claude'),
+        probeBinaryCommand,
+      });
+      await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+    } finally {
+      if (prev !== undefined) process.env.CLAUDE_CONFIG_DIR = prev;
+    }
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'claude',
+      expect.any(Array),
+      expect.not.objectContaining({ CLAUDE_CONFIG_DIR: expect.anything() }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
   it('maps the real Claude CLI selected-model rejection through the shared binary status contract', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),

@@ -93,6 +93,15 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
       TMPDIR: process.env.TMPDIR,
+      // claude config dir. Forward-if-set only (undefined is stripped below), so
+      // hosts that don't set it see zero change. Required on launchd-managed
+      // macOS hosts where the agent OAuth credential item in the login keychain
+      // is unreadable in the non-GUI context: pointing CLAUDE_CONFIG_DIR at the
+      // dir holding `.credentials.json` (`$HOME/.claude`) lets the spawned cli
+      // read the file-based OAuth creds instead of 401-ing. Without this
+      // forward, a per-instance plist setting never reaches the child env (this
+      // builder is an explicit allow-list, not a process.env passthrough).
+      CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
       // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
       // external M365 read-only hooks; most instances do not set it and
       // remain read-only.

@@ -115,6 +115,14 @@ function modelProbeEnv(
     PATH: process.env.PATH,
     USER: process.env.USER,
     NO_COLOR: '1',
+    // Mirror buildBaseChildEnv: forward CLAUDE_CONFIG_DIR (if set) so the
+    // recovery/health probe resolves credentials the same way a real turn does.
+    // On launchd-managed macOS hosts the keychain cred item is unreadable in the
+    // non-GUI context; CLAUDE_CONFIG_DIR=$HOME/.claude routes the probe to the
+    // readable `.credentials.json` file store. Omitting it pinned rb-bot in
+    // auth-required fallback even after a successful reauth. undefined is dropped
+    // by the spawn layer when the var is unset → no change on hosts that omit it.
+    ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}),
   };
 }
 

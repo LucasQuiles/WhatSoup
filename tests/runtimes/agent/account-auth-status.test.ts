@@ -94,6 +94,30 @@ describe('account-auth-status probe — CLI providers', () => {
     expect(r).toMatchObject({ ok: false, confidence: 'suspected' });
   });
 
+  it('forwards CLAUDE_CONFIG_DIR into the probe env when present, omits it when absent', async () => {
+    const withVar = vi.fn(async () => ({ status: 'ok' as const, output: 'authenticated' }));
+    await makeAccountAuthStatusProbe(
+      TARGET,
+      deps({ probeBinaryAuthStatus: withVar, env: { HOME: '/home/x', PATH: '/usr/bin', USER: 'x', CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude' } }),
+    )(liveSignal());
+    expect(withVar).toHaveBeenCalledWith(
+      'claude',
+      ['auth', 'status', '--json'],
+      expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude' }),
+    );
+
+    const withoutVar = vi.fn(async () => ({ status: 'ok' as const, output: 'authenticated' }));
+    await makeAccountAuthStatusProbe(
+      TARGET,
+      deps({ probeBinaryAuthStatus: withoutVar, env: { HOME: '/home/x', PATH: '/usr/bin', USER: 'x' } }),
+    )(liveSignal());
+    expect(withoutVar).toHaveBeenCalledWith(
+      'claude',
+      ['auth', 'status', '--json'],
+      expect.not.objectContaining({ CLAUDE_CONFIG_DIR: expect.anything() }),
+    );
+  });
+
   it('never leaks raw probe output (which may carry tokens) into the summary', async () => {
     // Non-key-shaped sentinel: exercises the leak guard without tripping the
     // repo-hygiene secret-shape scanner on a literal provider key prefix.
