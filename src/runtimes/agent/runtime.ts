@@ -6256,10 +6256,14 @@ export class AgentRuntime implements Runtime {
           probeBinaryAuthStatus,
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
           // Explicit allowlist — never hand the CLI probe the full process env.
+          // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
+          // creds from the same place as the model probe + turns (launchd keychain
+          // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
           env: {
             HOME: process.env['HOME'],
             PATH: process.env['PATH'],
             USER: process.env['USER'],
+            ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
           },
         },
       });

@@ -35,6 +35,7 @@ const MANAGED_ENV_KEYS = [
   'CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS',
   'CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT',
   'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
+  'CLAUDE_CONFIG_DIR',
   'PLAYWRIGHT_MCP_SNAPSHOT_MODE',
   'PLAYWRIGHT_MCP_OUTPUT_MODE',
   'PLAYWRIGHT_MCP_CONSOLE_LEVEL',
@@ -199,6 +200,25 @@ describe('buildBaseChildEnv', () => {
     for (const key of Object.keys(TOKENOMICS_ENV_VARS)) {
       expect(unsetEnv).not.toHaveProperty(key);
     }
+  });
+
+  it('forwards CLAUDE_CONFIG_DIR when the parent sets it, and omits it when unset', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      CLAUDE_CONFIG_DIR: '/tmp/child-home/.claude',
+    });
+
+    const env = buildBaseChildEnv();
+    expect(env).toHaveProperty('CLAUDE_CONFIG_DIR', '/tmp/child-home/.claude');
+
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+    });
+
+    const unsetEnv = buildBaseChildEnv();
+    expect(unsetEnv).not.toHaveProperty('CLAUDE_CONFIG_DIR');
   });
 
   it('keeps parent HOME and XDG roots by default even when configRoot is supplied', () => {
