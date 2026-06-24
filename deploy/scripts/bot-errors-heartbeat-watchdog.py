@@ -22,6 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 
 
@@ -595,10 +596,7 @@ def unique_hosts(hosts: list[str]) -> list[str]:
 
 
 def canonical_local_host() -> str:
-    host = socket.gethostname().split(".", 1)[0].lower()
-    if host.startswith("nucles"):
-        return "nucles"
-    return host
+    return normalize_hub_host(socket.gethostname().split(".", 1)[0])
 
 
 def local_daily_health_hosts() -> list[str]:
@@ -1144,16 +1142,9 @@ def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | No
     match = re.search(r"\.relay-([A-Za-z0-9_.:-]+)\.bot-errors-health\.daily-health\.", path.name)
     if match:
         return match.group(1)
-    if data:
-        diagnostics = data.get("diagnostics")
-        if isinstance(diagnostics, dict):
-            relay = diagnostics.get("relay")
-            if isinstance(relay, dict) and isinstance(relay.get("remoteHost"), str):
-                return relay["remoteHost"]
-        machine = str(data.get("machine") or "").lower()
-        if machine.startswith("nucles"):
-            return "nucles"
-    return None
+    # Payload branch shares the dispatcher's canonical key so the freshness ledger
+    # the dispatcher writes and the host the watchdog reads cannot drift apart.
+    return daily_health_host_from_payload(data)
 
 
 def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
@@ -1183,16 +1174,45 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
     return events
 
 
-def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
-    dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
-    if dry_age is not None and host is None:
-        try:
-            age = int(dry_age)
-        except (TypeError, ValueError, OverflowError):
-            return None, f"invalid dry daily-health age: value={dry_age!r}"
-        if age < 0:
-            return None, f"invalid dry daily-health age: value={dry_age!r}"
-        return age, "dry daily-health age"
+def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
+    """Read per-host daily-health freshness from the durable incident-state ledger.
+
+    The dispatcher records ``dailyHealthFreshness[host] = {lastSeenAt, lastSeenIso}``
+    into incident-state.json, which is never FIFO-pruned. Unlike a scan of the
+    garbage-collected suppressed/ archive, this freshness survives archive eviction —
+    it is the authoritative liveness source. Returns ``(age_seconds, detail)`` or
+    ``(None, reason)`` when the host is absent or the record is unusable.
+    """
+    path = state_root() / "incident-state.json"
+    if not path.exists():
+        return None, f"no incident-state ledger at {path}"
+    data = load_json(path)
+    if not isinstance(data, dict):
+        return None, f"unreadable incident-state ledger at {path}"
+    ledger = data.get("dailyHealthFreshness")
+    if not isinstance(ledger, dict):
+        return None, "incident-state ledger has no dailyHealthFreshness map"
+    record = ledger.get(host)
+    if not isinstance(record, dict):
+        return None, f"no dailyHealthFreshness entry for {host}"
+    last_seen = record.get("lastSeenAt")
+    last_seen_epoch: int | None
+    try:
+        last_seen_epoch = int(last_seen)
+    except (TypeError, ValueError):
+        last_seen_epoch = parse_iso_epoch(record.get("lastSeenIso"))
+    if last_seen_epoch is None:
+        return None, f"invalid dailyHealthFreshness lastSeenAt for {host}: {last_seen!r}"
+    current = now_epoch()
+    if last_seen_epoch > current:
+        return None, (
+            f"future dailyHealthFreshness for {host}: lastSeenAt={last_seen_epoch} "
+            f"now={current} future_by_seconds={last_seen_epoch - current}"
+        )
+    return max(0, current - last_seen_epoch), f"ledger dailyHealthFreshness[{host}] lastSeenAt={last_seen_epoch}"
+
+
+def _daily_health_file_age(host: str | None) -> tuple[int | None, str]:
     newest: int | None = None
     newest_path = ""
     try:
@@ -1217,6 +1237,35 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
             f"timestamp={newest} now={current} future_by_seconds={newest - current}"
         )
     return max(0, current - newest), f"{newest_path} mtime={newest}"
+
+
+def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
+    dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
+    if dry_age is not None and host is None:
+        try:
+            age = int(dry_age)
+        except (TypeError, ValueError, OverflowError):
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        if age < 0:
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        return age, "dry daily-health age"
+    file_age, file_detail = _daily_health_file_age(host)
+    if host is None:
+        # Aggregate "any daily-health" check: the per-host freshness ledger does not apply.
+        return file_age, file_detail
+    ledger_age, ledger_detail = daily_health_freshness_ledger_age(host)
+    # Freshest signal wins. The durable ledger decouples liveness from the
+    # garbage-collected suppressed/ archive (the false-positive root cause): a FIFO
+    # eviction can no longer age a live host out, while a genuinely dead host gets no
+    # fresh ledger write and still ages out correctly via both sources.
+    candidates = [
+        (age, detail)
+        for age, detail in ((file_age, file_detail), (ledger_age, ledger_detail))
+        if age is not None
+    ]
+    if not candidates:
+        return ledger_age, f"{ledger_detail}; file-scan: {file_detail}"
+    return min(candidates, key=lambda candidate: candidate[0])
 
 
 def configured_checks() -> set[str]:

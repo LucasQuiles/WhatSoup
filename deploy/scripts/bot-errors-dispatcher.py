@@ -28,6 +28,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.bot_errors_daily_health import daily_health_host_from_payload
 from lib.bot_errors_redaction import redact_bot_errors_text
 
 
@@ -676,12 +677,44 @@ def load_incident_state(paths: dict[str, Path]) -> dict[str, Any]:
         state["staleAutocloseHistory"] = loaded["staleAutocloseHistory"]
     if isinstance(loaded.get("promotionSafety"), dict):
         state["promotionSafety"] = loaded["promotionSafety"]
+    # Per-host daily-health freshness ledger — the heartbeat-watchdog's authoritative
+    # liveness source. Must survive across one-shot runs; without this preserve the
+    # ledger would reset every invocation and the watchdog would fall back to scanning
+    # the FIFO-pruned archive (the false-positive root cause this ledger fixes).
+    if isinstance(loaded.get("dailyHealthFreshness"), dict):
+        state["dailyHealthFreshness"] = loaded["dailyHealthFreshness"]
     return state
 
 
 def save_incident_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
     state["updatedAt"] = now_iso()
     atomic_write_json(paths["incident_state"], state)
+
+
+def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+    """Stamp per-host daily-health liveness into the durable freshness ledger.
+
+    Any ``daily-health*`` event (info cadence, ``daily-health-fail``, recovery) is
+    proof that host's daily-health monitor is alive and reporting, so it refreshes
+    liveness. The heartbeat-watchdog reads this ledger instead of scanning the
+    FIFO-pruned suppressed/ archive — decoupling liveness from a garbage-collected
+    directory, the root cause of the mass "cadence stale" false positives. The host
+    key is the shared canonical key so the write and the watchdog lookup cannot
+    drift. Returns the host recorded, or ``None`` when the event is not daily-health
+    or no host can be derived (the watchdog then falls back to a file scan).
+    """
+    source = str(event.get("source") or "")
+    if not source.startswith("daily-health"):
+        return None
+    host = daily_health_host_from_payload(event)
+    if not host:
+        return None
+    ledger = incident_state.setdefault("dailyHealthFreshness", {})
+    if not isinstance(ledger, dict):
+        ledger = {}
+        incident_state["dailyHealthFreshness"] = ledger
+    ledger[host] = {"lastSeenAt": int(time.time()), "lastSeenIso": now_iso()}
+    return host
 
 
 def incident_source(event: dict[str, Any]) -> str:
@@ -4122,6 +4155,13 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     event = mark_attempt(event)
     atomic_write_json(claimed, event)
     incident_state = load_incident_state(paths)
+
+    # Stamp daily-health liveness into the durable freshness ledger before any
+    # suppress/send branch — all three downstream paths that persist incident_state
+    # (suppress, send-success) then carry it, and the high-frequency info cadence is
+    # always suppressed (and thus always saved). The watchdog reads this ledger
+    # instead of the FIFO-pruned suppressed/ archive.
+    record_daily_health_freshness(event, incident_state)
 
     if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
         recovered = close_recovered_daily_health_incidents(event, incident_state)
