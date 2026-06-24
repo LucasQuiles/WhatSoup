@@ -118,7 +118,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
-import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import { emitAlert, clearAlertSource } from '../../../src/lib/emit-alert.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -196,8 +196,16 @@ function view(runtime: AgentRuntime): FallbackView {
   return runtime as unknown as FallbackView;
 }
 
-function alertsFor(source: string): Array<[string, string, string, string]> {
-  return vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === source) as Array<[string, string, string, string]>;
+function alertsFor(source: string): Array<[string, string, string, string, string?]> {
+  return vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === source) as Array<
+    [string, string, string, string, string?]
+  >;
+}
+
+function clearsFor(source: string): Array<[string, string, string]> {
+  return vi.mocked(clearAlertSource).mock.calls.filter((c) => c[1] === source) as Array<
+    [string, string, string]
+  >;
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -220,9 +228,12 @@ describe('AgentRuntime — fallback transition alerts', () => {
     v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
     const activated = alertsFor('provider_fallback_activated');
     expect(activated).toHaveLength(1);
-    const [instance, source, , evidence] = activated[0];
+    const [instance, source, , evidence, severity] = activated[0];
     expect(instance).toBe('test');
     expect(source).toBe('provider_fallback_activated');
+    // Activation is a FAULT (primary provider failed) — keeps the critical
+    // default. Asymmetry with the revert (info) is the point.
+    expect(severity ?? 'critical').toBe('critical');
     expect(evidence).toContain('reason=usage-limit');
     expect(evidence).toContain('provider=opencode-cli');
     expect(evidence).toContain('model=minimax/MiniMax-M2.7');
@@ -248,12 +259,20 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(v.fallbackWindow.activeUntil).toBeNull();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
-    const [instance, , , evidence] = reverted[0];
+    const [instance, , , evidence, severity] = reverted[0];
     expect(instance).toBe('test');
+    // A revert is a RECOVERY — it must emit at info, never the critical
+    // default. Pre-fix this paged "Q investigate, remediate" for clean cycles.
+    expect(severity).toBe('info');
     expect(evidence).toContain('reason=window-elapsed');
     expect(evidence).toContain('turnsServed=3');
     expect(evidence).toContain('turnsEmpty=1');
     expect(evidence).toContain('windowMs=3600000');
+
+    // Recovery clears the activation incident this window opened.
+    const cleared = clearsFor('provider_fallback_activated');
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0][0]).toBe('test');
   });
 
   it('reports per-window turn DELTAS in revert evidence — window 2 never re-reports window 1 turns', () => {

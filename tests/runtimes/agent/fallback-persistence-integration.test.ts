@@ -54,9 +54,12 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
 // Alerts must never leave the test process.
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
   return {
     emitAlert,
     emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
   };
 });
 
