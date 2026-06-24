@@ -75,8 +75,12 @@ const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
 const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+// Anchored, non-ambiguous prefix (lookbehind-guarded `~`/`/` + single lazy body)
+// mirrors CREDENTIAL_PATH_RE in lib/bot_errors_redaction.py. The previous
+// `(?:~|/[^\s]+)*` prefix allowed overlapping partitions of a long slash-path,
+// which backtracked catastrophically (ReDoS) when the required suffix failed.
 const CREDENTIAL_PATH =
-  /(?:~|\/[^\s"',}]+)*(?:\.config\/whatsoup\/[^\s"',}]+|\.local\/share\/whatsoup\/instances\/[^\s"',}]*\/auth(?:\/[^\s"',}]*)?|auth-bond-backups\/[^\s"',}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b/gi;
+  /(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])\/)[^\s"',;}]*?(?:\.config\/secrets\/[^\s"',;}]+|\.config\/whatsoup\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]*\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s"',;}]+)?))\b/gi;
 const KEYED_PHONE_LIKE = /\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|\s+)(\+?\d{10,16})\b/gi;
 const CONTEXT_PHONE_LIKE = /\b(for)(\s+)(\+?\d{10,16})\b/gi;
 const PHONE_LIKE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;

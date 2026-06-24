@@ -349,3 +349,58 @@ describe('recordBotErrorsWritefail', () => {
     expect(readdirSync(fallback).filter((entry) => entry.endsWith('.writefail'))).toHaveLength(1);
   });
 });
+
+describe('credential-path redaction (canonical pattern)', () => {
+  function pathRedaction(rawPath: string): string {
+    const event = buildBotErrorsEvent({
+      eventType: 'alert',
+      instance: 'agent-alpha',
+      source: 'provider_auth',
+      summary: 'credential exposure',
+      evidence: `leaked path ${rawPath} end`,
+    });
+    return event.evidence;
+  }
+
+  it('redacts a .config/secrets/ path (branch missing before canonical sync)', () => {
+    expect(pathRedaction('/srv/app/.config/secrets/fleet.json')).toBe(
+      'leaked path [REDACTED CREDENTIAL PATH] end',
+    );
+  });
+
+  it('redacts a bare .env credential file with suffix', () => {
+    expect(pathRedaction('/srv/app/.env.production')).toBe(
+      'leaked path [REDACTED CREDENTIAL PATH] end',
+    );
+  });
+
+  it('still redacts the previously-covered whatsoup auth path', () => {
+    expect(pathRedaction('/u/.local/share/whatsoup/instances/rb/auth/creds.json')).toBe(
+      'leaked path [REDACTED CREDENTIAL PATH] end',
+    );
+  });
+
+  it('leaves non-credential text untouched', () => {
+    expect(pathRedaction('https://example.com/public/page')).toBe(
+      'leaked path https://example.com/public/page end',
+    );
+  });
+
+  it('is ReDoS-safe on a long ambiguous slash-path (no catastrophic backtracking)', () => {
+    // The pre-canonical `(?:~|/[^\s]+)*` prefix backtracked exponentially on this
+    // shape once the required suffix failed. Bound the work to prove it is linear.
+    const evil = `/${'a/'.repeat(40000)}!`;
+    const start = process.hrtime.bigint();
+    const event = buildBotErrorsEvent({
+      eventType: 'alert',
+      instance: 'agent-alpha',
+      source: 'provider_auth',
+      summary: 'credential exposure',
+      evidence: evil,
+    });
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    expect(elapsedMs).toBeLessThan(1000);
+    // No credential category matched, so the adversarial input passes through.
+    expect(event.evidence).toContain('a/a/');
+  });
+});
