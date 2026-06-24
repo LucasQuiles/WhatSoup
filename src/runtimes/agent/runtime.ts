@@ -218,6 +218,14 @@ const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
 // the injected system block. A stale summary misleads the stand-in, so the
 // prelude builder rejects artifacts older than this when composing context.
 const HANDOFF_STALE_MS = 120_000;
+/**
+ * `modelUsable` reports `true` only when the primary-model usability probe behind
+ * it is no older than this window. A stale `usable` probe (e.g. after reverting to
+ * primary and then sitting idle, or if an external process strips creds) is
+ * downgraded to `null` (unknown) so /health and monitors cannot read a green that
+ * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
+ */
+const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
 // ── Background handoff-distiller sweep tuning (all gated behind the flag) ──────
 // One periodic sweep enumerates active conversations and asks the runner to
 // (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
@@ -358,10 +366,38 @@ export interface AgentRuntimeOptions {
   replyGuaranteeTimeoutMs?: number;
 }
 
-type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
+export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
   checkedAt: number | null;
   probeInFlight: boolean;
 };
+
+/**
+ * Pure derivation of the `modelUsable` health verdict from the last usability
+ * probe, gated on freshness. A `usable` probe older than `freshnessMs` is reported
+ * as `null` (unknown) with `modelUsableStale=true` rather than a stale green. Pure
+ * + exported for direct unit testing (the probe state itself is private).
+ */
+export function deriveModelUsable(
+  usability: RuntimePrimaryModelUsability | null,
+  nowMs: number,
+  freshnessMs: number = MODEL_USABILITY_FRESHNESS_MS,
+): { modelUsable: boolean | null; modelUsableStale: boolean; modelUsableCheckedAt: number | null } {
+  const modelUsableCheckedAt = usability?.checkedAt ?? null;
+  if (!usability || usability.probeInFlight) {
+    return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+  }
+  if (usability.status === 'usable') {
+    const fresh = typeof modelUsableCheckedAt === 'number'
+      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
+    return fresh
+      ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
+      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
+  }
+  if (primaryModelUsabilityRequiresAlert(usability)) {
+    return { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt };
+  }
+  return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+}
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
 //
@@ -5260,16 +5296,11 @@ export class AgentRuntime implements Runtime {
 
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    let modelUsable: boolean | null = null;
-    if (usability && !usability.probeInFlight) {
-      if (usability.status === 'usable') {
-        modelUsable = true;
-      } else if (primaryModelUsabilityRequiresAlert(usability)) {
-        modelUsable = false;
-      }
-    }
+    const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
     return {
       modelUsable,
+      modelUsableStale,
+      modelUsableCheckedAt,
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,

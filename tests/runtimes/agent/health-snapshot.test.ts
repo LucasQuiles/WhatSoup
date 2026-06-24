@@ -238,6 +238,8 @@ function expectedFallbackDetails(): Record<string, unknown> {
     primaryModelUsability: null,
     turnCapability: {
       modelUsable: null,
+      modelUsableStale: false,
+      modelUsableCheckedAt: null,
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastTurnErrorClass: null,
