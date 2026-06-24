@@ -169,15 +169,13 @@ def test_env_profile_not_object_reports_error(monkeypatch, tmp_path):
 # host_profile_name normalization
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    "hostname,expected",
-    [
-        ("Alpha", "alpha"),
-        ("node5", "node5"),
-        ("NODE5.local", "node5"),
-        ("box-7.example.lan", "box-7"),
-    ],
-)
-def test_host_profile_name_normalizes(monkeypatch, hostname, expected):
-    monkeypatch.setattr(_mod.socket, "gethostname", lambda: hostname)
-    assert _mod.host_profile_name() == expected
+def test_host_profile_name_normalizes(monkeypatch):
+    """First DNS label, lowercased — matching the install scripts."""
+    def check(hostname: str, expected: str) -> None:
+        monkeypatch.setattr(_mod.socket, "gethostname", lambda: hostname)
+        assert _mod.host_profile_name() == expected
+
+    check("Alpha", "alpha")            # uppercase -> lowercase
+    check("node5", "node5")            # already canonical
+    check("NODE5.local", "node5")      # strips domain, lowercases
+    check("box-7.example.lan", "box-7")  # multi-label domain, hyphen preserved
