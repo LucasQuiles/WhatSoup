@@ -165,13 +165,17 @@ export function redactInternalArtifacts(text: string): { text: string; redaction
 // --- False infra-status self-diagnosis (high precision; bounded clauses) ---
 
 const INFRA_CLAIM_PATTERNS: readonly RegExp[] = [
-  // plural "tools (are|is) ... blocked" — self-infra, not "the booking tool is blocked"
-  /\b(?:all\s+)?(?:my\s+|the\s+)?tools\s+(?:are|is)\s+(?:being\s+|currently\s+)?blocked\b/i,
-  /\bcannot\s+(?:run|use|access|call)\s+(?:any\s+)?(?:of\s+my\s+)?tools\b/i,
+  // SELF-referential only: a first-person claim that the agent's OWN tools are
+  // blocked. Requiring "my"/"I" keeps the agent helping a client with the
+  // CLIENT's tools ("your tools are blocked by the firewall") from being
+  // diverted — a divert would replace genuine help with a generic stub.
+  /\b(?:all\s+)?my\s+tools\s+(?:are|is)\s+(?:being\s+|currently\s+)?blocked\b/i,
+  /\bI\s+(?:can(?:'|’)?t|cannot|am\s+unable\s+to)\s+(?:run|use|access|call)\s+(?:any\s+)?(?:of\s+)?(?:my\s+)?tools\b/i,
+  // Internal runtime terms that are inherently the agent's own — a client has no
+  // agent-sandbox or sandbox policy — so these stay unconditional.
   /\bfailing\s+closed\b/i,
   /\bagent[\s-]?sandbox\b[^.]*\b(?:failing|blocked|closed)\b/i,
-  /\bsandbox[\s-]?policy(?:\.json)?\b[^.]*\b(?:missing|not\s+found|gone)\b/i,
-  /\bpolicy\s+file\b[^.]*\b(?:missing|not\s+found|gone)\b/i,
+  /\bsandbox[\s-]?policy(?:\s+file)?(?:\.json)?\b[^.]*\b(?:missing|not\s+found|gone)\b/i,
   /\bsandbox\b[^.]*\b(?:is\s+)?(?:missing|failing\s+closed)\b/i,
 ];
 

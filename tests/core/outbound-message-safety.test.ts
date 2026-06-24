@@ -119,7 +119,7 @@ describe('classifyInfraStatusClaim', () => {
     'I cannot use any tools at the moment.',
     'The agent sandbox is failing closed.',
     'My sandbox policy is missing so nothing works.',
-    'The policy file is missing and tools are blocked.',
+    'The sandbox policy file is missing and my tools are blocked.',
   ])('classifies a self-infra failure claim as true: %s', (claim) => {
     expect(classifyInfraStatusClaim(claim)).toBe(true);
   });
@@ -130,6 +130,18 @@ describe('classifyInfraStatusClaim', () => {
     'Your scheduling tool is currently unavailable from the vendor.',
     'I can help you book that appointment today.',
   ])('does not classify benign client-facing text as an infra claim: %s', (text) => {
+    expect(classifyInfraStatusClaim(text)).toBe(false);
+  });
+
+  // The classifier must be SELF-referential: the agent helping a client with the
+  // CLIENT's tooling must not be misread as the agent's own infra failing — a
+  // divert would replace genuine help with a generic stub.
+  it.each([
+    'It sounds like your tools are blocked by the firewall — try allowlisting them.',
+    'Your booking tools are blocked on weekends per your settings.',
+    'The CRM tools are blocked for your role; ask your admin.',
+    'Those export tools are blocked until you upgrade your plan.',
+  ])('does not classify a reference to the CLIENT\'s tools as a self-infra claim: %s', (text) => {
     expect(classifyInfraStatusClaim(text)).toBe(false);
   });
 });
@@ -182,7 +194,7 @@ describe('evaluateOutboundMessageSafety', () => {
 
   it('attaches sanitized opsEvidence on divert — no raw path username, token, JID, or phone', () => {
     const raw =
-      `All tools are blocked. creds at /Users/testuser/.claude/x, token Bearer ${FAKE_TOKEN_2}, chat ${FAKE_JID}, call ${FAKE_PHONE}`;
+      `All my tools are blocked. creds at /Users/testuser/.claude/x, token Bearer ${FAKE_TOKEN_2}, chat ${FAKE_JID}, call ${FAKE_PHONE}`;
     const decision = evaluateOutboundMessageSafety({ text: raw, audience: 'client' });
     expect(decision.action).toBe('divert');
     expect(decision.opsEvidence).toBeDefined();
