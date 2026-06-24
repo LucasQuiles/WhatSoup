@@ -2895,7 +2895,89 @@ def dry_credential_status(service: str) -> str | None:
     return raw.strip().lower() if isinstance(raw, str) and raw.strip() else None
 
 
+# WhatSoup lookupCredential keychain migration fallbacks (mirror src/lib/keyring.ts
+# SERVICE_MIGRATION_FALLBACKS): a service whose live key is stored under a divergent keyring
+# service name. The health-check must try the same fallbacks the runtime does, or it reports a
+# resolvable key as missing (e.g. glm whose key is stored under "zai-api-key").
+SERVICE_KEYCHAIN_FALLBACKS: dict[str, list[str]] = {
+    "glm": ["zai-api-key"],
+    "google": ["gemini"],
+    "whatsoup-health-token": ["whatsoup_health"],
+}
+
+
+def whatsoup_keyfile_present(service: str) -> bool:
+    """True when ~/.config/whatsoup/credentials/<service>.key holds a non-empty value.
+
+    This is the file store lookupCredential consults after a keyring miss (keyring.ts
+    fileStoreRead — reached even on the macos-keychain backend). It is the store the live fleet is
+    actually provisioned into, so the health-check MUST check it or it reports a runtime-resolvable
+    key as missing (false negative). NOTE: lookupCredential's file store keys on the ORIGINAL
+    service name only (no migration), so we do too.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    path = Path(base) / "whatsoup" / "credentials" / f"{service}.key"
+    try:
+        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
+
+
+def _keychain_secret_status(candidates: list[str], account: str, timeout_seconds: int) -> str:
+    """darwin keychain read for the first resolvable candidate.
+    Returns 'present' | 'missing' | 'timeout' | 'probe_error_<detail>'."""
+    for candidate in candidates:
+        try:
+            proc = subprocess.run(
+                ["security", "find-generic-password", "-s", candidate, "-a", account, "-w"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=min(timeout_seconds, 5),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
+            return f"probe_error_{redact_evidence_string(str(exc), 80)}"
+        if proc.returncode == 0 and proc.stdout.strip():
+            return "present"
+    return "missing"
+
+
+def _secret_tool_status(candidates: list[str], timeout_seconds: int) -> str:
+    """linux secret-tool read for the first resolvable candidate.
+    Returns 'present' | 'missing' | 'empty' | 'timeout' | 'probe_error_<detail>'."""
+    saw_empty = False
+    for candidate in candidates:
+        try:
+            proc = subprocess.run(
+                ["secret-tool", "lookup", "service", candidate],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=min(timeout_seconds, 5),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
+            return f"probe_error_{redact_evidence_string(str(exc), 80)}"
+        if proc.returncode == 0 and proc.stdout.strip():
+            return "present"
+        if proc.returncode == 0:
+            saw_empty = True
+    return "empty" if saw_empty else "missing"
+
+
 def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bool, str, str]:
+    # Mirror src/lib/keyring.ts lookupCredential resolution EXACTLY so a key the runtime can
+    # resolve is never reported missing (and vice-versa):
+    #   env var -> OS keyring (service + migration fallbacks) -> ~/.config/whatsoup/credentials/<svc>.key
+    # NOTE: ~/.config/secrets/<svc>.env is the `ocw` worker store; the WhatSoup runtime does NOT
+    # source it, so it is reported as a diagnostic negative only, never as provisioned. (2026-06-23:
+    # the fleet is provisioned via the .key file store, not the keychain — checking only env/.env/
+    # keychain produced false "missing fallback credentials" despite a healthy runtime.)
     env_key = service_env_var(service)
     dry_status = dry_credential_status(service)
     if dry_status is not None:
@@ -2903,46 +2985,36 @@ def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bo
         return present, "dry", dry_status
     if env_key and os.environ.get(env_key):
         return True, "env", "present"
-    if secret_file_has_service_key(service, env_key):
-        return True, "secret_file", "present"
+
+    candidates = [service, *SERVICE_KEYCHAIN_FALLBACKS.get(service, [])]
     if HOST_PLATFORM == "darwin":
         account = os.environ.get("USER") or Path.home().name or "unknown"
-        try:
-            proc = subprocess.run(
-                ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=min(timeout_seconds, 5),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "macos_keychain", "timeout"
-        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
-            return False, "macos_keychain", f"probe_error_{redact_evidence_string(str(exc), 80)}"
-        if proc.returncode == 0 and proc.stdout.strip():
-            return True, "macos_keychain", "present"
-        return False, "macos_keychain", "missing"
-    if shutil.which("secret-tool"):
-        try:
-            proc = subprocess.run(
-                ["secret-tool", "lookup", "service", service],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=min(timeout_seconds, 5),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "secret_tool", "timeout"
-        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
-            return False, "secret_tool", f"probe_error_{redact_evidence_string(str(exc), 80)}"
-        if proc.returncode == 0 and proc.stdout.strip():
-            return True, "secret_tool", "present"
-        if proc.returncode == 0:
-            return False, "secret_tool", "empty"
-        return False, "secret_tool", "missing"
-    return False, "none", "missing"
+        keyring_source = "macos_keychain"
+        keyring_status = _keychain_secret_status(candidates, account, timeout_seconds)
+    elif shutil.which("secret-tool"):
+        keyring_source = "secret_tool"
+        keyring_status = _secret_tool_status(candidates, timeout_seconds)
+    else:
+        keyring_source = "none"
+        keyring_status = "missing"
+
+    if keyring_status == "present":
+        return True, keyring_source, "present"
+
+    # Keyring miss -> the runtime's next backend: the whatsoup .key file store (the de-facto fleet
+    # provisioning store). Presence here means the runtime CAN resolve the key.
+    if whatsoup_keyfile_present(service):
+        return True, "whatsoup_keyfile", "present"
+
+    # Not resolvable by the runtime. A populated ocw .env is a misplacement diagnostic only.
+    if secret_file_has_service_key(service, env_key):
+        return False, "secret_file", "present_in_ocw_env_only_not_runtime_store"
+
+    if keyring_status == "timeout" or keyring_status.startswith("probe_error_"):
+        return False, keyring_source, keyring_status
+    if keyring_status == "empty":
+        return False, keyring_source, "empty"
+    return False, keyring_source, "missing"
 
 
 def opencode_provider_credential_fragments(data: dict[str, Any], target: str, timeout_seconds: int) -> tuple[bool | None, list[str]]:

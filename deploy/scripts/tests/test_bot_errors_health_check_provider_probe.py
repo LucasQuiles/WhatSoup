@@ -214,3 +214,96 @@ def test_fleet_api_inventory_explicit_url_still_wins(monkeypatch):
     assert len(lines) == 1
     assert "endpoint=http://127.0.0.1:18080/api/instances" in lines[0]
     assert "instances=1" in lines[0]
+
+
+# --- provider_credential_presence: mirror lookupCredential (env -> keyring + migration -> .key store) ---
+# 2026-06-23 fleet audit: provider keys live in ~/.config/whatsoup/credentials/<svc>.key (the file
+# store lookupCredential consults after a keyring miss, keyring.ts:209), NOT the keychain, and NOT
+# the ocw ~/.config/secrets/<svc>.env store. The health-check must check the .key store or it
+# reports a runtime-resolvable key as missing (false negative — worst for glm, which has only
+# glm.key). It must also try the glm->zai-api-key keyring migration the runtime uses.
+
+class _FakeProc:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _arm_presence(monkeypatch, *, ocw_env_present, keychain_returncode, keychain_stdout, keyfile_present=False):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "service_env_var", lambda _service: "DEEPSEEK_API_KEY")
+    monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: ocw_env_present)
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: keyfile_present)
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *_a, **_k: _FakeProc(keychain_returncode, keychain_stdout),
+    )
+
+
+def test_credential_presence_keychain_present_wins(monkeypatch):
+    _arm_presence(monkeypatch, ocw_env_present=True, keychain_returncode=0, keychain_stdout="secret-value", keyfile_present=True)
+    present, source, status = _mod.provider_credential_presence("deepseek", 15)
+    assert present is True
+    assert source == "macos_keychain"
+    assert status == "present"
+
+
+def test_credential_presence_keyfile_resolves_when_keychain_empty(monkeypatch):
+    # THE FIX: the .key file store is the runtime's real backend -> RESOLVABLE even with empty keychain.
+    _arm_presence(monkeypatch, ocw_env_present=False, keychain_returncode=1, keychain_stdout="", keyfile_present=True)
+    present, source, status = _mod.provider_credential_presence("deepseek", 15)
+    assert present is True
+    assert source == "whatsoup_keyfile"
+    assert status == "present"
+
+
+def test_credential_presence_ocw_env_only_is_not_provisioned(monkeypatch):
+    # ocw .env present but no keychain and no .key store -> NOT runtime-resolvable; diagnostic only.
+    _arm_presence(monkeypatch, ocw_env_present=True, keychain_returncode=1, keychain_stdout="", keyfile_present=False)
+    present, source, status = _mod.provider_credential_presence("deepseek", 15)
+    assert present is False
+    assert source == "secret_file"
+    assert status == "present_in_ocw_env_only_not_runtime_store"
+
+
+def test_credential_presence_env_short_circuits(monkeypatch):
+    _arm_presence(monkeypatch, ocw_env_present=True, keychain_returncode=1, keychain_stdout="", keyfile_present=True)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "live-from-process-env")
+    present, source, status = _mod.provider_credential_presence("deepseek", 15)
+    assert present is True
+    assert source == "env"
+    assert status == "present"
+
+
+def test_credential_presence_missing_everywhere(monkeypatch):
+    _arm_presence(monkeypatch, ocw_env_present=False, keychain_returncode=1, keychain_stdout="", keyfile_present=False)
+    present, source, status = _mod.provider_credential_presence("deepseek", 15)
+    assert present is False
+    assert source == "macos_keychain"
+    assert status == "missing"
+
+
+def test_credential_presence_glm_resolves_via_zai_api_key_migration(monkeypatch):
+    # glm's live key is stored under keyring service "zai-api-key" (SERVICE_KEYCHAIN_FALLBACKS),
+    # exactly as lookupCredential's SERVICE_MIGRATION_FALLBACKS does.
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "service_env_var", lambda _service: "ZAI_API_KEY")
+    monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: False)
+    monkeypatch.setattr(_mod, "whatsoup_keyfile_present", lambda _service: False)
+
+    def fake_run(cmd, *_a, **_k):
+        # resolvable ONLY under the migration service name "zai-api-key"
+        if "zai-api-key" in cmd:
+            return _FakeProc(0, "glm-secret")
+        return _FakeProc(1, "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+    present, source, status = _mod.provider_credential_presence("glm", 15)
+    assert present is True
+    assert source == "macos_keychain"
+    assert status == "present"
