@@ -372,33 +372,87 @@ def socket_rpc_lock(timeout: float):
         os.close(fd)
 
 
+def host_profile_name() -> str:
+    """Host token used to name per-host profiles.
+
+    Mirrors the install scripts (``hostname -s | tr '[:upper:]' '[:lower:]'``):
+    first DNS label of the hostname, lowercased.
+    """
+    return socket.gethostname().split(".")[0].strip().lower()
+
+
+def script_relative_profile_path() -> Path:
+    """Canonical in-repo per-host profile path, resolved relative to this script.
+
+    Matches deploy/scripts/install-bot-errors-health-launchd.sh and setup.sh
+    (``REPO_ROOT/deploy/health-profiles/<host>.json``). Used as a self-healing
+    fallback when the baked ``BOT_ERRORS_HEALTH_PROFILE`` env path is stale —
+    e.g. a non-canonical checkout location — so a relay/leaf host never silently
+    falls back to role=central and fails every central-only check.
+    """
+    return REPO_ROOT / "deploy" / "health-profiles" / f"{host_profile_name()}.json"
+
+
+def read_profile_file(path: Path) -> dict[str, Any]:
+    """Read and parse a profile JSON file.
+
+    Returns the parsed dict; raises on read, parse, or non-object content so the
+    caller can distinguish a usable profile from a failure.
+    """
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError(f"profile {path} must be an object")
+    return loaded
+
+
 def load_health_profile() -> dict[str, Any]:
     raw = os.environ.get("BOT_ERRORS_HEALTH_PROFILE_JSON")
     path = os.environ.get("BOT_ERRORS_HEALTH_PROFILE")
     profile: dict[str, Any] = dict(DEFAULT_HEALTH_PROFILE)
-    explicit_profile = False
     if raw:
-        explicit_profile = True
         try:
             loaded = json.loads(raw)
         except json.JSONDecodeError as exc:
-            return profile | {"profileLoadError": f"invalid BOT_ERRORS_HEALTH_PROFILE_JSON: {exc}"}
+            return profile | {"profileLoadError": f"invalid BOT_ERRORS_HEALTH_PROFILE_JSON: {exc}", "_explicitProfile": True}
         if isinstance(loaded, dict):
             profile.update(loaded)
         else:
             profile["profileLoadError"] = "BOT_ERRORS_HEALTH_PROFILE_JSON must be an object"
-    elif path:
-        explicit_profile = True
+        profile["_explicitProfile"] = True
+        return profile
+
+    fallback = script_relative_profile_path()
+    if path:
         try:
-            loaded = json.loads(Path(path).read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001 - daily health should report profile failure.
-            return profile | {"profileLoadError": f"cannot read profile {path}: {exc}"}
-        if isinstance(loaded, dict):
-            profile.update(loaded)
-        else:
-            profile["profileLoadError"] = f"profile {path} must be an object"
-    profile["_explicitProfile"] = explicit_profile
-    return profile
+            profile.update(read_profile_file(Path(path)))
+            profile["_explicitProfile"] = True
+            profile["_profilePath"] = path
+            return profile
+        except Exception as env_exc:  # noqa: BLE001 - self-heal before reporting failure.
+            # Stale/unreadable baked env path (e.g. plist baked for a checkout
+            # that no longer exists). Self-heal from the in-repo per-host profile
+            # before defaulting to role=central, which would produce fleet-wide
+            # false-criticals on relay/leaf hosts.
+            try:
+                profile.update(read_profile_file(fallback))
+                profile["_explicitProfile"] = True
+                profile["_profilePath"] = str(fallback)
+                profile["profileFallback"] = f"env path unreadable ({path}: {env_exc}); recovered from {fallback}"
+                return profile
+            except Exception:  # noqa: BLE001 - daily health should report the original failure.
+                return profile | {"profileLoadError": f"cannot read profile {path}: {env_exc}", "_explicitProfile": True}
+
+    # No explicit env profile set — try the in-repo per-host profile before
+    # defaulting to role=central.
+    try:
+        profile.update(read_profile_file(fallback))
+        profile["_explicitProfile"] = True
+        profile["_profilePath"] = str(fallback)
+        profile["profileFallback"] = f"no BOT_ERRORS_HEALTH_PROFILE set; recovered from {fallback}"
+        return profile
+    except Exception:  # noqa: BLE001 - role=central default when no per-host profile exists.
+        profile["_explicitProfile"] = False
+        return profile
 
 
 def profile_bool(profile: dict[str, Any], key: str, default: bool) -> bool:
@@ -5429,8 +5483,9 @@ def daily() -> int:
         personal_socket_line = f"personal_socket: skipped by health profile {socket_label} exists={socket_exists}"
     lines = [
         f"machine: {socket.gethostname()}",
-        f"profile: role={profile.get('role', 'unknown')} path={os.environ.get('BOT_ERRORS_HEALTH_PROFILE', 'default')}",
+        f"profile: role={profile.get('role', 'unknown')} path={profile.get('_profilePath') or os.environ.get('BOT_ERRORS_HEALTH_PROFILE', 'default')}",
         *([f"FAIL profile: {profile['profileLoadError']}"] if profile.get("profileLoadError") else []),
+        *([f"profile_fallback: {profile['profileFallback']}"] if profile.get("profileFallback") else []),
         dispatcher_line,
         f"dispatcher_enabled: {service_enabled(DISPATCHER_SERVICE)}",
         q_loop_line,
