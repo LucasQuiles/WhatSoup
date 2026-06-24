@@ -307,3 +307,57 @@ def test_credential_presence_glm_resolves_via_zai_api_key_migration(monkeypatch)
     assert present is True
     assert source == "macos_keychain"
     assert status == "present"
+
+
+# --- watchdog currency: detect stale pre-#952 (degraded-intolerant) watchdogs (2026-06-23 drift) ---
+
+def test_classify_watchdog_policy_degraded_tolerant():
+    assert _mod.classify_watchdog_policy('if status not in ("healthy", "degraded"):\n  restart') == "degraded_tolerant"
+
+
+def test_classify_watchdog_policy_stale_is_intolerant():
+    assert _mod.classify_watchdog_policy('if status != "healthy":\n  restart') == "degraded_intolerant"
+
+
+def test_classify_watchdog_policy_unknown():
+    assert _mod.classify_watchdog_policy("echo no restart decision here") == "unknown"
+
+
+def test_canonical_watchdog_template_is_degraded_tolerant():
+    # The SHIPPED template must stay #952-tolerant; guards against reintroducing the flap class.
+    tmpl = Path(__file__).resolve().parents[2] / "templates" / "watchdog-script.sh"
+    assert tmpl.is_file()
+    assert _mod.classify_watchdog_policy(tmpl.read_text(encoding="utf-8")) == "degraded_tolerant"
+
+
+def test_watchdog_currency_inventory_skips_non_darwin(monkeypatch):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    assert _mod.watchdog_currency_inventory(["rb-bot"]) == []
+
+
+def test_watchdog_currency_inventory_warns_on_stale(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rb-bot-watchdog").write_text('#!/bin/bash\nif status != "healthy":\n  restart\n')
+    out = _mod.watchdog_currency_inventory(["rb-bot"])
+    assert len(out) == 1
+    assert out[0].startswith("WARN watchdog_currency rb-bot: stale_pre_952_watchdog")
+    assert "remediation=redeploy_degraded_tolerant_watchdog_template" in out[0]
+
+
+def test_watchdog_currency_inventory_clean_on_tolerant(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    bindir = tmp_path / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "ad-bot-watchdog").write_text('#!/bin/bash\nif status not in ("healthy", "degraded"):\n  restart\n')
+    assert _mod.watchdog_currency_inventory(["ad-bot"]) == []
+
+
+def test_watchdog_currency_inventory_skips_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", lambda: tmp_path)
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    assert _mod.watchdog_currency_inventory(["yl-bot"]) == []

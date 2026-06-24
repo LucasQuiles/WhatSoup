@@ -4675,6 +4675,68 @@ def unprofiled_service_inventory(root: Path, expected_names: set[str]) -> list[s
     return lines
 
 
+# Canonical restart-decision predicates in deploy/templates/watchdog-script.sh.
+# #952 made the watchdog TOLERATE the `degraded` health status (a restart cannot fix a
+# degraded/auth condition — it just resets the cold-start clock and re-fires alerts). A pre-#952
+# watchdog restarts on anything != "healthy", so a degraded-but-connected bot false-positive flaps.
+_WATCHDOG_DEGRADED_TOLERANT_RE = re.compile(
+    r"""status\s+not\s+in\s*\(\s*["']healthy["']\s*,\s*["']degraded["']""", re.IGNORECASE
+)
+_WATCHDOG_DEGRADED_INTOLERANT_RE = re.compile(r"""status\s*!=\s*["']healthy["']""", re.IGNORECASE)
+
+
+def classify_watchdog_policy(script_text: str) -> str:
+    """Classify a rendered watchdog script's restart policy w.r.t. the `degraded` health status.
+
+    Returns:
+      'degraded_tolerant'   — #952: restarts only when status not in (healthy, degraded).
+      'degraded_intolerant' — pre-#952: restarts on anything != healthy (false-flap on degraded).
+      'unknown'             — no recognizable restart-decision line.
+    """
+    if _WATCHDOG_DEGRADED_TOLERANT_RE.search(script_text):
+        return "degraded_tolerant"
+    if _WATCHDOG_DEGRADED_INTOLERANT_RE.search(script_text):
+        return "degraded_intolerant"
+    return "unknown"
+
+
+def watchdog_currency_inventory(names: list[str]) -> list[str]:
+    """WARN when an installed per-instance watchdog is the stale pre-#952 (degraded-intolerant)
+    template. macOS-only: the rendered `~/.local/bin/<inst>-watchdog` launchd scripts. Linux hosts
+    supervise via systemd timers (different mechanism) and are skipped. Instances with no installed
+    fleet-standard watchdog (KeepAlive-only / bespoke) are skipped here, not flagged — that is a
+    separate divergence class. This check would have caught the 2026-06-23 fleet-wide stale-watchdog
+    flap drift automatically."""
+    if HOST_PLATFORM != "darwin":
+        return []
+    lines: list[str] = []
+    bindir = Path.home() / ".local" / "bin"
+    for name in sorted(set(names)):
+        watchdog = bindir / f"{name}-watchdog"
+        if not watchdog.is_file():
+            continue
+        try:
+            text = watchdog.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            lines.append(
+                f"WARN watchdog_currency {name}: unreadable watchdog={watchdog} "
+                f"error={redact_evidence_string(str(exc), 80)}"
+            )
+            continue
+        policy = classify_watchdog_policy(text)
+        if policy == "degraded_intolerant":
+            lines.append(
+                f"WARN watchdog_currency {name}: stale_pre_952_watchdog restarts_on_degraded "
+                f"(false_positive_flap_risk) watchdog={watchdog} "
+                f"remediation=redeploy_degraded_tolerant_watchdog_template"
+            )
+        elif policy == "unknown":
+            lines.append(
+                f"WARN watchdog_currency {name}: unrecognized_restart_policy watchdog={watchdog}"
+            )
+    return lines
+
+
 def tail_text(path: Path, max_bytes: int = 512 * 1024) -> str:
     try:
         with path.open("rb") as handle:
@@ -5024,6 +5086,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
         if not profile_bool(profile, "allowUnprofiledInstances", False):
             lines.extend(unprofiled_config_inventory(root, expected_names))
             lines.extend(unprofiled_service_inventory(root, expected_names))
+        lines.extend(watchdog_currency_inventory(auth_names))
         lines.extend(local_auth_bond_duplicates(root, auth_names))
         return lines
     ports: dict[int, str] = {}
