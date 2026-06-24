@@ -189,8 +189,19 @@ describe('shouldEmitToolFailureAlert', () => {
     expect(shouldEmitToolFailureAlert('blocked', 'permission denied')).toBe(true);
   });
 
-  it('always emits for cancelled category', () => {
-    expect(shouldEmitToolFailureAlert('cancelled', 'Cancelled')).toBe(true);
+  it('never emits for cancelled category (collateral of a sibling error, no result)', () => {
+    // A cancelled tool produced no result and is not a fault. The real signal, if
+    // any, is carried by the erroring sibling's own `error` classification.
+    expect(shouldEmitToolFailureAlert('cancelled', 'Cancelled')).toBe(false);
+    expect(
+      shouldEmitToolFailureAlert(
+        'cancelled',
+        'Cancelled: parallel tool call Bash(cd /tmp/x && echo hi) errored',
+      ),
+    ).toBe(false);
+    // Even an operator-actionable-looking string does not page when cancelled —
+    // the sibling that actually hit it pages through the error path instead.
+    expect(shouldEmitToolFailureAlert('cancelled', 'ENOSPC: no space left')).toBe(false);
   });
 
   it('suppresses error category for benign agent-recoverable results', () => {

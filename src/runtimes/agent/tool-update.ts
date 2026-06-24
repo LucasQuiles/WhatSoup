@@ -270,15 +270,26 @@ export function isOperatorActionableToolError(content: string): boolean {
 /**
  * Gate for `runtime-tool-error` BOT ERRORS alert emission.
  *
- * `blocked` (permission/hook denial) and `cancelled` keep their existing alert
- * behavior. A plain execution `error` only pages when it carries an
- * operator-actionable infra/provider signature — otherwise it is benign,
- * agent-recoverable noise (the dominant false-positive class on this channel).
+ * `blocked` (permission/hook denial) still pages — a tool repeatedly denied by a
+ * hook or allowlist can signal a misconfiguration an operator must fix.
+ *
+ * `cancelled` never pages: a cancelled tool produced no result and is not itself a
+ * fault. It is overwhelmingly collateral — claude-cli auto-cancels the remaining
+ * siblings of a parallel batch when one sibling errors, or the turn is aborted. Any
+ * operator-actionable signal is carried by the ERRORING sibling's own `error`
+ * classification, which is gated independently below; paging on the cancelled
+ * siblings only duplicates that as noise. (Pre-fix this was the dominant critical
+ * false-positive: a benign Bash non-zero exit is suppressed as a benign `error`,
+ * yet its cancelled Grep/Glob siblings each paged critical.)
+ *
+ * A plain execution `error` only pages when it carries an operator-actionable
+ * infra/provider signature — otherwise it is benign, agent-recoverable noise.
  */
 export function shouldEmitToolFailureAlert(
   category: ToolUpdate['category'],
   content: string,
 ): boolean {
+  if (category === 'cancelled') return false;
   if (category !== 'error') return true;
   return isOperatorActionableToolError(content);
 }
