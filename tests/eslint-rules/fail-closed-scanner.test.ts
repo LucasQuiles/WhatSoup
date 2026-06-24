@@ -29,6 +29,10 @@ ruleTester.run('fail-closed-scanner', failClosedScanner, {
     {
       code: `function scan() { try { return parse(); } catch (e) { console.error(e); return []; } }`,
     },
+    // Structured logger error before empty return — surfaced in runtime health/logs.
+    {
+      code: `const log = { error() {} }; function scan() { try { return parse(); } catch (e) { log.error(e); return []; } }`,
+    },
     // Returns a NON-empty fallback — deliberate, not the fail-open shape.
     {
       code: `function scan() { try { return parse(); } catch (e) { return [{ code: 'parse-error' }]; } }`,

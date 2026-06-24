@@ -108,6 +108,7 @@ export class PendingPollPersistence {
         .prepare('SELECT map_key, chat_jid, payload, hard_closes_at FROM pending_polls')
         .all() as unknown as PendingPollRow[];
     } catch (err) {
+      this.errors += 1;
       log.error({ err }, 'rehydratePendingPolls: SELECT failed; skipping');
       return [];
     }

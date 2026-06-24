@@ -11,7 +11,8 @@
  *   - `throw` (rethrow or new error)
  *   - assign `process.exitCode`
  *   - call something whose callee name looks like it records/pushes/emits an
- *     issue or logs an error (push, report, emit, record, logError, console.error)
+ *     issue or logs an error (push, report, emit, record, logError,
+ *     console.error, log.error, logger.error)
  *   - return a non-empty value (a real fallback the author chose deliberately)
  *
  * Heuristic and advisory by design: it targets the specific "return empty on
@@ -63,7 +64,7 @@ export default {
         const text = sourceCode.getText(node);
         // Cheap safeguard signals via source text (covers process.exitCode,
         // console.error, nested helper calls the AST walk below may miss).
-        if (/process\.exitCode/.test(text) || /console\.error/.test(text)) {
+        if (/process\.exitCode/.test(text) || /console\.error/.test(text) || /\blog(?:ger)?\.error\s*\(/.test(text)) {
           hasSafeguard = true;
         }
 
