@@ -158,7 +158,7 @@ const sensitiveContentPatterns: Array<{ kind: string; pattern: RegExp }> = [
   { kind: 'private-key', pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/ },
   {
     kind: 'credential-path',
-    pattern: /(?:\.config\/(?:secrets|whatsoup)\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]+\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b/i,
+    pattern: /(?:\.config\/(?:secrets|whatsoup)\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]+\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s"',;}]+)?))\b/i,
   },
 ];
 
@@ -1057,7 +1057,7 @@ SENSITIVE_PATTERNS = [
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
     ("private-key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
-    ("credential-path", re.compile(r"(?:~|/[^\s\"',;}]+)*(?:\.config/(?:secrets|whatsoup)/[^\s\"',;}]+|\.local/share/whatsoup/instances/[^\s\"',;}]+/auth(?:/[^\s\"',;}]+)?|auth-bond-backups/[^\s\"',;}]+|/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b", re.I)),
+    ("credential-path", re.compile(r"(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])/)[^\s\"',;}]*?(?:\.config/secrets/[^\s\"',;}]+|\.config/whatsoup/[^\s\"',;}]+|\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|auth-bond-backups/[^\s\"',;}]+|/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s\"',;}]+)?))\b", re.I)),
 ]
 
 if not repo.exists() or not repo.is_dir():
