@@ -415,6 +415,8 @@ export {
   classifyToolError,
   isOperatorActionableToolError,
   shouldEmitToolFailureAlert,
+  stripToolErrorTags,
+  isParallelSiblingCancellation,
 } from './tool-update.ts';
 import {
   buildToolUpdate,

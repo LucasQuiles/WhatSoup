@@ -8,6 +8,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 - **Test:** `npm test` (vitest, 10s timeout)
 - **Typecheck:** `npm run typecheck`
 - **Lint:** `npm run guard:lint:src` (ESLint architectural-fitness ring — warn-only on ring rules, fail-closed on errors/config faults; see `docs/architecture/fitness-taxonomy.md`)
+- **Agent workflow:** `docs/agent-operating-procedure.md` maps each SDLC phase → the global skill to invoke → the repo command that verifies it. This repo owns no `.claude/skills`; invoke skills by name, don't duplicate them.
 
 ## Architecture
 

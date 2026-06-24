@@ -148,17 +148,33 @@ NODE
   fi
 }
 
+# send_alert <slug> <severity> <summary> <evidence>
+#
+# The <slug> namespaces the alert under a per-condition incident source
+# ("harness-maintenance:<slug>"). Distinct operations (claude-update,
+# codex-update, codex-cooldown-defense, job, ...) get distinct incident keys so
+# a benign info notification (e.g. "Claude harness updated") can never be
+# mutated into a persistent warn by an unrelated condition that fired in the
+# same run (e.g. "Codex held by npm cooldown"). Previously every condition
+# shared the flat "harness-maintenance" source, so the existing-incident repeat
+# path in whatsapp-alert.sh collapsed them onto one key — flipping a transient
+# info incident to persistent warn that could never auto-expire, then escalating
+# daily. Slugging by operation (not by message) preserves correct intra-operation
+# escalation: info "updated" and critical "rollback" for the SAME tool still
+# share a key and escalate as intended. The "harness-maintenance:" prefix keeps
+# prefix-based filtering and grouping intact for any human/dashboard consumer.
 send_alert() {
-  local severity="$1"
-  local summary="$2"
-  local evidence="$3"
+  local slug="$1"
+  local severity="$2"
+  local summary="$3"
+  local evidence="$4"
   if [ "$CHECK_ONLY" -eq 1 ]; then
     return 0
   fi
   if [ -x "$ALERT_BIN" ]; then
     "$ALERT_BIN" \
       --instance q \
-      --source harness-maintenance \
+      --source "harness-maintenance:$slug" \
       --severity "$severity" \
       --summary "$summary" \
       --evidence "$evidence" >/dev/null 2>&1 || true
@@ -170,7 +186,7 @@ on_error() {
   trap - ERR
   record_event "harness-maintenance" "failed" "unexpected failure rc=$rc"
   write_state "failed" || true
-  send_alert "warn" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
+  send_alert "job" "warn" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
   rm -rf "$TMP_DIR"
   exit "$rc"
 }
@@ -303,7 +319,7 @@ check_codex_npm_cooldown() {
   npm="$(npm_bin)"
   if [ -z "$npm" ]; then
     record_event "codex-npm-cooldown" "missing" "npm not found for Codex node"
-    send_alert "warn" "Codex npm cooldown check missing npm" "The Codex node npm binary was not found."
+    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check missing npm" "The Codex node npm binary was not found."
     return 0
   fi
 
@@ -331,14 +347,14 @@ check_codex_npm_cooldown() {
     local err
     err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
     record_event "codex-npm-cooldown" "failed" "npm --version failed: $err"
-    send_alert "warn" "Codex npm cooldown check failed" "npm --version failed for Codex node. $err"
+    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "npm --version failed for Codex node. $err"
     return 0
   fi
   if [ "$config_rc" -ne 0 ]; then
     local err
     err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
     record_event "codex-npm-cooldown" "failed" "npm config get min-release-age failed: $err"
-    send_alert "warn" "Codex npm cooldown check failed" "npm config get min-release-age failed for Codex node. $err"
+    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "npm config get min-release-age failed for Codex node. $err"
     return 0
   fi
 
@@ -361,12 +377,12 @@ check_codex_npm_cooldown() {
   fi
   if [ "$rc" -eq 2 ]; then
     record_event "codex-npm-cooldown" "degraded" "npm $npm_version: $out"
-    send_alert "warn" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
+    send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
     return 0
   fi
 
   record_event "codex-npm-cooldown" "failed" "cooldown recognition guard failed: $out"
-  send_alert "warn" "Codex npm cooldown check failed" "Cooldown recognition guard failed. $out"
+  send_alert "codex-cooldown-defense" "warn" "Codex npm cooldown check failed" "Cooldown recognition guard failed. $out"
 }
 
 npm_latest_version() {
@@ -406,14 +422,14 @@ ensure_npm_version_eligible() {
     # A cooldown hold is the supply-chain defense working as designed: the target
     # is simply too new (younger than min-release-age) and will install itself
     # once it ages past the window. This is expected, self-resolving, and
-    # non-actionable — emit as info so it opens a transient (auto-expiring)
-    # incident instead of a persistent warn that bumps the run's info update
-    # incident to warn, blocks auto-expiry, and re-escalates every cycle.
-    send_alert "info" "Harness update held by npm cooldown" "$pkg@$version is younger than the configured cooldown. $out"
+    # non-actionable — emit as info (transient, auto-expiring) so it never
+    # bumps the run's info update incident to warn, blocks auto-expiry, or
+    # re-escalates every cycle.
+    send_alert "${pkg##*/}-update" "info" "Harness update held by npm cooldown" "$pkg@$version is younger than the configured cooldown. The cooldown defense is working as intended and self-resolves when the version ages past the window. $out"
     return 2
   fi
   record_event "$pkg" "failed" "npm cooldown check failed: $out"
-  send_alert "warn" "Npm cooldown check failed" "The maintenance job could not verify publish age for $pkg@$version. $out"
+  send_alert "${pkg##*/}-update" "warn" "Npm cooldown check failed" "The maintenance job could not verify publish age for $pkg@$version. $out"
   return "$rc"
 }
 
@@ -440,7 +456,7 @@ install_opencode_npm() {
   npm="$(npm_bin)"
   if [ -z "$npm" ]; then
     record_event "opencode" "failed" "npm not found for opencode-ai install" "" "" "$target"
-    send_alert "warn" "OpenCode harness install failed" "npm was not found; opencode-ai@$target could not be installed."
+    send_alert "opencode-update" "warn" "OpenCode harness install failed" "npm was not found; opencode-ai@$target could not be installed."
     return 1
   fi
   mkdir -p "$NPM_GLOBAL_PREFIX"
@@ -450,7 +466,7 @@ install_opencode_npm() {
     --prefix "$NPM_GLOBAL_PREFIX"
   if ! smoke_opencode; then
     record_event "opencode" "failed" "opencode-ai install failed smoke check" "" "" "$target"
-    send_alert "critical" "OpenCode harness install failed" "opencode-ai@$target installed but opencode --version did not pass."
+    send_alert "opencode-update" "critical" "OpenCode harness install failed" "opencode-ai@$target installed but opencode --version did not pass."
     return 1
   fi
   return 0
@@ -472,12 +488,12 @@ update_claude() {
   latest="$(npm_latest_version @anthropic-ai/claude-code || true)"
   if [ -z "$before" ]; then
     record_event "claude" "missing" "claude binary not found"
-    send_alert "warn" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
+    send_alert "claude-update" "warn" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
     return 0
   fi
   if [ -z "$latest" ]; then
     record_event "claude" "unknown" "latest version lookup failed" "$before"
-    send_alert "warn" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
+    send_alert "claude-update" "warn" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -492,12 +508,12 @@ update_claude() {
   if ! smoke_claude; then
     claude install "$before" || true
     record_event "claude" "rollback" "smoke failed after update; rollback attempted" "$before" "" "$latest"
-    send_alert "critical" "Claude harness rollback" "Update to $latest failed smoke check; rollback to $before attempted."
+    send_alert "claude-update" "critical" "Claude harness rollback" "Update to $latest failed smoke check; rollback to $before attempted."
     return 1
   fi
   after="$(claude_current)"
   record_event "claude" "updated" "updated and smoke checked" "$before" "$after" "$latest"
-  send_alert "info" "Claude harness updated" "Claude CLI $before -> $after"
+  send_alert "claude-update" "info" "Claude harness updated" "Claude CLI $before -> $after"
 }
 
 update_codex() {
@@ -507,12 +523,12 @@ update_codex() {
   npm="$(npm_bin)"
   if [ -z "$before" ]; then
     record_event "codex" "missing" "codex binary not found"
-    send_alert "warn" "Codex harness missing" "The maintenance job could not find the codex binary."
+    send_alert "codex-update" "warn" "Codex harness missing" "The maintenance job could not find the codex binary."
     return 0
   fi
   if [ -z "$latest" ] || [ -z "$npm" ]; then
     record_event "codex" "unknown" "latest version lookup failed" "$before"
-    send_alert "warn" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
+    send_alert "codex-update" "warn" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -530,12 +546,12 @@ update_codex() {
   if ! audit_npm_global || ! smoke_codex; then
     PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install -g "@openai/codex@$before" --ignore-scripts || true
     record_event "codex" "rollback" "audit or smoke failed after update; rollback attempted" "$before" "" "$latest"
-    send_alert "critical" "Codex harness rollback" "Update to $latest failed audit/smoke; rollback to $before attempted."
+    send_alert "codex-update" "critical" "Codex harness rollback" "Update to $latest failed audit/smoke; rollback to $before attempted."
     return 1
   fi
   after="$(codex_current)"
   record_event "codex" "updated" "updated, audited, and smoke checked" "$before" "$after" "$latest"
-  send_alert "info" "Codex harness updated" "Codex CLI $before -> $after"
+  send_alert "codex-update" "info" "Codex harness updated" "Codex CLI $before -> $after"
 }
 
 update_opencode() {
@@ -545,7 +561,9 @@ update_opencode() {
     target="$(npm_latest_eligible_version opencode-ai || true)"
     if [ -z "$target" ]; then
       record_event "opencode" "held" "opencode missing and no opencode-ai version is past the npm cooldown window"
-      send_alert "warn" "OpenCode harness install held" "OpenCode is missing, and no opencode-ai version is old enough under the configured npm cooldown."
+      # Cooldown hold = supply-chain defense working as intended; self-resolves
+      # as opencode-ai versions age past the window. Info/transient, not a warn.
+      send_alert "opencode-update" "info" "OpenCode harness install held" "OpenCode is missing, and no opencode-ai version is old enough under the configured npm cooldown. This is the cooldown defense working as intended and self-resolves as a version ages past the window."
       return 0
     fi
     if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -555,7 +573,7 @@ update_opencode() {
     install_opencode_npm "$target"
     after="$(opencode_current)"
     record_event "opencode" "installed" "installed and smoke checked via opencode-ai npm package" "" "$after" "$target"
-    send_alert "info" "OpenCode harness installed" "OpenCode fallback harness installed as opencode-ai@$target and passed opencode --version."
+    send_alert "opencode-update" "info" "OpenCode harness installed" "OpenCode fallback harness installed as opencode-ai@$target and passed opencode --version."
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -566,7 +584,7 @@ update_opencode() {
   if ! smoke_opencode; then
     opencode upgrade "$before" || true
     record_event "opencode" "rollback" "smoke failed after upgrade; rollback attempted" "$before"
-    send_alert "critical" "OpenCode harness rollback" "Upgrade failed smoke check; rollback to $before attempted."
+    send_alert "opencode-update" "critical" "OpenCode harness rollback" "Upgrade failed smoke check; rollback to $before attempted."
     return 1
   fi
   after="$(opencode_current)"
@@ -574,7 +592,7 @@ update_opencode() {
     record_event "opencode" "current" "upgrade completed with no version change" "$before" "$after"
   else
     record_event "opencode" "updated" "upgraded and smoke checked" "$before" "$after"
-    send_alert "info" "OpenCode harness updated" "OpenCode $before -> $after"
+    send_alert "opencode-update" "info" "OpenCode harness updated" "OpenCode $before -> $after"
   fi
 }
 
@@ -596,10 +614,10 @@ probe_command() {
     record_event "$name" "ok" "$out"
   elif [ "$rc" -eq 124 ]; then
     record_event "$name" "timeout" "probe exceeded ${PROBE_TIMEOUT_SECS}s"
-    send_alert "warn" "Harness maintenance probe timed out" "$name exceeded ${PROBE_TIMEOUT_SECS}s"
+    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warn" "Harness maintenance probe timed out" "$name exceeded ${PROBE_TIMEOUT_SECS}s"
   else
     record_event "$name" "failed" "$out"
-    send_alert "warn" "Harness maintenance probe failed" "$name failed: $out"
+    send_alert "probe-${name//[^A-Za-z0-9_.-]/_}" "warn" "Harness maintenance probe failed" "$name failed: $out"
   fi
 }
 
