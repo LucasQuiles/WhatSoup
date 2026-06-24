@@ -132,6 +132,35 @@ class TestPhysicalInterventionSignals:
         )
         assert not _mod.is_logged_out_physical_signal(event)
 
+    def test_weak_logged_out_critical_asset_is_not_verified_physical_intervention(self):
+        event = _make_event(
+            source="instance_logged_out",
+            evidence=(
+                "connected=false state=unknown reconnect_phase=backoff reconnect_attempts=0 "
+                "weak_signal_polls=3"
+            ),
+            criticalAsset={
+                "asset": {
+                    "kind": "whatsapp_linked_device",
+                    "instance": "test-bot",
+                    "owner": "whatsoup",
+                },
+                "failure": {
+                    "code": "WEAK_LOGGED_OUT_SIGNAL",
+                    "domain": "account_linkage",
+                    "recoverability": "manual_relink_required",
+                    "confidence": "probable",
+                    "operatorAction": "verify the weak logged-out signal before physical relink",
+                    "clearRequirement": "confirmed terminal auth evidence or reconnect recovery",
+                },
+            },
+        )
+
+        assert not _mod.is_logged_out_physical_signal(event)
+        assert not _mod.is_verified_device_bond_lost_signal(event)
+        assert not _mod.is_physical_intervention_signal(event)
+        assert _mod.is_autoclose_protected(event, "testhost|test-bot|instance_logged_out")
+
     def test_terminal_auth_failure_class_inventory(self):
         assert _mod.TERMINAL_AUTH_FAILURE_CLASSES == {
             "pairing_required",

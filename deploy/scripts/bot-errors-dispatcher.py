@@ -1338,8 +1338,11 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
 
 
 def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:
-    if critical_failure_code(event) == "WA_AUTH_BOND_SERVER_REVOKED":
+    code = critical_failure_code(event)
+    if code == "WA_AUTH_BOND_SERVER_REVOKED":
         return True
+    if code == "WEAK_LOGGED_OUT_SIGNAL":
+        return False
     if critical_recoverability(event) == "manual_relink_required":
         kind = str(critical_asset_asset(event).get("kind") or "")
         if kind in {"whatsapp_linked_device", "account_linkage"}:
