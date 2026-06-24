@@ -693,6 +693,23 @@ export class HealthPoller {
       : confirmation.failureCode;
   }
 
+  private shouldEmitLoggedOutAlert(
+    name: string,
+    prevStatus: InstanceStatus['status'],
+    existing: InstanceStatus | undefined,
+    loggedOutWeak: boolean,
+    loggedOutFailureCode: LoggedOutAlertFailureCode,
+  ): boolean {
+    if (prevStatus !== 'logged_out') return true;
+    if (!this.hasConfirmedAlert(name, 'instance_logged_out')) return true;
+    return (
+      existing?.status === 'logged_out'
+      && existing.statusConfidence !== 'confirmed'
+      && !loggedOutWeak
+      && loggedOutFailureCode === 'WA_AUTH_BOND_SERVER_REVOKED'
+    );
+  }
+
   private appendLifecycleEvidence(evidence: string[], lifecycle: Record<string, unknown> | null): void {
     if (!lifecycle) return;
     this.pushEvidenceField(evidence, 'baileys_version', lifecycle['latestBaileysVersion']);
@@ -1058,7 +1075,7 @@ export class HealthPoller {
 
     if (
       newStatus === 'logged_out'
-      && (prevStatus !== 'logged_out' || !this.hasConfirmedAlert(name, 'instance_logged_out'))
+      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode)
     ) {
       const emitted = this.maybeEmitAlert(name, 'instance_logged_out',
         `whatsoup@${name} appears logged out`,
