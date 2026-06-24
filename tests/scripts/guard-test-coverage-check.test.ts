@@ -93,6 +93,17 @@ describe('guard-test-coverage meta-guard', () => {
     expect(guards).not.toContain('scripts/build-something.ts');
   });
 
+  it('fails closed when the scripts directory cannot be scanned', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'guard-test-coverage-missing-scripts-'));
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'fixture', scripts: { 'verify:push:branch': 'npm test --' } }),
+      'utf8',
+    );
+
+    expect(() => findGuardsMissingTests({ cwd: dir })).toThrow(/unable to scan guard scripts/i);
+  });
+
   it('derives the check-<x> alias companion candidate', () => {
     expect(companionTestCandidates('scripts/check-node-pin-consistency.ts')).toEqual([
       'tests/scripts/check-node-pin-consistency.test.ts',

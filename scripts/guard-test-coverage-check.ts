@@ -71,8 +71,9 @@ export function enumerateGuardScripts(cwd: string): string[] {
   let entries: string[];
   try {
     entries = readdirSync(dir);
-  } catch {
-    return [];
+  } catch (err) {
+    const detail = err instanceof Error && err.message ? `: ${err.message}` : '';
+    throw new Error(`unable to scan guard scripts directory ${dir}${detail}`);
   }
   const guards = entries.filter((name) => {
     if (!name.endsWith('.ts')) return false;
