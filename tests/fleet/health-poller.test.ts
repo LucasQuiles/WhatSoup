@@ -2387,6 +2387,76 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('re-emits logged-out when a weak signal escalates to explicit auth loss', async () => {
+    const weakHealth = {
+      status: 'unhealthy',
+      uptime_seconds: 120,
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'disconnected',
+          reconnect_phase: 'backoff',
+          reconnect_attempts: 0,
+        },
+      },
+    };
+    const explicitHealth = {
+      status: 'unhealthy',
+      uptime_seconds: 125,
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'disconnected',
+          last_status_code: 401,
+          last_disconnect_reason: 'loggedOut',
+          reconnect_phase: 'backoff',
+          reconnect_attempts: 0,
+        },
+      },
+    };
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(weakHealth) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(weakHealth) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(weakHealth) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(explicitHealth) });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('weak_signal_polls=3'),
+      'critical',
+      loggedOutAssetMatcher('WEAK_LOGGED_OUT_SIGNAL', 'probable'),
+    );
+
+    alertFns.emitAlert.mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')!.statusConfidence).toBe('confirmed');
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('last_status_code=401'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
+
+    poller.stop();
+  });
+
   it('does not clear weaker degraded alerts when the instance escalates to logged_out', async () => {
     const degradedHealth = {
       status: 'degraded',
