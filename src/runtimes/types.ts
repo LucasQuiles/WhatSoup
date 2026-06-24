@@ -5,6 +5,15 @@ import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
+  /**
+   * True when the last probe said `usable` but is older than the freshness
+   * window, so `modelUsable` is downgraded to `null` (unknown) rather than a
+   * stale green. Prevents /health and monitors from reading a `modelUsable=true`
+   * off a probe that is hours out of date. See RCA 2026-06-24.
+   */
+  modelUsableStale: boolean;
+  /** Epoch ms of the usability probe behind `modelUsable` (null if never probed). */
+  modelUsableCheckedAt: number | null;
   modelUsabilityStatus: string | null;
   lastSuccessfulTurnAt: number | null;
   lastTurnErrorClass: string | null;
