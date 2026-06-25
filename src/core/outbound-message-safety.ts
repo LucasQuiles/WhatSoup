@@ -22,6 +22,7 @@
 // `src/lib/internal-artifact-patterns.ts` (deferred per YAGNI — one consumer now).
 
 import { sanitizeProviderPreviewText } from '../lib/provider-preview-sanitizer.ts';
+import { jidPattern } from '../lib/redaction-patterns.ts';
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
 
@@ -103,7 +104,8 @@ const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
 const TAILNET_IP =
   /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/g;
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
-const WHATSAPP_JID = /\b\d{5,}(?:-\d+)?@(?:s\.whatsapp\.net|g\.us|lid)\b/gi;
+// JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
+// (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
 const PHONE_LIKE = /(^|[^\w])(\+?\d[\d\s().-]{8,}\d)(?![\w])/g;
 
 function maskPhoneLike(value: string): string {
@@ -193,7 +195,7 @@ export function classifyInfraStatusClaim(text: string): boolean {
 function sanitizeOpsEvidence(text: string): string {
   let out = sanitizeProviderPreviewText(text);
   out = out.replace(HOME_PATH_USER, '$1[redacted-user]');
-  out = out.replace(WHATSAPP_JID, '[redacted-jid]');
+  out = out.replace(jidPattern(), '[redacted-jid]');
   out = maskPhoneLike(out);
   return out;
 }

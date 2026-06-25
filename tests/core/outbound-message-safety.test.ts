@@ -18,6 +18,13 @@ const FAKE_TOKEN = `sk-${'abc123def456ghi789'}`;
 const FAKE_TOKEN_2 = `sk-${'zzz999yyy888'}`;
 const FAKE_EMAIL = ['ops', 'example.test'].join('@');
 const FAKE_JID = `${'12345678901'}@${'s.whatsapp.net'}`;
+// Device-suffixed (`:N`) JIDs — the dimension the old local regex dropped, so
+// they leaked verbatim before folding onto the SSOT `jidPattern()` (BEAD-048).
+const FAKE_JID_DEVICE = `${'123456789'}:6@${'s.whatsapp.net'}`;
+const FAKE_LID_DEVICE = `${'12345'}:6@lid`;
+// Already-covered shapes — assert no regression after the swap.
+const FAKE_JID_PLAIN = `${'123456'}@${'s.whatsapp.net'}`;
+const FAKE_JID_DASH = `${'123456'}-2@${'s.whatsapp.net'}`;
 const FAKE_PHONE = `+${'12025550143'}`;
 
 describe('redactInternalArtifacts', () => {
@@ -204,6 +211,22 @@ describe('evaluateOutboundMessageSafety', () => {
     expect(evidence).not.toContain(FAKE_TOKEN_2);
     expect(evidence).not.toContain(FAKE_JID);
     expect(evidence).not.toContain(FAKE_PHONE);
+  });
+
+  it('masks device-suffixed (`:N`) JIDs in opsEvidence — BEAD-048 (no `:N` leak)', () => {
+    const raw =
+      `All my tools are blocked. device chat ${FAKE_JID_DEVICE} and lid ${FAKE_LID_DEVICE}; ` +
+      `plain ${FAKE_JID_PLAIN}; dash ${FAKE_JID_DASH}`;
+    const decision = evaluateOutboundMessageSafety({ text: raw, audience: 'client' });
+    expect(decision.action).toBe('divert');
+    const evidence = decision.opsEvidence ?? '';
+    // The device-suffixed JIDs (the leak this fix closes) must be fully masked.
+    expect(evidence).not.toContain(FAKE_JID_DEVICE);
+    expect(evidence).not.toContain(FAKE_LID_DEVICE);
+    // No regression: plain and device-dash JIDs still redact.
+    expect(evidence).not.toContain(FAKE_JID_PLAIN);
+    expect(evidence).not.toContain(FAKE_JID_DASH);
+    expect(evidence).toContain('[redacted-jid]');
   });
 
   it('attaches sanitized opsEvidence on redact', () => {
