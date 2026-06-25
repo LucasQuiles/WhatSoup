@@ -1495,18 +1495,6 @@ export class SessionManager {
     this.watchdogHard = setTimeout(() => this.handleWatchdogHard(), WATCHDOG_HARD_MS);
   }
 
-  /** @deprecated Replaced by OperationTracker. Kept for one release cycle. */
-  private handleWatchdogSoft(): void {
-    this.watchdogSoft = null;
-    // No-op — operation tracker handles per-tool slow detection
-  }
-
-  /** @deprecated Replaced by OperationTracker. Kept for one release cycle. */
-  private handleWatchdogWarn(): void {
-    this.watchdogWarn = null;
-    // No-op — operation tracker handles per-tool stall detection
-  }
-
   private handleWatchdogHard(): void {
     this.watchdogHard = null;
     if (!this.active) return;

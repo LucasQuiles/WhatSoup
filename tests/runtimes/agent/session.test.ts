@@ -1263,8 +1263,6 @@ describe('SessionManager', () => {
 
     (sm as unknown as { active: boolean }).active = false;
 
-    (sm as unknown as { handleWatchdogSoft: () => void }).handleWatchdogSoft();
-    (sm as unknown as { handleWatchdogWarn: () => void }).handleWatchdogWarn();
     (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
 
     expect(notifyUser).not.toHaveBeenCalled();
@@ -1567,23 +1565,6 @@ describe('SessionManager', () => {
 
     await sm.shutdown();
     expect(sm.hasPendingTools).toBe(false);
-  });
-
-  it('soft/warn watchdog handlers are no-ops (deprecated, replaced by operation tracker)', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const notifyUser = vi.fn();
-
-    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
-    await sm.spawnSession();
-    await sm.sendTurn('test message');
-
-    // Directly invoke the deprecated handlers — they should be no-ops
-    (sm as unknown as { handleWatchdogSoft: () => void }).handleWatchdogSoft();
-    (sm as unknown as { handleWatchdogWarn: () => void }).handleWatchdogWarn();
-
-    expect(notifyUser).not.toHaveBeenCalled();
-    expect(mockChild.kill).not.toHaveBeenCalled();
   });
 
   it('hard watchdog kills regardless of pending tools', async () => {
