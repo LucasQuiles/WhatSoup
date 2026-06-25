@@ -142,9 +142,10 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 162 tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when
-Pinecone is configured, and `emit_heal_result` when the runtime has at least one configured
-control-plane peer and is not in any sandbox mode; see
+all 163 tools (160 always-registered + 3 conditionally-registered: `knowledge_search` when
+Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
+control-plane peer and is not in any sandbox mode, and `memory_write` when a Pinecone key and
+index are configured; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
 Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
 factory that registers tools with the names listed below — except for `emit_heal_result`,

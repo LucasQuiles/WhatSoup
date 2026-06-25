@@ -100,4 +100,44 @@ describe('memory_write tool', () => {
     );
     expect(isToolErrorPayload(res)).toBe(true);
   });
+
+  it('REJECTS a global session even with a caller-supplied chatJid (no cross-conversation write)', async () => {
+    const { tool, upsert } = setup({ botJid: 'bot@s.whatsapp.net' });
+    const res = await tool.handler(
+      { chatJid: '999', text: 'sneaky', memory_type: 'user_fact' },
+      { tier: 'global' }, // global session: registry would accept caller chatJid
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('REJECTS a chat-scoped session with no bound conversationKey', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact' },
+      { tier: 'chat-scoped', deliveryJid: '12345@s.whatsapp.net' }, // no conversationKey
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED when self_fact has no bot JID (no placeholder sender)', async () => {
+    const { tool, upsert } = setup({ botJid: undefined });
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'I am the bot', memory_type: 'self_fact' },
+      chatSession(),
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED when a non-self_fact write has no session actor', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact' },
+      chatSession({ actorJid: undefined }),
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
 });

@@ -20,7 +20,7 @@ Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 162 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 163 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -66,7 +66,7 @@ Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped 
 | [memory-write.ts](#memory-writets) | 1 |
 | **Total** | **163** |
 
-> The total above (`162`) reflects the full canonical surface — `161` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`163`) reflects the full canonical surface — `162` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
