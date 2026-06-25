@@ -1,11 +1,10 @@
 /**
  * Direct unit coverage for src/core/substrate/time.ts.
  *
- * The module exposes three helpers used by the substrate vault to manage
+ * The module exposes two helpers used by the substrate vault to manage
  * TTL clamping on submission timestamps:
  *
  * - nowUnixSec: re-export from fleet/time-utils (already covered indirectly)
- * - addSeconds: pure additive helper
  * - clampTtl: bounds a requested terminal time to `now + maxHours*3600`,
  *   defaulting to the hard-max when no request is provided
  *
@@ -13,7 +12,7 @@
  * vault's primary guarantee against runaway holds.
  */
 import { describe, expect, it } from 'vitest';
-import { addSeconds, clampTtl, nowUnixSec } from '../../../src/core/substrate/time.ts';
+import { clampTtl, nowUnixSec } from '../../../src/core/substrate/time.ts';
 
 describe('nowUnixSec re-export', () => {
   it('returns a finite integer-ish unix-seconds value', () => {
@@ -24,25 +23,6 @@ describe('nowUnixSec re-export', () => {
     // year 2050 (2524608000). Catches accidental ms-vs-sec drift.
     expect(t).toBeGreaterThan(1577836800);
     expect(t).toBeLessThan(2524608000);
-  });
-});
-
-describe('addSeconds', () => {
-  it('returns the sum of the two arguments', () => {
-    expect(addSeconds(1000, 60)).toBe(1060);
-  });
-
-  it('handles negative offsets (rewinds)', () => {
-    expect(addSeconds(1000, -100)).toBe(900);
-  });
-
-  it('handles zero offset (identity)', () => {
-    expect(addSeconds(1000, 0)).toBe(1000);
-  });
-
-  it('handles large values without precision loss within safe integer range', () => {
-    const t = 1_700_000_000;
-    expect(addSeconds(t, 86_400)).toBe(t + 86_400);
   });
 });
 
