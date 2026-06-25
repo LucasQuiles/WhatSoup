@@ -462,7 +462,7 @@ const resolvedRateLimitWindowMs: number = (() => {
     return instance.rateLimitWindowMs as number;
   }
   if (instance?.rateLimitNoticeWindowMs != null) {
-    // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; expires 2026-07-01
+    // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; legacy rateLimitNoticeWindowMs fallback is still supported (read at runtime.ts:176), so this nudge is retained, not scheduled for removal; expires 2026-12-31
     console.warn(
       '[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (%dms). ' +
         'Set rateLimitWindowMs explicitly to silence this warning.',

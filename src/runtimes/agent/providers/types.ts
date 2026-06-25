@@ -236,9 +236,6 @@ export interface ProviderSession {
 // Provider registry
 // ---------------------------------------------------------------------------
 
-/** Factory function that creates a {@link ProviderSession} instance. */
-export type ProviderFactory = () => ProviderSession;
-
 // ProviderRegistry interface removed — provider selection is config-driven
 // via agentOptions.provider string, not a runtime registry pattern.
 

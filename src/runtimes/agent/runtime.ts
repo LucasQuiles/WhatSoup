@@ -126,7 +126,7 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import { jitteredDelay } from '../../core/retry.ts';
+import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
@@ -2024,7 +2024,7 @@ export class AgentRuntime implements Runtime {
           : undefined;
         session.spawnSession(full.session_id).then(async () => {
           // Small delay to let the init event propagate (confirms resume succeeded)
-          await new Promise(r => setTimeout(r, 1_000));
+          await sleep(1_000);
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
           try {
             // Inject messages that arrived while the service was down.
@@ -7097,7 +7097,7 @@ export class AgentRuntime implements Runtime {
 
           log.info({ mapKey, sessionId }, 'auto-respawn: attempting resume');
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
-            await new Promise(r => setTimeout(r, 1_000));
+            await sleep(1_000);
             if (!session.getStatus().active) return;
             clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
             try {

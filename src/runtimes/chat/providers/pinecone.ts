@@ -1,10 +1,10 @@
 import { Pinecone } from '@pinecone-database/pinecone';
-import { createHash } from 'node:crypto';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
+import { shortHash } from '../../../lib/short-hash.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
@@ -26,7 +26,7 @@ const breakers: Record<string, CircuitBreaker> = {};
 
 function queryLogFields(query: string): { queryHash: string; queryLength: number } {
   return {
-    queryHash: createHash('sha256').update(query).digest('hex').slice(0, 12),
+    queryHash: shortHash(query),
     queryLength: query.length,
   };
 }

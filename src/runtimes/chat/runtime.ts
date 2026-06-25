@@ -23,7 +23,7 @@ import type { ProcessedMedia } from './media/processor.ts';
 import { EnrichmentPoller } from './enrichment/poller.ts';
 import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
-import { jitteredDelay } from '../../core/retry.ts';
+import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 
@@ -459,7 +459,7 @@ export class ChatRuntime implements Runtime {
       if (attempt > 0) {
         const delay = jitteredDelay(2000, attempt - 1);
         log.warn({ attempt: attempt + 1, maxAttempts: MAX_SEND_ATTEMPTS, chatJid: msg.chatJid, error: (lastSendErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - sendStart, traceId }, 'send_retry');
-        await new Promise(r => setTimeout(r, delay));
+        await sleep(delay);
       }
       try {
         const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);

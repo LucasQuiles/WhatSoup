@@ -129,6 +129,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`, `POST /agent/compact`). |
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
 | `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. |
+| `WHATSOUP_REPO_ROOT` | path | `process.cwd()` | Repository root scanned for the ARC binding file reported under the `arc` key of `GET /health` (`src/core/health.ts:1059`); a missing/unparseable file degrades to `{loaded:false,reason}` without failing the process. Only needed when the process CWD is not the repo checkout. |
 
 #### Agent compact endpoint
 
@@ -256,6 +257,8 @@ are unaffected.
 | `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `config.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
 | `WHATSOUP_NODE` | path | Optional Node binary path propagated into the generated macOS launchd plist's `EnvironmentVariables` (`src/fleet/platform.ts:105`). When set in the generating process's environment, a `WHATSOUP_NODE` key with this value is emitted into the plist so the launched instance uses the chosen Node runtime; when unset the key is omitted entirely. |
 | `WHATSOUP_SANDBOX_FAIL_OPEN` | string (`1` to enable) | Read by the agent sandbox `PreToolUse` hook (`deploy/hooks/agent-sandbox.sh`). Controls behaviour when `.claude/sandbox-policy.json` is **missing**. Default (unset/any value ≠ `1`): the hook **fails closed** — it denies the tool call and logs a structured `sandbox_deny` event, because WhatSoup only wires this hook in the same code path that writes the policy file (`src/core/workspace.ts` `writeSandboxArtifacts`), so a missing policy means the sandbox was tampered with or misconfigured. Set to exactly `1` to restore the legacy allow-all-on-missing-policy behaviour for out-of-band manual deployments that intentionally run the hook with no policy file. |
+| `ENABLE_TOOL_SEARCH` | string (passthrough) | **Not a WhatSoup knob** — an agent-CLI harness "tokenomics pilot" control, forwarded verbatim into the agent subprocess only when set in the parent env (`src/runtimes/agent/providers/child-env.ts:115`). WhatSoup never reads it. |
+| `TOKENOMICS_BOT` | string (passthrough) | **Not a WhatSoup knob** — same agent-CLI harness tokenomics-pilot passthrough into the agent subprocess (`child-env.ts:116`); WhatSoup never reads the value. |
 
 ---
 
