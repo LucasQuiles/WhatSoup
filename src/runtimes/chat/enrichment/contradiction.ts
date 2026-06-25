@@ -2,6 +2,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
+import { stripJsonFences } from '../../../lib/json-fences.ts';
 
 const log = createChildLogger('contradiction');
 
@@ -52,11 +53,6 @@ Definitions:
 - neutral: the claims are about different topics or don't interact logically
 
 Output ONLY a JSON array. No markdown.`;
-
-function stripJsonFences(raw: string): string {
-  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  return fenceMatch ? fenceMatch[1].trim() : raw;
-}
 
 export async function detectContradictions(
   provider: LLMProvider,

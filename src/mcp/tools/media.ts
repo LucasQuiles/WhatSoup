@@ -6,7 +6,7 @@ import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
-import { extractRawMime } from '../../core/media-mime.ts';
+import { extractRawMime, EXTENSION_MEDIA_MAP } from '../../core/media-mime.ts';
 import { extractQuotedMedia } from '../../core/quoted-media.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -39,31 +39,6 @@ export interface MediaDeps {
 // ---------------------------------------------------------------------------
 // MIME type inference from extension
 // ---------------------------------------------------------------------------
-
-const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string }> = {
-  '.png':  { type: 'image',    mime: 'image/png' },
-  '.jpg':  { type: 'image',    mime: 'image/jpeg' },
-  '.jpeg': { type: 'image',    mime: 'image/jpeg' },
-  '.gif':  { type: 'image',    mime: 'image/gif' },
-  '.webp': { type: 'sticker',  mime: 'image/webp' },
-
-  '.pdf':  { type: 'document', mime: 'application/pdf' },
-  '.doc':  { type: 'document', mime: 'application/msword' },
-  '.docx': { type: 'document', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
-  '.xlsx': { type: 'document', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
-  '.csv':  { type: 'document', mime: 'text/csv' },
-  '.txt':  { type: 'document', mime: 'text/plain' },
-  '.zip':  { type: 'document', mime: 'application/zip' },
-
-  '.mp3':  { type: 'audio',    mime: 'audio/mpeg' },
-  '.ogg':  { type: 'audio',    mime: 'audio/ogg; codecs=opus' },
-  '.m4a':  { type: 'audio',    mime: 'audio/mp4' },
-  '.wav':  { type: 'audio',    mime: 'audio/wav' },
-
-  '.mp4':  { type: 'video',    mime: 'video/mp4' },
-  '.mov':  { type: 'video',    mime: 'video/quicktime' },
-  '.webm': { type: 'video',    mime: 'video/webm' },
-};
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -184,10 +159,10 @@ export function registerMediaTools(
       // ── MIME inference ────────────────────────────────────────────────
 
       const ext = extname(resolved).toLowerCase();
-      const mediaInfo = EXTENSION_MAP[ext];
+      const mediaInfo = EXTENSION_MEDIA_MAP[ext];
       if (!mediaInfo) {
         return errorResult({
-          error: `Unsupported file extension "${ext}". Supported: ${Object.keys(EXTENSION_MAP).join(', ')}`,
+          error: `Unsupported file extension "${ext}". Supported: ${Object.keys(EXTENSION_MEDIA_MAP).join(', ')}`,
         });
       }
 

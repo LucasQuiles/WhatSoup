@@ -3,6 +3,7 @@ import { createChildLogger } from '../../../logger.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
+import { stripJsonFences } from '../../../lib/json-fences.ts';
 
 const log = createChildLogger('enrichment');
 
@@ -165,10 +166,7 @@ export async function extractFacts(
     return [];
   }
 
-  // Strip markdown code fences if present (LLMs sometimes wrap despite instructions)
-  let jsonStr = raw;
-  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (fenceMatch) jsonStr = fenceMatch[1].trim();
+  const jsonStr = stripJsonFences(raw);
 
   let parsed: unknown;
   try {

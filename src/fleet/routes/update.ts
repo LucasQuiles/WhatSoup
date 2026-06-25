@@ -208,7 +208,7 @@ export async function handleUpdate(
       const { stdout: porcelain } = await execGit(repoRoot, ['status', '--porcelain'], 5_000);
       // Only block on tracked-file modifications (M, A, D, R, etc.) — untracked files (??) are
       // safe for git pull and should not prevent updates.
-      const trackedChanges = porcelain.split('\n').filter(l => l.trim() && !l.startsWith('??'));
+      const trackedChanges = parseTrackedChanges(porcelain);
       if (trackedChanges.length > 0) {
         writeSSE('error', { step: 'pull', message: `Working tree has ${trackedChanges.length} uncommitted change(s). Commit or stash before updating.` });
         finishUpdate();

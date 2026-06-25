@@ -8,6 +8,7 @@ import type { ToolRegistry } from '../registry.ts';
 import { isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
+import { EXTENSION_MEDIA_MAP } from '../../core/media-mime.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
@@ -20,28 +21,6 @@ function isValidIanaTimeZone(tz: string): boolean {
     return false;
   }
 }
-
-const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string }> = {
-  '.png':  { type: 'image',    mime: 'image/png' },
-  '.jpg':  { type: 'image',    mime: 'image/jpeg' },
-  '.jpeg': { type: 'image',    mime: 'image/jpeg' },
-  '.gif':  { type: 'image',    mime: 'image/gif' },
-  '.webp': { type: 'sticker',  mime: 'image/webp' },
-  '.pdf':  { type: 'document', mime: 'application/pdf' },
-  '.doc':  { type: 'document', mime: 'application/msword' },
-  '.docx': { type: 'document', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
-  '.xlsx': { type: 'document', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
-  '.csv':  { type: 'document', mime: 'text/csv' },
-  '.txt':  { type: 'document', mime: 'text/plain' },
-  '.zip':  { type: 'document', mime: 'application/zip' },
-  '.mp3':  { type: 'audio',    mime: 'audio/mpeg' },
-  '.ogg':  { type: 'audio',    mime: 'audio/ogg; codecs=opus' },
-  '.m4a':  { type: 'audio',    mime: 'audio/mp4' },
-  '.wav':  { type: 'audio',    mime: 'audio/wav' },
-  '.mp4':  { type: 'video',    mime: 'video/mp4' },
-  '.mov':  { type: 'video',    mime: 'video/quicktime' },
-  '.webm': { type: 'video',    mime: 'video/webm' },
-};
 
 export interface SchedulingDeps {
   db: Database;
@@ -148,9 +127,9 @@ function resolveFile(filePath: string, session: SessionContext): { resolved: str
     throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (limit 25 MB)`);
   }
 
-  const info = EXTENSION_MAP[extname(resolved).toLowerCase()];
+  const info = EXTENSION_MEDIA_MAP[extname(resolved).toLowerCase()];
   if (!info) {
-    throw new Error(`Unsupported file extension "${extname(resolved)}". Supported: ${Object.keys(EXTENSION_MAP).join(', ')}`);
+    throw new Error(`Unsupported file extension "${extname(resolved)}". Supported: ${Object.keys(EXTENSION_MEDIA_MAP).join(', ')}`);
   }
 
   return { resolved, info, buffer: readFileSync(resolved) };

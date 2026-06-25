@@ -148,6 +148,34 @@ describe('buildBotErrorsEvent', () => {
     expect(JSON.stringify(event)).not.toContain('session-secret');
   });
 
+  it('masks device-suffixed (`:N`) JIDs at the redactText boundary — BEAD-048', () => {
+    // The device suffix (`:N`) is the dimension the old local outbox regex
+    // dropped, so such JIDs leaked verbatim into the persisted disk event
+    // before the redactText path was folded onto the SSOT `jidPattern()`.
+    const deviceJid = `${'123456789'}:6@${'s.whatsapp.net'}`;
+    const deviceLid = `${'12345'}:6@lid`;
+    const plainJid = `${'123456'}@${'s.whatsapp.net'}`;
+    const dashJid = `${'123456'}-2@${'s.whatsapp.net'}`;
+
+    const event = buildBotErrorsEvent({
+      eventType: 'alert',
+      instance: 'agent-alpha',
+      source: 'provider_auth',
+      summary: `device chat ${deviceJid} failed`,
+      evidence: `device ${deviceJid}, lid ${deviceLid}, plain ${plainJid}, dash ${dashJid}`,
+    });
+
+    // The device-suffixed JIDs (the leak this fix closes) are fully masked.
+    expect(event.summary).not.toContain(deviceJid);
+    expect(event.evidence).not.toContain(deviceJid);
+    expect(event.evidence).not.toContain(deviceLid);
+    // No regression: plain and device-dash JIDs still redact.
+    expect(event.evidence).not.toContain(plainJid);
+    expect(event.evidence).not.toContain(dashJid);
+    expect(event.evidence).toContain('[REDACTED WHATSAPP JID]');
+    expect(JSON.stringify(event)).not.toContain(':6@');
+  });
+
   it('allows live outbox resolution in tests only behind the explicit override', () => {
     delete process.env['BOT_ERRORS_STATE_DIR'];
     delete process.env['BOT_ERRORS_OUTBOX_DIR'];

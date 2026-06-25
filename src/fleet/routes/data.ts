@@ -351,7 +351,7 @@ export function handleGetLogs(
   }
   const logFile = logResult.file.path;
 
-  // readTailLines reads last 64KB and returns up to maxLines — same logic that was inlined here
+  // readTailLinesDetailed reads last 64KB and returns up to maxLines — same logic that was inlined here
   const tailResult = readTailLinesDetailed(logFile, 2000);
   if (!tailResult.ok) {
     jsonResponse(res, 503, {

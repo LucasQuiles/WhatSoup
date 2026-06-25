@@ -2,7 +2,7 @@
  * Direct unit coverage for src/fleet/realtime-publisher.ts.
  *
  * The module ships 8 typed helpers that route handlers call instead of
- * constructing WsEvent objects inline, plus a `createNoopPublisher` factory.
+ * constructing WsEvent objects inline.
  * Existing tests reference the module indirectly via the realtime-event-poller
  * suites; this file pins the event-shape contract per helper.
  *
@@ -19,7 +19,6 @@ import {
   publishFeedEvent,
   publishLidConflict,
   publishTypingUpdate,
-  createNoopPublisher,
   type FleetRealtimePublisher,
 } from '../../src/fleet/realtime-publisher.ts';
 
@@ -151,21 +150,5 @@ describe('publishTypingUpdate', () => {
     const pub = makeRecordingPublisher();
     publishTypingUpdate(pub, 'alpha', '15551234567@s.whatsapp.net', false);
     expect((pub.events[0] as { composing: boolean }).composing).toBe(false);
-  });
-});
-
-describe('createNoopPublisher', () => {
-  it('returns a publisher whose publish() is a no-op (does not throw)', () => {
-    const noop = createNoopPublisher();
-    expect(() => noop.publish({ type: 'instance_status', instance: 'alpha' })).not.toThrow();
-  });
-
-  it('returns a distinct instance on each call (factory, not singleton)', () => {
-    const a = createNoopPublisher();
-    const b = createNoopPublisher();
-    expect(a).not.toBe(b);
-    // Both must still satisfy the FleetRealtimePublisher contract
-    expect(typeof a.publish).toBe('function');
-    expect(typeof b.publish).toBe('function');
   });
 });

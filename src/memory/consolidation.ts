@@ -1,4 +1,5 @@
 import { shortHash } from '../lib/short-hash.ts';
+import { stripJsonFences } from '../lib/json-fences.ts';
 import { createChildLogger } from '../logger.ts';
 import { config } from '../config.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
@@ -129,9 +130,7 @@ export async function consolidateCluster(
     return empty;
   }
 
-  let jsonStr = raw;
-  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (fenceMatch) jsonStr = fenceMatch[1].trim();
+  const jsonStr = stripJsonFences(raw);
 
   try {
     const parsed = JSON.parse(jsonStr) as ConsolidationResult;

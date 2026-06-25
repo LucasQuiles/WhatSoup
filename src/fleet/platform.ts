@@ -162,12 +162,6 @@ export interface ServiceManager {
   startFire(name: string, onError?: (err: Error | null) => void): void;
 }
 
-/** Parse a unit-style name: "whatsoup@foo" -> "foo", "whatsoup-fleet" -> "whatsoup-fleet". */
-export function parseInstanceName(unit: string): string {
-  const match = unit.match(/^whatsoup@(.+)$/);
-  return match ? match[1] : unit;
-}
-
 export function systemdUnitName(name: string): string {
   return name === 'whatsoup-fleet' ? 'whatsoup-fleet.service' : `whatsoup@${name}.service`;
 }

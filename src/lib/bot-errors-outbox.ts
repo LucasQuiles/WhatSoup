@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
+import { jidPattern } from './redaction-patterns.ts';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -69,7 +70,8 @@ const SECRETISH_ASSIGNMENT =
   /\b(api[_-]?key|token|secret|password|cookie|credential)\b(\s*[:=]\s*)(["']?)(?:Bearer\s+)?[^\s"',}]+/gi;
 const AUTHORIZATION_BEARER = /\bAuthorization:\s*Bearer\s+[^\s"',}]+/gi;
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
-const WHATSAPP_JID = /\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b/gi;
+// JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
+// (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
 const AWS_ACCESS_KEY_ID = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
 const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
@@ -133,7 +135,7 @@ function redactCredentialPath(value: string): string {
 function redactText(value: string): string {
   return redactPhoneLike(redactCredentialPath(value
     .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]'))
-    .replace(WHATSAPP_JID, '[REDACTED WHATSAPP JID]')
+    .replace(jidPattern(), '[REDACTED WHATSAPP JID]')
     .replace(URL_USERINFO, '$1[REDACTED]@')
     .replace(AWS_ACCESS_KEY_ID, '[REDACTED AWS ACCESS KEY]')
     .replace(GITHUB_TOKEN, '[REDACTED GITHUB TOKEN]')
