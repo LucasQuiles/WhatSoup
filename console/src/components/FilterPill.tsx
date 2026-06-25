@@ -8,9 +8,9 @@
  *   - aria-pressed preserved (interactive variant)
  *   - count badge preserved (Pill's built-in count lane)
  *   - suffix prop: Pill doesn't have a suffix lane; we wrap it inline
- *   - activeColor / activeBorder / style: the Pill primitive uses semantic
- *     tone tokens instead of caller-provided color strings. These props are
- *     accepted but intentionally not forwarded — they represented the exact
+ *   - activeColor: the Pill primitive uses semantic tone tokens instead of
+ *     caller-provided color strings. This prop is accepted and mapped onto a
+ *     Pill tone (LEGACY_COLOR_TONE) for backward compat — it represented the
  *     anti-pattern pill.md consolidates away (per-use color overrides).
  *     Callers that need per-tone styling should use the Pill tone prop directly.
  *   - Default tone "neutral" provides the equivalent of the old text-t2 / bg-d4 style.
@@ -29,17 +29,11 @@ interface FilterPillProps {
    * Accepted for backward compat but not forwarded — use PillTone.
    */
   activeColor?: string
-  /**
-   * @deprecated Use Pill's tone tokens instead of inline border strings.
-   */
-  activeBorder?: string
   onClick: () => void
   count?: number
   /** DECORATIVE content only — rendered OUTSIDE the interactive control (not part of
    *  its accessible name or pointer target). Meaningful state must live in the label. */
   suffix?: ReactNode
-  /** @deprecated */
-  style?: React.CSSProperties
   /** Optional Pill tone override. Defaults to "neutral". */
   tone?: PillTone
 }

@@ -9,7 +9,6 @@ import {
   structuralSelectors,
   rawFormControlSelectors,
   focusSuppressionSelectors,
-  migratedSurfaceSelectors,
   legacyTokenSelectors,
   utilitySmellSelectors,
 } from './eslint-rules/design-selectors.mjs'
@@ -785,8 +784,7 @@ export default defineConfig([
   // Block 4a — Migrated surfaces (M list, excluding CreateGroupModal).
   // NOTE: no-raw-button, no-adhoc-modal, and no-infinite-animation are now
   // console-wide (promoted 2026-06-15 into structuralSelectors/Group S).
-  // migratedSurfaceSelectors spread is kept for forward-compat but is now empty.
-  // Full array: base + structural (incl. promoted M rules) + focus + (empty M spread).
+  // Full array: base + structural (incl. promoted M rules) + focus.
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
@@ -808,7 +806,6 @@ export default defineConfig([
         ...structuralSelectors,
         ...rawFormControlSelectors,
         ...focusSuppressionSelectors,
-        ...migratedSurfaceSelectors,
       ],
     },
   },
@@ -819,7 +816,6 @@ export default defineConfig([
   // It must carry the union of all: base + scheduled + structural + focus + migrated.
   // Placing it in 4a alone would silently strip the scheduled ratchet (flat-config
   // replace semantics — last match wins). Constraint §3 in d6-investigation.md.
-  // migratedSurfaceSelectors is now empty (rules promoted into structuralSelectors 2026-06-15).
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
@@ -830,11 +826,10 @@ export default defineConfig([
         'error',
         ...designSystemRestrictions,
         ...scheduledGroupsDesignSystemRestrictions,
-        // Full union — Group S, raw form controls, F, M:
+        // Full union — Group S, raw form controls, F:
         ...structuralSelectors,
         ...rawFormControlSelectors,
         ...focusSuppressionSelectors,
-        ...migratedSurfaceSelectors,
       ],
     },
   },

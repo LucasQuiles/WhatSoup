@@ -916,19 +916,6 @@ const SoupKitchen: FC = () => {
                   label={m === "all" ? "All" : m}
                   isActive={modeFilter === m}
                   activeColor={m === "all" ? "text-text-2" : modeTextClass[m]}
-                  activeBorder={
-                    modeFilter === m
-                      ? `var(--bw) solid ${
-                          m === "passive"
-                            ? "var(--color-m-pas)"
-                            : m === "chat"
-                              ? "var(--color-m-cht)"
-                              : m === "agent"
-                                ? "var(--color-m-agt)"
-                                : "var(--border-strong)"
-                        }`
-                      : undefined
-                  }
                   onClick={() => setModeFilter(m)}
                   count={modeCounts[m]}
                 />

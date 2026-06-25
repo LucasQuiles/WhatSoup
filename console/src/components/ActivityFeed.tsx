@@ -180,11 +180,6 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
               label={f.label}
               isActive={filter === f.key}
               activeColor={f.key === "errors" ? "text-s-crit" : "text-text-2"}
-              activeBorder={
-                filter === f.key
-                  ? `var(--bw) solid ${f.key === "errors" ? "var(--color-s-crit)" : "var(--border-strong)"}`
-                  : undefined
-              }
               count={filterCounts[f.key]}
               onClick={() => setFilter(f.key)}
             />

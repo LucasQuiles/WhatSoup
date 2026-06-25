@@ -232,7 +232,7 @@ export default function Operator() {
                     {/* Row 1: Name + mode + phone */}
                     <div className="flex items-center justify-between mb-[var(--sp-2)] pr-[var(--sp-8)]">
                       <div className="flex items-center gap-[var(--sp-2)]">
-                        <StatusDot status={line.status} size="sm" />
+                        <StatusDot status={line.status} />
                         <span className="font-sans font-medium text-text-1 text-body">
                           {displayInstanceName(line.name)}
                         </span>
