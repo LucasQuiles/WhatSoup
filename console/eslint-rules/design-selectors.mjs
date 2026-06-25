@@ -110,13 +110,6 @@ export const focusSuppressionSelectors = [
   },
 ]
 
-// ── Group M — DEPRECATED (selectors promoted into structuralSelectors 2026-06-15) ──
-// Previously scoped to 9 files (blocks 4a/4b). All 3 selectors (no-raw-button, no-adhoc-modal x2)
-// have been moved into structuralSelectors above for console-wide enforcement.
-// This export is kept so existing spread references in blocks 4a/4b remain valid (empty = no-op).
-// TODO: remove this export and its spreads in the next config cleanup pass.
-export const migratedSurfaceSelectors = []
-
 // ── Group P — primitives strict tier ────────────────────────────────────────
 // Scope: components/primitives/** ONLY (born-clean enforcement)
 // Current violations in primitives/: 0 (grep-verified in d6-investigation.md §3)

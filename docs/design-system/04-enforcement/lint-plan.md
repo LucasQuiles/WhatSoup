@@ -930,7 +930,10 @@ landed `ba4ed643`):
   pages/SoupKitchen.tsx, TagInput.tsx, CardSelector.tsx, ConfirmDialog.tsx, RelinkModal.tsx,
   SaveContactDialog.tsx, UpdateModal.tsx (joined at B3 wave 3 `d73bef54`), plus
   line-detail/CreateGroupModal.tsx in the full-union block 4b. The ad-hoc-modal shadow set is
-  EMPTY console-wide since wave 4. Both rules remain shadow-tracked outside the M list.
+  EMPTY console-wide since wave 4. Both rules remain shadow-tracked outside the M list. The
+  M selectors were promoted into `structuralSelectors` (Group S) on 2026-06-15, so the legacy
+  `migratedSurfaceSelectors` export went empty (`[]`); that dead export and its two no-op
+  block-4a/4b spreads were removed (lint output unchanged — the empty spread was a no-op).
 - **Group P** (soup/no-legacy-tokens, soup/no-utility-smell): scoped-error inside
   `components/primitives/**` (born-clean tier); both remain shadow outside primitives.
 - **Shared design verification chain**: CI-blocking — `npm run verify:console-design` runs in
