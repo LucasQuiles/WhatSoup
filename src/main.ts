@@ -182,7 +182,14 @@ const durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
 
 // Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
-const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
+let instanceConfig: Record<string, unknown> | null = null;
+if (process.env.INSTANCE_CONFIG) {
+  try {
+    instanceConfig = JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown>;
+  } catch {
+    throw new Error('INSTANCE_CONFIG is set but is not valid JSON');
+  }
+}
 
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
