@@ -395,6 +395,114 @@ describe('poll vote bridge', () => {
       expect(JSON.stringify([changedLog, emittedLog])).not.toContain('Go');
     });
 
+    // -----------------------------------------------------------------------
+    // CHARACTERIZATION (BEAD-019 prep): lock the EXACT candidate-context object
+    // passed to decryptPollVote, including ordering and the pollMsgId/pollEncKey
+    // fields that the existing tests do not assert.
+    // -----------------------------------------------------------------------
+    it('passes the exact LID-then-phone candidate contexts to decryptPollVote (full call-args)', async () => {
+      // Force BOTH candidates to be tried by failing every attempt, so we can
+      // capture the precise context object for each.
+      mockDecryptPollVote.mockImplementation(() => {
+        throw new Error('Unsupported state or unable to authenticate data');
+      });
+
+      cm.on('pollVoteFailed', vi.fn());
+
+      const voteMsg = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+
+      emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
+
+      // Candidate ordering: LID pair tried FIRST.
+      const [vote0, ctx0] = mockDecryptPollVote.mock.calls[0];
+      const [vote1, ctx1] = mockDecryptPollVote.mock.calls[1];
+
+      // The same encrypted vote object is threaded to every candidate.
+      expect(vote0).toBe(voteMsg.message.pollUpdateMessage.vote);
+      expect(vote1).toBe(voteMsg.message.pollUpdateMessage.vote);
+
+      // First candidate = LID pair, with the FULL context shape the decryptor sees.
+      expect(ctx0).toEqual({
+        pollCreatorJid: BOT_LID,
+        pollMsgId: POLL_MSG_ID,
+        pollEncKey: expect.any(Uint8Array),
+        voterJid: VOTER_LID,
+      });
+      // Second candidate = phone pair.
+      expect(ctx1).toEqual({
+        pollCreatorJid: BOT_PHONE,
+        pollMsgId: POLL_MSG_ID,
+        pollEncKey: expect.any(Uint8Array),
+        voterJid: VOTER_PHONE,
+      });
+
+      // pollEncKey is the stored messageSecret (filled with 99 by this block's beforeEach).
+      expect(Array.from(ctx0.pollEncKey as Uint8Array)).toEqual(Array.from(new Uint8Array(32).fill(99)));
+      expect(ctx1.pollEncKey).toBe(ctx0.pollEncKey);
+    });
+
+    // -----------------------------------------------------------------------
+    // CHARACTERIZATION (BEAD-019 prep): an option hash that is NOT in the
+    // poll's optionHashes map maps to the literal 'Unknown' fallback.
+    // -----------------------------------------------------------------------
+    it("emits 'Unknown' for a decrypted option hash absent from the poll's option set", async () => {
+      // 'Rust' was never an option of this poll (Node.js/Python/Go) → its hash
+      // is absent from stored.optionHashes → fallback to 'Unknown'.
+      mockDecryptPollVote.mockReturnValue({
+        selectedOptions: [optionHash('Rust')],
+      });
+
+      const handler = vi.fn();
+      cm.on('pollVoteReceived', handler);
+
+      const voteMsg = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+
+      emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(handler).toHaveBeenCalledWith({
+        pollMessageId: POLL_MSG_ID,
+        chatJid: VOTER_LID,
+        voterJid: VOTER_LID,
+        selectedOptions: ['Unknown'],
+      });
+    });
+
+    it("emits a known name AND 'Unknown' when a vote mixes a real hash with an absent one", async () => {
+      // Multi-select where one hash is a real option ('Go') and one is not ('Rust').
+      // Characterizes that mapping is positional and the fallback is per-hash.
+      mockDecryptPollVote.mockReturnValue({
+        selectedOptions: [optionHash('Go'), optionHash('Rust')],
+      });
+
+      const handler = vi.fn();
+      cm.on('pollVoteReceived', handler);
+
+      const voteMsg = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+
+      emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({ selectedOptions: ['Go', 'Unknown'] }),
+      );
+    });
+
     it('replaces buffered vote when user changes answer within grace window', async () => {
       mockDecryptPollVote.mockReturnValue({
         selectedOptions: [optionHash('Node.js')],
@@ -544,6 +652,115 @@ describe('poll vote bridge', () => {
         voterJid: VOTER_B_LID,
         selectedOptions: ['Go'],
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // CHARACTERIZATION (BEAD-019 prep): the creationKey.fromMe branch that
+  // selects the poll-creator JID. fromMe === true derives the creator from the
+  // bot's own identity (botLid/botJid); fromMe === false derives it from the
+  // creationKey's participant/remoteJid fields.
+  // -------------------------------------------------------------------------
+  describe('poll vote decryption — creationKey.fromMe creator-JID arm', () => {
+    const POLL_MSG_ID = 'POLL_FROMME_ARM_001';
+    const VOTER_LID = '3333@lid';
+    const VOTER_PHONE = '2222@s.whatsapp.net';
+    const BOT_LID = '4444@lid';
+    const BOT_PHONE = '1111@s.whatsapp.net';
+    // Creator identity used only in the fromMe === false arm (a different
+    // participant created the poll — e.g. a group poll we did not author).
+    const CREATOR_LID = '7777@lid';
+    const CREATOR_PHONE = '8888@s.whatsapp.net';
+
+    beforeEach(async () => {
+      const secret = new Uint8Array(32).fill(55);
+      mockSock.sendMessage.mockResolvedValue({
+        key: { id: POLL_MSG_ID, remoteJid: VOTER_LID, fromMe: true },
+        message: {
+          messageContextInfo: { messageSecret: secret },
+          pollCreationMessageV3: {
+            name: 'Which runtime?',
+            options: [{ optionName: 'Node.js' }, { optionName: 'Python' }],
+          },
+        },
+      });
+      await cm.sendPollMessage(VOTER_LID, 'Which runtime?', ['Node.js', 'Python'], 1);
+    });
+
+    it('fromMe === true: creator JID derives from the bot identity (botLid then botJid)', async () => {
+      mockDecryptPollVote.mockImplementation(() => {
+        throw new Error('Unsupported state or unable to authenticate data');
+      });
+      cm.on('pollVoteFailed', vi.fn());
+
+      const voteMsg = {
+        key: {
+          remoteJid: VOTER_LID,
+          remoteJidAlt: VOTER_PHONE,
+          fromMe: false,
+          id: 'VOTE_FROMME_TRUE',
+          addressingMode: 'lid',
+        },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: {
+              remoteJid: VOTER_LID,
+              fromMe: true, // we authored the poll → creator = bot identity
+              id: POLL_MSG_ID,
+            },
+            vote: { encPayload: new Uint8Array(50), encIv: new Uint8Array(12) },
+          },
+        },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      };
+
+      emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
+
+      // LID candidate uses the bot LID; phone candidate uses the bot phone.
+      expect(mockDecryptPollVote.mock.calls[0][1].pollCreatorJid).toBe(BOT_LID);
+      expect(mockDecryptPollVote.mock.calls[1][1].pollCreatorJid).toBe(BOT_PHONE);
+    });
+
+    it('fromMe === false: creator JID derives from the creationKey participant fields', async () => {
+      mockDecryptPollVote.mockImplementation(() => {
+        throw new Error('Unsupported state or unable to authenticate data');
+      });
+      cm.on('pollVoteFailed', vi.fn());
+
+      const voteMsg = {
+        key: {
+          remoteJid: VOTER_LID,
+          remoteJidAlt: VOTER_PHONE,
+          fromMe: false,
+          id: 'VOTE_FROMME_FALSE',
+          addressingMode: 'lid',
+        },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: {
+              // Someone else authored the poll: creator JID comes from these.
+              participant: CREATOR_LID,
+              participantAlt: CREATOR_PHONE,
+              remoteJid: VOTER_LID,
+              fromMe: false,
+              id: POLL_MSG_ID,
+            },
+            vote: { encPayload: new Uint8Array(50), encIv: new Uint8Array(12) },
+          },
+        },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      };
+
+      emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
+
+      // LID candidate creator = creationKey.participant (normalized);
+      // phone candidate creator = creationKey.participantAlt.
+      expect(mockDecryptPollVote.mock.calls[0][1].pollCreatorJid).toBe(CREATOR_LID);
+      expect(mockDecryptPollVote.mock.calls[0][1].voterJid).toBe(VOTER_LID);
+      expect(mockDecryptPollVote.mock.calls[1][1].pollCreatorJid).toBe(CREATOR_PHONE);
+      expect(mockDecryptPollVote.mock.calls[1][1].voterJid).toBe(VOTER_PHONE);
     });
   });
 });
