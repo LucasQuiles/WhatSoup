@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLASSIFY_PY="${SCRIPT_DIR}/lib/classify_health.py"
+
 LABEL=""
 PORT=""
 UID_="$(id -u)"
@@ -68,6 +71,7 @@ done
 [[ "$UID_" =~ ^[0-9]+$ ]] || usage_die "--uid must be numeric: $UID_"
 [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || usage_die "--health-timeout must be numeric: $HEALTH_TIMEOUT"
 [[ "$SETTLE" =~ ^[0-9]+$ ]] || usage_die "--settle must be numeric: $SETTLE"
+[[ -f "$CLASSIFY_PY" ]] || usage_die "classifier not found: $CLASSIFY_PY"
 
 # Classify the current /health. Prints exactly one verdict token:
 #   ok | degraded | unreachable | parse | fields
@@ -85,21 +89,10 @@ classify_health() {
     echo "unreachable"
     return 0
   fi
-  printf '%s' "$body" | python3 -c '
-import json, sys
-raw = sys.stdin.read()
-try:
-    d = json.loads(raw)
-except Exception:
-    print("parse"); sys.exit(0)
-if not isinstance(d, dict):
-    print("parse"); sys.exit(0)
-status = d.get("status")
-tc = d.get("turn_capability")
-if status is None or not isinstance(tc, dict) or "model_usable" not in tc:
-    print("fields"); sys.exit(0)
-print("ok" if (status == "healthy" and tc.get("model_usable") is True) else "degraded")
-' 2>/dev/null || { echo "parse"; return 0; }
+  # Classification logic lives in lib/classify_health.py (unit-tested). The
+  # acceptance signal is a FRESH usable model: status=healthy AND
+  # model_usable=true AND not model_usable_stale (the #1392 freshness guard).
+  printf '%s' "$body" | python3 "$CLASSIFY_PY" 2>/dev/null || { echo "parse"; return 0; }
 }
 
 attempt=0
