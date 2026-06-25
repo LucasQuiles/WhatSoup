@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { WhatSoupError } from '../../errors.ts';
+import { shortHash } from '../../lib/short-hash.ts';
 
 export type AgentFailureClass =
   | 'provider_usage_limit'
@@ -638,7 +638,7 @@ function buildAgentFailureIncidentId(
     failure.toolName ?? '',
     normalizeWhitespace(message).slice(0, 300),
   ].join('\n');
-  return createHash('sha256').update(fingerprint).digest('hex').slice(0, 24);
+  return shortHash(fingerprint, 24);
 }
 
 function normalizeWhitespace(value: string): string {
