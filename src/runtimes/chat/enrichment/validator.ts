@@ -4,6 +4,7 @@ import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import type { ExtractedFact } from './extractor.ts';
 import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
+import { stripJsonFences } from '../../../lib/json-fences.ts';
 
 const log = createChildLogger('enrichment');
 
@@ -141,10 +142,7 @@ export async function validateFacts(
     return [];
   }
 
-  // Strip markdown code fences if present
-  let jsonStr = raw;
-  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (fenceMatch) jsonStr = fenceMatch[1].trim();
+  const jsonStr = stripJsonFences(raw);
 
   let parsed: unknown;
   try {
