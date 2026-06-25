@@ -36,7 +36,7 @@ import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
-import { assertPrivateDirectorySync, privateWriteError } from '../../lib/private-fs.ts';
+import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
@@ -74,52 +74,6 @@ class ConfigUpdateResponseSent extends Error {
 
 function haltConfigUpdateAfterResponse(): never {
   throw new ConfigUpdateResponseSent();
-}
-
-interface PrivateWriteOptions {
-  exclusive?: boolean;
-  mode?: number;
-}
-
-function writePrivateFileSync(filePath: string, data: string | Buffer, options: PrivateWriteOptions = {}): void {
-  assertPrivateDirectorySync(path.dirname(filePath));
-  const mode = options.mode ?? 0o600;
-
-  try {
-    const stat = fs.lstatSync(filePath);
-    if (stat.isSymbolicLink()) {
-      throw privateWriteError('refusing to write private file through symlink', 'ELOOP');
-    }
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-    if (options.exclusive) {
-      throw privateWriteError('refusing to create private file because it already exists', 'EEXIST');
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-
-  const flags = fs.constants.O_WRONLY |
-    fs.constants.O_CREAT |
-    fs.constants.O_NOFOLLOW |
-    fs.constants.O_NONBLOCK |
-    (options.exclusive ? fs.constants.O_EXCL : 0);
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(filePath, flags, mode);
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-    fs.fchmodSync(fd, mode);
-    fs.ftruncateSync(fd, 0);
-    if (typeof data === 'string') fs.writeFileSync(fd, data, { encoding: 'utf-8' });
-    else fs.writeFileSync(fd, data);
-    fs.fchmodSync(fd, mode);
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
 }
 
 export interface OpsDeps {
