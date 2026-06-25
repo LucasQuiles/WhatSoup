@@ -100,12 +100,12 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "4cc0726f47803b69d1bbfab6c1a6c2294513ff5717a3bf17edfc17ab6ef00093",
+      "sha256": "d81f5fecab333ba58c3608454d8d45908c7d69422660f8f7859cf057e2b33f2f",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "Authorization: Bearer [REDACTED]",
         "constants.O_NOFOLLOW",
-        "redactDiagnosticValue(event)",
+        "redactOutboxValue(event)",
         "recordBotErrorsWritefail"
       ]
     },

@@ -143,13 +143,23 @@ function redactText(value: string): string {
     .replace(BEARER_VALUE, 'Bearer [REDACTED]'));
 }
 
-function redactDiagnosticValue(value: unknown): unknown {
+// Intentionally distinct from transport/connection.ts's same-purpose redactor
+// (and deliberately renamed away from its old shared name `redactDiagnosticValue`
+// to remove the confusing collision). The split is safe: this outbox path only
+// ever receives the type-locked `BotErrorsCriticalAssetDiagnostic` (fixed benign
+// keys — `fingerprint` is a SHA-256 hash, `path` is covered by redactText's
+// credential-path rule) plus pre-stringified strings. No sensitive-keyed object,
+// raw Error instance, or deeply-nested attacker-shaped value can reach here, so
+// connection.ts's key-sensitivity, depth-cap, and Error-instance handling are
+// unreachable. `redactText` (secret-shape-based) is sufficient and complete for
+// this input — same redaction output, no behavior change.
+function redactOutboxValue(value: unknown): unknown {
   if (typeof value === 'string') return redactText(value);
-  if (Array.isArray(value)) return value.map(redactDiagnosticValue);
+  if (Array.isArray(value)) return value.map(redactOutboxValue);
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .map(([key, item]) => [key, redactDiagnosticValue(item)]),
+        .map(([key, item]) => [key, redactOutboxValue(item)]),
     );
   }
   return value;
@@ -236,7 +246,7 @@ export function recordBotErrorsWritefail(
     failedTarget: redactText(target),
     reason,
     emitPid: process.pid,
-    event: redactDiagnosticValue(event),
+    event: redactOutboxValue(event),
   };
   const payload = `${JSON.stringify(breadcrumb, null, 2)}\n`;
 
@@ -327,7 +337,7 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
   const summary = input.summary.trim() || `${input.eventType} event from ${source}`;
   const evidence = input.evidence?.trim() ?? '';
   const criticalAsset = input.criticalAsset
-    ? redactDiagnosticValue(input.criticalAsset) as BotErrorsCriticalAssetDiagnostic
+    ? redactOutboxValue(input.criticalAsset) as BotErrorsCriticalAssetDiagnostic
     : null;
 
   return {
