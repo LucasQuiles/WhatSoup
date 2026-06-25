@@ -69,10 +69,3 @@ export function publishTypingUpdate(
   rt.publish(event);
 }
 
-// ---------------------------------------------------------------------------
-//  Factory — creates a no-op publisher when no WS server is available
-// ---------------------------------------------------------------------------
-
-export function createNoopPublisher(): FleetRealtimePublisher {
-  return { publish: () => {} };
-}

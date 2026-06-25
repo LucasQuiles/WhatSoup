@@ -10,7 +10,6 @@ vi.mock('../../src/fleet/http-proxy.ts', () => ({
 // Mock findLatestLogFile — now returns { path, mtimeMs } | null
 vi.mock('../../src/fleet/log-utils.ts', () => ({
   findLatestLogFile: vi.fn(),
-  readTailLines: vi.fn().mockReturnValue([]),
 }));
 
 import { findLatestLogFile } from '../../src/fleet/log-utils.ts';

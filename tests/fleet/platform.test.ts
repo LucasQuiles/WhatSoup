@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   escapeXml,
   buildPlist,
-  parseInstanceName,
   systemdUnitName,
   detectPlatform,
   createServiceManager,
@@ -113,24 +112,6 @@ describe('platform', () => {
         if (origNode === undefined) delete process.env.WHATSOUP_NODE;
         else process.env.WHATSOUP_NODE = origNode;
       }
-    });
-  });
-
-  describe('parseInstanceName', () => {
-    it('extracts name from whatsoup@ unit pattern', () => {
-      expect(parseInstanceName('whatsoup@foo')).toBe('foo');
-    });
-
-    it('extracts name with hyphens', () => {
-      expect(parseInstanceName('whatsoup@my-instance')).toBe('my-instance');
-    });
-
-    it('returns full string for non-template units', () => {
-      expect(parseInstanceName('whatsoup-fleet')).toBe('whatsoup-fleet');
-    });
-
-    it('returns full string for plain names', () => {
-      expect(parseInstanceName('myservice')).toBe('myservice');
     });
   });
 });

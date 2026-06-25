@@ -83,8 +83,3 @@ export function readTailLinesDetailed(filePath: string, maxLines: number): TailL
   }
 }
 
-/** Read the last N lines from a file (best-effort, reads last 64KB). */
-export function readTailLines(filePath: string, maxLines: number): string[] {
-  const result = readTailLinesDetailed(filePath, maxLines);
-  return result.ok ? result.lines : [];
-}
