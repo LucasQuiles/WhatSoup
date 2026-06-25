@@ -147,6 +147,13 @@
     "toLayer": "runtimes"
   },
   {
+    "file": "src/mcp/tools/memory-write.ts",
+    "line": 21,
+    "specifier": "../../runtimes/chat/providers/pinecone.ts",
+    "fromLayer": "mcp",
+    "toLayer": "runtimes"
+  },
+  {
     "file": "src/mcp/tools/messaging.ts",
     "line": 27,
     "specifier": "../../runtimes/agent/runtime.ts",
