@@ -16,8 +16,9 @@
  * and call markSeqsSkipped / markSeqFailed / abort here. AgentRuntime keeps a thin
  * abortImageCoalesceBuffer delegator so the existing call sites are unchanged.
  *
- * durability and replyGuarantee are late-bound on AgentRuntime (assigned at start,
- * nulled at shutdown), so they are read through getter thunks rather than captured
+ * durability and replyGuarantee are late-bound on AgentRuntime (assigned at start;
+ * durability is never nulled, replyGuarantee may be reset to null — see runtime.ts:4740),
+ * so they are read through getter thunks rather than captured
  * at construction. Behavior is identical to the previous inline implementation —
  * see the image-coalescing characterization suite in
  * tests/runtimes/agent/runtime.test.ts (timer-batch flush, flush-before-text,
@@ -63,7 +64,7 @@ export class ImageCoalescer {
 
   /**
    * Mark the given buffered inbound seqs skipped in durability (they will not get
-   * their own turn). No-op when durability is not yet wired. Each seq is disarmed
+   * their own turn). No-op when durability is unset (only before startup wiring or in durability-free test construction; production wires it before any inbound message). Each seq is disarmed
    * from the reply guarantee first; failures are logged and do not abort the loop.
    */
   markSeqsSkipped(mapKey: string, inboundSeqs: number[], reason: string): void {
