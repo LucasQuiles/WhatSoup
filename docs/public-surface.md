@@ -171,6 +171,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
 | `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
+| `mcp:tools.memory-write` | 1 | [`src/mcp/tools/memory-write.ts`](../src/mcp/tools/memory-write.ts) | stable | active | `memory_write` (agent episodic write to the configured per-person Pinecone index; Pinecone-gated, `core: false`). |
 | `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone). Pinecone-gated registration: conditionally-registered only when the instance's Pinecone allowed-indexes, credentials, and knowledge profiles are usable; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for full gating conditions. |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |

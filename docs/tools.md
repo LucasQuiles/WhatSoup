@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 162 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 162 documented tools, 160 are always registered at startup and 2 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 163 documented tools, 160 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -63,7 +63,8 @@ Complete reference for all 162 MCP tools exposed by WhatSoup. Tools are grouped 
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 1 |
 | [substrate.ts](#substratets) | 19 |
-| **Total** | **162** |
+| [memory-write.ts](#memory-writets) | 1 |
+| **Total** | **163** |
 
 > The total above (`162`) reflects the full canonical surface — `161` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
@@ -3121,6 +3122,40 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | namespace | string | optional | Override default namespace(s) |
 
 **Returns:** Formatted search results with relevance scores. Available indexes are dynamically configured per instance.
+
+---
+
+## memory-write.ts
+
+Agent-facing episodic memory write into the configured per-person Pinecone index.
+
+---
+
+### memory_write
+
+Persist a durable memory about the current conversation into the instance's configured Pinecone memory index (`memory.pinecone.index`) via the integrated-embedding upsert path. Intended for agent instances, which do not run the chat-runtime enrichment poller.
+
+> **Conditional registration.** Registered only when a Pinecone API key is available (`memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The configured project guard is enforced by `PineconeMemory.upsert`. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| text | string | required | The memory content to persist (1-2000 chars) |
+| memory_type | string (enum) | required | user_fact \| group_context \| preference \| correction \| self_fact |
+| confidence | number | optional | 0-1 confidence (default 0.8) |
+| claim | string | optional | Toulmin claim |
+| evidence | string | optional | Toulmin evidence |
+| warrant | string | optional | Toulmin warrant |
+| contradicts | string | optional | id of a superseded memory |
+
+**Returns:** `{ id, status: "written", memory_type }`. The conversation and speaker are derived from the session, never caller-supplied.
 
 ---
 
