@@ -15,16 +15,11 @@ import { toPersonalJid } from './jid-constants.ts';
 const log = createChildLogger('heal');
 
 const MAX_ATTEMPTS = 2;
-const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 const RESOLUTION_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 const GLOBAL_VALVE_LIMIT = 5;
 const GLOBAL_VALVE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const ACTIVE_REPORT_STATES = ['attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued'] as const;
 export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
-
-// Suppress unused variable warnings — these constants document the design intent
-// and will be used when cooldown/resolution logic is wired in.
-void COOLDOWN_MS;
 
 export interface HealReportData {
   type: 'crash' | 'degraded' | 'service_crash';
