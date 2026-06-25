@@ -200,6 +200,25 @@ interface UrlTriggerSpec {
 /** Default top_k when a poll.pinecone spec omits it. */
 const PINECONE_DEFAULT_TOP_K = 5;
 
+/**
+ * Enumerated `outputJson.reason` codes emitted by the trigger executors. Single source of truth to
+ * diff against docs/runbooks/personal-line-watch.md. Not all outputJson shapes carry a reason —
+ * only the fail-closed / not-implemented branches do.
+ */
+const TRIGGER_REASONS = [
+  'shell_watch_removed',
+  'event_message_not_polled',
+  'not_implemented',
+  'unsafe_sql',
+  'index_not_allowed',
+  'pinecone_unavailable',
+  'path_not_allowed',
+  'url_watch_disabled',
+  'ssrf_blocked',
+  'fetch_error',
+] as const;
+type TriggerReason = (typeof TRIGGER_REASONS)[number];
+
 interface ExecuteOutcome {
   status: 'ok' | 'noop' | 'failed';
   fired: boolean;
@@ -467,7 +486,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'poll.shell has been removed',
-        outputJson: { reason: 'shell_watch_removed' },
+        outputJson: { reason: 'shell_watch_removed' satisfies TriggerReason },
         errorKind: 'shell_watch_removed',
         errorMessage: 'poll.shell watches are removed; no executor exists. Recreate as a different watch kind.',
       };
@@ -492,7 +511,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'event.message is not poller-executed (reserved for ingest path)',
-        outputJson: { kind, reason: 'event_message_not_polled' },
+        outputJson: { kind, reason: 'event_message_not_polled' satisfies TriggerReason },
         errorKind: 'event_message_not_polled',
         errorMessage: 'event.message triggers are event-driven (ingest path), not interval-polled; this legacy row will not be rescheduled.',
       };
@@ -502,7 +521,7 @@ export class TriggerPoller {
       status: 'noop',
       fired: false,
       outputSummary: `kind ${kind} not yet implemented`,
-      outputJson: { kind, reason: 'not_implemented' },
+      outputJson: { kind, reason: 'not_implemented' satisfies TriggerReason },
     };
   }
 
@@ -514,7 +533,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'unsafe SQL rejected',
-        outputJson: { reason: 'unsafe_sql' },
+        outputJson: { reason: 'unsafe_sql' satisfies TriggerReason },
         errorKind: 'unsafe_sql',
         errorMessage: 'poll.sqlite rejects ATTACH/DETACH/PRAGMA and multi-statement SQL',
       };
@@ -604,7 +623,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: `index ${spec.index} not in allowlist`,
-        outputJson: { reason: 'index_not_allowed' },
+        outputJson: { reason: 'index_not_allowed' satisfies TriggerReason },
         errorKind: 'index_not_allowed',
         errorMessage: 'poll.pinecone index is not in config.memory.pinecone.allowedIndexes',
       };
@@ -614,7 +633,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'pinecone search path not configured',
-        outputJson: { reason: 'pinecone_unavailable' },
+        outputJson: { reason: 'pinecone_unavailable' satisfies TriggerReason },
         errorKind: 'pinecone_unavailable',
         errorMessage: 'poll.pinecone has no Pinecone client wired in this process',
       };
@@ -679,7 +698,7 @@ export class TriggerPoller {
       status: 'failed',
       fired: false,
       outputSummary: `path rejected: ${detail}`,
-      outputJson: { reason: 'path_not_allowed' },
+      outputJson: { reason: 'path_not_allowed' satisfies TriggerReason },
       errorKind: 'path_not_allowed',
       errorMessage: `poll.file ${detail}`,
     });
@@ -871,7 +890,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'url watch is disabled',
-        outputJson: { reason: 'url_watch_disabled' },
+        outputJson: { reason: 'url_watch_disabled' satisfies TriggerReason },
         errorKind: 'url_watch_disabled',
         errorMessage: 'poll.url is disabled; set advanced.enableUrlWatch:true to enable',
       };
@@ -881,7 +900,7 @@ export class TriggerPoller {
       status: 'failed',
       fired: false,
       outputSummary: `url rejected: ${detail}`,
-      outputJson: { reason: 'ssrf_blocked' },
+      outputJson: { reason: 'ssrf_blocked' satisfies TriggerReason },
       errorKind: 'ssrf_blocked',
       errorMessage: `poll.url ${detail}`,
     });
@@ -912,7 +931,7 @@ export class TriggerPoller {
         status: 'failed',
         fired: false,
         outputSummary: 'url fetch failed',
-        outputJson: { reason: 'fetch_error' },
+        outputJson: { reason: 'fetch_error' satisfies TriggerReason },
         errorKind: 'fetch_error',
         errorMessage: errorMessage(err),
       };
