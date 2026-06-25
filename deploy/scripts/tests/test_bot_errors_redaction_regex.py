@@ -85,6 +85,33 @@ def test_common_secret_fixtures_redact_across_consumers(script_name: str, func_n
 
 @pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
 @pytest.mark.parametrize(
+    "leak",
+    [
+        "123456789:6@s.whatsapp.net",
+        "12345:6@lid",
+        "123456@s.whatsapp.net",
+        "123456-2@s.whatsapp.net",
+    ],
+)
+def test_device_suffixed_jids_fully_masked_across_consumers(
+    script_name: str,
+    func_name: str,
+    _marker: str,
+    leak: str,
+):
+    mod = _load_module(script_name)
+    redact: Callable[[str], str] = getattr(mod, func_name)
+
+    redacted = redact("jid=" + leak)
+
+    # The bare numeric local part must not survive verbatim for any form:
+    # device-suffixed (:N), device-dash (-N), or plain.
+    assert leak not in redacted
+    assert leak.split("@", 1)[0] not in redacted
+
+
+@pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
+@pytest.mark.parametrize(
     ("raw", "expected_prefix"),
     [
         ("authorization=authzsecret" + "d" * 20, "authorization="),

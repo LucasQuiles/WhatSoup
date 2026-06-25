@@ -33,7 +33,7 @@ CREDENTIAL_PATH_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
+WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?(?::\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
 WHATSAPP_SERVICE_UNIT_RE = re.compile(r"\b(whatsoup@)(\d{8,16})(\.service)?\b", re.IGNORECASE)
 KEYED_PHONE_LIKE_RE = re.compile(
     r"(?<![A-Za-z0-9])(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|[\s_-]+)(\+?\d{10,16})(?![A-Za-z0-9])",

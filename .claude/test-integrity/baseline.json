@@ -46,6 +46,15 @@
       "signature": "eb5bb6f5cfd7561578d1952f6bedb2c284b77f2dadd7c7dbfc9dcd30440316c6",
       "owner": "q",
       "reason": "advisory-suggestion: test_gate_off_accepts_falsey_values enumerates the finite accepted falsey env values for the inhibition gate (false/no/off/0). These are public compatibility literals, not a broad data domain, so explicit parametrize is clearer and keeps the fail-open contract readable."
+    },
+    {
+      "content_signature": "81429ec372c4c04fca3450c48c0b14a91e0adc02e92dd086997b712991bcd1a4",
+      "file": "deploy/scripts/tests/test_bot_errors_redaction_regex.py",
+      "line": 87,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "9f2bd75463575d6566427c1db8122c93dfea40e05d82b1746a7bffed54cd0445",
+      "owner": "q",
+      "reason": "advisory-suggestion: test_device_suffixed_jids_fully_masked_across_consumers enumerates the named JID forms whose verbatim leak BEAD-049 fixes (device-suffix :N, device-dash -N, plain) across each of the 7 consumer redactors; each literal is a distinct security regression contract, while property generation would obscure which JID shape proves the WHATSAPP_JID_RE fix. Keep explicit parametrize."
     }
   ],
   "schema_version": "1"
