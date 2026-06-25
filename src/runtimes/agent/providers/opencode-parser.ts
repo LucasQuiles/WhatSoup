@@ -145,17 +145,3 @@ export function createOpenCodeParser(): OpenCodeParser {
   };
 }
 
-// ── Backward-compatible module-level API ──────────────────────────────────────
-// Kept so that existing tests and any other callsites continue to work.
-// New code should use createOpenCodeParser() for per-session isolation.
-const _defaultParser = createOpenCodeParser();
-
-/** @deprecated Use createOpenCodeParser() for per-session isolation. */
-export function parseOpenCodeEvent(line: string): AgentEvent | null {
-  return _defaultParser.parse(line);
-}
-
-/** @deprecated Use createOpenCodeParser().reset() for per-session isolation. */
-export function resetParserState(): void {
-  _defaultParser.reset();
-}

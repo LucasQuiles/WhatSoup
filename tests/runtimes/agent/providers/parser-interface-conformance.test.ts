@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
 import { parseEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
@@ -6,8 +6,6 @@ import { parseGeminiAcpEvent } from '../../../../src/runtimes/agent/providers/ge
 import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
 import {
   createOpenCodeParser,
-  parseOpenCodeEvent,
-  resetParserState,
 } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
 
 const AGENT_EVENT_TYPES = new Set<AgentEvent['type']>([
@@ -87,7 +85,6 @@ const parsers: ParserCase[] = [
   { name: 'parseCodexEvent', parse: (line) => parseCodexEvent(line) },
   { name: 'parseGeminiAcpEvent', parse: (line) => parseGeminiAcpEvent(line) },
   { name: 'parseGeminiEvent', parse: (line) => parseGeminiEvent(line) },
-  { name: 'parseOpenCodeEvent', parse: (line) => parseOpenCodeEvent(line) },
   {
     name: 'createOpenCodeParser().parse',
     parse: (line) => createOpenCodeParser().parse(line),
@@ -162,10 +159,6 @@ const providerSpecificInputs: Record<string, { line: string; expectedType: Agent
       expectedType: 'assistant_text',
     },
   ],
-  parseOpenCodeEvent: [
-    { line: JSON.stringify({ type: 'step_start', sessionID: 'oc-1' }), expectedType: 'init' },
-    { line: JSON.stringify({ type: 'text', part: { text: 'opencode says hi' } }), expectedType: 'assistant_text' },
-  ],
   'createOpenCodeParser().parse': [
     { line: JSON.stringify({ type: 'step_start', sessionID: 'oc-2' }), expectedType: 'init' },
     { line: JSON.stringify({ type: 'text', part: { text: 'instance one' } }), expectedType: 'assistant_text' },
@@ -174,10 +167,6 @@ const providerSpecificInputs: Record<string, { line: string; expectedType: Agent
 
 describe('parser interface conformance', () => {
   describe.each(parsers)('$name', ({ name, parse }) => {
-    beforeEach(() => {
-      if (name === 'parseOpenCodeEvent') resetParserState();
-    });
-
     it.each(universalInputs)(
       'returns null or a valid AgentEvent for $label',
       ({ line }) => {
@@ -224,7 +213,6 @@ describe('parser interface conformance', () => {
       'parseCodexEvent',
       'parseGeminiAcpEvent',
       'parseGeminiEvent',
-      'parseOpenCodeEvent',
       'createOpenCodeParser().parse',
     ]);
   });

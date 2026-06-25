@@ -6,8 +6,7 @@ import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-
 import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
 import {
   createOpenCodeParser,
-  parseOpenCodeEvent,
-  resetParserState,
+  type OpenCodeParser,
 } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
 
 const FIXTURES_DIR = resolve(
@@ -644,15 +643,17 @@ describe('Gemini stream parser', () => {
 // ---------------------------------------------------------------------------
 
 describe('OpenCode stream parser', () => {
+  let parser: OpenCodeParser;
+
   beforeEach(() => {
-    resetParserState();
+    parser = createOpenCodeParser();
   });
 
   describe('opencode-output.jsonl (simple text response)', () => {
     const lines = readFixtureLines('opencode-output.jsonl');
 
     it('parses first step_start → init with sessionId', () => {
-      const event = parseOpenCodeEvent(lines[0]!);
+      const event = parser.parse(lines[0]!);
       expect(event).toEqual({
         type: 'init',
         sessionId: 'ses_2a87cf8f6ffe7hp2X3Pp2257Ni',
@@ -660,17 +661,17 @@ describe('OpenCode stream parser', () => {
     });
 
     it('parses text event → assistant_text with text content', () => {
-      parseOpenCodeEvent(lines[0]!); // consume step_start
-      const event = parseOpenCodeEvent(lines[1]!);
+      parser.parse(lines[0]!); // consume step_start
+      const event = parser.parse(lines[1]!);
       expect(event).toMatchObject({ type: 'assistant_text' });
       const textEvent = event as { type: 'assistant_text'; text: string };
       expect(textEvent.text).toContain('Hello!');
     });
 
     it('parses step_finish with reason=stop → result with token counts', () => {
-      parseOpenCodeEvent(lines[0]!);
-      parseOpenCodeEvent(lines[1]!);
-      const event = parseOpenCodeEvent(lines[2]!);
+      parser.parse(lines[0]!);
+      parser.parse(lines[1]!);
+      const event = parser.parse(lines[2]!);
       expect(event).toEqual({
         type: 'result',
         text: null,
@@ -683,7 +684,7 @@ describe('OpenCode stream parser', () => {
     it('returns null for empty/whitespace-only lines', () => {
       const lastLine = lines[lines.length - 1]!;
       expect(lastLine.trim()).toBe('');
-      expect(parseOpenCodeEvent(lastLine)).toBeNull();
+      expect(parser.parse(lastLine)).toBeNull();
     });
   });
 
@@ -691,7 +692,7 @@ describe('OpenCode stream parser', () => {
     const lines = readFixtureLines('opencode-tools-output.jsonl').filter((l) => l.trim() !== '');
 
     it('parses first step_start → init with sessionId', () => {
-      const event = parseOpenCodeEvent(lines[0]!);
+      const event = parser.parse(lines[0]!);
       expect(event).toEqual({
         type: 'init',
         sessionId: 'ses_2a7f70c38ffemX8TGwQSl6tjaH',
@@ -699,8 +700,8 @@ describe('OpenCode stream parser', () => {
     });
 
     it('parses tool_use event → tool_result with isError=false and output content', () => {
-      parseOpenCodeEvent(lines[0]!); // step_start → init
-      const event = parseOpenCodeEvent(lines[1]!); // tool_use
+      parser.parse(lines[0]!); // step_start → init
+      const event = parser.parse(lines[1]!); // tool_use
       expect(event).toMatchObject({
         type: 'tool_result',
         toolId: 'call_nB8ilojwx5u6AutWTkcmMwUc',
@@ -711,34 +712,34 @@ describe('OpenCode stream parser', () => {
     });
 
     it('parses step_finish with reason=tool-calls → ignored', () => {
-      parseOpenCodeEvent(lines[0]!);
-      parseOpenCodeEvent(lines[1]!);
-      const event = parseOpenCodeEvent(lines[2]!);
+      parser.parse(lines[0]!);
+      parser.parse(lines[1]!);
+      const event = parser.parse(lines[2]!);
       expect(event).toEqual({ type: 'ignored' });
     });
 
     it('parses second step_start → ignored (not init)', () => {
-      parseOpenCodeEvent(lines[0]!);
-      parseOpenCodeEvent(lines[1]!);
-      parseOpenCodeEvent(lines[2]!);
-      const event = parseOpenCodeEvent(lines[3]!);
+      parser.parse(lines[0]!);
+      parser.parse(lines[1]!);
+      parser.parse(lines[2]!);
+      const event = parser.parse(lines[3]!);
       expect(event).toEqual({ type: 'ignored' });
     });
 
     it('parses text event after tool round → assistant_text', () => {
-      parseOpenCodeEvent(lines[0]!);
-      parseOpenCodeEvent(lines[1]!);
-      parseOpenCodeEvent(lines[2]!);
-      parseOpenCodeEvent(lines[3]!); // second step_start
-      const event = parseOpenCodeEvent(lines[4]!); // text
+      parser.parse(lines[0]!);
+      parser.parse(lines[1]!);
+      parser.parse(lines[2]!);
+      parser.parse(lines[3]!); // second step_start
+      const event = parser.parse(lines[4]!); // text
       expect(event).toMatchObject({ type: 'assistant_text' });
       const textEvent = event as { type: 'assistant_text'; text: string };
       expect(textEvent.text).toContain('CLAUDE.md');
     });
 
     it('parses final step_finish with reason=stop → result with token counts', () => {
-      for (let i = 0; i < 5; i++) parseOpenCodeEvent(lines[i]!);
-      const event = parseOpenCodeEvent(lines[5]!);
+      for (let i = 0; i < 5; i++) parser.parse(lines[i]!);
+      const event = parser.parse(lines[5]!);
       expect(event).toMatchObject({ type: 'result', text: null });
       const result = event as { type: 'result'; inputTokens?: number; outputTokens?: number };
       expect(typeof result.inputTokens).toBe('number');
@@ -748,27 +749,27 @@ describe('OpenCode stream parser', () => {
 
   describe('edge cases', () => {
     it('returns null for empty string', () => {
-      expect(parseOpenCodeEvent('')).toBeNull();
+      expect(parser.parse('')).toBeNull();
     });
 
     it('returns null for whitespace-only string', () => {
-      expect(parseOpenCodeEvent('   \t  ')).toBeNull();
+      expect(parser.parse('   \t  ')).toBeNull();
     });
 
     it('returns parse_error for malformed JSON', () => {
-      const event = parseOpenCodeEvent('{not valid json');
+      const event = parser.parse('{not valid json');
       expect(event).toEqual({ type: 'parse_error', line: '{not valid json' });
     });
 
-    it('resets state: second step_start after resetParserState → init again', () => {
+    it('resets state: second step_start after parser.reset() → init again', () => {
       const line = JSON.stringify({
         type: 'step_start',
         sessionID: 'ses_test123',
         part: { type: 'step-start', sessionID: 'ses_test123' },
       });
-      parseOpenCodeEvent(line); // consume first → init
-      resetParserState();
-      const event = parseOpenCodeEvent(line); // after reset → init again
+      parser.parse(line); // consume first → init
+      parser.reset();
+      const event = parser.parse(line); // after reset → init again
       expect(event).toEqual({ type: 'init', sessionId: 'ses_test123' });
     });
 
@@ -808,7 +809,7 @@ describe('OpenCode stream parser', () => {
           },
         },
       });
-      const event = parseOpenCodeEvent(line);
+      const event = parser.parse(line);
       expect(event).toMatchObject({
         type: 'tool_result',
         toolId: 'call_err1',
@@ -819,7 +820,7 @@ describe('OpenCode stream parser', () => {
 
     it('parses unknown event type → unknown', () => {
       const line = JSON.stringify({ type: 'heartbeat', ts: 1234 });
-      const event = parseOpenCodeEvent(line);
+      const event = parser.parse(line);
       expect(event).toMatchObject({ type: 'unknown' });
     });
   });
