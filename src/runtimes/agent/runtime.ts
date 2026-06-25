@@ -797,6 +797,7 @@ export class AgentRuntime implements Runtime {
   private suppressedAskUserToolIds = new Set<string>();
   private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
   private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly GROUP_METADATA_CACHE_MAX = 256;
 
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
@@ -885,7 +886,7 @@ export class AgentRuntime implements Runtime {
    * window-pruned maps can't grow without limit between prunes (e.g. one entry per
    * distinct chat that never recurs within the window).
    */
-  private capDedupeMap(map: Map<string, number>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
+  private capDedupeMap(map: Map<string, unknown>, max = MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS): void {
     while (map.size > max) {
       const oldest = map.keys().next().value;
       if (oldest === undefined) break;
@@ -3404,6 +3405,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
+      this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
       log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
