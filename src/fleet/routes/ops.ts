@@ -674,30 +674,6 @@ export async function handleDeleteLine(
   jsonResponse(res, 200, { deleted: params.name });
 }
 
-// ---------------------------------------------------------------------------
-// Shared validation helpers (used by handleConfigUpdate and handleCreateLine)
-// ---------------------------------------------------------------------------
-
-/**
- * Validate numeric bounds for rateLimitPerHour, maxTokens, and tokenBudget.
- * Writes a 400 response and returns false on the first violation; returns true when valid.
- */
-function validateNumericBounds(body: Record<string, unknown>, res: ServerResponse): boolean {
-  if (typeof body.rateLimitPerHour === 'number' && (body.rateLimitPerHour < 1 || body.rateLimitPerHour > 10000)) {
-    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
-    return false;
-  }
-  if (typeof body.maxTokens === 'number' && (body.maxTokens < 256 || body.maxTokens > 200000)) {
-    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
-    return false;
-  }
-  if (typeof body.tokenBudget === 'number' && (body.tokenBudget < 1000 || body.tokenBudget > 10000000)) {
-    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
-    return false;
-  }
-  return true;
-}
-
 function pathIsInsideDirectory(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -1115,8 +1091,8 @@ export async function handleCreateLine(
     introSent: false, // triggers introduction message on first boot
   };
 
-  // --- Validate numeric bounds ---
-  if (!validateNumericBounds(body, res)) return;
+  // Numeric bounds (rateLimitPerHour/maxTokens/tokenBudget) are enforced by the
+  // shared validateInstanceConfig call below, which runs on both CREATE and PATCH.
 
   // Pass through all optional config fields (exclude internal/UI-only fields)
   const PASSTHROUGH_FIELDS = [
