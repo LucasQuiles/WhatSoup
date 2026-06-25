@@ -14,7 +14,6 @@ import type {
   ProviderCheckpoint,
   ProviderConfig,
   ProviderDescriptor,
-  ProviderMcpToolResult,
   ProviderSession,
   ProviderSessionOptions,
   ProviderTurnRequest,
