@@ -25,6 +25,7 @@ import * as callTools from './tools/calls.ts';
 import * as presenceTools from './tools/presence.ts';
 import * as profileTools from './tools/profile.ts';
 import * as knowledgeTools from './tools/knowledge.ts';
+import * as memoryWriteTools from './tools/memory-write.ts';
 import * as voiceTools from './tools/voice.ts';
 import * as retentionTools from './tools/retention.ts';
 import * as statusTools from './tools/status.ts';
@@ -182,6 +183,19 @@ export function registerAllTools(
   const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
   if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
     runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
+  }
+
+  // Memory write — agent-facing episodic WRITE into the configured per-person
+  // Pinecone index (agent instances don't run the chat-runtime enrichment poller).
+  // Vendor-gated (Pinecone): core: false. Registered whenever a Pinecone API key
+  // is available; PineconeMemory.upsert enforces the non-q project guard.
+  const memWriteApiKeyEnv =
+    (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
+  if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
+    const getBotJid = (): string | undefined => getSock()?.user?.id ?? undefined;
+    runModule('memory-write', false, (register) =>
+      memoryWriteTools.registerMemoryWriteTools(getBotJid, register),
+    );
   }
 
   // Fail-closed: if any core module threw, abort boot with the full failure list

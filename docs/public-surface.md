@@ -142,9 +142,10 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 162 tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when
-Pinecone is configured, and `emit_heal_result` when the runtime has at least one configured
-control-plane peer and is not in any sandbox mode; see
+all 163 tools (160 always-registered + 3 conditionally-registered: `knowledge_search` when
+Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
+control-plane peer and is not in any sandbox mode, and `memory_write` when a Pinecone key and
+index are configured; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
 Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
 factory that registers tools with the names listed below — except for `emit_heal_result`,
@@ -171,6 +172,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
 | `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
+| `mcp:tools.memory-write` | 1 | [`src/mcp/tools/memory-write.ts`](../src/mcp/tools/memory-write.ts) | stable | active | `memory_write` (agent episodic write to the configured per-person Pinecone index; Pinecone-gated, `core: false`). |
 | `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone). Pinecone-gated registration: conditionally-registered only when the instance's Pinecone allowed-indexes, credentials, and knowledge profiles are usable; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for full gating conditions. |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
