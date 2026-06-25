@@ -1138,6 +1138,54 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
+    // Regression for the half-deployed #1392: the freshness fields were exposed on
+    // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts
+    // serializers feeding runtime.agent.turnCapability and the top-level snake-case
+    // turn_capability — which is exactly what whatsoup-keychain-heal.sh reads, leaving a
+    // stale-green blind spot. See FLEET-MATRIX F1.
+    db.close();
+    const db2 = makeDb();
+    const checkedAt = 1_782_349_406_162;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          active: true,
+          turnCapability: {
+            modelUsable: null,
+            modelUsableStale: true,
+            modelUsableCheckedAt: checkedAt,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: null,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // runtime.agent.turnCapability (camelCase) must carry the freshness fields
+    expect(json.runtime.agent.turnCapability.modelUsableStale).toBe(true);
+    expect(json.runtime.agent.turnCapability.modelUsableCheckedAt).toBe(checkedAt);
+    // top-level snake-case turn_capability (read by whatsoup-keychain-heal.sh) too
+    expect(json.turn_capability.model_usable_stale).toBe(true);
+    expect(json.turn_capability.model_usable_checked_at).toBe(checkedAt);
+    // existing fields preserved
+    expect(json.turn_capability.model_usable).toBe(null);
+    db2.close();
+  });
+
   it('propagates degraded runtime snapshots to the top-level health status', async () => {
     db.close();
     const db2 = makeDb();
@@ -1374,6 +1422,8 @@ describe('GET /health', () => {
     expect(json.status).toBe('degraded');
     expect(json.turn_capability).toEqual({
       model_usable: false,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: 'model-unavailable',
       last_successful_turn_at: null,
       last_turn_error_class: 'model-unavailable',
@@ -1411,6 +1461,8 @@ describe('GET /health', () => {
     expect(json.status).toBe('healthy');
     expect(json.turn_capability).toEqual({
       model_usable: true,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_781_316_030_000,
       last_turn_error_class: null,
@@ -1454,6 +1506,8 @@ describe('GET /health', () => {
     expect(json.status).toBe('healthy');
     expect(json.turn_capability).toEqual({
       model_usable: null,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: 'unknown',
       last_successful_turn_at: null,
       last_turn_error_class: 'empty-output',
@@ -1553,6 +1607,8 @@ describe('GET /health', () => {
     expect(status).toBe(200);
     expect(json.turn_capability).toEqual({
       model_usable: false,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: null,
       last_successful_turn_at: null,
       last_turn_error_class: null,
@@ -1560,6 +1616,8 @@ describe('GET /health', () => {
     });
     expect(json.runtime.agent.turnCapability).toEqual({
       modelUsable: false,
+      modelUsableStale: null,
+      modelUsableCheckedAt: null,
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastTurnErrorClass: null,
@@ -3148,6 +3206,8 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
     const json = JSON.parse(body);
     expect(json.turn_capability).toEqual({
       model_usable: null,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: null,
       last_turn_error_class: null,
@@ -3456,6 +3516,8 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     // Line 910 truthy branch: turn_capability was normalized from real details.
     expect(json.turn_capability).toEqual({
       model_usable: true,
+      model_usable_stale: null,
+      model_usable_checked_at: null,
       model_usability_status: 'usable',
       last_successful_turn_at: 1_700_000_000_000,
       last_turn_error_class: null,

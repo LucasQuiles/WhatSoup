@@ -87,6 +87,13 @@ interface LatestSuccessfulOutboundSend {
 
 interface HealthTurnCapability {
   model_usable: boolean | null;
+  // #1392 freshness fields: surfaced so runtime.agent.turnCapability and the
+  // top-level snake-case turn_capability are freshness-honest too, not just
+  // instance.turnCapability. Without these a consumer (e.g.
+  // deploy/scripts/whatsoup-keychain-heal.sh) reading model_usable here can
+  // act on a stale green. See FLEET-MATRIX F1.
+  model_usable_stale: boolean | null;
+  model_usable_checked_at: number | null;
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
   last_turn_error_class: string | null;
@@ -154,6 +161,8 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
   if (!isRecord(raw)) return null;
   return {
     model_usable: normalizeBooleanOrNull(raw.modelUsable),
+    model_usable_stale: normalizeBooleanOrNull(raw.modelUsableStale),
+    model_usable_checked_at: normalizeNumberOrNull(raw.modelUsableCheckedAt),
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
@@ -171,6 +180,8 @@ function agentRuntimeDetailsForHealth(
     turnCapability: turnCapability
       ? {
           modelUsable: turnCapability.model_usable,
+          modelUsableStale: turnCapability.model_usable_stale,
+          modelUsableCheckedAt: turnCapability.model_usable_checked_at,
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
           lastTurnErrorClass: turnCapability.last_turn_error_class,

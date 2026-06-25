@@ -50,6 +50,7 @@ const FAKE_CURL = [
   'state="$(cat "$STATE_FILE" 2>/dev/null || echo degraded)"',
   'case "$state" in',
   "  healthy)     echo '{\"status\":\"healthy\",\"turn_capability\":{\"model_usable\":true}}' ;;",
+  "  stale)       echo '{\"status\":\"healthy\",\"turn_capability\":{\"model_usable\":true,\"model_usable_stale\":true}}' ;;",
   "  degraded)    echo '{\"status\":\"degraded\",\"turn_capability\":{\"model_usable\":false}}' ;;",
   '  unreachable) exit 7 ;;',
   "  parse)       echo 'not-json{' ;;",
@@ -139,6 +140,17 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
     expect(exitCode, 'already-healthy should exit 0').toBe(0);
     expect(kickstartCount(h), 'must not restart a healthy bot').toBe(0);
     expect(stderr).toMatch(/already healthy/i);
+  });
+
+  it('treats a stale-green bot (model_usable=true but model_usable_stale=true) as degraded, not healthy (F1)', () => {
+    // The #1392 stale-green blind spot: an aged "usable" probe must not read as
+    // healthy, or the self-heal monitor takes no action on stale model usability.
+    const h = makeHarness('stale');
+    const { exitCode, stderr } = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1']);
+    expect(exitCode, 'stale-green must not be accepted as already-healthy').toBe(1);
+    expect(kickstartCount(h), 'stale-green should trigger a remediation kickstart').toBeGreaterThanOrEqual(1);
+    expect(stderr).not.toMatch(/already healthy/i);
+    expect(stderr).toMatch(/still degraded/i);
   });
 
   it('kickstarts once and exits 0 when a degraded bot recovers', () => {

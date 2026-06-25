@@ -123,13 +123,13 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:881` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) and `primaryModelUsability` (`status`, `provider`, `model`, `reason`, `suggestion`, `checkedAt`, `probeInFlight`) from the startup primary model usability probe. The top-level `turn_capability` block exposes `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`; agent health degrades when runtime health is degraded, the configured primary model is unusable, or a user-turn error has no later successful user turn. |
-| `http:health.send` | `POST /send` | `src/core/health.ts:477` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:705` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:797` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:867` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:620` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:531` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.status` | `GET /health` | `src/core/health.ts:892` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) and `primaryModelUsability` (`status`, `provider`, `model`, `reason`, `suggestion`, `checkedAt`, `probeInFlight`) from the startup primary model usability probe. The top-level `turn_capability` block exposes `model_usable`, `model_usability_status`, `model_usable_stale`, `model_usable_checked_at`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at` (`model_usable_stale` flags a usability verdict whose probe is past its freshness window — treated as unusable so a stale "usable" reading cannot keep health green; `model_usable_checked_at` is the probe timestamp); agent health degrades when runtime health is degraded, the configured primary model is unusable or its usability probe is stale, or a user-turn error has no later successful user turn. |
+| `http:health.send` | `POST /send` | `src/core/health.ts:488` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:716` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:808` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:878` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:631` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:542` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
