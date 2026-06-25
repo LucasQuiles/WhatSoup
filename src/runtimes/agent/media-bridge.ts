@@ -6,6 +6,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { statSync, unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
+import { destroyOutboundMediaStream } from '../../core/media-stream.ts';
 import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
@@ -59,12 +60,6 @@ const EXT_TO_MIME: Record<string, string> = {
   '.mov': 'video/quicktime',
   '.webm': 'video/webm',
 };
-
-function destroyOutboundMediaStream(media: OutboundMedia): void {
-  if (media.stream === undefined) return;
-  media.stream.on('error', () => {});
-  media.stream.destroy();
-}
 
 function buildOutboundMediaFromPath(
   mediaType: MediaType,

@@ -17,6 +17,7 @@ import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type Sess
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
+import { destroyOutboundMediaStream } from '../../core/media-stream.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 
@@ -65,12 +66,6 @@ const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string 
 };
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
-
-function destroyOutboundMediaStream(media: OutboundMedia): void {
-  if (media.stream === undefined) return;
-  media.stream.on('error', () => {});
-  media.stream.destroy();
-}
 
 function buildSendMediaPayload(
   type: OutboundMedia['type'],
