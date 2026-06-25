@@ -54,9 +54,8 @@ export default defineConfig({
     env: {
       INSTANCE_CONFIG: '',
     },
-    poolOptions: {
-      forks: { maxForks: 4 },
-      threads: { maxThreads: 4 },
-    },
+    // vitest 4 removed test.poolOptions; the per-pool maxForks/maxThreads cap is
+    // now the unified top-level maxWorkers option (applies to whichever pool runs).
+    maxWorkers: 4,
   },
 });

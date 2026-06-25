@@ -52,8 +52,35 @@ export function ensurePrivateDirectorySync(dirPath: string): void {
   chmodSync(dirPath, 0o700);
 }
 
-export function writePrivateFileSync(filePath: string, data: string): void {
+export interface PrivateWriteOptions {
+  /** Refuse to overwrite: open with O_EXCL so a pre-existing path fails EEXIST. */
+  exclusive?: boolean;
+  /** File permission bits for the created/updated file. Defaults to 0o600. */
+  mode?: number;
+}
+
+/**
+ * Write a private file with TOCTOU-resistant symlink refusal.
+ *
+ * Guard sequence (must stay in this order — the symlink/non-file refusal runs
+ * BEFORE the write): assert the parent directory is a real (non-symlink)
+ * directory, lstat the target and refuse a symlink (ELOOP) or non-regular file
+ * (EINVAL), then open with O_NOFOLLOW so the kernel also refuses a symlink at
+ * open time, re-check via fstat, force the mode, truncate, write, and re-force
+ * the mode.
+ *
+ * Backward-compatible: called as `(path, string)` it behaves exactly as the
+ * original fixed-mode string writer (mode 0o600, no O_EXCL). The optional
+ * `options` add Buffer payloads, a per-call `mode`, and an `exclusive`
+ * (refuse-overwrite / O_EXCL) mode.
+ */
+export function writePrivateFileSync(
+  filePath: string,
+  data: string | Buffer,
+  options: PrivateWriteOptions = {},
+): void {
   assertPrivateDirectorySync(dirname(filePath));
+  const mode = options.mode ?? 0o600;
 
   try {
     const stat = lstatSync(filePath);
@@ -63,22 +90,30 @@ export function writePrivateFileSync(filePath: string, data: string): void {
     if (!stat.isFile()) {
       throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
     }
+    if (options.exclusive) {
+      throw privateWriteError('refusing to create private file because it already exists', 'EEXIST');
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const flags = constants.O_WRONLY |
+    constants.O_CREAT |
+    constants.O_NOFOLLOW |
+    constants.O_NONBLOCK |
+    (options.exclusive ? constants.O_EXCL : 0);
   let fd: number | undefined;
   try {
-    fd = openSync(filePath, flags, 0o600);
+    fd = openSync(filePath, flags, mode);
     const stat = fstatSync(fd);
     if (!stat.isFile()) {
       throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
     }
-    fchmodSync(fd, 0o600);
+    fchmodSync(fd, mode);
     ftruncateSync(fd, 0);
-    writeFileSync(fd, data, { encoding: 'utf-8' });
-    fchmodSync(fd, 0o600);
+    if (typeof data === 'string') writeFileSync(fd, data, { encoding: 'utf-8' });
+    else writeFileSync(fd, data);
+    fchmodSync(fd, mode);
   } finally {
     if (fd !== undefined) closeSync(fd);
   }

@@ -102,7 +102,8 @@ import {
   emitHealReport,
   handleHealComplete,
   dequeueNextReport,
-  checkGlobalValve,
+  getGlobalValveCount,
+  GLOBAL_VALVE_LIMIT,
 } from '../../src/core/heal.ts';
 
 // ---------------------------------------------------------------------------
@@ -413,7 +414,7 @@ describe('12.1.7: global valve blocks reports beyond the limit', () => {
     }
 
     // Global valve should now be closed
-    expect(checkGlobalValve(db)).toBe(false);
+    expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(false);
 
     // 6th report should be suppressed by the valve
     const sixth = emitHealReport(db, messenger, null, {

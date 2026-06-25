@@ -2767,8 +2767,8 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
     expect(JSON.parse(res._body).error).toMatch(/pluginDirs entries must be within the home directory/);
   });
 
-  // Line 1104: validateNumericBounds rejects an out-of-range tokenBudget.
-  it('rejects an out-of-range tokenBudget with 400 (line 1104)', async () => {
+  // The shared validateInstanceConfig (create mode) rejects an out-of-range tokenBudget.
+  it('rejects an out-of-range tokenBudget with 400', async () => {
     const res = mockRes();
     await handleCreateLine(
       mockReq(JSON.stringify({
@@ -3265,8 +3265,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     }
   });
 
-  // --- handleCreateLine: rateLimitPerHour out of range (validateNumericBounds line 671) ---
-  it('handleCreateLine rejects an out-of-range rateLimitPerHour with 400 (line 671)', async () => {
+  // --- handleCreateLine: rateLimitPerHour out of range (shared validateInstanceConfig) ---
+  it('handleCreateLine rejects an out-of-range rateLimitPerHour with 400', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave2-rl-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     const origData = process.env.XDG_DATA_HOME;
@@ -3299,8 +3299,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     }
   });
 
-  // --- handleCreateLine: maxTokens out of range (validateNumericBounds line 675) ---
-  it('handleCreateLine rejects an out-of-range maxTokens with 400 (line 675)', async () => {
+  // --- handleCreateLine: maxTokens out of range (shared validateInstanceConfig) ---
+  it('handleCreateLine rejects an out-of-range maxTokens with 400', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wave2-mt-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     const origData = process.env.XDG_DATA_HOME;
@@ -4062,9 +4062,9 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
-  // ---- Line 671/675/679: validateNumericBounds upper-bound failure (above-max) ----
-  // validateNumericBounds is invoked from handleCreateLine, not handleConfigUpdate.
-  it('handleCreateLine rejects rateLimitPerHour above 10000 (line 671 above-max)', async () => {
+  // ---- Numeric-bounds upper-bound failure (above-max) via shared validateInstanceConfig ----
+  // Enforced on the CREATE path by validateInstanceConfig (create mode).
+  it('handleCreateLine rejects rateLimitPerHour above 10000 (above-max)', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-rlh-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     const origData = process.env.XDG_DATA_HOME;
@@ -4100,7 +4100,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
-  it('handleCreateLine rejects maxTokens above 200000 (line 675 above-max)', async () => {
+  it('handleCreateLine rejects maxTokens above 200000 (above-max)', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-mt-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     const origData = process.env.XDG_DATA_HOME;
@@ -4136,7 +4136,7 @@ describe('ops.ts uncovered-branch coverage', () => {
     }
   });
 
-  it('handleCreateLine rejects tokenBudget above 10000000 (line 679 above-max)', async () => {
+  it('handleCreateLine rejects tokenBudget above 10000000 (above-max)', async () => {
     const cfgTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-leaf-tb-'));
     const origConfig = process.env.XDG_CONFIG_HOME;
     const origData = process.env.XDG_DATA_HOME;

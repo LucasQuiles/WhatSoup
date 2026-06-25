@@ -6,8 +6,6 @@
  * event (subsequent ones return `ignored`). The module exposes:
  *
  * - createOpenCodeParser(): factory returning { parse, reset } with isolated state
- * - parseOpenCodeEvent(line): deprecated module-level wrapper around a shared instance
- * - resetParserState(): deprecated reset of that shared instance
  *
  * Existing parser-interface-conformance.test.ts covers only `init` +
  * `assistant_text` generically. This file pins state-tracking + each
@@ -16,8 +14,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   createOpenCodeParser,
-  parseOpenCodeEvent,
-  resetParserState,
 } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
 
 describe('createOpenCodeParser — factory + per-instance state isolation', () => {
@@ -60,20 +56,21 @@ describe('createOpenCodeParser — factory + per-instance state isolation', () =
   });
 });
 
-describe('parseOpenCodeEvent — deprecated module-level API', () => {
-  it('delegates to the shared default instance and respects resetParserState()', () => {
-    resetParserState();
-    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'first' }))).toEqual({
+describe('createOpenCodeParser — shared instance state + reset()', () => {
+  it('tracks step_start state across calls on one instance and respects reset()', () => {
+    const parser = createOpenCodeParser();
+    parser.reset();
+    expect(parser.parse(JSON.stringify({ type: 'step_start', sessionID: 'first' }))).toEqual({
       type: 'init',
       sessionId: 'first',
     });
-    // Second step_start through module-level API is ignored (shared state)
-    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'second' }))).toEqual({
+    // Second step_start on the same instance is ignored (shared state)
+    expect(parser.parse(JSON.stringify({ type: 'step_start', sessionID: 'second' }))).toEqual({
       type: 'ignored',
     });
     // After reset, first-step behavior returns
-    resetParserState();
-    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'third' }))).toEqual({
+    parser.reset();
+    expect(parser.parse(JSON.stringify({ type: 'step_start', sessionID: 'third' }))).toEqual({
       type: 'init',
       sessionId: 'third',
     });

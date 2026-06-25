@@ -15,8 +15,8 @@
 //     the bot's own JID; otherwise the session actor (the human in the chat).
 //   - The configured Pinecone project guard is enforced by PineconeMemory.upsert.
 
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { shortHash } from '../../lib/short-hash.ts';
 import { createChildLogger } from '../../logger.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
 import { errorResult, type ToolDeclaration } from '../types.ts';
@@ -44,7 +44,7 @@ const MemoryWriteSchema = z.object({
 });
 
 function stableId(chatKey: string, memoryType: string, text: string): string {
-  const h = createHash('sha256').update(JSON.stringify([chatKey, memoryType, text])).digest('hex').slice(0, 24);
+  const h = shortHash(JSON.stringify([chatKey, memoryType, text]), 24);
   return `${memoryType}_${h}`;
 }
 
