@@ -548,6 +548,3 @@ export class ChatRuntime implements Runtime {
     );
   }
 }
-
-/** @deprecated Use ChatRuntime instead */
-export const ConversationHandler = ChatRuntime;

@@ -1,7 +1,7 @@
 /**
- * Integration tests for ConversationHandler (src/runtimes/chat/runtime.ts).
+ * Integration tests for ChatRuntime (src/runtimes/chat/runtime.ts).
  *
- * ConversationHandler now implements Runtime and only handles chat-specific
+ * ChatRuntime now implements Runtime and only handles chat-specific
  * processing: rate limiting, media, context/window loading, LLM calls, sending
  * and storing bot replies. Ingest concerns (store incoming, admin routing,
  * access policy) are tested in tests/core/ingest.test.ts.
@@ -119,7 +119,7 @@ import { loadContext } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
-import { ConversationHandler } from '../../../src/runtimes/chat/runtime.ts';
+import { ChatRuntime } from '../../../src/runtimes/chat/runtime.ts';
 import { jitteredDelay } from '../../../src/core/retry.ts';
 
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ function makeHandler() {
   const pinecone = makePinecone();
   const primary = makePrimaryProvider();
   const fallback = makeFallbackProvider();
-  const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback);
+  const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback);
   return { handler, db, messenger, pinecone, primary, fallback };
 }
 
@@ -256,7 +256,7 @@ function makeHandler() {
  * Use for tests that need processMessage() to complete.
  */
 async function handleAndDrain(
-  handler: InstanceType<typeof ConversationHandler>,
+  handler: InstanceType<typeof ChatRuntime>,
   msg: IncomingMessage,
 ): Promise<void> {
   await handler.handleMessage(msg);
@@ -1009,7 +1009,7 @@ describe('Runtime interface', () => {
     const pinecone = makePinecone();
     const primary = makePrimaryProvider();
     const fallback = makeFallbackProvider();
-    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+    const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback, {
       enableEnrichment: false,
     });
     await handler.start();
@@ -1039,7 +1039,7 @@ describe('Identity injection', () => {
     const pinecone = makePinecone();
     const primary = makePrimaryProvider();
     const fallback = makeFallbackProvider();
-    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, options);
+    const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback, options);
 
     await handleAndDrain(handler, makeIncomingMessage());
 
@@ -1178,7 +1178,7 @@ describe('ChatRuntime — no MCP socket leakage (Gap #104)', () => {
 
     // Should not throw — no socket-server side-effect
     expect(
-      () => new ConversationHandler(db, messenger, pinecone, provider, provider, { enableEnrichment: false }),
+      () => new ChatRuntime(db, messenger, pinecone, provider, provider, { enableEnrichment: false }),
     ).not.toThrow();
   });
 });
@@ -1409,7 +1409,7 @@ describe('getHealthSnapshot degraded paths', () => {
     const primary = makePrimaryProvider();
     const fallback = makeFallbackProvider();
     // Inject a custom ChatQueue mock that reports queuedChats > 0
-    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+    const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback, {
       enableEnrichment: false,
     });
     // Monkey-patch the chatQueue stats to simulate backlog
@@ -1430,7 +1430,7 @@ describe('getHealthSnapshot degraded paths', () => {
     const pinecone = makePinecone();
     const primary = makePrimaryProvider();
     const fallback = makeFallbackProvider();
-    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+    const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback, {
       enableEnrichment: true, // poller created
     });
     // Set lastRunAt to a time well past the stale threshold (15 minutes ago)
@@ -1450,7 +1450,7 @@ describe('getHealthSnapshot degraded paths', () => {
     const pinecone = makePinecone();
     const primary = makePrimaryProvider();
     const fallback = makeFallbackProvider();
-    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+    const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback, {
       enableEnrichment: true,
     });
     const recentTime = new Date(Date.now() - 30 * 1000).toISOString(); // 30s ago = fresh
@@ -1808,7 +1808,7 @@ describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
     const db = makeDb();
     const messenger2 = makeMessenger();
     const pinecone = makePinecone();
-    const handler2 = new ConversationHandler(db, messenger2, pinecone, primary as unknown as LLMProvider, fallback, {
+    const handler2 = new ChatRuntime(db, messenger2, pinecone, primary as unknown as LLMProvider, fallback, {
       enableEnrichment: false,
     });
     vi.mocked(fallback.generate).mockResolvedValue({
