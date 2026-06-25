@@ -43,9 +43,9 @@
     {
       "host": "gupta",
       "role": "bot-host",
-      "guiSessionExpected": "always_aqua",
+      "guiSessionExpected": "best_effort",
       "profile": "gupta.json",
-      "collectorRemote": true,
+      "collectorRemote": false,
       "instances": [
         {
           "name": "clanka",
