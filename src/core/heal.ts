@@ -16,7 +16,7 @@ const log = createChildLogger('heal');
 
 const MAX_ATTEMPTS = 2;
 const RESOLUTION_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
-const GLOBAL_VALVE_LIMIT = 5;
+export const GLOBAL_VALVE_LIMIT = 5;
 const GLOBAL_VALVE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const ACTIVE_REPORT_STATES = ['attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued'] as const;
 export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
@@ -310,22 +310,12 @@ export function parseHealContext(raw: string | null): Record<string, unknown> {
  * Get the count of non-queued heal reports created in the past hour.
  * Used by emitHealReport for global valve logging.
  */
-function getGlobalValveCount(db: Database): number {
+export function getGlobalValveCount(db: Database): number {
   const windowMinutes = -Math.floor(GLOBAL_VALVE_WINDOW_MS / 60_000);
   return (db.raw.prepare(`
     SELECT COUNT(*) as cnt FROM heal_reports
     WHERE state != 'queued' AND created_at > datetime('now', ? || ' minutes')
   `).get(`${windowMinutes}`) as { cnt: number }).cnt;
-}
-
-/**
- * Check whether the global valve allows a new heal report to be emitted.
- *
- * Returns true (allowed) if fewer than GLOBAL_VALVE_LIMIT non-queued reports
- * have been created in the past hour.
- */
-export function checkGlobalValve(db: Database): boolean {
-  return getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT;
 }
 
 /**

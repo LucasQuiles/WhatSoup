@@ -73,7 +73,8 @@ import {
   getActiveReportForClass,
   dequeueNextReport,
   reconcileStaleHealReports,
-  checkGlobalValve,
+  getGlobalValveCount,
+  GLOBAL_VALVE_LIMIT,
   parseHealContext,
 } from '../../src/core/heal.ts';
 
@@ -494,10 +495,10 @@ describe('dequeueNextReport', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 12 & 13. checkGlobalValve
+// 12 & 13. global valve count (getGlobalValveCount vs GLOBAL_VALVE_LIMIT)
 // ---------------------------------------------------------------------------
 
-describe('checkGlobalValve', () => {
+describe('global valve gate', () => {
   it('returns true when under the limit', () => {
     const db = makeDb();
 
@@ -509,7 +510,7 @@ describe('checkGlobalValve', () => {
       `).run(randomUUID());
     }
 
-    expect(checkGlobalValve(db)).toBe(true);
+    expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(true);
   });
 
   it('returns false at the limit', () => {
@@ -523,7 +524,7 @@ describe('checkGlobalValve', () => {
       `).run(randomUUID());
     }
 
-    expect(checkGlobalValve(db)).toBe(false);
+    expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(false);
   });
 
   it('emits an operational alert when the global valve suppresses a new report', () => {
@@ -567,7 +568,7 @@ describe('checkGlobalValve', () => {
       `).run(randomUUID());
     }
 
-    expect(checkGlobalValve(db)).toBe(true);
+    expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(true);
   });
 
   it('does not count old reports (outside the 1-hour window) toward the limit', () => {
@@ -581,7 +582,7 @@ describe('checkGlobalValve', () => {
       `).run(randomUUID());
     }
 
-    expect(checkGlobalValve(db)).toBe(true);
+    expect(getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT).toBe(true);
   });
 });
 

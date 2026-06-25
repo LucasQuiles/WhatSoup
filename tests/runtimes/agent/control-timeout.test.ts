@@ -138,7 +138,7 @@ vi.mock('../../../src/core/heal.ts', () => ({
   handleHealComplete: vi.fn(),
   handleHealEscalate: vi.fn(),
   getActiveReportForClass: vi.fn(() => null),
-  checkGlobalValve: vi.fn(() => true),
+  getGlobalValveCount: vi.fn(() => 0),
   // Faithful stand-in for the real guarded parse (tests feed valid JSON).
   parseHealContext: vi.fn((raw: string | null) => {
     if (!raw) return {};
