@@ -116,6 +116,17 @@ function mapPortError(
 // ---------------------------------------------------------------------------
 const DEDUPE_CAP = 1000;
 
+// Post-record eviction: trim the seen set back to DEDUPE_CAP by removing the
+// oldest entries (first inserted, by insertion-order of Set). Shared by both
+// dedupe seams (handleInboundRecord, handleTranscript) so the trim policy
+// cannot drift between them.
+function trimSeenSet(seen: Set<string>): void {
+  for (const oldest of seen) {
+    if (seen.size <= DEDUPE_CAP) break;
+    seen.delete(oldest);
+  }
+}
+
 const DEFAULT_PLACE_CALL_TWIML = '<Response><Say>This line is text-first. Please leave a message.</Say></Response>';
 
 // ---------------------------------------------------------------------------
@@ -469,12 +480,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     this.seen.add(record.sid);
     const msg = this.buildInboundMessage(record);
     this.safeEmit(this.listeners.message, msg);
-    // Post-record eviction: trim the seen set to DEDUPE_CAP by removing the
-    // oldest entries (first inserted by insertion-order of Set).
-    for (const oldest of this.seen) {
-      if (this.seen.size <= DEDUPE_CAP) break;
-      this.seen.delete(oldest);
-    }
+    trimSeenSet(this.seen);
     return true;
   }
 
@@ -500,11 +506,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
       transportTimestamp: new Date(),
       ingestSeq: ++this.ingestSeq,
     });
-    // Post-record eviction: trim the seen set to DEDUPE_CAP.
-    for (const oldest of this.seen) {
-      if (this.seen.size <= DEDUPE_CAP) break;
-      this.seen.delete(oldest);
-    }
+    trimSeenSet(this.seen);
     return true;
   }
 
