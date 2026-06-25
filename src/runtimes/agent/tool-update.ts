@@ -5,7 +5,8 @@
  * Extracted verbatim from runtime.ts module scope (module-level FILE-reduction slice
  * of the god-class decomposition; behavior unchanged — pure relocation). buildToolUpdate
  * is re-exported by runtime.ts to preserve the original public surface; humanizeError is
- * imported back by runtime.ts's classifyToolError.
+ * called internally here by classifyToolError (which also lives in this module) and is
+ * not referenced by runtime.ts.
  */
 
 /** Max chars of tool-failure error text included in an operator alert excerpt. */
