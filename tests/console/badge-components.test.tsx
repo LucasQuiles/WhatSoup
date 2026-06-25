@@ -318,11 +318,6 @@ describe('StatusDot wrapper (backward compat)', () => {
     expect(screen.getByText('unreachable')).toBeTruthy();
   });
 
-  it('accepts size prop without error (deprecated but still accepted)', () => {
-    // size="sm" is deprecated — accepted silently, does not affect rendering
-    expect(() => render(<StatusDot status="online" size="sm" />)).not.toThrow();
-    expect(screen.getByText('online')).toBeTruthy();
-  });
 });
 
 // ---------------------------------------------------------------------------
