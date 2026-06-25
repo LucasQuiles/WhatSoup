@@ -12,6 +12,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { AdminCommand } from './command-router.ts';
+import { sleep } from './retry.ts';
 
 const log = createChildLogger('admin');
 
@@ -155,7 +156,7 @@ export async function handleAdminCommand(
         await handleMessageFn(incomingMsg);
         // Throttle between replayed messages to avoid flooding
         if (config.adminReplayDelayMs > 0) {
-          await new Promise(r => setTimeout(r, config.adminReplayDelayMs));
+          await sleep(config.adminReplayDelayMs);
         }
       }
     } else {
