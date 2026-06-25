@@ -156,7 +156,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "a623cea3f40a5ad58b040a55930663cc7208decd4ecb1735950f2971339cede1",
+      "sha256": "9ca62e79bdebbd7767275a91dc3b6a764a18651391dc242d19d3a94eef79a97d",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",

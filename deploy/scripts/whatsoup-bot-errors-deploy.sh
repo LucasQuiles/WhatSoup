@@ -28,7 +28,7 @@ FILES=(
   "deploy/scripts/bot-errors-emit.py:bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad"
   "deploy/scripts/bot-errors-runner.py:f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030"
   "deploy/scripts/lib/__init__.py:438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
-  "deploy/scripts/lib/bot_errors_redaction.py:a623cea3f40a5ad58b040a55930663cc7208decd4ecb1735950f2971339cede1"
+  "deploy/scripts/lib/bot_errors_redaction.py:9ca62e79bdebbd7767275a91dc3b6a764a18651391dc242d19d3a94eef79a97d"
   "deploy/scripts/lib/bot_errors_daily_health.py:45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
 )
 
