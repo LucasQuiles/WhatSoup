@@ -588,7 +588,7 @@ describe('chat-management tools', () => {
     it('enforce mode blocks a forward to a cold target before any sock.sendMessage', async () => {
       const { config } = await import('../../../src/config.ts');
       const original = config.outboundIdentityMode;
-      config.outboundIdentityMode = 'enforce';
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = 'enforce';
       try {
         // 333@s.whatsapp.net has no contact / no access / no inbound — cold.
         const result = await registry.call(
@@ -600,14 +600,14 @@ describe('chat-management tools', () => {
         expect(result.content[0].text).toMatch(/identity guard blocked/i);
         expect(mockSock.sendMessage).not.toHaveBeenCalled();
       } finally {
-        config.outboundIdentityMode = original;
+        (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
       }
     });
 
     it('log-only mode forwards to a cold target (audit only, no block)', async () => {
       const { config } = await import('../../../src/config.ts');
       const original = config.outboundIdentityMode;
-      config.outboundIdentityMode = 'log-only';
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = 'log-only';
       try {
         const result = await registry.call(
           'forward_message',
@@ -617,7 +617,7 @@ describe('chat-management tools', () => {
         expect(result.isError).toBeUndefined();
         expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
       } finally {
-        config.outboundIdentityMode = original;
+        (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
       }
     });
   });
