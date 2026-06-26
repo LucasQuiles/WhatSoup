@@ -18,7 +18,7 @@ const EXPECTED_TOOLS = [
   'list_beads', 'get_bead', 'update_bead', 'complete_bead', 'cancel_bead',
   'approve_proposal', 'reject_proposal',
   'list_triggers', 'pause_trigger', 'extend_trigger',
-  'get_profile', 'list_entities', 'merge_entities', 'forget_observation',
+  'get_profile', 'list_entities', 'add_alias', 'merge_entities', 'forget_observation',
   'regenerate_vault',
 ];
 
@@ -76,7 +76,7 @@ describe('substrate MCP tools', () => {
     if (existsSync(vaultPath)) rmSync(vaultPath, { recursive: true, force: true });
   });
 
-  it('registers all 19 tools', () => {
+  it('registers all 20 tools', () => {
     const names = registry.listTools(adminSession).map(t => t.name);
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
@@ -514,6 +514,46 @@ describe('substrate MCP tools', () => {
     }, adminSession));
 
     expect(res.entities.map((entity: { canonical_name: string }) => entity.canonical_name)).toEqual(['Alpha Project']);
+  });
+
+  it('add_alias attaches an alias surfaced by get_profile', async () => {
+    const entity = upsertEntity(db.raw, { canonicalName: 'Casey', kind: 'person' });
+
+    const res = parseResult(await registry.call('add_alias', {
+      entity_ref: { entity_id: entity.id },
+      alias: 'cz',
+      alias_kind: 'nickname',
+      source: 'manual',
+    }, adminSession));
+    expect(res).toEqual({ entity_id: entity.id, alias: 'cz', alias_kind: 'nickname' });
+
+    const profile = parseResult(await registry.call('get_profile', {
+      entity_ref: { entity_id: entity.id },
+    }, adminSession));
+    expect(profile.aliases.map((a: { alias: string }) => a.alias)).toContain('cz');
+  });
+
+  it('add_alias returns an error for an unresolvable entity_ref', async () => {
+    const res = await registry.call('add_alias', {
+      entity_ref: { canonical_name: 'Nobody', kind: 'person' },
+      alias: 'ghost',
+      alias_kind: 'handle',
+    }, adminSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/entity not found/i);
+  });
+
+  it('add_alias is admin gated', async () => {
+    const entity = upsertEntity(db.raw, { canonicalName: 'Gated', kind: 'person' });
+    const res = await registry.call('add_alias', {
+      entity_ref: { entity_id: entity.id },
+      alias: 'g',
+      alias_kind: 'nickname',
+    }, guestSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/admin/i);
   });
 
   it('forget_observation reprojects the affected entity profile', async () => {

@@ -20,8 +20,9 @@ import {
 } from '../../core/substrate/triggers.ts';
 import {
   captureObservation, forgetObservation, mergeEntities,
-  getProfile, listEntities,
+  getProfile, listEntities, addAlias, resolveEntityRef,
 } from '../../core/substrate/entities.ts';
+import { errorResult } from '../types.ts';
 import { nowUnixSec } from '../../core/substrate/time.ts';
 import type { EntityRef, TriggerKind } from '../../core/substrate/types.ts';
 import { regenerateVault, projectBead, projectEntity, removeEntityProjection } from '../../core/substrate/vault.ts';
@@ -526,6 +527,39 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
     handler: async (raw) => {
       const p = raw as { kind?: 'person'|'org'|'project'|'place'|'topic'|'other'; text_match?: string; limit?: number };
       return { entities: listEntities(deps.db, { kind: p.kind, textMatch: p.text_match, limit: p.limit }) };
+    },
+  });
+
+  registry.register({
+    name: 'add_alias',
+    description: 'Add an alias (display_name/handle/email/phone/url/nickname/other) to an entity — the write-half of the aliases surface read by get_profile. Duplicate (entity, alias, kind) rows are ignored. Admin only.',
+    scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    schema: z.object({
+      entity_ref: EntityRefSchema,
+      alias: z.string().min(1),
+      // Alias kinds mirror the DB CHECK constraint on entity_aliases.alias_kind
+      // and the AliasKind union, so callers get a clear validation error at the
+      // MCP layer instead of an opaque SQLite CHECK failure at write time.
+      alias_kind: z.enum(['display_name','handle','email','phone','url','nickname','other']),
+      source: z.string().optional(),
+    }),
+    handler: async (raw, session) => {
+      assertAdmin(deps, session);
+      const p = raw as {
+        entity_ref: z.infer<typeof EntityRefSchema>;
+        alias: string;
+        alias_kind: 'display_name'|'handle'|'email'|'phone'|'url'|'nickname'|'other';
+        source?: string;
+      };
+      // addAlias keys on entity_id, so the caller-supplied ref must resolve to a
+      // live entity first. A missing ref is a soft error (toolError envelope),
+      // mirroring the read tools that return null for unknown entities rather
+      // than throwing.
+      const entity = resolveEntityRef(deps.db, toEntityRef(p.entity_ref));
+      if (!entity) return errorResult('entity not found for the supplied entity_ref');
+      addAlias(deps.db, { entityId: entity.id, alias: p.alias, aliasKind: p.alias_kind, source: p.source });
+      projectEntityQuietly(deps, entity.id);
+      return { entity_id: entity.id, alias: p.alias, alias_kind: p.alias_kind };
     },
   });
 
