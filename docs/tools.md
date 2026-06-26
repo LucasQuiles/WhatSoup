@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 163 documented tools, 160 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 165 documented tools, 162 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -20,7 +20,7 @@ Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 163 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 165 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -62,11 +62,11 @@ Complete reference for all 163 MCP tools exposed by WhatSoup. Tools are grouped 
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 1 |
-| [substrate.ts](#substratets) | 19 |
+| [substrate.ts](#substratets) | 21 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **163** |
+| **Total** | **165** |
 
-> The total above (`163`) reflects the full canonical surface — `162` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`165`) reflects the full canonical surface — `164` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -446,6 +446,25 @@ List beads with optional filters.
 
 ---
 
+### get_activity
+
+Return a unified durable-memory timeline of bead events and live entity observations, newest first. Optionally owner-scoped; live-view only (superseded and forgotten observations are excluded). Read only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| owner_jid | string | optional | Restrict the timeline to a single owner JID; omit for all owners. |
+| since | number | optional | Only include activity at or after this Unix-seconds cutoff. |
+| limit | number | optional | Maximum rows, up to 500 (default 100). |
+
+---
+
 ### get_bead
 
 Return a bead and its recent events.
@@ -640,6 +659,26 @@ List entities with optional kind and text-match filters.
 | kind | `"person"` \| `"org"` \| `"project"` \| `"place"` \| `"topic"` \| `"other"` | optional | Entity kind filter. |
 | text_match | string | optional | Text search filter. |
 | limit | number | optional | Maximum rows, up to 500. |
+
+---
+
+### add_alias
+
+Add an alias to an entity — the write-half of the aliases surface read by `get_profile`. Duplicate `(entity, alias, kind)` rows are ignored. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| entity_ref | object | required | Entity reference by id, JID, canonical name, and/or kind. |
+| alias | string | required | Alias text to attach to the entity. |
+| alias_kind | `"display_name"` \| `"handle"` \| `"email"` \| `"phone"` \| `"url"` \| `"nickname"` \| `"other"` | required | Alias kind. |
+| source | string | optional | Provenance of the alias. |
 
 ---
 

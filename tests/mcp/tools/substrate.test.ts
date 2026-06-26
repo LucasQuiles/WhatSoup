@@ -15,10 +15,10 @@ function tmpDir() { return join(tmpdir(), `sub-vault-${randomBytes(8).toString('
 
 const EXPECTED_TOOLS = [
   'create_agent_job', 'create_watch', 'capture_task', 'capture_observation',
-  'list_beads', 'get_bead', 'update_bead', 'complete_bead', 'cancel_bead',
+  'list_beads', 'get_activity', 'get_bead', 'update_bead', 'complete_bead', 'cancel_bead',
   'approve_proposal', 'reject_proposal',
   'list_triggers', 'pause_trigger', 'extend_trigger',
-  'get_profile', 'list_entities', 'merge_entities', 'forget_observation',
+  'get_profile', 'list_entities', 'add_alias', 'merge_entities', 'forget_observation',
   'regenerate_vault',
 ];
 
@@ -76,7 +76,7 @@ describe('substrate MCP tools', () => {
     if (existsSync(vaultPath)) rmSync(vaultPath, { recursive: true, force: true });
   });
 
-  it('registers all 19 tools', () => {
+  it('registers all 21 tools', () => {
     const names = registry.listTools(adminSession).map(t => t.name);
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
@@ -437,6 +437,24 @@ describe('substrate MCP tools', () => {
     expect(res.events.map((event: { event_type: string }) => event.event_type)).toContain('status_change');
   });
 
+  it('get_activity returns a timeline including bead events', async () => {
+    const created = parseResult(await registry.call('capture_task', { title: 'timeline item' }, adminSession));
+
+    const res = parseResult(await registry.call('get_activity', { limit: 50 }, adminSession));
+
+    expect(Array.isArray(res.activity)).toBe(true);
+    const beadEvents = res.activity.filter((r: { source: string }) => r.source === 'bead_event');
+    expect(beadEvents.some((r: { bead_id: number }) => r.bead_id === created.bead_id)).toBe(true);
+  });
+
+  it('get_activity owner_jid filter excludes other owners', async () => {
+    await registry.call('capture_task', { title: 'owned by a', owner_jid: 'owner-a' }, adminSession);
+
+    const res = parseResult(await registry.call('get_activity', { owner_jid: 'owner-b', limit: 50 }, adminSession));
+
+    expect(res.activity.filter((r: { source: string }) => r.source === 'bead_event')).toEqual([]);
+  });
+
   it('capture_observation + get_profile', async () => {
     await registry.call('capture_observation', {
       entity_ref: { canonical_name: 'Alex', kind: 'person' },
@@ -514,6 +532,46 @@ describe('substrate MCP tools', () => {
     }, adminSession));
 
     expect(res.entities.map((entity: { canonical_name: string }) => entity.canonical_name)).toEqual(['Alpha Project']);
+  });
+
+  it('add_alias attaches an alias surfaced by get_profile', async () => {
+    const entity = upsertEntity(db.raw, { canonicalName: 'Casey', kind: 'person' });
+
+    const res = parseResult(await registry.call('add_alias', {
+      entity_ref: { entity_id: entity.id },
+      alias: 'cz',
+      alias_kind: 'nickname',
+      source: 'manual',
+    }, adminSession));
+    expect(res).toEqual({ entity_id: entity.id, alias: 'cz', alias_kind: 'nickname' });
+
+    const profile = parseResult(await registry.call('get_profile', {
+      entity_ref: { entity_id: entity.id },
+    }, adminSession));
+    expect(profile.aliases.map((a: { alias: string }) => a.alias)).toContain('cz');
+  });
+
+  it('add_alias returns an error for an unresolvable entity_ref', async () => {
+    const res = await registry.call('add_alias', {
+      entity_ref: { canonical_name: 'Nobody', kind: 'person' },
+      alias: 'ghost',
+      alias_kind: 'handle',
+    }, adminSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/entity not found/i);
+  });
+
+  it('add_alias is admin gated', async () => {
+    const entity = upsertEntity(db.raw, { canonicalName: 'Gated', kind: 'person' });
+    const res = await registry.call('add_alias', {
+      entity_ref: { entity_id: entity.id },
+      alias: 'g',
+      alias_kind: 'nickname',
+    }, guestSession);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/admin/i);
   });
 
   it('forget_observation reprojects the affected entity profile', async () => {

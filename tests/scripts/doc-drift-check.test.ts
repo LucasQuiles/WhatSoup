@@ -21,6 +21,7 @@ import {
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const currentToolCount = findToolRegistrations(repoRoot).length;
+const currentSubstrateToolCount = findToolRegistrations(repoRoot).filter((r) => r.filePath.endsWith('substrate.ts')).length;
 const currentRawFormControlInventory = findRawFormControlInventory(repoRoot);
 const currentShadowBaselineInventory = findShadowBaselineInventory(repoRoot);
 const currentDesignRegressionCheckCount = findDesignRegressionCheckCount(repoRoot);
@@ -80,8 +81,8 @@ describe('doc drift check', () => {
     writeFileSync(
       staleDoc,
       currentToolsDoc
-        .replace('| [substrate.ts](#substratets) | 19 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **163** |', '| **Total** | **160** |'),
+        .replace('| [substrate.ts](#substratets) | 21 |', '| [substrate.ts](#substratets) | 18 |')
+        .replace('| **Total** | **165** |', '| **Total** | **160** |'),
       'utf8',
     );
 
@@ -93,7 +94,7 @@ describe('doc drift check', () => {
 
     expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
       {
-        actual: 19,
+        actual: currentSubstrateToolCount,
         claimed: 18,
         filePath: staleDoc,
         kind: 'tool-count',
