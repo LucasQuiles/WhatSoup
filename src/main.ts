@@ -30,6 +30,7 @@ import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
 import { createOutboundSendsWriter } from './core/outbound-sends.ts';
+import { SqliteIdentityStore } from './core/outbound-identity/store.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
   handleReaction,
@@ -774,6 +775,8 @@ triggerPoller.start();
 {
   // Inject DB into contacts directory so LID→phone resolution works for @mentions
   connectionManager.contactsDir.setDatabase(db);
+
+  connectionManager.setIdentityStore(new SqliteIdentityStore(db.raw), config.outboundIdentityMode);
 
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages

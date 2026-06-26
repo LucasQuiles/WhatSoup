@@ -6,6 +6,7 @@
 
 import type { EventEmitter } from 'node:events';
 import type { IncomingMessage, Messenger, SubmissionReceipt } from '../core/types.ts';
+import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
 import type { ContactsDirectory } from '../core/mentions.ts';
 import type { PresenceCache } from './presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
@@ -29,6 +30,8 @@ export interface RuntimeConnection extends EventEmitter, Messenger {
   getSocket(): WhatsAppSocket | null;
   /** Returns the current connection state snapshot. Optional — health falls back to botJid. */
   getConnectionState?(): ConnectionStateSnapshot;
+  /** Inject the outbound identity store + guard mode. Wired post-construction in main.ts. */
+  setIdentityStore(store: IdentityStore, mode: GuardMode): void;
   connect(): Promise<void>;
   shutdown(): void;
   sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt>;
