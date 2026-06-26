@@ -15,6 +15,7 @@ import type { IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } f
 import { ContactsDirectory } from '../../core/mentions.ts';
 import { PresenceCache } from '../presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from '../connection.ts';
+import { emptyConnectionStateSnapshot } from './connection-snapshot.ts';
 import type { Subscription } from '../contract/subscription.ts';
 import { toSmsJid, fromSmsJid } from '../../core/jid-constants.ts';
 import type { TwilioWebhookServer } from './webhook-server.ts';
@@ -264,97 +265,11 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   getConnectionState(): ConnectionStateSnapshot {
     const health = this.adapter.state();
     const connected = health.state === 'connected';
-    return {
-      state: connected ? 'connected' : 'disconnected',
+    return emptyConnectionStateSnapshot({
       connected,
-      reconnectAttempts: 0,
-      reconnectPhase: null,
       stateChangedAt: health.since.toISOString(),
-      firstFailureAt: null,
-      lastPingAt: null,
-      lastPongAt: null,
       lastDisconnectReason: health.reasonCode ?? null,
-      lastStatusCode: null,
-      recentDisconnects: {
-        windowMs: 10 * 60 * 1000,
-        count: 0,
-        lastAt: null,
-        lastReason: null,
-        lastStatusCode: null,
-        byReason: {},
-      },
-      credentialLifecycle: {
-        version: 1,
-        redaction: {
-          version: 1,
-          policy: 'sms transport has no WhatsApp credential material; no secrets or phone numbers are exposed',
-        },
-        environment: {
-          instance: 'twilio-sms',
-          host: process.env['HOSTNAME'] ?? 'unknown',
-          pid: process.pid,
-          nodeVersion: process.version,
-          platform: process.platform,
-          arch: process.arch,
-          release: 'unknown',
-          processUptimeSeconds: Math.floor(process.uptime()),
-          osUptimeSeconds: 0,
-          loadavg: [],
-          memory: { freeBytes: 0, totalBytes: 0 },
-          authDir: 'sms_transport_not_applicable',
-          stateRoot: null,
-          dataRoot: null,
-          lockPath: 'sms_transport_not_applicable',
-          healthPort: 0,
-          provider: 'twilio-sms',
-        },
-        currentAuthBond: {
-          status: 'missing',
-          issues: ['sms_transport_no_whatsapp_auth_bond'],
-          authDir: { path: 'sms_transport_not_applicable', exists: false, mode: null, size: null, mtime: null },
-          creds: {
-            path: 'sms_transport_not_applicable',
-            exists: false,
-            mode: null,
-            size: null,
-            mtime: null,
-            hash: null,
-            identityHash: null,
-          },
-          treeHash: null,
-          backup: {
-            root: 'sms_transport_not_applicable',
-            latest: null,
-            latestAt: null,
-            latestReason: null,
-            latestTreeHash: null,
-            lastCaptureAt: null,
-            lastCaptureReason: null,
-            lastCaptureError: null,
-            lastCaptureDeferredAt: null,
-            lastCaptureDeferredReason: null,
-            lastCaptureDeferredAgeMs: null,
-            lastRestoreAt: null,
-            lastRestoreSource: null,
-            lastRestoreError: null,
-          },
-        },
-        latestBaileysVersion: null,
-        connectStartedAt: null,
-        lastOpenAt: connected ? health.since.toISOString() : null,
-        lastCloseAt: connected ? null : health.since.toISOString(),
-        lastQrAt: null,
-        lastCredsUpdateAt: null,
-        lastCredsUpdateFailedAt: null,
-        lastAuthSnapshotAt: null,
-        lastAuthSnapshotFailedAt: null,
-        credsUpdateCount: 0,
-        authSnapshotCaptureCount: 0,
-        authSnapshotFailureCount: 0,
-        lastDisconnectDiagnostic: null,
-        recentEvents: [],
-      },
-    };
+    });
   }
 
   /**
