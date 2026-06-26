@@ -73,9 +73,11 @@ export class OutboundIdentityError extends Error {
 
 /**
  * Call-site helper: run the guard, audit every non-allow decision, and throw on
- * block. Synchronous (node:sqlite is sync). A store read failure is caught and
- * mapped to fail-open with a loud STORE_UNAVAILABLE audit — a later effort adds
- * the explicit retry; this baseline already fails open rather than closed.
+ * block. Synchronous (node:sqlite is sync). A store read failure is retried once
+ * (node:sqlite's busy_timeout already waited up to 5s, so one more attempt covers
+ * a checkpoint-truncate blip); only if the retry also throws does it fail open
+ * with a loud STORE_UNAVAILABLE audit. A cold target is blocked only on a
+ * SUCCESSFUL read — a transient DB blip never becomes a blocked send.
  */
 export function applyOutboundIdentityGuard(
   chatJid: string,
@@ -85,13 +87,19 @@ export function applyOutboundIdentityGuard(
   if (store === null) return; // not yet wired (e.g. early boot) — do not block.
   let decision: Decision;
   try {
-    decision = assertOutboundIdentity(chatJid, opts, store);
+    try {
+      decision = assertOutboundIdentity(chatJid, opts, store);
+    } catch {
+      // node:sqlite busy_timeout already waited up to 5s; one more attempt
+      // covers a checkpoint-truncate blip. Persistent failure → fail open.
+      decision = assertOutboundIdentity(chatJid, opts, store);
+    }
   } catch (err) {
     guardLog.warn(
       { chatJid, caller: opts.caller, mode: opts.mode, err: (err as Error).message },
       'outbound identity store unavailable — failing open (STORE_UNAVAILABLE)',
     );
-    return; // fail-open
+    return; // fail-open: never convert a DB blip into a blocked primary reply path
   }
   if (decision.verdict === 'allow') return;
   guardLog.warn(
