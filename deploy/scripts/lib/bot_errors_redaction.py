@@ -15,12 +15,18 @@ AUTHORIZATION_KEYED_RE = re.compile(
     re.IGNORECASE,
 )
 BEARER_VALUE_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+# C1 (ReDoS): the `api[_-]?key` alternative bounds its optional prefix/suffix
+# wildcards to `[A-Za-z0-9_.-]{0,20}` instead of unbounded `*`. The prefix group
+# already anchors the key start; the `*` form backtracked quadratically on dotted
+# input (e.g. `1.1.1.…`). The bound still catches `x-api-key`/`apikey`/`x_api_key`.
+# C3 (`token=Bearer <secret>` leak): the VALUE capture optionally consumes a
+# leading `Bearer `/`Basic ` scheme so the whole token is masked.
 KEYED_SECRET_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
-    r"([\"']?(?:(?:[A-Za-z0-9_.-]*api[_-]?key[A-Za-z0-9_.-]*)|client[_-]?secret|access[_-]?token|"
+    r"([\"']?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|"
     r"refresh[_-]?token|auth[_-]?token|cookie|password|passphrase|secret|session|token|"
     r"pat)[\"']?\s*[:=]\s*[\"']?)"
-    r"([^\s\\,\"';}]+)([\"']?)",
+    r"((?:(?:Bearer|Basic)\s+)?[^\s\\,\"';}]+)([\"']?)",
     re.IGNORECASE,
 )
 CREDENTIAL_PATH_RE = re.compile(
@@ -53,8 +59,17 @@ URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.
 def redact_phone_like_match(match: re.Match[str], marker: str) -> str:
     candidate = match.group(2)
     stripped = candidate.strip()
+    # I1 fix: the dotted-version guard must NOT exempt a phone written in dotted
+    # form (e.g. `212.555.0181`, 10 digits in 3 short groups). A real version
+    # carries a long build/segment number (>= 5 digits) or more than 15 total
+    # digits; a dotted phone has 10–15 digits in short (<= 4 digit) groups. Only
+    # exempt the candidate when it is a real version by that test.
     if re.fullmatch(r"\d+(?:\.\d+){2,}(?:[-+~][A-Za-z0-9.-]+)?", stripped):
-        return match.group(0)
+        runs = re.findall(r"\d+", stripped)
+        total_digits = sum(len(run) for run in runs)
+        longest_run = max((len(run) for run in runs), default=0)
+        if total_digits > 15 or longest_run >= 5:
+            return match.group(0)
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}(?::\d{2}(?::\d{2})?)?)?", stripped):
         return match.group(0)
     digits = re.sub(r"\D", "", candidate)

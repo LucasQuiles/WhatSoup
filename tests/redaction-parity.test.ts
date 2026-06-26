@@ -63,4 +63,19 @@ describe('redaction parity corpus (TS side)', () => {
       expect(redactBotErrorsText(row.input)).toBe(expected);
     });
   }
+
+  // C1 ReDoS guard: the keyed-secret `api[_-]?key` alternative previously wrapped
+  // `api[_-]?key` in unbounded `[A-Za-z0-9_.-]*` wildcards, which backtracked
+  // quadratically on dotted input (~80KB took seconds). The bounded `{0,20}` form
+  // keeps the scan linear. A ~100KB dotted input must redact well under a generous
+  // bound; the fixed redactor finishes in single-digit milliseconds here.
+  it('redacts a ~100KB dotted input without catastrophic backtracking (C1)', () => {
+    const dotted = `1${'.1'.repeat(50000)}`; // ~100KB, no `api`/`key` literal
+    const start = process.hrtime.bigint();
+    const out = redactBotErrorsText(dotted);
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    expect(elapsedMs).toBeLessThan(250);
+    // No secret key matched, so the adversarial input passes through unchanged.
+    expect(out).toBe(dotted);
+  });
 });

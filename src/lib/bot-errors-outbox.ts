@@ -75,18 +75,38 @@ export interface BotErrorsOutboxWrite {
 // alternation mirrors the SSOT exactly. `credential` is RETAINED here even though
 // the SSOT omits it: TS is the safer side (see the `div-credential-eq` corpus
 // row + rationale).
+//
+// Two adversarial-review fixes are folded in (and mirrored in the Python SSOT):
+//   * C1 (ReDoS): the `api[_-]?key` alternative bounds its optional prefix/suffix
+//     wildcards to `[A-Za-z0-9_.-]{0,20}` instead of unbounded `*`. The prefix
+//     group already anchors the key start; the `*` form backtracked quadratically
+//     on dotted input (e.g. `1.1.1.…`). The bound still catches `x-api-key`,
+//     `apikey`, and `x_api_key` while keeping the scan linear.
+//   * C3 (`token=Bearer <secret>` leak): the VALUE capture optionally consumes a
+//     leading `Bearer `/`Basic ` scheme so the whole token is masked (the bare
+//     `[^\s…]+` value stopped at the space after `Bearer`, leaking the secret).
 const SECRETISH_ASSIGNMENT =
-  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:(?:[A-Za-z0-9_.-]*api[_-]?key[A-Za-z0-9_.-]*)|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)([^\s\\,"';}]+)(["']?)/gi;
-const AUTHORIZATION_BEARER = /\bAuthorization:\s*Bearer\s+[^\s"',}]+/gi;
+  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
+// Mirror of the Python SSOT `AUTHORIZATION_BEARER_RE`: an `authorization` header
+// carrying a `Bearer` OR `Basic` scheme. C2 fix — the prior form matched only
+// `Authorization: Bearer …` (capital, colon-only, Bearer-only) and normalised the
+// whole match to a literal, so `authorization: Basic <base64>` leaked verbatim.
+// The captured prefix is preserved (`$1[REDACTED]`) so casing/scheme survive.
+const AUTHORIZATION_BEARER = /\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\"',;}]+/gi;
 // Mirror of the Python SSOT `AUTHORIZATION_KEYED_RE`: a non-Bearer/non-Basic
 // `authorization=<value>` / `authorization: <value>` assignment. Bearer/Basic
-// values are deferred to AUTHORIZATION_BEARER + BEARER_VALUE via the negative
-// lookahead, so this never double-redacts an already-masked bearer header.
+// values are deferred to AUTHORIZATION_BEARER (now Bearer AND Basic) + BEARER_VALUE
+// via the negative lookahead, so this never double-redacts an already-masked
+// authorization header.
 const AUTHORIZATION_KEYED =
   /(^|[^A-Za-z0-9_]|\\n)(["']?authorization["']?\s*[:=]\s*["']?)(?!(?:Bearer|Basic)\s)([^\s\\,"';}]+)(["']?)/gi;
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
+// Mirror of the Python SSOT `WHATSAPP_SERVICE_UNIT_RE`: a systemd/launchd unit
+// name `whatsoup@<digits>.service` embeds the instance phone number, so mask the
+// digit run while keeping the recognizable `whatsoup@…​.service` shape (I2).
+const WHATSAPP_SERVICE_UNIT = /\b(whatsoup@)(\d{8,16})(\.service)?\b/gi;
 const AWS_ACCESS_KEY_ID = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
 const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
@@ -111,7 +131,18 @@ function redactPhoneLike(value: string): string {
       // Mirror of the Python SSOT `redact_phone_like_match` guards: dotted version
       // strings (e.g. `2.3000.1020194169`) and ISO-ish dates/timestamps (e.g.
       // `2026-06-11 10:15:02`) are diagnostics, not phone numbers — never redact.
-      if (/^\d+(?:\.\d+){2,}(?:[-+~][A-Za-z0-9.-]+)?$/.test(stripped)) return match;
+      //
+      // I1 fix: the dotted-version guard must NOT exempt a phone written in dotted
+      // form (e.g. `212.555.0181`, 10 digits in 3 short groups). A real version
+      // carries a long build/segment number (>= 5 digits) or more than 15 total
+      // digits; a dotted phone has 10–15 digits in short (<= 4 digit) groups. Only
+      // exempt the candidate when it is a real version by that test.
+      if (/^\d+(?:\.\d+){2,}(?:[-+~][A-Za-z0-9.-]+)?$/.test(stripped)) {
+        const runs = stripped.match(/\d+/g) ?? [];
+        const totalDigits = runs.reduce((sum, run) => sum + run.length, 0);
+        const longestRun = runs.reduce((max, run) => Math.max(max, run.length), 0);
+        if (totalDigits > 15 || longestRun >= 5) return match;
+      }
       if (/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}(?::\d{2}(?::\d{2})?)?)?$/.test(stripped)) return match;
       const digits = candidate.replace(/\D/g, '');
       const hasPhoneSyntax = stripped.startsWith('+') || /[\s().-]/.test(candidate);
@@ -157,11 +188,12 @@ function redactText(value: string): string {
   return redactPhoneLike(redactCredentialPath(value
     .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]'))
     .replace(jidPattern(), '[REDACTED WHATSAPP JID]')
+    .replace(WHATSAPP_SERVICE_UNIT, (_match, prefix: string, _digits: string, suffix?: string) => `${prefix}[REDACTED PHONE]${suffix ?? ''}`)
     .replace(URL_USERINFO, '$1[REDACTED]@')
     .replace(AWS_ACCESS_KEY_ID, '[REDACTED AWS ACCESS KEY]')
     .replace(GITHUB_TOKEN, '[REDACTED GITHUB TOKEN]')
     .replace(JWT_VALUE, '[REDACTED JWT]')
-    .replace(AUTHORIZATION_BEARER, 'Authorization: Bearer [REDACTED]')
+    .replace(AUTHORIZATION_BEARER, '$1[REDACTED]')
     .replace(AUTHORIZATION_KEYED, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
     .replace(SECRETISH_ASSIGNMENT, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
     .replace(BEARER_VALUE, 'Bearer [REDACTED]'));

@@ -100,10 +100,10 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "8edb55648c5e9cdad4be1d6f48f7d2743ae446c97448349097de0b1f6bc8b76a",
+      "sha256": "692e9be208cc6b304d075ffc57efce881e9e9c86f7b0701266a6f9ddef1b52b1",
       "mustContain": [
         "AUTHORIZATION_BEARER",
-        "Authorization: Bearer [REDACTED]",
+        "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail"
@@ -156,7 +156,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "9ca62e79bdebbd7767275a91dc3b6a764a18651391dc242d19d3a94eef79a97d",
+      "sha256": "d7fd4db66e58f4b4a0e5fd33e60a41d51898963fb3d628d42437822ba7731bc6",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
