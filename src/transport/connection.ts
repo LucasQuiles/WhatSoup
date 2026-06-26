@@ -43,6 +43,8 @@ import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.t
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
+import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
+import { applyOutboundIdentityGuard } from '../core/outbound-identity/guard.ts';
 import { formatMentions, buildLidMappings, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
@@ -573,6 +575,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   /** In-memory cache of the most recent presence status per JID. */
   readonly presenceCache = new PresenceCache();
 
+  private identityStore: IdentityStore | null = null;
+  private identityMode: GuardMode = 'log-only';
+
+  setIdentityStore(store: IdentityStore, mode: GuardMode): void {
+    this.identityStore = store;
+    this.identityMode = mode;
+  }
+
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
   autoRejectCalls = false;
 
@@ -726,6 +736,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
+    applyOutboundIdentityGuard(chatJid, { caller: 'agent', mode: this.identityMode }, this.identityStore);
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
@@ -787,6 +798,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    */
   async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
+    applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
     const autoTyping = typeof content['text'] === 'string' && config.autoTyping !== 'off'
       ? config.autoTyping
       : 'off';
@@ -823,6 +835,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     selectableCount: number,
   ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
+    applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
 
     const result = await withSendTimeout(
       this.sock.sendMessage(chatJid, {
@@ -900,6 +913,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
+    applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
     for (let attempt = 0; ; attempt += 1) {
       this.log.info({ chatJid, mediaType: media.type, attempt }, 'Sending media');
       const upload = mediaUpload(media);

@@ -1067,6 +1067,11 @@ export const config = {
   // Mirroring agentProvider: simple inline read with a default.
   transport: resolvedTransport,
 
+  // Outbound identity guard mode. Staged rollout: default log-only (audit-only,
+  // no behavior change). Per-instance flip to 'enforce' via env.
+  outboundIdentityMode:
+    process.env.WHATSOUP_OUTBOUND_IDENTITY_MODE === 'enforce' ? 'enforce' : 'log-only',
+
   // Twilio SMS config — present only when instance.twilioConfig is set.
   // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.
   twilioConfig: resolvedTwilioConfig,
