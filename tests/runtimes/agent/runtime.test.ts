@@ -699,6 +699,36 @@ describe('AgentRuntime', () => {
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
   });
 
+  it('capDedupeMap evicts oldest-first down to max over an object-valued map (BEAD-050)', () => {
+    // groupMetadataCache holds object values, so capDedupeMap must operate on
+    // Map<string, unknown> (widened from Map<string, number>). Insertion order is
+    // FIFO, so eviction must drop the oldest keys first.
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const cap = (runtime as unknown as {
+      capDedupeMap(map: Map<string, unknown>, max?: number): void;
+    }).capDedupeMap.bind(runtime);
+
+    const map = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
+    for (let i = 0; i < 10; i++) {
+      map.set(`group-${i}@g.us`, { adminJids: new Set([`admin-${i}`]), fetchedAt: i });
+    }
+
+    cap(map, 4);
+
+    expect(map.size).toBe(4);
+    // Oldest six (0..5) evicted; newest four (6..9) retained.
+    expect([...map.keys()]).toEqual([
+      'group-6@g.us',
+      'group-7@g.us',
+      'group-8@g.us',
+      'group-9@g.us',
+    ]);
+
+    // Idempotent when already at/under max.
+    cap(map, 4);
+    expect(map.size).toBe(4);
+  });
+
   it('start() records primary model usability and alerts on unusable primary model', async () => {
     const agentConfig = mockConfig as typeof mockConfig & {
       agentProvider?: string;
