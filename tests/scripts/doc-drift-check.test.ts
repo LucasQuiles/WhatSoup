@@ -81,8 +81,8 @@ describe('doc drift check', () => {
     writeFileSync(
       staleDoc,
       currentToolsDoc
-        .replace('| [substrate.ts](#substratets) | 20 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **164** |', '| **Total** | **160** |'),
+        .replace('| [substrate.ts](#substratets) | 21 |', '| [substrate.ts](#substratets) | 18 |')
+        .replace('| **Total** | **165** |', '| **Total** | **160** |'),
       'utf8',
     );
 

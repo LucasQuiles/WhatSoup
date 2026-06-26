@@ -13,7 +13,7 @@ import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import {
   createBead, updateBead, completeBead, cancelBead,
   approveProposal, rejectProposal, listBeads, getBead,
-  assertMutableBeadFields,
+  assertMutableBeadFields, activityFeed,
 } from '../../core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger, prepareTrigger,
@@ -363,6 +363,23 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       return { beads: listBeads(deps.db, {
         ownerJid: p.owner_jid, kind: p.kind, status: p.status, chatJid: p.chat_jid,
         dueBefore: p.due_before, since: p.since, limit: p.limit,
+      }) };
+    },
+  });
+
+  registry.register({
+    name: 'get_activity',
+    description: 'Return a unified durable-memory timeline of bead events and live entity observations, newest first. Optionally owner-scoped; live-view only (superseded/forgotten observations excluded). Read only.',
+    scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
+    schema: z.object({
+      owner_jid: z.string().optional(),
+      since: z.number().int().positive().optional(),
+      limit: z.number().int().positive().max(500).optional(),
+    }),
+    handler: async (raw) => {
+      const p = raw as { owner_jid?: string; since?: number; limit?: number };
+      return { activity: activityFeed(deps.db, {
+        ownerJid: p.owner_jid, since: p.since, limit: p.limit,
       }) };
     },
   });
