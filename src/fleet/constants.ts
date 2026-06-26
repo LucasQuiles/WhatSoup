@@ -27,3 +27,6 @@ export const DEFAULT_INSTANCE_HEALTH_PORT = 9090;
  */
 export const INSTANCE_HEALTH_PORT_MIN = 9090;
 export const INSTANCE_HEALTH_PORT_MAX = 9098;
+
+/** Valid `range` query tokens accepted by the fleet metrics endpoints. */
+export const VALID_METRICS_RANGES = new Set(['24h', '7d', '30d']);

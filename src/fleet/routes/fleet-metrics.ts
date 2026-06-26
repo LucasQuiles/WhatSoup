@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString } from '../../lib/http.ts';
+import { VALID_METRICS_RANGES as VALID_RANGES } from '../constants.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -10,8 +11,6 @@ export interface FleetMetricsDeps {
   discovery: FleetDiscovery;
   dbReader: FleetDbReader;
 }
-
-const VALID_RANGES = new Set(['24h', '7d', '30d']);
 
 /**
  * GET /api/metrics?range=24h|7d|30d
