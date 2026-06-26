@@ -8,7 +8,7 @@ const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 // path boundary (`~` or `/`) rather than a nested `(?:~|/[^...]+)*` quantifier. The old form
 // backtracked exponentially on `/!/!/...`-style input (CodeQL js/redos); this form is linear
 // while still redacting the entire path (parent dirs included) so usernames are not leaked.
-const CREDENTIAL_PATH = /(?:[~/][^\s"',}]*)?(?:\.config\/whatsoup\/[^\s"',}]+|\.local\/share\/whatsoup\/instances\/[^\s"',}]*\/auth(?:\/[^\s"',}]*)?|auth-bond-backups\/[^\s"',}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env))\b/gi;
+const CREDENTIAL_PATH = /(?:[~/][^\s"',}]*)?(?:\.config\/secrets\/[^\s"',}]+|\.config\/whatsoup\/[^\s"',}]+|\.local\/share\/whatsoup\/instances\/[^\s"',}]*\/auth(?:\/[^\s"',}]*)?|auth-bond-backups\/[^\s"',}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s"',}]+)?))\b/gi;
 
 export function redactAuthCliText(value: unknown): string {
   return String(value ?? '')
