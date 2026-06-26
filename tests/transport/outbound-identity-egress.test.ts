@@ -65,3 +65,40 @@ describe('ConnectionManager egress is guarded', () => {
     expect(sock.sendMessage).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('outbound identity guard — incident regression', () => {
+  it('enforce mode blocks the original cold-LID mis-send state', async () => {
+    // Reconstruct the incident's structural state: lid_mapping present, but no
+    // contact, no access, no inbound — a cold LID that must be floored.
+    const db = new Database(':memory:');
+    db.open();
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000402', '15550009999@s.whatsapp.net');
+
+    const cm = new ConnectionManager();
+    cm.setIdentityStore(new SqliteIdentityStore(db.raw), 'enforce');
+    const sock = { sendMessage: vi.fn(async () => ({ key: { id: 'x' } })), sendPresenceUpdate: vi.fn(async () => {}) };
+    // @ts-expect-error -- minimal fake socket for egress spying; expires 2099-12-31
+    cm.sock = sock;
+
+    await expect(cm.sendMessage('11111110000402@lid', 'status update…'))
+      .rejects.toMatchObject({ guardCode: 'COLD_TARGET' });
+    expect(sock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('log-only mode would NOT block the same state (audit only)', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000402', '15550009999@s.whatsapp.net');
+
+    const cm = new ConnectionManager();
+    cm.setIdentityStore(new SqliteIdentityStore(db.raw), 'log-only');
+    const sock = { sendMessage: vi.fn(async () => ({ key: { id: 'x' } })), sendPresenceUpdate: vi.fn(async () => {}) };
+    // @ts-expect-error -- minimal fake socket for egress spying; expires 2099-12-31
+    cm.sock = sock;
+
+    await cm.sendMessage('11111110000402@lid', 'status update…');
+    expect(sock.sendMessage).toHaveBeenCalledTimes(1); // sent, but the warn audit fired
+  });
+});
