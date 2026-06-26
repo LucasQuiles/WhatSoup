@@ -24,6 +24,7 @@ class FakeConnection extends EventEmitter {
   sendRaw = vi.fn(async () => ({ waMessageId: 'raw-1' }));
   sendPollMessage = vi.fn(async () => ({ waMessageId: 'poll-1', hasSecret: false }));
   getSocket = vi.fn(() => null);
+  setIdentityStore = vi.fn();
 }
 
 function runtimeStub() {
