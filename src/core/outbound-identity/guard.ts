@@ -1,6 +1,6 @@
 // src/core/outbound-identity/guard.ts
 // Outbound identity guard — pure decision function over an injected IdentityStore.
-// Decision order (spec §4.2): A group → B system caller → C cold floor → E allow.
+// Decision order (spec §4.2): B system caller → A group → LID resolve → C cold floor → E allow.
 // Step D (expect: verified-alias) is a later, separate effort and intentionally absent here.
 
 import { bareNumber, isLidJid, isGroupJid } from '../jid-constants.ts';
@@ -24,14 +24,17 @@ export function assertOutboundIdentity(
   opts: GuardOpts,
   store: IdentityStore,
 ): Decision {
-  // A. Group — placeholder: allow. A later task tightens this to UNKNOWN_GROUP.
-  if (isGroupJid(chatJid)) {
+  // B. System/infra caller — never floored (applies to DMs and groups).
+  if (SYSTEM_CALLERS.has(opts.caller)) {
     return { verdict: 'allow' };
   }
 
-  // B. System/infra caller — never floored, audited by the caller.
-  if (SYSTEM_CALLERS.has(opts.caller)) {
-    return { verdict: 'allow' };
+  // A. Group classification — known group allowed, unknown group floored.
+  if (isGroupJid(chatJid)) {
+    if (store.isKnownGroup(chatJid)) {
+      return { verdict: 'allow' };
+    }
+    return applyMode('UNKNOWN_GROUP', `unknown group ${chatJid}`, opts.mode);
   }
 
   // Identity resolution → phone JID.

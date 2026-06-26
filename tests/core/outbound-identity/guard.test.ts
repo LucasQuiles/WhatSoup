@@ -61,3 +61,29 @@ describe('assertOutboundIdentity — plain phone jid', () => {
     expect(d).toEqual({ verdict: 'block', code: 'COLD_TARGET', reason: expect.any(String) });
   });
 });
+
+describe('assertOutboundIdentity — group classification', () => {
+  it('known group → allow', () => {
+    const store = fakeStore({ isKnownGroup: () => true });
+    const d = assertOutboundIdentity('1111111000000001@g.us', { caller: 'mcp', mode: 'enforce' }, store);
+    expect(d).toEqual({ verdict: 'allow' });
+  });
+
+  it('enforce: unknown group → block/UNKNOWN_GROUP', () => {
+    const store = fakeStore({ isKnownGroup: () => false });
+    const d = assertOutboundIdentity('1111111000000002@g.us', { caller: 'mcp', mode: 'enforce' }, store);
+    expect(d).toEqual({ verdict: 'block', code: 'UNKNOWN_GROUP', reason: expect.any(String) });
+  });
+
+  it('log-only: unknown group → warn/UNKNOWN_GROUP', () => {
+    const store = fakeStore({ isKnownGroup: () => false });
+    const d = assertOutboundIdentity('1111111000000002@g.us', { caller: 'mcp', mode: 'log-only' }, store);
+    expect(d).toEqual({ verdict: 'warn', code: 'UNKNOWN_GROUP', reason: expect.any(String) });
+  });
+
+  it('system caller to unknown group → allow (infra bypass precedes group block)', () => {
+    const store = fakeStore({ isKnownGroup: () => false });
+    const d = assertOutboundIdentity('1111111000000002@g.us', { caller: 'report-channel', mode: 'enforce' }, store);
+    expect(d).toEqual({ verdict: 'allow' });
+  });
+});
