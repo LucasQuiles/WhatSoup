@@ -82,6 +82,19 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
+| `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
+
+#### Enabling enforce mode
+
+Default is `log-only` (audit only). After an instance's logs show the warm-set
+covers legitimate traffic (only genuine cold/unknown would-blocks remain), flip:
+
+    WHATSOUP_OUTBOUND_IDENTITY_MODE=enforce
+
+in that instance's environment, then restart the instance. Audit events are
+structured logs from the `outbound-identity` child logger (`code`, `reason`,
+`verdict`, `caller`). Infra callers (`health`, `scheduler`, `reply-guarantee`,
+`report-channel`) are never floored regardless of mode.
 
 ### Storage Paths (single-instance / legacy mode only)
 
