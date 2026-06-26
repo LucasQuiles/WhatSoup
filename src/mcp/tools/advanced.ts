@@ -10,6 +10,8 @@ import { resetEnrichmentErrors } from '../../core/messages.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
+import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
+import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 
 const log = createChildLogger('advanced-tools');
 
@@ -219,17 +221,36 @@ const advancedConfigs: SockToolConfig<any>[] = [
       return { synced: true, collections };
     },
   },
-  {
+];
+
+// ---------------------------------------------------------------------------
+// relay_message — raw-socket free-recipient egress; needs db for the identity
+// guard, so it is a db-aware factory (mirrors reset_enrichment_errors) rather
+// than a sock-only config. Disabled by default; guarded before it can be enabled.
+// ---------------------------------------------------------------------------
+
+const RelayMessageSchema = z.object({
+  jid: z.string().describe('Recipient JID'),
+  proto: z.record(z.unknown()).describe('Raw protobuf message as a JSON object'),
+  opts: RelayMessageOptsSchema.optional().describe('Optional relay options'),
+});
+
+function makeRelayMessage(
+  getSock: () => ExtendedBaileysSocket | null,
+  db?: Database,
+): ToolDeclaration {
+  return {
     name: 'relay_message',
     description:
       'Low-level: relay a raw protobuf message to a JID. Use only for advanced protocol operations (global).',
-    schema: z.object({
-      jid: z.string().describe('Recipient JID'),
-      proto: z.record(z.unknown()).describe('Raw protobuf message as a JSON object'),
-      opts: RelayMessageOptsSchema.optional().describe('Optional relay options'),
-    }),
+    schema: RelayMessageSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
-    call: async ({ jid, proto, opts }, sock) => {
+    handler: async (params) => {
+      const { jid, proto, opts } = RelayMessageSchema.parse(params);
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
       if (!config.advanced.enableRelayMessage) {
         throw new Error('relay_message is disabled. Set advanced.enableRelayMessage: true in instance config to enable.');
       }
@@ -242,13 +263,26 @@ const advancedConfigs: SockToolConfig<any>[] = [
       if (payloadSize > config.advanced.relayMaxPayloadBytes) {
         throw new Error(`Payload too large: ${payloadSize} bytes (max ${config.advanced.relayMaxPayloadBytes})`);
       }
+      // Outbound identity floor: guard the free-recipient egress before relaying.
+      applyOutboundIdentityGuard(
+        jid,
+        { caller: 'mcp', mode: config.outboundIdentityMode },
+        db ? new SqliteIdentityStore(db.raw) : null,
+      );
       // Audit log
       log.warn({ jid, protoKeys: Object.keys(proto), payloadSize }, 'relay_message invoked');
-      const result = await sock.relayMessage(jid, proto, opts ?? {});
+      // The relay schema is intentionally looser than Baileys' message/options
+      // types (this is a low-level passthrough); cast to the socket's parameter
+      // types, mirroring the prior SockToolConfig<any> erasure.
+      const result = await sock.relayMessage(
+        jid,
+        proto as Parameters<ExtendedBaileysSocket['relayMessage']>[1],
+        (opts ?? {}) as Parameters<ExtendedBaileysSocket['relayMessage']>[2],
+      );
       return { relayed: true, jid, result: result ?? null };
     },
-  },
-];
+  };
+}
 
 // ---------------------------------------------------------------------------
 // reset_enrichment_errors (admin tool — uses db, not sock)
@@ -291,6 +325,11 @@ export function registerAdvancedTools(
 ): void {
   registerSockTools(getSock, advancedConfigs, register);
   // Note: fetch_message_history already exists in chat-operations.ts (Wave 2). Skipped here.
+
+  // relay_message: db-aware so the identity guard can read the warm set. When db
+  // is omitted the guard falls back to a null store (no block) — same behavior
+  // as before this tool was guarded.
+  register(makeRelayMessage(getSock, db));
 
   // Admin tools (require DB)
   if (db) {

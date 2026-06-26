@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { TwilioConnection } from '../../src/transport/twilio/connection-bridge.ts';
 import { SqliteIdentityStore } from '../../src/core/outbound-identity/store.ts';
 import { Database } from '../../src/core/database.ts';
 import { OutboundIdentityError } from '../../src/core/outbound-identity/guard.ts';
@@ -100,5 +101,27 @@ describe('outbound identity guard — incident regression', () => {
 
     await cm.sendMessage('11111110000402@lid', 'status update…');
     expect(sock.sendMessage).toHaveBeenCalledTimes(1); // sent, but the warn audit fired
+  });
+});
+
+describe('cross-transport — TwilioConnection egress is guarded', () => {
+  it('TwilioConnection.sendMessage to a cold target throws before adapter.sendText', async () => {
+    const sendText = vi.fn(async () => ({ id: 'sms1' }));
+    const adapter = {
+      capabilities: { channel: 'sms' },
+      sendText,
+      connect: vi.fn(async () => {}),
+      disconnect: vi.fn(async () => {}),
+      selfRef: () => ({ id: '+15550000000' }),
+      on: vi.fn(() => ({ dispose: vi.fn() })),
+    };
+    // @ts-expect-error -- minimal adapter fake for egress spying; expires 2099-12-31
+    const tc = new TwilioConnection(adapter);
+    tc.setIdentityStore(coldStore(), 'enforce');
+
+    await expect(tc.sendMessage('11111110000402@lid', 'hi')).rejects.toBeInstanceOf(
+      OutboundIdentityError,
+    );
+    expect(sendText).not.toHaveBeenCalled();
   });
 });
