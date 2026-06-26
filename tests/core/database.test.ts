@@ -363,6 +363,50 @@ describe('FTS5 triggers', () => {
     db.raw.prepare('DELETE FROM messages WHERE pk = ?').run(pk);
     expect(ftsMatch('xyzepsilon')).not.toContain(pk);
   });
+
+  // BEAD-061: negative-path coverage for the migration-13 soft-delete trigger's
+  // NULL guard (`messages_fts_soft_delete ... WHEN ... OLD.content_text IS NOT
+  // NULL`, database.ts:640-645). A row with content_text = NULL is never indexed
+  // by the insert trigger (its own NULL guard), so soft-deleting it must NOT fire
+  // a spurious FTS 'delete' for a rowid that has no shadow entry — doing so would
+  // corrupt the FTS5 index. Exclusion of the (orphan) row is instead handled by
+  // the read-time `deleted_at IS NULL` filter. The existing soft-delete test
+  // above always sets content_text, so this branch was untested.
+  it('soft-deleting a NULL content_text row keeps FTS uncorrupted and is excluded by the read-time deleted_at filter', () => {
+    // A co-resident, properly indexed row proves FTS stays usable throughout.
+    const sibling = insertMsg({ content: 'xyzsibling stays searchable', contentText: 'xyzsibling stays searchable' });
+    expect(ftsMatch('xyzsibling')).toContain(sibling);
+
+    // Seed the NULL-content_text row (insert trigger's NULL guard keeps it out of FTS).
+    const nullPk = insertMsg({ content: null, contentText: null });
+
+    // The read-time deleted_at filter still surfaces it while live.
+    const liveBefore = (
+      db.raw
+        .prepare('SELECT pk FROM messages WHERE pk = ? AND deleted_at IS NULL')
+        .all(nullPk) as Array<{ pk: number }>
+    ).map((r) => r.pk);
+    expect(liveBefore).toContain(nullPk);
+
+    // Soft-delete: the trigger's `OLD.content_text IS NOT NULL` guard is false,
+    // so no 'delete' is issued against messages_fts for an unindexed rowid.
+    db.raw.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE pk = ?").run(nullPk);
+
+    // FTS5 integrity check throws if the shadow index was corrupted by a stray
+    // delete; a clean run is the belt-and-suspenders proof of the NULL guard.
+    expect(() => {
+      db.raw.prepare("INSERT INTO messages_fts(messages_fts) VALUES ('integrity-check')").run();
+    }).not.toThrow();
+
+    // Read-time deleted_at filter now neutralizes the (orphan-free) NULL row.
+    const liveAfter = db.raw
+      .prepare('SELECT pk FROM messages WHERE pk = ? AND deleted_at IS NULL')
+      .all(nullPk) as Array<{ pk: number }>;
+    expect(liveAfter).toHaveLength(0);
+
+    // The indexed sibling remains searchable — FTS was untouched by the NULL path.
+    expect(ftsMatch('xyzsibling')).toContain(sibling);
+  });
 });
 
 // ─── Warm-start import ───────────────────────────────────────────────────────

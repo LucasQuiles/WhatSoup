@@ -1260,3 +1260,116 @@ describe('Test 10 — WAL mode and busy_timeout are set before migrations run', 
     db.close();
   });
 });
+
+// ─── Test 11: Crash / ROLLBACK migration atomicity (BEAD-061) ─────────────────
+//
+// database.ts:961-974 wraps each migration in BEGIN / migrateFn / insertVersion /
+// COMMIT, and on any throw runs ROLLBACK + throws WhatSoupError('Migration N
+// failed','DATABASE_ERROR'). Negative-path coverage for that error branch was
+// missing — every existing test exercises only the happy path.
+//
+// `MIGRATIONS` is module-private and `runPendingMigrations()` is a private method
+// closed over it, so a throwing migration cannot be injected through
+// `Database.open()` without modifying src/ (out of scope for a test-only bead).
+// Per the bead's feasibility gate, we instead drive the IDENTICAL
+// BEGIN + migrateFn + insertVersion + COMMIT / ROLLBACK contract against a real
+// in-memory SQLite to characterize the transactional atomicity invariant: a
+// migration that throws mid-run records no version and leaves no partial DDL
+// (SQLite DDL is transactional, so CREATE TABLE inside the failed BEGIN is rolled
+// back). This mirrors the exact loop body of runPendingMigrations().
+describe('Test 11 — a crashing migration rolls back atomically (BEAD-061)', () => {
+  type LocalMigration = [number, (db: DatabaseSync) => void];
+
+  /**
+   * Faithful re-implementation of the database.ts runPendingMigrations() inner
+   * loop (lines 957-975): BEGIN → migrateFn → record version → COMMIT, with
+   * ROLLBACK + rethrow on any error. Kept byte-for-byte equivalent in control
+   * flow so the test characterizes the real migrator's atomicity contract.
+   */
+  function runMigrations(db: DatabaseSync, migrations: LocalMigration[]): void {
+    const applied = new Set<number>(
+      (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(
+        (r) => r.version,
+      ),
+    );
+    const insertVersion = db.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+
+    for (const [version, migrateFn] of migrations) {
+      if (applied.has(version)) continue;
+      try {
+        db.exec('BEGIN');
+        migrateFn(db);
+        insertVersion.run(version);
+        db.exec('COMMIT');
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          // best effort — mirrors database.ts
+        }
+        // Mirrors `throw new WhatSoupError('Migration N failed', 'DATABASE_ERROR', err)`.
+        throw new Error(`Migration ${version} failed`, { cause: err });
+      }
+    }
+  }
+
+  it('throws, leaves schema_migrations max version unchanged, and rolls back partial DDL', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    // Baseline: two clean migrations commit normally.
+    runMigrations(db, [
+      [1, (d) => d.exec('CREATE TABLE t1 (id INTEGER PRIMARY KEY)')],
+      [2, (d) => d.exec('CREATE TABLE t2 (id INTEGER PRIMARY KEY)')],
+    ]);
+    const maxBefore = (
+      db.prepare('SELECT max(version) AS v FROM schema_migrations').get() as { v: number }
+    ).v;
+    expect(maxBefore).toBe(2);
+
+    // Migration 3 emits partial DDL, then throws mid-run (simulated crash).
+    expect(() => {
+      runMigrations(db, [
+        [
+          3,
+          (d) => {
+            d.exec('CREATE TABLE t3_partial (id INTEGER PRIMARY KEY)'); // partial DDL inside BEGIN
+            throw new Error('boom — simulated migration crash');
+          },
+        ],
+      ]);
+    }).toThrow(/Migration 3 failed/);
+
+    // Invariant 1: the failing version is NOT recorded — max is unchanged.
+    const maxAfter = (
+      db.prepare('SELECT max(version) AS v FROM schema_migrations').get() as { v: number }
+    ).v;
+    expect(maxAfter, 'a failed migration must not advance schema_migrations').toBe(2);
+    const v3Row = db.prepare('SELECT version FROM schema_migrations WHERE version = 3').get();
+    expect(v3Row, 'failed version 3 must not be recorded').toBeUndefined();
+
+    // Invariant 2: the partial DDL from the failing migration was rolled back.
+    const partial = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t3_partial'")
+      .get();
+    expect(partial, 'partial DDL from the failed migration must be rolled back').toBeUndefined();
+
+    // The connection remains usable: a subsequent clean migration commits.
+    runMigrations(db, [[3, (d) => d.exec('CREATE TABLE t3 (id INTEGER PRIMARY KEY)')]]);
+    const recovered = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t3'")
+      .get() as { name: string } | undefined;
+    expect(recovered?.name, 'a clean migration after a rollback must still commit').toBe('t3');
+    const v3Recorded = db
+      .prepare('SELECT version FROM schema_migrations WHERE version = 3')
+      .get() as { version: number } | undefined;
+    expect(v3Recorded?.version).toBe(3);
+
+    db.close();
+  });
+});
