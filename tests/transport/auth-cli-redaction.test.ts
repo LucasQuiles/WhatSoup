@@ -55,6 +55,23 @@ describe('auth CLI redaction', () => {
     expect(redactAuthCliText('see word/secrets.env here')).toBe('see word[REDACTED CREDENTIAL PATH] here');
   });
 
+  it('redacts .config/secrets/ and .env* credential paths (BEAD-051)', () => {
+    expect(redactAuthCliText('~/.config/secrets/token')).toBe('[REDACTED CREDENTIAL PATH]');
+    expect(redactAuthCliText('reading /home/testuser/.config/secrets/foo failed')).toBe(
+      'reading [REDACTED CREDENTIAL PATH] failed',
+    );
+    expect(redactAuthCliText('/home/testuser/.env')).toBe('[REDACTED CREDENTIAL PATH]');
+    expect(redactAuthCliText('see /home/testuser/.env.production here')).toBe(
+      'see [REDACTED CREDENTIAL PATH] here',
+    );
+  });
+
+  it('does not over-redact .env-adjacent non-credential paths (BEAD-051)', () => {
+    expect(redactAuthCliText('/home/testuser/.environment')).toBe('/home/testuser/.environment');
+    expect(redactAuthCliText('app.env-old')).toBe('app.env-old');
+    expect(redactAuthCliText('.eslintrc')).toBe('.eslintrc');
+  });
+
   it('completes in linear time on adversarial path-like input (ReDoS guard)', () => {
     // CREDENTIAL_PATH previously used a nested quantifier (`(?:~|/[^...]+)*`) that
     // backtracked exponentially on strings starting with '/' and repeating '!/'.
