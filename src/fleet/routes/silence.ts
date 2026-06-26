@@ -1,12 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readBody } from '../../lib/http.ts';
+import { readBody, jsonResponse } from '../../lib/http.ts';
 import { listActiveSilences, addSilence, removeSilence } from '../silence-manager.ts';
 
 /** GET /api/fleet/silences — list active silences */
 export async function handleGetSilences(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const silences = listActiveSilences();
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ silences }));
+  jsonResponse(res, 200, { silences });
 }
 
 /** POST /api/fleet/silence — add a silence */
@@ -15,8 +14,7 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   try {
     raw = await readBody(req);
   } catch (err) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: (err as Error).message }));
+    jsonResponse(res, 400, { error: (err as Error).message });
     return;
   }
 
@@ -24,8 +22,7 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   try {
     data = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'invalid JSON' }));
+    jsonResponse(res, 400, { error: 'invalid JSON' });
     return;
   }
 
@@ -34,13 +31,11 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
   const reason = data['reason'];
 
   if (typeof instance !== 'string' || !instance) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'instance is required' }));
+    jsonResponse(res, 400, { error: 'instance is required' });
     return;
   }
   if (typeof duration_minutes !== 'number' || duration_minutes <= 0) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'duration_minutes must be a positive number' }));
+    jsonResponse(res, 400, { error: 'duration_minutes must be a positive number' });
     return;
   }
 
@@ -50,8 +45,7 @@ export async function handleAddSilence(req: IncomingMessage, res: ServerResponse
     typeof reason === 'string' ? reason : 'manual silence',
     'fleet-api',
   );
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, rule }));
+  jsonResponse(res, 200, { ok: true, rule });
 }
 
 /** DELETE /api/fleet/silence/:instance — remove a silence */
@@ -62,10 +56,8 @@ export async function handleRemoveSilence(
 ): Promise<void> {
   const removed = removeSilence(params.instance);
   if (!removed) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'no silence found for instance' }));
+    jsonResponse(res, 404, { error: 'no silence found for instance' });
     return;
   }
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true }));
+  jsonResponse(res, 200, { ok: true });
 }

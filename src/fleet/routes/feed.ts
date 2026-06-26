@@ -381,7 +381,7 @@ function logEvidenceUnavailableEvent(inst: DiscoveredInstance, failure: LogReadF
 // ---------------------------------------------------------------------------
 
 /**
- * Coalesce connection lifecycle events per instance within the same second.
+ * Coalesce connection lifecycle events per instance within the same 10-second window.
  * A disconnect/reconnect cycle (error → reconnecting → connecting → connected)
  * becomes one summary card. Also suppresses stream-error duplicates when a
  * richer connection-closed event exists for the same instance+second.
@@ -760,7 +760,7 @@ export function handleGetFeed(
     log.debug({ stats: observability }, 'feed: request summary');
   }
 
-  // 6. Sort descending by time, take the first `limit`
+  // 7. Sort descending by time, take the first `limit`
   deduped.sort((a, b) => (a.time > b.time ? -1 : a.time < b.time ? 1 : 0));
   jsonResponse(res, 200, deduped.slice(0, limit));
 }
