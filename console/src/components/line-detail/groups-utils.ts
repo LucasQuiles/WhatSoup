@@ -1,4 +1,5 @@
 import { statusBadgeStyle } from '../../lib/status-severity.js';
+import { avatarHueIndex } from '../../lib/text-utils.js';
 
 export function roleLabel(admin?: 'admin' | 'superadmin'): string {
   if (admin === 'superadmin') return 'Owner';
@@ -37,8 +38,5 @@ export function settingLabel(key: string): string {
 
 /** Generate a deterministic color from JID */
 export function avatarColor(jid: string): string {
-  let hash = 0
-  for (let i = 0; i < jid.length; i++) hash = ((hash << 5) - hash + jid.charCodeAt(i)) | 0
-  const idx = ((hash % 8) + 8) % 8
-  return `var(--avatar-hue-${idx})`
+  return `var(--avatar-hue-${avatarHueIndex(jid)})`
 }
