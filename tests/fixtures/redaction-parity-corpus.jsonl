@@ -1,0 +1,22 @@
+{"id": "make-client-secret", "class": "make:keyed-secret", "input": "client_secret=abc123XYZ", "expected": "client_secret=[REDACTED]"}
+{"id": "make-access-token", "class": "make:keyed-secret", "input": "access_token: tok_live_9988776655", "expected": "access_token: [REDACTED]"}
+{"id": "make-refresh-token", "class": "make:keyed-secret", "input": "refresh_token=rt-7777", "expected": "refresh_token=[REDACTED]"}
+{"id": "make-auth-token-quoted", "class": "make:keyed-secret", "input": "auth_token = \"aabbccddee\"", "expected": "auth_token = \"[REDACTED]\""}
+{"id": "make-passphrase", "class": "make:keyed-secret", "input": "passphrase: hunter2hunter2", "expected": "passphrase: [REDACTED]"}
+{"id": "make-session", "class": "make:keyed-secret", "input": "session=sess_abcdef123456", "expected": "session=[REDACTED]"}
+{"id": "make-pat", "class": "make:keyed-secret", "input": "pat=p4tABCDEF123456", "expected": "pat=[REDACTED]"}
+{"id": "make-authorization-eq", "class": "make:authorization-keyed", "input": "authorization=abcdef123456ghi", "expected": "authorization=[REDACTED]"}
+{"id": "make-authorization-colon", "class": "make:authorization-keyed", "input": "authorization: tok_abc123XYZ789", "expected": "authorization: [REDACTED]"}
+{"id": "make-version-not-phone", "class": "make:phone-version-guard", "input": "app version 2.3000.1020194169 started", "expected": "app version 2.3000.1020194169 started"}
+{"id": "make-date-not-phone", "class": "make:phone-date-guard", "input": "last seen 2026-06-11 10:15:02 UTC", "expected": "last seen 2026-06-11 10:15:02 UTC"}
+{"id": "base-jid-device-suffix", "class": "baseline:jid", "input": "chat 18459780919:12@s.whatsapp.net disconnected", "expected": "chat [REDACTED WHATSAPP JID] disconnected"}
+{"id": "base-keyed-phone", "class": "baseline:phone-keyed", "input": "phone=+12025550181", "expected": "phone=[REDACTED PHONE]"}
+{"id": "base-context-phone", "class": "baseline:phone-context", "input": "code sent for +12025550181 now", "expected": "code sent for [REDACTED PHONE] now"}
+{"id": "base-url-userinfo", "class": "baseline:url-userinfo", "input": "connecting to https://admin:s3cr3tpw@example.com/db", "expected": "connecting to https://[REDACTED]@example.com/db"}
+{"id": "base-bearer-value", "class": "baseline:bearer", "input": "request Bearer sk-abc123def456GHI", "expected": "request Bearer [REDACTED]"}
+{"id": "base-credential-path", "class": "baseline:credential-path", "input": "loaded ~/.config/secrets/provider.env ok", "expected": "loaded [REDACTED CREDENTIAL PATH] ok"}
+{"id": "base-pem", "class": "baseline:pem", "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIBabc123XYZ\n-----END RSA PRIVATE KEY-----", "expected": "[REDACTED PEM PRIVATE KEY]"}
+{"id": "base-aws", "class": "baseline:aws", "input": "aws AKIAIOSFODNN7EXAMPLE creds", "expected": "aws [REDACTED AWS ACCESS KEY] creds"}
+{"id": "base-github", "class": "baseline:github", "input": "using ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 now", "expected": "using [REDACTED GITHUB TOKEN] now"}
+{"id": "base-jwt", "class": "baseline:jwt", "input": "jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", "expected": "jwt [REDACTED JWT]"}
+{"id": "div-credential-eq", "class": "divergence:credential-eq", "input": "credential=topsecretvalue123", "expected_ts": "credential=[REDACTED]", "expected_py": "credential=topsecretvalue123", "rationale": "TS intentionally masks `credential=<value>` (safer side; BEAD #13 REFUTED weakening). The Python SSOT KEYED_SECRET_RE omits `credential`, so it preserves the value. Encoded as separate per-side expectations rather than a single oracle."}

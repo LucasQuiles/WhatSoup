@@ -66,9 +66,24 @@ export interface BotErrorsOutboxWrite {
   path: string;
 }
 
+// Mirror of the Python SSOT `KEYED_SECRET_RE` (deploy/scripts/lib/bot_errors_redaction.py):
+// the compound keyed-secret set. The previous `\b(api_key|token|secret|...)\b`
+// form could not match `client_secret`/`access_token`/`refresh_token`/`auth_token`
+// (or any `_token`/`_secret` compound) because `_` is a word char, so no `\b`
+// exists between `_` and the bare `token`/`secret` alternative — those compound
+// keys leaked (BEAD-052). The `(^|[^A-Za-z0-9_]|\\n)` prefix group + per-key
+// alternation mirrors the SSOT exactly. `credential` is RETAINED here even though
+// the SSOT omits it: TS is the safer side (see the `div-credential-eq` corpus
+// row + rationale).
 const SECRETISH_ASSIGNMENT =
-  /\b(api[_-]?key|token|secret|password|cookie|credential)\b(\s*[:=]\s*)(["']?)(?:Bearer\s+)?[^\s"',}]+/gi;
+  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:(?:[A-Za-z0-9_.-]*api[_-]?key[A-Za-z0-9_.-]*)|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)([^\s\\,"';}]+)(["']?)/gi;
 const AUTHORIZATION_BEARER = /\bAuthorization:\s*Bearer\s+[^\s"',}]+/gi;
+// Mirror of the Python SSOT `AUTHORIZATION_KEYED_RE`: a non-Bearer/non-Basic
+// `authorization=<value>` / `authorization: <value>` assignment. Bearer/Basic
+// values are deferred to AUTHORIZATION_BEARER + BEARER_VALUE via the negative
+// lookahead, so this never double-redacts an already-masked bearer header.
+const AUTHORIZATION_KEYED =
+  /(^|[^A-Za-z0-9_]|\\n)(["']?authorization["']?\s*[:=]\s*["']?)(?!(?:Bearer|Basic)\s)([^\s\\,"';}]+)(["']?)/gi;
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
@@ -92,8 +107,14 @@ function redactPhoneLike(value: string): string {
     .replace(KEYED_PHONE_LIKE, (_match, key: string, sep: string) => `${key}${sep}[REDACTED PHONE]`)
     .replace(CONTEXT_PHONE_LIKE, (_match, key: string, sep: string) => `${key}${sep}[REDACTED PHONE]`)
     .replace(PHONE_LIKE, (match, prefix: string, candidate: string) => {
+      const stripped = candidate.trim();
+      // Mirror of the Python SSOT `redact_phone_like_match` guards: dotted version
+      // strings (e.g. `2.3000.1020194169`) and ISO-ish dates/timestamps (e.g.
+      // `2026-06-11 10:15:02`) are diagnostics, not phone numbers — never redact.
+      if (/^\d+(?:\.\d+){2,}(?:[-+~][A-Za-z0-9.-]+)?$/.test(stripped)) return match;
+      if (/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}(?::\d{2}(?::\d{2})?)?)?$/.test(stripped)) return match;
       const digits = candidate.replace(/\D/g, '');
-      const hasPhoneSyntax = candidate.trim().startsWith('+') || /[\s().-]/.test(candidate);
+      const hasPhoneSyntax = stripped.startsWith('+') || /[\s().-]/.test(candidate);
       return hasPhoneSyntax && digits.length >= 10 && digits.length <= 15 ? `${prefix}[REDACTED PHONE]` : match;
     });
 }
@@ -141,9 +162,14 @@ function redactText(value: string): string {
     .replace(GITHUB_TOKEN, '[REDACTED GITHUB TOKEN]')
     .replace(JWT_VALUE, '[REDACTED JWT]')
     .replace(AUTHORIZATION_BEARER, 'Authorization: Bearer [REDACTED]')
-    .replace(SECRETISH_ASSIGNMENT, (_match, key: string, sep: string, quote: string) => `${key}${sep}${quote}[REDACTED]`)
+    .replace(AUTHORIZATION_KEYED, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
+    .replace(SECRETISH_ASSIGNMENT, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
     .replace(BEARER_VALUE, 'Bearer [REDACTED]'));
 }
+
+// Stable export for parity testing (`tests/redaction-parity.test.ts`). The
+// internal call sites keep using `redactText` unchanged.
+export { redactText as redactBotErrorsText };
 
 // Intentionally distinct from transport/connection.ts's same-purpose redactor
 // (and deliberately renamed away from its old shared name `redactDiagnosticValue`

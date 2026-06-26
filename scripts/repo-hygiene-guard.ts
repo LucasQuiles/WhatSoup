@@ -55,6 +55,11 @@ const fixtureFiles = new Set([
   'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
   'tests/eslint-rules/categorized-skips.test.ts',
+  // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
+  // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
+  // Python sides. Real credential leaks remain covered by the separate global
+  // pre-commit git-secret-scanner.
+  'tests/fixtures/redaction-parity-corpus.jsonl',
 ]);
 
 // The CAPE agent-runtime probe suite (tools/agent-runtime-probes/) is security/masking tooling:
