@@ -14,6 +14,7 @@ vi.mock('../../../src/config.ts', () => ({
       enableResync: true,
       relayMaxPayloadBytes: 1_048_576,
     },
+    outboundIdentityMode: 'log-only',
   },
 }));
 
@@ -937,5 +938,61 @@ describe('reset_enrichment_errors', () => {
     const result = await registry.call('reset_enrichment_errors', {}, chatSession('111'));
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
+  });
+});
+
+// ===========================================================================
+// relay_message — outbound identity guard (db-aware path)
+// ===========================================================================
+
+describe('relay_message — outbound identity guard', () => {
+  let db: Database;
+  let registry: ToolRegistry;
+  const proto = { conversation: 'hello from relay' };
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    // Cold target: lid maps to a phone, but the phone has no warm signal.
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000402', '15550009999@s.whatsapp.net');
+    registry = new ToolRegistry();
+    registerAdvancedTools(() => makeMockSock(), (tool) => registry.register(tool), db);
+  });
+
+  it('enforce mode blocks a relay to a cold target before sock.relayMessage', async () => {
+    const { config } = await import('../../../src/config.ts');
+    const original = config.outboundIdentityMode;
+    (config as { outboundIdentityMode: string }).outboundIdentityMode = 'enforce';
+    try {
+      const result = await registry.call(
+        'relay_message',
+        { jid: '11111110000402@lid', proto },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/identity guard blocked/i);
+    } finally {
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
+    }
+  });
+
+  it('log-only mode relays to a cold target (audit only, no block)', async () => {
+    const { config } = await import('../../../src/config.ts');
+    const original = config.outboundIdentityMode;
+    (config as { outboundIdentityMode: string }).outboundIdentityMode = 'log-only';
+    try {
+      const result = await registry.call(
+        'relay_message',
+        { jid: '11111110000402@lid', proto },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { relayed: boolean };
+      expect(data.relayed).toBe(true);
+    } finally {
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
+    }
   });
 });

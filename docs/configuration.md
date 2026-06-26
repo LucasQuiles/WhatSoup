@@ -96,6 +96,24 @@ structured logs from the `outbound-identity` child logger (`code`, `reason`,
 `verdict`, `caller`). Infra callers (`health`, `scheduler`, `reply-guarantee`,
 `report-channel`) are never floored regardless of mode.
 
+#### Guarded egresses and out-of-scope direct callers
+
+The guard runs at every free-recipient egress. The five `Messenger` methods
+(`ConnectionManager` `sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
+`TwilioConnection.sendMessage`) are guarded inline. Two MCP tools that reach the
+raw socket directly — `forward_message` and `relay_message` — are **also** routed
+through the guard. `relay_message` is disabled by default
+(`advanced.enableRelayMessage`) and is guarded before it can be enabled.
+
+The following direct callers are intentionally **out of scope**: they are
+fixed-destination, self-profile, or catalog sends with no free recipient, so the
+identity floor does not apply:
+
+- **status broadcast** — posts to the WhatsApp status JID, not a chosen recipient.
+- **send_product / send_product_message** — catalog content to a fixed target.
+- **share_phone_number / request_phone_number** — self-profile exchange, no message body to a cold target.
+- **group invite (send_group_invite)** — invite link delivery, fixed-destination.
+
 ### Storage Paths (single-instance / legacy mode only)
 
 These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
