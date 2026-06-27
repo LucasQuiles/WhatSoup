@@ -328,6 +328,64 @@ describe('idle session eviction — LRU ceiling and poll guard', () => {
     expect(rt.perChatInboundSeqQueue.has('auxchat')).toBe(false);
   });
 
+  it('does NOT suspend an idle session with images buffered mid-coalesce (would drop the images)', async () => {
+    // Regression: image receipt opens a 3s coalesce buffer without setting
+    // pendingTurnText or refreshing lastMessageAt, so an idle/LRU-selected session
+    // could be evicted mid-buffer — cleanupPerChatState aborts the buffer, dropping
+    // the user's images and disarming the reply guarantee.
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 }); // 3h idle
+    const { runtime, sessions } = await seededRuntime({ imgchat: s });
+    (runtime as unknown as { imageCoalesce: { buffers: Map<string, unknown> } })
+      .imageCoalesce.buffers.set('imgchat', { inboundSeqs: [1], timer: null });
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+
+  it('does NOT suspend a session younger than the residency floor (anti-thrash)', async () => {
+    // started 1 min ago (< 5 min floor) but idle 3h — must be kept.
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000, startedAgoMs: 60 * 1000 });
+    const { runtime, sessions } = await seededRuntime({ freshborn: s });
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+
+  it('does NOT suspend the synthetic control session', async () => {
+    // The control-session guard is identity-based (session === this.controlSession),
+    // independent of the map key, so a benign key suffices.
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 });
+    const { runtime, sessions } = await seededRuntime({ ctrlchat: s });
+    (runtime as unknown as { controlSession: unknown }).controlSession = s;
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+
+  it('does NOT suspend an inactive session (active=false)', async () => {
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000, active: false });
+    const { runtime, sessions } = await seededRuntime({ deadchat: s });
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+
+  it('tears down the chat outbound queue (abortTurn + delete) when it suspends a session', async () => {
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 });
+    const { runtime, sessions } = await seededRuntime({ qchat: s });
+    const queue = { abortTurn: vi.fn(), shutdown: vi.fn(async () => {}) };
+    (runtime as unknown as { chatQueues: Map<string, unknown> }).chatQueues.set('qchat', queue);
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(s.shutdown).toHaveBeenCalledWith(true);
+    expect(sessions.has('qchat')).toBe(false);
+    expect(queue.abortTurn).toHaveBeenCalled();
+    expect((runtime as unknown as { chatQueues: Map<string, unknown> }).chatQueues.has('qchat')).toBe(false);
+  });
+
   it('does NOT suspend an idle-beyond-TTL session with a turn mid-dispatch (pendingTurnText)', async () => {
     // Guards the dispatch race: pendingTurnText is set before the session ref is
     // captured for dispatch, so a sweep firing during that window must not evict.

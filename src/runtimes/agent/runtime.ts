@@ -1320,6 +1320,11 @@ export class AgentRuntime implements Runtime {
     // a lingering pending turn only defers eviction, never forces it.
     if (this.pendingTurnText.has(mapKey)) return false;
     if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
+    // Images are buffered for IMAGE_COALESCE_MS before dispatch and do NOT set
+    // pendingTurnText or refresh lastMessageAt — so without this guard an idle/LRU
+    // sweep could evict mid-buffer, and cleanupPerChatState would abort the buffer,
+    // silently dropping the user's images and disarming the reply guarantee.
+    if (this.imageCoalesce.buffers.has(mapKey)) return false;
     const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
     if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
     return true;
@@ -1377,6 +1382,12 @@ export class AgentRuntime implements Runtime {
     log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
     // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
     this.chatSessions.delete(mapKey);
+    // Tear down the chat's outbound queue too (mirrors every other session-removal
+    // site). In per_chat mode the queue sweep never runs, so without this the queue
+    // map grows one dead entry per evicted chat under a burst — undercutting the
+    // memory bound this feature exists to enforce.
+    this.chatQueues.get(mapKey)?.abortTurn();
+    this.chatQueues.delete(mapKey);
     // Canonical teardown of all co-keyed per-chat state (operation tracker,
     // auto-compact timers, image-coalesce buffers, turn bookkeeping). Required
     // whenever a session leaves chatSessions — otherwise eviction leaks the very
