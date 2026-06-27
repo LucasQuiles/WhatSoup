@@ -2,7 +2,7 @@ import type { EventEmitter } from 'node:events';
 
 export interface PostConnectRecoveryOptions {
   connectionManager: Pick<EventEmitter, 'once'>;
-  recover: () => void;
+  recover: () => void | Promise<void>;
   historySyncTimeoutMs?: number;
   echoGraceMs?: number;
 }
@@ -22,5 +22,5 @@ export async function waitForHistorySyncThenRecover({
     delay(historySyncTimeoutMs),
   ]);
   await delay(echoGraceMs);
-  recover();
+  await recover();
 }

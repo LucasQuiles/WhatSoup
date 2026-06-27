@@ -55,9 +55,16 @@ Every outbound op declares one of three replay policies:
 
 | Policy | Meaning | On unconfirmed delivery |
 |---|---|---|
-| `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending` for replay |
+| `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
-| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending` for replay |
+| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+
+**Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
+reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
+replayed), a replay that re-sends an op which *was* actually delivered produces at most a
+duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
+for guaranteeing safe/read_only ops are not silently dropped; it is never incurred for
+user-terminal replies.
 
 The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
 
@@ -134,6 +141,9 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                                        └─ not found + unsafe
                                                           → quarantined
 
+  pending ─── drainPendingOutbound() ──► sending → submitted   (re-send, §4.4)
+            (text {text} ops; non-reconstructable → quarantined)
+
   sending ─── process crash ──► maybe_sent  (pre-connect recovery)
 
   pending ─── send() throws ──► maybe_sent  (sendTracked error path)
@@ -144,6 +154,10 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
 **Terminal states:** `echoed`, `failed_permanent`, `quarantined`
 
 **Recoverable state:** `maybe_sent` — always resolved in the next post-connect recovery pass.
+
+**Replay-pending state:** `pending` reached via a `maybe_sent` reset is re-sent by the
+pending drainer (§4.4) — both immediately after post-connect recovery and on the live
+echo-timeout interval — so a reset op does not wait for a future restart to be re-delivered.
 
 ---
 
@@ -207,27 +221,71 @@ For each `maybe_sent` op (including those promoted in Step 1):
 
 - **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
   - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
-  - Not found + `safe`/`read_only`: reset to `pending` for replay.
+  - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
 - **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
-  - `safe`/`read_only`: reset to `pending` for replay.
+  - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
+
+> The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
+> `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
+> counting site for `outbound_reconciled` (one increment per op). (BEAD-060)
 
 **Step 3 — Log recovery run**
 
 A `recovery_runs` record is inserted with aggregated statistics from both steps.
 
+**Step 4 — Drain `pending` (re-send reset ops)**
+
+After `postConnectRecovery` returns, the recover callback in `main.ts` invokes
+`drainPendingOutbound()` (§4.4), which actually re-sends the ops that Step 2 reset to
+`pending`. Reset-to-`pending` and re-send are deliberately separate steps: reset is a pure
+synchronous SQLite write (safe inside the recovery pass), while re-send performs network I/O
+and so runs after the pass completes. The drain is failure-isolated — a drain error never
+breaks startup.
+
 ### 4.3 Periodic Sweep (`sweepStaleSubmitted`)
 
-Runs every **10 seconds** while the process is live (wired in `main.ts` via `setInterval`):
+Runs every **10 seconds** while the process is live (wired in `main.ts` via `setInterval`,
+on the same interval that calls `drainPendingOutbound()` — see §4.4):
 
 ```
-setInterval(() => durability.sweepStaleSubmitted(), 10_000)
+setInterval(() => { durability.sweepStaleSubmitted(); drainPendingOutbound(...); }, 10_000)
 ```
 
-Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to `maybe_sent` with `error = 'echo_timeout'`. This catches ops whose echo was permanently lost during a live session (not just crash recovery). Promoted ops are picked up by the next post-connect recovery after a future restart, or by an explicit reconciliation call if one is added.
+Promotes any `submitted` op with `submitted_at < now() - 30 seconds` to `maybe_sent` with `error = 'echo_timeout'`. This catches ops whose echo was permanently lost during a live session (not just crash recovery). These `maybe_sent` ops are reconciled by the next post-connect recovery pass (which resets `safe`/`read_only` ops to `pending`); the `pending` stage is then re-sent by the drainer (§4.4), which runs both on this same interval and immediately after each recovery pass.
 
 **Why 30 seconds?** WhatsApp echo latency is typically under 2 seconds on a healthy connection. 30 seconds provides a large margin for slow connections, QoS throttling, and brief disconnects while still being short enough that stuck ops don't silently accumulate for hours.
+
+### 4.4 Pending Drainer (`drainPendingOutbound`)
+
+`postConnectRecovery` resets unconfirmed `safe`/`read_only` ops to `pending`, but the reset
+alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is the step
+that re-sends them. It is wired in two places (`main.ts`):
+
+1. **Post-connect recover callback** — immediately after each `postConnectRecovery()`.
+2. **Echo-timeout interval** (every 10 s, alongside `sweepStaleSubmitted()`) — drains any op
+   that lands in `pending` between reconnects, without waiting for a restart.
+
+For each op in `status='pending'`:
+
+- **Reconstructable text op** — `op_type === 'text'` and `payload` parses to
+  `{ text: string }` (the exact shape `sendTracked` writes): `markSending()`, re-send via
+  `messenger.sendMessage(chat_jid, text)`, then `markSubmitted(wa_message_id)`. The op then
+  re-enters the normal `submitted → echoed` reconciliation path. If the send throws, the op
+  is set back to `maybe_sent` so it re-enters the reconnect-paced recovery loop (no inline
+  retry / tight-loop).
+- **Non-reconstructable op** — unknown `op_type`, or a `text` op whose payload does not parse
+  to `{ text }`: `markQuarantined()` + an `outbound_quarantined` alert
+  (`reason=pending_replay_unreconstructable`). These are **not** left `pending` forever —
+  doing so would reintroduce the original silent-drop bug for non-text ops.
+
+One failing op never aborts the rest of the drain. The function returns the count of ops
+successfully re-sent. **Duplicate-delivery tradeoff:** see §2.4 — only `safe`/`read_only` ops
+ever reach `pending`, so a replay that duplicates an already-delivered message is the
+accepted tradeoff for those ops and is never incurred for user-terminal (`unsafe`) replies.
+This is the same risk `sendTracked`-created ops already carry on a `maybe_sent → reset`
+cycle; the drainer does not widen it.
 
 ---
 

@@ -25,7 +25,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
-import { DurabilityEngine, sendTracked } from './core/durability.ts';
+import { DurabilityEngine, sendTracked, drainPendingOutbound } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
@@ -707,6 +707,10 @@ const echoTimeoutInterval = setInterval(() => {
   try {
     durability.sweepStaleSubmitted();
   } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
+  // Drain any ops that landed in `pending` between reconnects (BEAD-057).
+  // Fire-and-forget, matching this interval's existing style.
+  drainPendingOutbound(connectionManager, durability)
+    .catch((err) => log.error({ err }, 'echo timeout drain failed'));
 }, 10_000);
 
 // 14. Degradation signal check — detect persistent decryption failures (Type 2)
@@ -795,7 +799,16 @@ async function start(): Promise<void> {
   // echoes from inflight messages can arrive.
   await waitForHistorySyncThenRecover({
     connectionManager,
-    recover: () => durability.postConnectRecovery(),
+    recover: async () => {
+      durability.postConnectRecovery();
+      // Re-send ops that postConnectRecovery reset to `pending` (BEAD-057).
+      // Failure-isolated: a drain error must never break startup.
+      try {
+        await drainPendingOutbound(connectionManager, durability);
+      } catch (err) {
+        log.error({ err }, 'drainPendingOutbound on post-connect recovery failed');
+      }
+    },
   });
 
   log.info('WhatSoup bot started');

@@ -637,8 +637,9 @@ describe('durability.ts uncovered-branch coverage', () => {
       `UPDATE outbound_ops SET status='submitted', wa_message_id='WA_STALE_1', submitted_at=datetime('now','-60 seconds') WHERE id=${opId}`,
     );
     const stats = engine.postConnectRecovery();
-    // Two reconciliation touches: stale-promotion + maybe_sent reconciliation.
-    expect(stats.outboundReconciled).toBeGreaterThanOrEqual(2);
+    // BEAD-060: Step 2 (maybe_sent reconciliation) is the single counting site —
+    // the stale-submitted promotion in Step 1 is no longer double-counted.
+    expect(stats.outboundReconciled).toBe(1);
     expect(stats.outboundReplayed).toBe(1);
     const op = db.raw.prepare('SELECT status, error FROM outbound_ops WHERE id = ?').get(opId) as any;
     // Final state after safe reconciliation: reset to pending, error cleared.

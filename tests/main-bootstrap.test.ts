@@ -250,8 +250,9 @@ async function importMainWithMocks(options: {
     selectReplayableDms: vi.fn((stored: unknown[]) => ({ toReplay: stored, groupSkipped: 1 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
+    drainPendingOutbound: vi.fn(async () => 0),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
-      recover();
+      await recover();
     }),
     seedChatAliases: vi.fn(() => 1),
     createProfileRegistry: vi.fn(() => ({ profiles: ['q'] })),
@@ -367,6 +368,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/durability.ts', () => ({
     DurabilityEngine,
     sendTracked: mocks.sendTracked,
+    drainPendingOutbound: mocks.drainPendingOutbound,
   }));
   vi.doMock('../src/core/post-connect-recovery.ts', () => ({
     waitForHistorySyncThenRecover: mocks.waitForHistorySyncThenRecover,
