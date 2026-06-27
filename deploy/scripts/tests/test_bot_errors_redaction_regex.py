@@ -148,6 +148,33 @@ def test_repeated_pathlike_nonmatches_do_not_backtrack(script_name: str, func_na
     assert elapsed < 0.5
 
 
+def _load_ssot_redactor() -> Callable[[str], str]:
+    spec = importlib.util.spec_from_file_location(
+        "bead054_bot_errors_redaction", _SCRIPT_ROOT / "lib" / "bot_errors_redaction.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return lambda text: mod.redact_bot_errors_text(text, credential_path_marker="[REDACTED CREDENTIAL PATH]")
+
+
+def test_url_userinfo_scheme_does_not_backtrack():
+    """BEAD-054 (ReDoS): `URL_USERINFO_RE` previously used an unbounded `[a-z0-9+.-]*`
+    scheme wildcard, which backtracked quadratically on adversarial scheme-shaped
+    runs (`apikey.`*N): a 140KB input took ~8s. The bounded `{0,30}` form keeps the
+    scan linear (finishes in tens of milliseconds here). Mirror of the TS C1 timing
+    assertion in tests/redaction-parity.test.ts. Generous sub-second threshold to
+    avoid CI flakiness while still separating the fixed (<1s) from the regressed (~8s)."""
+    redact = _load_ssot_redactor()
+    adversarial = "apikey." * 20000  # ~140KB, no `://`, no trailing `@`
+    started = time.monotonic()
+    out = redact(adversarial)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"URL_USERINFO_RE backtracked: {elapsed:.3f}s"
+    # No `://…@` userinfo present, so the adversarial input passes through unchanged.
+    assert out == adversarial
+
+
 @pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
 def test_operational_diagnostics_remain_actionable(script_name: str, func_name: str, _marker: str):
     mod = _load_module(script_name)
