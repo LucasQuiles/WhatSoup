@@ -25,10 +25,15 @@ import { turnPartsToOpenAIContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
-import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
+import { waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
-import { errorMessage } from '../../../lib/error-message.ts';
-import { parseProviderToolInput, buildApiKeyEnv, type ParsedToolInput } from './api-provider-shared.ts';
+import {
+  parseProviderToolInput,
+  buildApiKeyEnv,
+  mapSharedApiError,
+  connectionErrorResult,
+  type ParsedToolInput,
+} from './api-provider-shared.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -301,9 +306,7 @@ export class OpenAIApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
-      const msg = errorMessage(err);
-      log.error({ err: msg, model }, 'fetch error in callApi');
-      return { text: '', terminalResultText: '_Connection error - please try again._' };
+      return connectionErrorResult(err, model, log);
     }
 
     if (!response.ok) {
@@ -316,26 +319,19 @@ export class OpenAIApiProvider implements ProviderSession {
         return this.callApi(model, true);
       }
 
-      // User-friendly error — never show raw JSON error bodies
-      let friendlyMsg: string;
-      if (response.status === 400) {
-        friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
-        log.error({ status: 400, errPreview: providerPreview(errText, 500), model, selfHealAttempt }, 'API 400 error');
-      } else if (response.status === 429) {
-        const retryAfterMs = boundedRetryAfterMs(response.headers);
-        if (!rateLimitRetryAttempt && retryAfterMs !== null) {
-          log.warn({ status: 429, model, retryAfterMs }, 'API rate limited — retrying after Retry-After');
-          await waitForRateLimitRetry(retryAfterMs, this.abortController.signal);
-          return this.callApi(model, selfHealAttempt, true);
-        }
-        friendlyMsg = '_Rate limited - please wait a moment and try again._';
-      } else if (response.status >= 500) {
-        friendlyMsg = '_Service temporarily unavailable - please try again in a moment._';
-      } else {
-        friendlyMsg = `_Service error (${response.status}) - please try again._`;
+      // User-friendly error — never show raw JSON error bodies.
+      // OpenAI has NO dedicated 401 branch: a 401 falls through the shared
+      // ladder to the generic `_Service error (401) ..._` message.
+      const outcome = mapSharedApiError(
+        { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
+        log,
+      );
+      if (outcome.kind === 'rate-limit-retry') {
+        await waitForRateLimitRetry(outcome.retryAfterMs, this.abortController.signal);
+        return this.callApi(model, selfHealAttempt, true);
       }
 
-      return { text: '', terminalResultText: friendlyMsg };
+      return { text: '', terminalResultText: outcome.text };
     }
 
     // ── SSE streaming ────────────────────────────────────────────────────────
