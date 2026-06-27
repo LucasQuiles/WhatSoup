@@ -1308,16 +1308,26 @@ export class AgentRuntime implements Runtime {
    * guards proven necessary by the eviction design (turn-in-flight, anti-thrash
    * residency floor, awaited-poll exemption).
    */
-  private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
+  private isSessionSafeToEvict(mapKey: string, session: SessionManager, now: number): boolean {
     const st = session.getStatus();
     if (st.active !== true) return false;                 // not a live resident session
     if (st.turnInFlight === true) return false;           // mid-turn (covers mid-tool-call)
     if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
     const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
     if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
-    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
-    if (!Number.isFinite(lastMs) || now - lastMs <= SESSION_IDLE_MS) return false; // within TTL
     return true;
+  }
+
+  private sessionIdleMs(session: SessionManager, now: number): number {
+    const st = session.getStatus();
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
+    return Number.isFinite(lastMs) ? now - lastMs : 0;
+  }
+
+  /** TTL-pass eligibility: safe to evict AND idle beyond the TTL. */
+  private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
+    return this.isSessionSafeToEvict(mapKey, session, now) && this.sessionIdleMs(session, now) > SESSION_IDLE_MS;
   }
 
   /**
@@ -1340,17 +1350,16 @@ export class AgentRuntime implements Runtime {
       this.evictIdleSession(mapKey, session, 'idle-ttl');
     }
 
-    // Pass 2 — LRU ceiling.
+    // Pass 2 — LRU ceiling. Unlike pass 1 this evicts even sessions still within
+    // the TTL (longest-idle first), to bound memory under a burst of many active
+    // chats; it still honors the safety guards (live, between-turns, no pending
+    // poll, past the residency floor).
     if (this.chatSessions.size > MAX_RESIDENT_SESSIONS) {
       const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
       const candidates = [...this.chatSessions.entries()]
-        .filter(([mapKey, session]) => this.isSessionEvictable(mapKey, session, now))
-        .map(([mapKey, session]) => {
-          const st = session.getStatus();
-          const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : 0;
-          return { mapKey, session, lastMs: Number.isFinite(lastMs) ? lastMs : 0 };
-        })
-        .sort((a, b) => a.lastMs - b.lastMs); // longest-idle first
+        .filter(([mapKey, session]) => this.isSessionSafeToEvict(mapKey, session, now))
+        .map(([mapKey, session]) => ({ mapKey, session, idleMs: this.sessionIdleMs(session, now) }))
+        .sort((a, b) => b.idleMs - a.idleMs); // longest-idle first
       for (const { mapKey, session } of candidates.slice(0, overBy)) {
         this.evictIdleSession(mapKey, session, 'lru-ceiling');
       }

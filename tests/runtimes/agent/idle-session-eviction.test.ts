@@ -250,3 +250,57 @@ describe('idle session eviction — sweepIdleSessions', () => {
     expect(sessions.size).toBe(1);
   });
 });
+
+// A standalone fake session whose getStatus is independently controllable, so the
+// LRU ceiling (which must distinguish longest-idle across many sessions) can be
+// tested — the shared mockSession is a singleton and cannot model distinct chats.
+interface FakeSession { shutdown: ReturnType<typeof vi.fn>; getStatus: () => unknown }
+function fakeSession(opts: { lastAgoMs: number; startedAgoMs?: number; turnInFlight?: boolean; active?: boolean }): FakeSession {
+  return {
+    shutdown: vi.fn(async () => {}),
+    getStatus: () => ({
+      active: opts.active ?? true, pid: 1, sessionId: 's', startedAt: isoAgo(opts.startedAgoMs ?? 4 * HOUR),
+      messageCount: 1, lastMessageAt: isoAgo(opts.lastAgoMs), turnInFlight: opts.turnInFlight ?? false,
+    }),
+  };
+}
+async function seededRuntime(seed: Record<string, FakeSession>): Promise<{ runtime: AgentRuntime; sessions: Map<string, FakeSession> }> {
+  const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+  await runtime.start();
+  const sessions = (runtime as unknown as { chatSessions: Map<string, FakeSession> }).chatSessions;
+  sessions.clear();
+  for (const [k, v] of Object.entries(seed)) sessions.set(k, v);
+  return { runtime, sessions };
+}
+
+describe('idle session eviction — LRU ceiling and poll guard', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('LRU ceiling: when over MAX_RESIDENT_SESSIONS, suspends the longest-idle even within TTL', async () => {
+    // 14 sessions, all active and within the 1h TTL (1..14 min idle) — pass 1 evicts none.
+    // Default cap is 12, so the LRU pass must evict the 2 longest-idle (chat14, chat13).
+    const seed: Record<string, FakeSession> = {};
+    for (let i = 1; i <= 14; i++) seed[`chat${i}`] = fakeSession({ lastAgoMs: i * 60 * 1000 });
+    const { runtime, sessions } = await seededRuntime(seed);
+    expect(sessions.size).toBe(14);
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(sessions.size).toBe(12);
+    expect(seed['chat14'].shutdown).toHaveBeenCalledWith(true); // longest idle
+    expect(seed['chat13'].shutdown).toHaveBeenCalledWith(true);
+    expect(seed['chat1'].shutdown).not.toHaveBeenCalled();      // most recent kept
+  });
+
+  it('does NOT suspend an idle-beyond-TTL session that is awaiting a poll vote', async () => {
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 }); // 3h idle
+    const { runtime, sessions } = await seededRuntime({ pollchat: s });
+    (runtime as unknown as { pendingPolls: { questions: Map<string, unknown> } })
+      .pendingPolls.questions.set('pollchat', { chatJid: 'pollchat' });
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+});
