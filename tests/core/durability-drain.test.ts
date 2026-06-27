@@ -150,4 +150,71 @@ describe('drainPendingOutbound()', () => {
     expect(count).toBe(0);
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
+
+  // BEAD-057 double-send race: two un-serialized drivers (the awaited recover
+  // callback + the fire-and-forget 10s echo-timeout interval) can each run
+  // drainPendingOutbound over an OVERLAPPING stale snapshot. Without a CAS on
+  // markSending, both drains claim+send the same pending op → DOUBLE SEND.
+  // This reproduces the interval drain firing DURING the recover drain's send
+  // by having opA's send synchronously re-enter a second drain before resolving.
+  it('does not double-send when a second drain fires during the first drain (concurrent-drain CAS)', async () => {
+    const JID_A = 'ja@s.whatsapp.net';
+    const JID_B = 'jb@s.whatsapp.net';
+    // Two pending safe ops, exactly as postConnectRecovery would reset them.
+    engine.createOutboundOp({
+      conversationKey: 'kA', chatJid: JID_A, opType: 'text',
+      payload: JSON.stringify({ text: 'msg A' }), replayPolicy: 'safe',
+    });
+    engine.createOutboundOp({
+      conversationKey: 'kB', chatJid: JID_B, opType: 'text',
+      payload: JSON.stringify({ text: 'msg B' }), replayPolicy: 'safe',
+    });
+
+    // Count opB sends across BOTH drains/messengers — must be exactly 1.
+    let opBSendCount = 0;
+    let reentered = false;
+
+    // messenger2 = the interval drain's messenger. It only ever sees opB
+    // (opA is already 'sending' when this drain snapshots pending).
+    const messenger2 = makeMessenger(async (chatJid: string) => {
+      if (chatJid === JID_B) opBSendCount += 1;
+      return { waMessageId: 'WA_VIA_INTERVAL' };
+    });
+
+    // messenger1 = the recover-callback drain's messenger. opA's send (the
+    // first op in the stale snapshot) re-enters a second concurrent drain
+    // BEFORE resolving — simulating the interval firing mid-send.
+    const messenger1 = makeMessenger(async (chatJid: string) => {
+      if (chatJid === JID_A && !reentered) {
+        reentered = true;
+        await drainPendingOutbound(messenger2, engine);
+        return { waMessageId: 'WA_A' };
+      }
+      if (chatJid === JID_B) opBSendCount += 1;
+      return { waMessageId: 'WA_VIA_RECOVER' };
+    });
+
+    await drainPendingOutbound(messenger1, engine);
+
+    // opB must be sent exactly once across both drains (CAS skip in the loser).
+    expect(opBSendCount).toBe(1);
+    // opB ends submitted (delivered once), never re-sent by the stale snapshot.
+    expect(getOutbound(db, 2)['status']).toBe('submitted');
+  });
+
+  it('markSending is a CAS: true on a pending op (→sending), false on an already-sending op (no-op)', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'cas' }), replayPolicy: 'safe',
+    });
+    expect(getOutbound(db, opId)['status']).toBe('pending');
+
+    // First claim wins: pending → sending.
+    expect(engine.markSending(opId)).toBe(true);
+    expect(getOutbound(db, opId)['status']).toBe('sending');
+
+    // Second claim loses: op is no longer pending, no state change.
+    expect(engine.markSending(opId)).toBe(false);
+    expect(getOutbound(db, opId)['status']).toBe('sending');
+  });
 });

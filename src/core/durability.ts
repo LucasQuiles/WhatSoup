@@ -194,7 +194,9 @@ export class DurabilityEngine {
         `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       ),
-      markSending: prepare(`UPDATE outbound_ops SET status = 'sending' WHERE id = ?`),
+      markSending: prepare(
+        `UPDATE outbound_ops SET status = 'sending' WHERE id = ? AND status = 'pending'`,
+      ),
       markSubmitted: prepare(
         `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
       ),
@@ -444,8 +446,17 @@ export class DurabilityEngine {
     return id;
   }
 
-  markSending(id: number): void {
-    this.statements.markSending.run(id);
+  /**
+   * Compare-and-swap pending → sending. Returns whether THIS call won the
+   * transition (`changes === 1`). The `AND status = 'pending'` guard makes the
+   * claim atomic so two un-serialized drainers (recover callback + echo-timeout
+   * interval) over an overlapping stale snapshot cannot both send the same op
+   * (BEAD-057 double-send). New-op callers (`sendTracked`, the chat/agent
+   * runtimes) INSERT `pending` immediately before calling, so the CAS always
+   * succeeds for them; they ignore the return value (behavior unchanged).
+   */
+  markSending(id: number): boolean {
+    return this.statements.markSending.run(id).changes === 1;
   }
 
   markSubmitted(id: number, waMessageId: string | null): void {
@@ -1001,7 +1012,13 @@ export async function drainPendingOutbound(
         continue;
       }
 
-      durability.markSending(op.id);
+      if (!durability.markSending(op.id)) {
+        // Another concurrent drain (the un-serialized recover callback vs. the
+        // echo-timeout interval) already claimed this op out of `pending` from
+        // an overlapping stale snapshot. Skip — re-sending here is the BEAD-057
+        // double-send. The winning drain owns the send.
+        continue;
+      }
       try {
         const receipt = await messenger.sendMessage(op.chat_jid, text);
         durability.markSubmitted(op.id, receipt.waMessageId);
