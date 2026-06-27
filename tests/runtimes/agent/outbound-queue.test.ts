@@ -2419,18 +2419,34 @@ describe('OutboundQueue', () => {
       await queue.flush();
     });
 
-    it('a fresh startTyping within a turn resets the self-bound clock', async () => {
+    it('a fresh startTyping within a turn grants a full TYPING_MAX_MS window from the reset point', async () => {
       const { messenger, typingCalls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
       queue.enqueueStreamingText('chunk-1');
+      // Advance to just before the original cap would fire
       await vi.advanceTimersByTimeAsync(TYPING_MAX_MS - TYPING_REFRESH_MS);
-      queue.enqueueStreamingText('chunk-2');               // new activity → resets clock
+      queue.enqueueStreamingText('chunk-2');               // new activity → resets clock to T=0
+      const assertsAfterReset = typingCalls.filter((v) => v === true).length;
+
+      // Advance a full TYPING_MAX_MS from the reset — the interval should still
+      // be firing (the full window was granted, not just the remaining slice).
+      // We check at the midpoint and near the end of the new window.
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS / 2);
+      const assertsMidWindow = typingCalls.filter((v) => v === true).length;
+      expect(assertsMidWindow).toBeGreaterThan(assertsAfterReset);
+
+      // Near the end of the full reset window (but before it expires) — still firing
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS / 2 - TYPING_REFRESH_MS);
+      const assertsNearEnd = typingCalls.filter((v) => v === true).length;
+      expect(assertsNearEnd).toBeGreaterThan(assertsMidWindow);
+
+      // Past the full reset window — self-bound fires, no more re-asserts
       await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 2);
-      // Still typing because the clock was reset by chunk-2 activity
-      const before = typingCalls.filter((v) => v === true).length;
-      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS);
-      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThan(before);
+      const assertsAtExpiry = typingCalls.filter((v) => v === true).length;
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 3);
+      expect(typingCalls.filter((v) => v === true).length).toBe(assertsAtExpiry);
+
       await queue.flush();
     });
   });
