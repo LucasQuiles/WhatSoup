@@ -3,6 +3,10 @@ import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
 import { formatWhatsAppText } from '../lib/format-wa-text'
 
+function formatMediaDuration(seconds: number): string {
+  return seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
+}
+
 /**
  * Renders message content with WhatsApp-style formatting.
  * Handles text (with bold/italic/code/links), images, audio, documents.
@@ -103,7 +107,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       const seconds = audio?.seconds ?? 0
       const isPtt = audio?.ptt === true
       const label = isPtt ? 'Voice note' : 'Audio'
-      const duration = seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
+      const duration = formatMediaDuration(seconds)
       return (
         <div className="flex items-center gap-[var(--sp-2)]">
           <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />
@@ -148,7 +152,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       const thumb = video?.jpegThumbnail
       const seconds = video?.seconds ?? 0
       const isGif = video?.gifPlayback === true
-      const duration = seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
+      const duration = formatMediaDuration(seconds)
 
       if (thumb) {
         return (
