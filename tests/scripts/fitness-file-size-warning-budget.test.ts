@@ -28,6 +28,13 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
   'tests/runtimes/chat/providers/pinecone.test.ts',
+  // BEAD-056 added 4 regression tests (#1064 inbound-close parity) to the
+  // DurabilityEngine integration block, taking this file 1929→2022 lines, just
+  // over the 2000-line arch.file-size warn budget. The new tests reuse the
+  // file's shared scaffolding (makeHandler/makeDurability/handleAndDrain), so
+  // extracting them would duplicate that setup; grandfathered per the project
+  // norm for large cohesive test files (cf. the agent runtime/session twins).
+  'tests/runtimes/chat/runtime.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
 ].sort();
 
