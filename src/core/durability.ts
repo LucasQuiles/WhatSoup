@@ -32,6 +32,9 @@ export interface InboundEventRow {
 /** Row returned by SELECT on outbound_ops for status-based queries. */
 export interface OutboundOpRow {
   id: number;
+  chat_jid: string;
+  op_type: string;
+  payload: string;
   wa_message_id: string | null;
   replay_policy: string;
   submitted_at: string | null;
@@ -191,7 +194,9 @@ export class DurabilityEngine {
         `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       ),
-      markSending: prepare(`UPDATE outbound_ops SET status = 'sending' WHERE id = ?`),
+      markSending: prepare(
+        `UPDATE outbound_ops SET status = 'sending' WHERE id = ? AND status = 'pending'`,
+      ),
       markSubmitted: prepare(
         `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
       ),
@@ -263,7 +268,7 @@ export class DurabilityEngine {
         `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
-        `SELECT id, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
       ),
       getRecoverableToolCalls: prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
@@ -441,8 +446,17 @@ export class DurabilityEngine {
     return id;
   }
 
-  markSending(id: number): void {
-    this.statements.markSending.run(id);
+  /**
+   * Compare-and-swap pending → sending. Returns whether THIS call won the
+   * transition (`changes === 1`). The `AND status = 'pending'` guard makes the
+   * claim atomic so two un-serialized drainers (recover callback + echo-timeout
+   * interval) over an overlapping stale snapshot cannot both send the same op
+   * (BEAD-057 double-send). New-op callers (`sendTracked`, the chat/agent
+   * runtimes) INSERT `pending` immediately before calling, so the CAS always
+   * succeeds for them; they ignore the return value (behavior unchanged).
+   */
+  markSending(id: number): boolean {
+    return this.statements.markSending.run(id).changes === 1;
   }
 
   markSubmitted(id: number, waMessageId: string | null): void {
@@ -705,7 +719,10 @@ export class DurabilityEngine {
       const staleSubmitted = this.statements.getStaleSubmitted.all() as Array<{ id: number }>;
       for (const op of staleSubmitted) {
         this.markMaybeSent(op.id, 'stale-submitted-no-echo');
-        stats.outboundReconciled += 1;
+        // NOTE (BEAD-060): do NOT increment outboundReconciled here. These ops are
+        // re-read as maybe_sent in Step 2, which is the single counting site for
+        // outboundReconciled — counting here too would double-count every
+        // stale-submitted op.
         log.info(
           { opId: op.id },
           'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
@@ -918,6 +935,116 @@ export async function sendTracked(
     }
     throw err;
   }
+}
+
+/**
+ * Drain outbound ops in `status='pending'` by actually re-sending them.
+ *
+ * `postConnectRecovery` resets unconfirmed `safe`/`read_only` `maybe_sent` ops to
+ * `pending` (the "reset for replay" step), but nothing else re-sends them — so
+ * before this drainer existed, genuinely-undelivered safe/read_only ops were
+ * silently dropped (BEAD-057). This function closes that gap. It is invoked both
+ * from the post-connect recover callback (after `postConnectRecovery`) and from
+ * the live echo-timeout interval, so any op that lands in `pending` between
+ * reconnects is re-sent without waiting for a future restart.
+ *
+ * Per-op handling:
+ *  - Reconstructable text op (`op_type === 'text'` and payload parses to
+ *    `{ text: string }`, the exact shape `sendTracked` writes): `markSending`,
+ *    re-send via `messenger.sendMessage`, then `markSubmitted` with the receipt.
+ *    On send failure → `markMaybeSent` so the op re-enters the reconnect-paced
+ *    recovery loop (no inline retry / tight-loop).
+ *  - Non-reconstructable op (unknown `op_type`, or a `text` op whose payload does
+ *    not parse to `{ text }`): `markQuarantined` + an `outbound_quarantined`
+ *    alert. We must NOT leave these `pending` forever — that would reintroduce the
+ *    original silent-drop bug for non-text ops.
+ *
+ * Idempotency / double-send: only `safe`/`read_only` ops ever reach `pending`
+ * (postConnectRecovery quarantines `unsafe`, and terminal USER replies are
+ * `unsafe`). A replay that duplicates an already-delivered message is therefore
+ * the ACCEPTED tradeoff for safe/read_only ops (admin notices, heal notices, MCP
+ * read ops) — never for user-terminal replies. This is the same risk profile
+ * `sendTracked`-created ops already carry on a maybe_sent → reset cycle; the
+ * drainer does not widen it.
+ *
+ * One failing op never aborts the rest of the drain. Returns the count of ops
+ * successfully re-sent (transitioned out of `pending` via `markSubmitted`).
+ */
+export async function drainPendingOutbound(
+  messenger: Messenger,
+  durability: DurabilityEngine,
+): Promise<number> {
+  const pending = durability.getOutboundByStatus('pending');
+  let resent = 0;
+
+  for (const op of pending) {
+    try {
+      let text: string | undefined;
+      if (op.op_type === 'text') {
+        try {
+          const parsed = JSON.parse(op.payload) as unknown;
+          if (
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            typeof (parsed as { text?: unknown }).text === 'string'
+          ) {
+            text = (parsed as { text: string }).text;
+          }
+        } catch {
+          text = undefined;
+        }
+      }
+
+      if (text === undefined) {
+        // Non-reconstructable: cannot faithfully rebuild the send. Quarantine +
+        // alert rather than leave it pending forever (BEAD-057 non-text guard).
+        durability.markQuarantined(op.id);
+        log.warn(
+          { opId: op.id, opType: op.op_type, replayPolicy: op.replay_policy },
+          'drainPendingOutbound: pending op not reconstructable → quarantined',
+        );
+        emitAlertChecked(
+          config.botName,
+          'outbound_quarantined',
+          `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+          `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=pending_replay_unreconstructable`,
+        );
+        continue;
+      }
+
+      if (!durability.markSending(op.id)) {
+        // Another concurrent drain (the un-serialized recover callback vs. the
+        // echo-timeout interval) already claimed this op out of `pending` from
+        // an overlapping stale snapshot. Skip — re-sending here is the BEAD-057
+        // double-send. The winning drain owns the send.
+        continue;
+      }
+      try {
+        const receipt = await messenger.sendMessage(op.chat_jid, text);
+        durability.markSubmitted(op.id, receipt.waMessageId);
+        resent += 1;
+        log.info(
+          { opId: op.id, waMessageId: receipt.waMessageId },
+          'drainPendingOutbound: pending op re-sent → submitted',
+        );
+      } catch (err) {
+        // Re-enter the reconnect-paced recovery loop; do NOT tight-loop / retry inline.
+        durability.markMaybeSent(op.id, (err as Error)?.message ?? 'replay_failed');
+        log.warn(
+          { opId: op.id, err },
+          'drainPendingOutbound: re-send failed → maybe_sent (recoverable)',
+        );
+      }
+    } catch (err) {
+      // Defensive: one malformed op must never abort the rest of the drain.
+      log.warn({ opId: op.id, err }, 'drainPendingOutbound: unexpected error draining op');
+    }
+  }
+
+  if (pending.length > 0) {
+    log.info({ pending: pending.length, resent }, 'drainPendingOutbound: complete');
+  }
+  return resent;
 }
 
 /**

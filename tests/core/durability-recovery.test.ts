@@ -522,6 +522,26 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     expect(getOutbound(db, id)['status']).toBe('echoed');
   });
 
+  // ── BEAD-060 item-1: outbound_reconciled double-count ──────────────────
+
+  it('counts a stale-submitted op exactly once in outboundReconciled (not twice) — BEAD-060', () => {
+    // A stale `submitted` op is promoted to maybe_sent in Step 1 and then
+    // reconciled in Step 2. Step 2 is the single counting site, so this op must
+    // contribute exactly 1 to outboundReconciled — not 2 (the prior double-count).
+    const opId = engine.createOutboundOp({
+      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      payload: '{"text":"x"}', replayPolicy: 'safe',
+    });
+    engine.markSending(opId);
+    engine.markSubmitted(opId, 'WA_DOUBLE');
+    makeSubmittedStale(db, opId);
+
+    const stats = engine.postConnectRecovery();
+
+    expect(getOutbound(db, opId)['status']).toBe('pending'); // promoted then reset
+    expect(stats.outboundReconciled).toBe(1);
+  });
+
   // ── recovery_runs logging ──────────────────────────────────────────────
 
   it('inserts a recovery_runs row after postConnectRecovery', () => {

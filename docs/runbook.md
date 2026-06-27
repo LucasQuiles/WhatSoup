@@ -708,8 +708,13 @@ sqlite3 ~/.local/share/whatsoup/instances/$INSTANCE/bot.db \
 #
 # Then postConnectRecovery() runs after reconnect:
 #    - Reconciles 'maybe_sent' ops against the messages table
-#    - Re-enqueues safe ops for replay
+#    - Resets safe/read_only ops to 'pending' for replay
 #    - Quarantines unsafe ops
+#
+# Immediately after, and on the live 10s echo-timeout interval,
+# drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
+#    - Reconstructable text ops ({text}) → re-sent via messenger
+#    - Non-reconstructable ops → quarantined + alerted (never left pending)
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE
