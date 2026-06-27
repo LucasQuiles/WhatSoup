@@ -27,6 +27,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
+import { parseProviderToolInput, type ParsedToolInput } from './api-provider-shared.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -59,10 +60,6 @@ type AnthropicContentBlock =
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
-
-type ParsedToolInput =
-  | { ok: true; input: Record<string, unknown> }
-  | { ok: false; content: string };
 
 interface ToolUseAccum {
   id: string;
@@ -520,38 +517,13 @@ export class AnthropicApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(toolUse.inputJson || '{}');
-    } catch (err) {
-      const message = errorMessage(err);
-      log.warn({
-        err: message,
-        model,
-        toolId: toolUse.id,
-        toolName: toolUse.name,
-        argumentLength: toolUse.inputJson.length,
-      }, 'malformed Anthropic tool input; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolUse.name}" failed: malformed provider tool arguments; the tool was not executed.`,
-      };
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      log.warn({
-        model,
-        toolId: toolUse.id,
-        toolName: toolUse.name,
-        argumentType: Array.isArray(parsed) ? 'array' : typeof parsed,
-      }, 'non-object Anthropic tool input; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolUse.name}" failed: provider tool arguments must be a JSON object; the tool was not executed.`,
-      };
-    }
-
-    return { ok: true, input: parsed as Record<string, unknown> };
+    return parseProviderToolInput(toolUse.inputJson, {
+      toolId: toolUse.id,
+      toolName: toolUse.name,
+      model,
+      malformedLabel: 'malformed Anthropic tool input; tool call blocked',
+      nonObjectLabel: 'non-object Anthropic tool input; tool call blocked',
+    }, log);
   }
 
 }

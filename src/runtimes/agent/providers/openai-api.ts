@@ -28,6 +28,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
+import { parseProviderToolInput, type ParsedToolInput } from './api-provider-shared.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -74,10 +75,6 @@ interface CallApiResult {
   outputTokens?: number;
   terminalResultText?: string;
 }
-
-type ParsedToolInput =
-  | { ok: true; input: Record<string, unknown> }
-  | { ok: false; content: string };
 
 const MAX_TOOL_ITERATIONS = 20;
 const MAX_HISTORY_MESSAGES = 100;
@@ -433,37 +430,12 @@ export class OpenAIApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(toolCall.function.arguments || '{}');
-    } catch (err) {
-      const message = errorMessage(err);
-      log.warn({
-        err: message,
-        model,
-        toolId: toolCall.id,
-        toolName: toolCall.function.name,
-        argumentLength: toolCall.function.arguments.length,
-      }, 'malformed OpenAI-compatible tool arguments; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolCall.function.name}" failed: malformed provider tool arguments; the tool was not executed.`,
-      };
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      log.warn({
-        model,
-        toolId: toolCall.id,
-        toolName: toolCall.function.name,
-        argumentType: Array.isArray(parsed) ? 'array' : typeof parsed,
-      }, 'non-object OpenAI-compatible tool arguments; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolCall.function.name}" failed: provider tool arguments must be a JSON object; the tool was not executed.`,
-      };
-    }
-
-    return { ok: true, input: parsed as Record<string, unknown> };
+    return parseProviderToolInput(toolCall.function.arguments, {
+      toolId: toolCall.id,
+      toolName: toolCall.function.name,
+      model,
+      malformedLabel: 'malformed OpenAI-compatible tool arguments; tool call blocked',
+      nonObjectLabel: 'non-object OpenAI-compatible tool arguments; tool call blocked',
+    }, log);
   }
 }
