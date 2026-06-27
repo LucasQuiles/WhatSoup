@@ -417,6 +417,13 @@ export class ChatRuntime implements Runtime {
     // a failure, so no failure message and no fallback alert.
     if (responseText !== null && responseText.trim() === '') {
       log.info({ traceId, model: modelUsed }, 'llm returned a valid empty/whitespace completion — no reply sent');
+      // Close the inbound_events row so it doesn't stay stuck in 'processing'
+      // (never reaped, later force-failed by preConnectRecovery — mislabeling a
+      // silent #1064 success as a failure). Mirror the agent runtime's
+      // 'empty_content' label; this is bookkeeping only — no user-facing send.
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'empty_content');
+      }
       return;
     }
 
@@ -429,6 +436,12 @@ export class ChatRuntime implements Runtime {
         await sendTracked(this.messenger, msg.chatJid, message, this.durability, { replayPolicy: 'unsafe', isTerminal: true });
       } catch (fallbackSendErr) {
         log.error({ traceId, err: fallbackSendErr, chatJid: msg.chatJid }, 'failed to send fallback message');
+      }
+      // Close the inbound_events row so it doesn't stay stuck in 'processing'
+      // (never reaped, later force-failed by preConnectRecovery). The terminal
+      // outage send above is unchanged; this is durability bookkeeping only.
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundFailed(msg.inboundSeq);
       }
       return;
     }

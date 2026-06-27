@@ -1674,6 +1674,99 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.markInboundSkipped)).not.toHaveBeenCalled();
   });
 
+  // BEAD-056: the empty-completion (#1064) path opened an inbound_events row
+  // ('processing') but never closed it. The row stayed stuck forever — never
+  // reaped (retention reaps only complete/failed) and later force-failed by
+  // preConnectRecovery, mislabeling a silent success as a failure. The fix
+  // mirrors the agent runtime: markInboundSkipped(seq, 'empty_content').
+  it('empty completion (#1064) with inboundSeq → markInboundSkipped(seq, empty_content), no other inbound close, stays silent', async () => {
+    const { handler, messenger, primary } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    vi.mocked(primary.generate).mockResolvedValue({
+      content: '',
+      inputTokens: 10,
+      outputTokens: 0,
+      model: 'claude-opus-4-6',
+      durationMs: 200,
+    });
+
+    const msg = makeIncomingMessage({ inboundSeq: 31 });
+    await handleAndDrain(handler, msg);
+
+    // Inbound row closed as skipped/empty_content (parity with agent runtime),
+    // not left 'processing'.
+    expect(vi.mocked(durability.markInboundSkipped)).toHaveBeenCalledWith(31, 'empty_content');
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+    // #1064 must stay silent: closing the inbound row triggers no user-facing
+    // send and no other side effects, and opens no outbound op for a non-reply.
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(mockStoreMessage).not.toHaveBeenCalled();
+    expect(mockRecordResponse).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.createOutboundOp)).not.toHaveBeenCalled();
+  });
+
+  it('empty completion without inboundSeq → markInboundSkipped NOT called', async () => {
+    const { handler, primary } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    vi.mocked(primary.generate).mockResolvedValue({
+      content: '',
+      inputTokens: 10,
+      outputTokens: 0,
+      model: 'claude-opus-4-6',
+      durationMs: 200,
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage({ inboundSeq: undefined }));
+
+    expect(vi.mocked(durability.markInboundSkipped)).not.toHaveBeenCalled();
+  });
+
+  // BEAD-056: the total-failure (responseText === null) path sent the terminal
+  // outage message but never closed its inbound_events row. The fix closes it as
+  // failed before returning, without altering the existing terminal send.
+  it('total failure (#1064) with inboundSeq → markInboundFailed(seq), no other inbound close, terminal outage send preserved', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    vi.mocked(primary.generate).mockRejectedValue(new Error('primary down'));
+    vi.mocked(fallback.generate).mockRejectedValue(new Error('fallback down'));
+
+    const msg = makeIncomingMessage({ inboundSeq: 77 });
+    await handler.handleMessage(msg);
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Inbound row closed as failed, not left 'processing'.
+    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(77);
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.markInboundSkipped)).not.toHaveBeenCalled();
+    // The existing terminal failure send is unchanged.
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      '⚠️ My language model is unavailable right now and my operator has been notified — please try again in a bit.',
+    );
+  });
+
+  it('total failure without inboundSeq → markInboundFailed NOT called', async () => {
+    vi.useFakeTimers();
+    const { handler, primary, fallback } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    vi.mocked(primary.generate).mockRejectedValue(new Error('primary down'));
+    vi.mocked(fallback.generate).mockRejectedValue(new Error('fallback down'));
+
+    await handler.handleMessage(makeIncomingMessage({ inboundSeq: undefined }));
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+  });
+
   it('token counts persisted to DB when LLM returns non-zero tokens', async () => {
     const { handler, db } = makeHandler();
     const durability = makeDurability();
