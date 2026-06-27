@@ -30,7 +30,6 @@ import {
   isJidGroup,
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
-import { createHash } from 'node:crypto';
 import { shortHash } from '../lib/short-hash.ts';
 import { privateWriteError } from '../lib/private-fs.ts';
 
@@ -53,6 +52,7 @@ import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
+import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
 
 function assertWritableMarkerTarget(path: string): void {
   if (!existsSync(path)) return;
@@ -391,21 +391,6 @@ type AuthBondSendProof = {
 };
 
 // ---------------------------------------------------------------------------
-// Poll vote decryption — loaded from Baileys at runtime via dynamic import.
-// TS cannot resolve the deep import path at compile time, so we lazy-load
-// the real decryptPollVote + proto decoder from Baileys' internal modules.
-// ---------------------------------------------------------------------------
-
-let _baileysPollDecrypt: ((vote: any, ctx: any) => any) | null = null;
-
-async function loadBaileysPollDecrypt(): Promise<(vote: any, ctx: any) => any> {
-  if (_baileysPollDecrypt) return _baileysPollDecrypt;
-  const mod = await import('@whiskeysockets/baileys/lib/Utils/process-message.js' as string);
-  _baileysPollDecrypt = mod.decryptPollVote;
-  return _baileysPollDecrypt!;
-}
-
-// ---------------------------------------------------------------------------
 // Typed transport events
 // ---------------------------------------------------------------------------
 
@@ -577,31 +562,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   autoRejectCalls = false;
 
   // ---------------------------------------------------------------------------
-  // Poll vote tracking — stores data needed to decrypt votes for polls we sent.
+  // Poll vote tracking + decryption — owned by PollVoteDecryptor.
+  // botJid/botLid are read through thunks (late-bound on connection open).
+  // Instantiated after `this.log` above so the decryptor shares the same logger.
   // ---------------------------------------------------------------------------
-  private pendingPolls = new Map<string, {
-    messageSecret: Uint8Array;
-    optionNames: string[];
-    optionHashes: Map<string, string>;  // hex(sha256(name)) → name
-    chatJid: string;
-    createdAt: number;
-  }>();
-  private static readonly PENDING_POLL_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-  // Vote grace window: buffer decoded votes for 5s so vote changes
-  // (user taps a different option) replace the previous selection.
-  // After 5s the final selection is emitted via pollVoteReceived.
-  private static readonly POLL_VOTE_GRACE_MS = 5_000;
-  private voteGraceTimers = new Map<string, {
-    timer: ReturnType<typeof setTimeout>;
-    pendingEmit: {
-      pollMessageId: string;
-      chatJid: string;
-      voterJid: string;
-      selectedOptions: string[];
-      jidType: string;
-    };
-  }>();
+  private readonly pollVoteDecryptor = new PollVoteDecryptor({
+    log: this.log,
+    emit: {
+      pollVoteReceived: (data) => { this.emit('pollVoteReceived', data); },
+      pollVoteFailed: (data) => { this.emit('pollVoteFailed', data); },
+    },
+    getBotJid: () => this.botJid,
+    getBotLid: () => this.botLid,
+  });
 
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
@@ -844,25 +817,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     ) as Uint8Array | undefined;
 
     if (waMessageId && messageSecret) {
-      // Evict stale entries before adding
-      this.evictStalePolls();
-
-      // Build option hash map: sha256(optionName) → optionName
-      const optionHashes = new Map<string, string>();
-      for (const v of values) {
-        // Match Baileys' sha256().toString() — raw buffer toString (NOT hex)
-        // See: @whiskeysockets/baileys/lib/Utils/messages.js:718
-        const hash = createHash('sha256').update(Buffer.from(v)).digest().toString();
-        optionHashes.set(hash, v);
-      }
-
-      this.pendingPolls.set(waMessageId, {
-        messageSecret,
-        optionNames: values,
-        optionHashes,
-        chatJid,
-        createdAt: Date.now(),
-      });
+      this.pollVoteDecryptor.track(waMessageId, { messageSecret, optionNames: values, chatJid });
 
       this.log.info({ chatJid, waMessageId, optionCount: values.length, secretLen: messageSecret.length }, 'poll sent and tracked for vote decryption');
       this.queueLocalAuthBondClearCandidate('sendPollMessage', waMessageId);
@@ -874,16 +829,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.queueLocalAuthBondClearCandidate('sendPollMessage', waMessageId);
     this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
     return { waMessageId, hasSecret: false };
-  }
-
-  /** Evict pending polls older than TTL and their grace timers to prevent memory leaks. */
-  private evictStalePolls(): void {
-    const cutoff = Date.now() - ConnectionManager.PENDING_POLL_TTL_MS;
-    for (const [id, poll] of this.pendingPolls) {
-      if (poll.createdAt < cutoff) {
-        this.clearPollTracking(id);
-      }
-    }
   }
 
   async setTyping(chatJid: string, typing: TypingState): Promise<void> {
@@ -972,10 +917,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.clearAuthSnapshotSettledTimer();
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
-    for (const [id, grace] of this.voteGraceTimers) {
-      clearTimeout(grace.timer);
-      this.voteGraceTimers.delete(id);
-    }
+    this.pollVoteDecryptor.dispose();
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -2275,7 +2217,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const pollUpdate = innerMsg?.pollUpdateMessage
         ?? innerMsg?.ephemeralMessage?.message?.pollUpdateMessage;
       if (pollUpdate) {
-        this.handlePollVoteMessage(msg, pollUpdate);
+        this.pollVoteDecryptor.handlePollVote(msg, pollUpdate);
         // Fall through to parseIncomingMessage — it sets isResponseWorthy=false,
         // so the vote gets stored in DB but doesn't trigger an agent session.
       }
@@ -2296,166 +2238,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
   }
 
-  /**
-   * Decrypt a poll vote message and emit `pollVoteReceived` if it matches a poll we sent.
-   * Uses `decryptPollVote` from Baileys with the stored messageSecret.
-   */
-  private handlePollVoteMessage(msg: WAMessage, pollUpdate: any): void {
-    const creationKey = pollUpdate.pollCreationMessageKey;
-    if (!creationKey?.id) return;
-
-    const stored = this.pendingPolls.get(creationKey.id);
-    if (!stored) {
-      // Not a poll we're tracking — ignore silently
-      return;
-    }
-
-    const vote = pollUpdate.vote;
-    if (!vote?.encPayload || !vote?.encIv) {
-      this.log.warn({ pollMessageId: creationKey.id }, 'poll vote missing encrypted payload');
-      return;
-    }
-
-    // Fire-and-forget async: decryptPollVote is loaded via dynamic import
-    void this.decryptAndEmitPollVote(msg, pollUpdate, creationKey, vote, stored).catch((err) => {
-      this.log.error({ err, pollMessageId: creationKey.id }, 'failed to decrypt poll vote');
-    });
-  }
-
-  private async decryptAndEmitPollVote(
-    msg: WAMessage,
-    _pollUpdate: any,
-    creationKey: any,
-    vote: any,
-    stored: { messageSecret: Uint8Array; optionHashes: Map<string, string>; chatJid: string },
-  ): Promise<void> {
-    const baileysDecrypt = await loadBaileysPollDecrypt();
-    const msgKey = msg.key as any;
-
-    // Build candidate JID pairs for decryption. In LID-addressed messages
-    // the HMAC context uses LID JIDs; in phone-addressed messages it uses
-    // phone JIDs. We try LID first (current WhatsApp default), then phone.
-    const botLid = this.botLid ? jidNormalizedUser(this.botLid) : null;
-    const botPhone = this.botJid ? jidNormalizedUser(this.botJid) : null;
-
-    // Voter JID: LID is at participant/remoteJid, phone is at participantAlt/remoteJidAlt
-    const voterLid = jidNormalizedUser(msgKey.participant || msgKey.remoteJid || '');
-    const voterPhone = msgKey.participantAlt || msgKey.remoteJidAlt || '';
-
-    // Poll creator JID: fromMe → our JID, else from creationKey
-    const creatorLid = creationKey.fromMe
-      ? botLid
-      : jidNormalizedUser(creationKey.participant || creationKey.remoteJid || '');
-    const creatorPhone = creationKey.fromMe
-      ? botPhone
-      : (creationKey.participantAlt || creationKey.remoteJidAlt || '');
-
-    // Bounded candidate list: LID pair first (LID-addressed default), phone pair second
-    const candidates: Array<{ voterJid: string; pollCreatorJid: string; label: string }> = [];
-    if (voterLid && creatorLid) {
-      candidates.push({ voterJid: voterLid, pollCreatorJid: creatorLid, label: 'LID' });
-    }
-    if (voterPhone && creatorPhone) {
-      candidates.push({ voterJid: voterPhone, pollCreatorJid: creatorPhone, label: 'phone' });
-    }
-
-    for (const candidate of candidates) {
-      try {
-        const decrypted = baileysDecrypt(
-          vote,
-          {
-            pollCreatorJid: candidate.pollCreatorJid,
-            pollMsgId: creationKey.id,
-            pollEncKey: stored.messageSecret,
-            voterJid: candidate.voterJid,
-          },
-        );
-
-        // Decryption succeeded — map hashes to option names
-        const selectedOptions: string[] = [];
-        for (const optHash of decrypted.selectedOptions ?? []) {
-          const hashStr = Buffer.from(optHash).toString();
-          const optName = stored.optionHashes.get(hashStr);
-          selectedOptions.push(optName ?? 'Unknown');
-        }
-
-        if (selectedOptions.length > 0) {
-          this.bufferVoteWithGrace(creationKey.id, {
-            pollMessageId: creationKey.id,
-            chatJid: stored.chatJid,
-            voterJid: candidate.voterJid,
-            selectedOptions,
-            jidType: candidate.label,
-          });
-        }
-        return; // success — stop trying candidates
-      } catch {
-        // This candidate pair failed — try next
-        this.log.debug({ pollMessageId: creationKey.id, jidType: candidate.label }, 'poll vote decrypt failed with candidate — trying next');
-      }
-    }
-
-    // All candidates exhausted
-    this.log.error({ pollMessageId: creationKey.id, candidateCount: candidates.length }, 'poll vote decryption failed with all JID candidates');
-    this.emit('pollVoteFailed', {
-      pollMessageId: creationKey.id,
-      chatJid: stored.chatJid,
-      reason: 'decrypt_failed',
-    });
-  }
-
-  /**
-   * Buffer a decoded vote for POLL_VOTE_GRACE_MS. If a new vote arrives
-   * for the same poll within the window (user changed their answer), the
-   * previous selection is replaced. After the grace period, the final
-   * selection is emitted and the poll is cleaned up.
-   */
-  private bufferVoteWithGrace(
-    pollMessageId: string,
-    data: { pollMessageId: string; chatJid: string; voterJid: string; selectedOptions: string[]; jidType: string },
-  ): void {
-    const graceKey = `${pollMessageId}:${data.voterJid}`;
-    const existing = this.voteGraceTimers.get(graceKey);
-    if (existing) {
-      // Vote changed within grace window — replace buffered result, reset timer
-      clearTimeout(existing.timer);
-      this.log.info({
-        pollMessageId,
-        newOptionCount: data.selectedOptions.length,
-        prevOptionCount: existing.pendingEmit.selectedOptions.length,
-      }, 'poll vote changed within grace window');
-    }
-
-    const timer = setTimeout(() => {
-      this.voteGraceTimers.delete(graceKey);
-      this.emit('pollVoteReceived', {
-        pollMessageId: data.pollMessageId,
-        chatJid: data.chatJid,
-        voterJid: data.voterJid,
-        selectedOptions: data.selectedOptions,
-      });
-      this.log.info({
-        pollMessageId: data.pollMessageId,
-        chatJid: data.chatJid,
-        selectedOptionCount: data.selectedOptions.length,
-        jidType: data.jidType,
-      }, 'poll vote decrypted and emitted');
-    }, ConnectionManager.POLL_VOTE_GRACE_MS);
-
-    this.voteGraceTimers.set(graceKey, { timer, pendingEmit: data });
-  }
-
   /** Atomically clears all grace timers and pendingPolls state for a given poll. */
   public clearPollTracking(pollMessageId: string): void {
-    this.pendingPolls.delete(pollMessageId);
-    const prefix = `${pollMessageId}:`;
-    for (const [key, entry] of this.voteGraceTimers) {
-      if (key.startsWith(prefix)) {
-        clearTimeout(entry.timer);
-        this.voteGraceTimers.delete(key);
-      }
-    }
-    this.log.info({ pollMessageId }, 'poll tracking cleared');
+    this.pollVoteDecryptor.clearTracking(pollMessageId);
   }
 
   // -------------------------------------------------------------------------
