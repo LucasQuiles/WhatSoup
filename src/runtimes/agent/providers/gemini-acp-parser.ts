@@ -192,7 +192,10 @@ function mapSessionUpdate(
       extractMessage(update['error']) ??
       extractMessage(update['message']) ??
       stringifyValue(update);
-    return { type: 'result', text: text ?? 'Gemini ACP error' };
+    // Default-deny: flag in-band errors so the runtime suppresses the raw
+    // provider/CLI text and raises a provider_unknown_terminal ops alert,
+    // mirroring the JSON-RPC error_response path above. (BEAD-058)
+    return { type: 'result', text: text ?? 'Gemini ACP error', isError: true };
   }
 
   // Unknown update shape — pass through for diagnostics.

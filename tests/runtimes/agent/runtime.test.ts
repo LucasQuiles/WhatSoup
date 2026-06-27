@@ -369,6 +369,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -3215,6 +3216,82 @@ describe('AgentRuntime', () => {
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
     });
+  });
+
+  it('end-to-end: a Gemini ACP in-band error update is default-denied (suppressed + ops-alerted), not leaked raw (BEAD-058)', async () => {
+    // Systemic proof crossing the parser -> runtime boundary: a raw Gemini ACP
+    // `session/update` of type `error` must be parsed with isError set, so the
+    // runtime default-deny handler suppresses the raw provider/CLI text and
+    // raises a provider_unknown_terminal ops alert. Before the parser fix the
+    // event carried no isError flag, so the runtime forwarded the raw text to
+    // the user (enqueueResultText) and skipped the alert — the leak this guards.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Gemini ACP internal failure exposing secret-token-xyz789';
+    const parsed = parseGeminiAcpEvent(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'session-e2e',
+          update: { type: 'error', message: raw },
+        },
+      }),
+    );
+    // Boundary anchor: the parser must flag the in-band error for default-deny.
+    // Without the source fix this is undefined and every assertion below fails.
+    expect(parsed).toEqual({ type: 'result', text: raw, isError: true });
+
+    mockEmitAlert.mockClear();
+    capturedOnEventRef.current!(parsed as AgentEvent);
+
+    // Ops is alerted on the unknown terminal provider error...
+    await vi.waitFor(() =>
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        expect.any(String),
+        'provider_unknown_terminal',
+        'Unclassified terminal provider error suppressed from user',
+        expect.stringContaining('secret-token-xyz789'),
+      ),
+    );
+    // ...the user gets only the generic notice...
+    const allUserText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
+    expect(allUserText).toContain('an operator has been notified');
+    expect(allUserText).not.toContain('secret-token-xyz789');
+    // ...and the raw provider text is NEVER forwarded to the user.
+    const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('unknown-terminal');
+    expect(JSON.stringify(turnCapability)).not.toContain('secret-token-xyz789');
+  });
+
+  it('end-to-end: a Gemini ACP successful turn result is still forwarded raw (no over-suppression, BEAD-058)', async () => {
+    // The fix is error-branch-only: a normal turn_complete / final reply must NOT
+    // acquire isError and must continue to reach the user verbatim.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const parsedSuccess = parseGeminiAcpEvent(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 9,
+        result: { stop_reason: 'end_turn', usage: { input_tokens: 3, output_tokens: 2 } },
+      }),
+    );
+    // A bare end-of-turn carries no text; emit a genuine assistant reply first,
+    // then prove the (non-error) result path forwards visible text untouched.
+    capturedOnEventRef.current!({ type: 'result', text: 'a genuine Gemini reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine Gemini reply'));
+    // The parsed success event must not have been flagged as an error.
+    expect((parsedSuccess as { isError?: boolean }).isError).toBeUndefined();
   });
 
   it('transient-network (socket-close) is_error result emits provider_transient_network WARNING, not provider_unknown_terminal CRITICAL (single path)', async () => {

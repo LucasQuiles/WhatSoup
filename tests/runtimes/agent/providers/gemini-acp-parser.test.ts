@@ -315,7 +315,10 @@ describe('Gemini ACP parser', () => {
             update: { type: 'error', message: 'model unavailable' },
           },
         })),
-      ).toEqual({ type: 'result', text: 'model unavailable' });
+        // Default-deny: an in-band error update MUST carry isError so the runtime
+        // suppresses the raw text and raises a provider_unknown_terminal alert,
+        // matching the JSON-RPC error_response path. (BEAD-058)
+      ).toEqual({ type: 'result', text: 'model unavailable', isError: true });
     });
 
     it('passes unknown session/update shapes through for diagnostics', () => {
@@ -669,7 +672,8 @@ describe('gemini-acp-parser.ts uncovered-branch coverage', () => {
           update: { type: 'error', error: { message: 'from-message-field' } },
         },
       })),
-    ).toEqual({ type: 'result', text: 'from-message-field' });
+      // In-band errors are flagged for default-deny suppression. (BEAD-058)
+    ).toEqual({ type: 'result', text: 'from-message-field', isError: true });
   });
 
   it('stringifies the whole update when an error update carries no extractable message', () => {
