@@ -63,6 +63,11 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
+  /** No-op — control sessions have no typing indicator to clear at turn end. */
+  endTurn(): void {
+    // intentional no-op
+  }
+
   /** Pass-through — control sessions execute polls immediately without ordering constraints. */
   async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
     await sendFn();
