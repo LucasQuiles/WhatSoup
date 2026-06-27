@@ -160,6 +160,19 @@ const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
 const HEALTH_STATS_INTERVAL_MS = 60_000;
 const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+// Idle per-chat agent session lifecycle bounds. A resident session idle (no
+// message) beyond SESSION_IDLE_MS is suspended; sessions support --resume so the
+// next message rehydrates. MAX_RESIDENT_SESSIONS is an LRU ceiling so a burst of
+// distinct chats cannot pin unbounded memory; SESSION_MIN_RESIDENCY_MS is an
+// anti-thrash floor so a freshly-spawned session is never immediately evicted.
+const envPositiveInt = (key: string, fallback: number): number => {
+  const raw = Number(process.env[key]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+};
+const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
+const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
+const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
@@ -753,6 +766,7 @@ export class AgentRuntime implements Runtime {
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1279,6 +1293,77 @@ export class AgentRuntime implements Runtime {
       });
       this.outboundQueues.delete(chatJid);
     }
+  }
+
+  private startSessionSweepTimer(): void {
+    if (this.sessionSweepTimer) return;
+    this.sessionSweepTimer = setInterval(() => this.sweepIdleSessions(), SESSION_SWEEP_INTERVAL_MS);
+    this.sessionSweepTimer.unref?.();
+  }
+
+  /**
+   * True only if a resident agent session is safe to suspend right now. A session
+   * is evictable when it is live, between turns, past the minimum-residency floor,
+   * idle beyond the TTL, and not blocking on a pending poll vote. Mirrors the
+   * guards proven necessary by the eviction design (turn-in-flight, anti-thrash
+   * residency floor, awaited-poll exemption).
+   */
+  private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
+    const st = session.getStatus();
+    if (st.active !== true) return false;                 // not a live resident session
+    if (st.turnInFlight === true) return false;           // mid-turn (covers mid-tool-call)
+    if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
+    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
+    if (!Number.isFinite(lastMs) || now - lastMs <= SESSION_IDLE_MS) return false; // within TTL
+    return true;
+  }
+
+  /**
+   * Suspend resident per-chat agent sessions that have gone idle, so the resident
+   * session set stays bounded instead of accumulating one process (plus its MCP
+   * and browser children) per distinct chat until the host exhausts memory.
+   *
+   * Pass 1 (TTL): suspend anything idle beyond SESSION_IDLE_MS. Pass 2 (LRU
+   * ceiling): if still over MAX_RESIDENT_SESSIONS, suspend the longest-idle
+   * evictable sessions down toward the cap. Eviction goes through the session's
+   * own graceful shutdown(true) — which suspends (resumable) and routes through
+   * the exit-handler's clean-shutdown path — never an external kill.
+   */
+  private sweepIdleSessions(): void {
+    const now = Date.now();
+
+    // Pass 1 — TTL.
+    for (const [mapKey, session] of this.chatSessions) {
+      if (!this.isSessionEvictable(mapKey, session, now)) continue;
+      this.evictIdleSession(mapKey, session, 'idle-ttl');
+    }
+
+    // Pass 2 — LRU ceiling.
+    if (this.chatSessions.size > MAX_RESIDENT_SESSIONS) {
+      const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
+      const candidates = [...this.chatSessions.entries()]
+        .filter(([mapKey, session]) => this.isSessionEvictable(mapKey, session, now))
+        .map(([mapKey, session]) => {
+          const st = session.getStatus();
+          const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : 0;
+          return { mapKey, session, lastMs: Number.isFinite(lastMs) ? lastMs : 0 };
+        })
+        .sort((a, b) => a.lastMs - b.lastMs); // longest-idle first
+      for (const { mapKey, session } of candidates.slice(0, overBy)) {
+        this.evictIdleSession(mapKey, session, 'lru-ceiling');
+      }
+    }
+  }
+
+  private evictIdleSession(mapKey: string, session: SessionManager, reason: string): void {
+    log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
+    // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
+    this.chatSessions.delete(mapKey);
+    void session.shutdown(true).catch((err) => {
+      log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
+    });
   }
 
   // Tracks inbound seq for the current turn (single/shared mode)
@@ -2371,6 +2456,7 @@ export class AgentRuntime implements Runtime {
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
+    this.startSessionSweepTimer();
     this.handoffDistill.start();
 
     // Restore any pending polls from the previous process so votes-in-flight
@@ -4789,6 +4875,10 @@ export class AgentRuntime implements Runtime {
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
+    }
+    if (this.sessionSweepTimer) {
+      clearInterval(this.sessionSweepTimer);
+      this.sessionSweepTimer = null;
     }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
