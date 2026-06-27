@@ -60,6 +60,14 @@ export const TOOL_BATCH_MAX_AGE_MS = 30_000;
 export const MIN_SEND_GAP_MS = 500;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
 export const TYPING_REFRESH_MS = 8_000;
+/**
+ * Hard upper bound on how long a single composing indicator may be re-asserted
+ * without fresh turn activity. Safety net: if a future code path ever leaks a
+ * turn end, the indicator self-clears within this window instead of forever.
+ * Set well above the longest legitimate single tool chain; streaming text
+ * re-arms typing and resets this clock.
+ */
+export const TYPING_MAX_MS = 300_000; // 5 min
 export const SEND_TIMEOUT_MS = 15_000;
 /** Delay before flushing aggregated text — batches streaming provider fragments. */
 export const TEXT_AGGREGATE_DELAY_MS = 2_000;
@@ -241,6 +249,8 @@ export class OutboundQueue implements IOutboundQueue {
   private isTyping = false;
   /** Interval that periodically re-asserts composing while a turn is in progress. */
   private typingRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  /** Wall-clock (ms) when the current composing indicator was (re)started. */
+  private typingStartedAt = 0;
 
   /** Promise chain used to serialize sends. */
   private chain: Promise<void> = Promise.resolve();
@@ -714,12 +724,24 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Start composing indicator and keep it alive with a periodic refresh. Idempotent. */
   private startTyping(): void {
+    // Always refresh the self-bound clock so ongoing turn activity keeps the
+    // indicator alive; only arm a new interval when not already typing.
+    this.typingStartedAt = Date.now();
     if (this.isTyping) return;
     this.isTyping = true;
     this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
     // Re-assert composing every 8s — WA auto-clears it on the recipient side after ~10-15s.
     // This keeps the indicator alive during long tool chains with no intermediate messages.
+    // The self-bound check caps the total lifetime to TYPING_MAX_MS so any future leak
+    // self-heals instead of persisting indefinitely.
     this.typingRefreshInterval = setInterval(() => {
+      if (Date.now() - this.typingStartedAt > TYPING_MAX_MS) {
+        // Self-bound tripped — stop re-asserting. WA clears composing on the
+        // recipient side after ~10-15s. Do NOT send 'paused' (avoid masking a
+        // genuine crash signal); just stop the heartbeat.
+        this.stopTyping(false);
+        return;
+      }
       this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
     }, TYPING_REFRESH_MS);
   }

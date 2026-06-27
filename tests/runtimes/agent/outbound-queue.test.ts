@@ -5,6 +5,7 @@ import {
   TOOL_BATCH_MAX_AGE_MS,
   MIN_SEND_GAP_MS,
   TYPING_REFRESH_MS,
+  TYPING_MAX_MS,
   TEXT_AGGREGATE_DELAY_MS,
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
@@ -2393,6 +2394,44 @@ describe('OutboundQueue', () => {
         'in-flight send that holds the chain open',
         '🔧 Running:\n  • late update',
       ]);
+    });
+  });
+
+  // ─── Layer 2: self-bounding typing refresh ───────────────────────────────
+
+  describe('typing self-bound (TYPING_MAX_MS)', () => {
+    it('self-expires the typing refresh after TYPING_MAX_MS without a new turn', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('long turn');             // arms composing + 8s refresh
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      // Advance just past the self-bound cap; the refresh must stop re-asserting.
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS + TYPING_REFRESH_MS);
+      const assertsAtCap = typingCalls.filter((v) => v === true).length;
+
+      // No further composing after the cap
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 3);
+      expect(typingCalls.filter((v) => v === true).length).toBe(assertsAtCap);
+
+      // Drain streamTimer
+      await queue.flush();
+    });
+
+    it('a fresh startTyping within a turn resets the self-bound clock', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('chunk-1');
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS - TYPING_REFRESH_MS);
+      queue.enqueueStreamingText('chunk-2');               // new activity → resets clock
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 2);
+      // Still typing because the clock was reset by chunk-2 activity
+      const before = typingCalls.filter((v) => v === true).length;
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS);
+      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThan(before);
+      await queue.flush();
     });
   });
 
