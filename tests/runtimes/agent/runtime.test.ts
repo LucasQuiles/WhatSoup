@@ -9167,5 +9167,35 @@ describe('AgentRuntime', () => {
 
       expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
     });
+
+    it('per-chat path: endTurn() called on handleEventPerChat result (usage-limit early-break)', () => {
+      // Drive a result through the per_chat code path (handleEventPerChat →
+      // handleEventWithContext) and verify endTurn() is reached on the per-chat
+      // queue, not just the shared queue. This would fail if queue.endTurn() were
+      // removed from handleEventWithContext.
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+      const MAP_KEY = 'chat-x@s.whatsapp.net';
+      const perChatQueue = makeQueueMock(MAP_KEY);
+
+      type PerChatRuntimeView = {
+        chatQueues: Map<string, IOutboundQueue>;
+        perChatInboundSeqQueue: Map<string, number[]>;
+        handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void;
+      };
+      const view = runtime as unknown as PerChatRuntimeView;
+
+      view.chatQueues.set(MAP_KEY, perChatQueue);
+      view.perChatInboundSeqQueue.set(MAP_KEY, [1]);
+
+      // Drive a usage-limit result — early-break branch in handleEventWithContext
+      view.handleEventPerChat(MAP_KEY, {
+        type: 'result',
+        text: 'Claude usage limit reached. Your limit will reset at 3pm.',
+        inputTokens: 0,
+        outputTokens: 0,
+      }, MAP_KEY);
+
+      expect(perChatQueue.endTurn).toHaveBeenCalledTimes(1);
+    });
   });
 });
