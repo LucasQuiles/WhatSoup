@@ -98,7 +98,9 @@ const operationalProtocolIdentifiers = new Set([
   'instances/personal/whatsoup.sock',
 ]);
 
-const privateHostLabels = [
+// SSOT for the fleet private-host labels: the publication detection rule below,
+// and consumers like the bot-errors collector-unit hygiene test, import this.
+export const privateHostLabels = [
   ['mw', 'lab'],
   ['nuc', 'les'],
   ['ana', 'bot'],
