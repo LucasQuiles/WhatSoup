@@ -70,6 +70,17 @@ git diff --name-only origin/main..HEAD | xargs -I{} \
 
 If anything turns up, read the matched line in context — if your PR closes the gap it describes, update the runbook in the same diff.
 
+**Local push gate is a SUBSET of CI — run the full suite on touched tests.** The
+`verify:push:branch` pre-push hook runs a curated guard-test list (`npm test -- <specific
+tests/scripts/*.test.ts> --pool=forks`), **not** the whole suite. CI `quality` runs
+`coverage:check` (`vitest run --coverage`) — the full suite, a strict superset. So a test
+outside the curated list can pass locally and still fail in CI (e.g. the `arch.file-size`
+ratchet `tests/scripts/fitness-file-size-warning-budget.test.ts`, which once let an
+over-budget test file through the local gate and went red in CI). Before pushing changes
+that touch tests, file sizes, or fitness/coverage surfaces, run the affected test(s)
+directly: `npx vitest run --pool=forks <touched test files>`. A green local push hook is
+necessary but not sufficient.
+
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
