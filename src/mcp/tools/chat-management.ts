@@ -13,6 +13,9 @@ import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { config } from '../../config.ts';
+import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
+import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 
 const log = createChildLogger('chat-management');
 const SQLITE_READ_LIMIT_MAX = 1000;
@@ -467,6 +470,15 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
         }
         assertConversationAccess(targetConversationKey, session, 'Forward target');
       }
+
+      // Outbound identity floor: forward_message is a free-recipient raw-socket
+      // egress that bypasses the Messenger methods, so guard it here. One call
+      // covers both the native-forward and the text-fallback sends below.
+      applyOutboundIdentityGuard(
+        to_jid,
+        { caller: 'mcp', mode: config.outboundIdentityMode },
+        new SqliteIdentityStore(db.raw),
+      );
 
       // Try true forward via raw Baileys proto (raw_message column may not exist yet)
       let rawMessage: string | null = null;

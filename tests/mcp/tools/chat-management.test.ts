@@ -582,6 +582,46 @@ describe('chat-management tools', () => {
     });
   });
 
+  // --- forward_message: outbound identity guard ---
+
+  describe('forward_message — outbound identity guard', () => {
+    it('enforce mode blocks a forward to a cold target before any sock.sendMessage', async () => {
+      const { config } = await import('../../../src/config.ts');
+      const original = config.outboundIdentityMode;
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = 'enforce';
+      try {
+        // 333@s.whatsapp.net has no contact / no access / no inbound — cold.
+        const result = await registry.call(
+          'forward_message',
+          { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/identity guard blocked/i);
+        expect(mockSock.sendMessage).not.toHaveBeenCalled();
+      } finally {
+        (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
+      }
+    });
+
+    it('log-only mode forwards to a cold target (audit only, no block)', async () => {
+      const { config } = await import('../../../src/config.ts');
+      const original = config.outboundIdentityMode;
+      (config as { outboundIdentityMode: string }).outboundIdentityMode = 'log-only';
+      try {
+        const result = await registry.call(
+          'forward_message',
+          { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+          globalSession(),
+        );
+        expect(result.isError).toBeUndefined();
+        expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        (config as { outboundIdentityMode: string }).outboundIdentityMode = original;
+      }
+    });
+  });
+
   // --- archive_chat ---
 
   describe('archive_chat', () => {

@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 
 let tmpRoot = '';
 const privateHostLabelFixture = ['nuc', 'les'].join('');
@@ -828,15 +829,37 @@ print(json.dumps(samples, sort_keys=True))
       expect(normalizeInstances(profile.instances)).toEqual(normalizeInstances(host.instances));
     }
 
-    const collectorService = readFileSync(join(process.cwd(), 'deploy', 'bot-errors-collector.service'), 'utf8');
-    const collectorRemotes = [...collectorService.matchAll(/--remote\s+([^\s]+)/g)]
-      .map((match) => match[1])
-      .sort();
-    const manifestRemotes = hosts
-      .filter((host) => host.collectorRemote === true)
-      .map((host) => String(host.host))
-      .sort();
-    expect(collectorRemotes).toEqual(manifestRemotes);
+    // collectorRemote is a manifest-internal flag: every host must declare it as
+    // a boolean, and at least one host must be a collector remote. The ACTUAL
+    // poll list is host-local (BOT_ERRORS_RELAY_REMOTES) and is NOT tracked here
+    // — see the 'free of private host topology' guard above. This replaces the
+    // former .service<->manifest --remote parity, which coupled this suite to
+    // private host labels in a tracked unit (the PR #1406 hygiene landmine).
+    for (const host of hosts) {
+      expect(typeof host.collectorRemote).toBe('boolean');
+    }
+    expect(hosts.some((host) => host.collectorRemote === true)).toBe(true);
+  });
+
+  it('keeps the tracked collector unit free of private host topology (poll list lives in host-local env)', () => {
+    // Regression guard for the publication-hygiene landmine: the tracked unit
+    // must NOT carry the fleet poll list. Real hosts are seeded per-host via
+    // BOT_ERRORS_RELAY_REMOTES in the untracked EnvironmentFile. Re-introducing
+    // --remote flags or private host labels here both leaks fleet topology into
+    // the public repo and re-couples this suite to repo-hygiene's branch-diff
+    // private-host-label rule (which froze the line and blocked PR #1406).
+    const unit = readFileSync(join(process.cwd(), 'deploy', 'bot-errors-collector.service'), 'utf8');
+    const execLine = unit.split('\n').find((line) => line.startsWith('ExecStart=')) ?? '';
+    expect(execLine).not.toMatch(/--remote\s/);
+    expect(execLine).not.toMatch(/--best-effort-remote\s/);
+    // No private host labels anywhere in the tracked unit. The label set is the
+    // canonical privateHostLabels SSOT imported from repo-hygiene-guard.ts, so
+    // this guard tracks the publication rule exactly and cannot drift from it.
+    for (const label of privateHostLabels) {
+      expect(unit).not.toContain(label);
+    }
+    // The unit must still load the host-local env file that supplies the list.
+    expect(unit).toMatch(/^EnvironmentFile=.*bot-errors\.env$/m);
   });
 
   it('passes runtime manifest files when hashes match', () => {

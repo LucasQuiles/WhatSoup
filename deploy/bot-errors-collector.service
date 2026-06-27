@@ -6,7 +6,10 @@ After=network-online.target bot-errors-dispatcher.service
 Type=simple
 WorkingDirectory=%h/LAB/WhatSoup
 EnvironmentFile=%h/.config/whatsoup/bot-errors.env
-ExecStart=/usr/bin/python3 %h/LAB/WhatSoup/deploy/scripts/bot-errors-collector.py --daemon --interval 30 --max-events 25 --remote maclab --remote mwlab --remote gupta --remote mini1 --remote mini2 --remote mini3 --remote mini4 --remote mini5 --remote mini6 --remote mini7 --remote mini8 --remote mini9 --remote mini10 --remote mini11
+# Poll list is host-local: set BOT_ERRORS_RELAY_REMOTES=host-a,host-b,... in the
+# EnvironmentFile above. Kept out of the tracked unit so fleet topology never
+# enters the public repo (see deploy/bot-errors.env.example).
+ExecStart=/usr/bin/python3 %h/LAB/WhatSoup/deploy/scripts/bot-errors-collector.py --daemon --interval 30 --max-events 25
 Restart=always
 RestartSec=10
 

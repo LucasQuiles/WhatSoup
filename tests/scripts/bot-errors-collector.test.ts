@@ -1211,4 +1211,54 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
       summary: 'stable id second occurrence must alert',
     });
   });
+
+  it('fails closed with exit 64 when no remotes are configured (empty env, no --remote)', () => {
+    // Externalized poll list: with no --remote flags and an empty
+    // BOT_ERRORS_RELAY_REMOTES, the collector must surface inconclusive config as
+    // a usage error (EX_USAGE=64), never daemonize on an empty set or exit 0.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const result = spawnSync(
+      'python3',
+      ['deploy/scripts/bot-errors-collector.py', '--max-events', '1', '--timeout', '2'],
+      {
+        cwd: process.cwd(),
+        env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_RELAY_REMOTES: '' }),
+        encoding: 'utf8',
+      },
+    );
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain('no remotes configured');
+  });
+
+  it('resolves the poll list from BOT_ERRORS_RELAY_REMOTES when no --remote flags are given', () => {
+    // Proves the env fallback (collector main: `args.remote or env split`) is the
+    // wired path now that the tracked unit carries no --remote flags. The env list
+    // gets past the fail-closed guard and the run acts on exactly that host.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const fakeSsh = writeFakeSsh(tmpRoot);
+    const result = spawnSync(
+      'python3',
+      ['deploy/scripts/bot-errors-collector.py', '--max-events', '1', '--timeout', '2', '--alert-cooldown', '3600'],
+      {
+        cwd: process.cwd(),
+        env: collectorEnv({
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_REMOTES: 'mini5',
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+          BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
+          FAKE_SSH_MODE: 'fail',
+        }),
+        encoding: 'utf8',
+      },
+    );
+    // Got past the fail-closed guard (not 64) → the env list became the remote
+    // set. The run_once summary is host-agnostic counters, so we assert behavior,
+    // not the host name: exactly the env-provided host was attempted and failed
+    // through fake-ssh (failed >= 1), proving a real poll — not a silent no-op
+    // (which would yield zero failures).
+    expect(result.status).not.toBe(64);
+    const summary = JSON.parse(result.stdout) as { failed: number; remotesSucceeded: number };
+    expect(summary.failed).toBeGreaterThanOrEqual(1);
+    expect(summary.remotesSucceeded).toBe(0);
+  });
 });
