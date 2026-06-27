@@ -85,8 +85,13 @@ export interface BotErrorsOutboxWrite {
 //   * C3 (`token=Bearer <secret>` leak): the VALUE capture optionally consumes a
 //     leading `Bearer `/`Basic ` scheme so the whole token is masked (the bare
 //     `[^\s…]+` value stopped at the space after `Bearer`, leaking the secret).
+// BEAD-055: the optional `(?:[A-Za-z0-9]*_)?` segment mirrors the Python SSOT so a
+// leading-`_` compound key (`user_access_token=`, `my_client_secret=`) anchors on
+// its known-secret tail instead of leaking. Benign tails (`event_count`,
+// `message_id`, `user_id`, `retry_count`) stay untouched. The `*` is over
+// `[A-Za-z0-9]` (no `_`) — a single linear alnum run, no catastrophic backtracking.
 const SECRETISH_ASSIGNMENT =
-  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
+  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:[A-Za-z0-9]*_)?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
 // Mirror of the Python SSOT `AUTHORIZATION_BEARER_RE`: an `authorization` header
 // carrying a `Bearer` OR `Basic` scheme. C2 fix — the prior form matched only
 // `Authorization: Bearer …` (capital, colon-only, Bearer-only) and normalised the
@@ -111,7 +116,12 @@ const AWS_ACCESS_KEY_ID = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
 const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
-const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+// BEAD-054: the prior `https?://`-only form UNDER-redacted non-http URL creds
+// (`redis://`/`wss://`/`ldap://`/`ftp://` passed through verbatim). Match the
+// Python SSOT `URL_USERINFO_RE` bounded any-scheme form: `[a-z][a-z0-9+.-]{0,30}://`.
+// The `{0,30}` bound (not unbounded `*`) keeps the scan linear — importing the
+// `*` form would import the Python ReDoS this bead removes.
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 // Anchored, non-ambiguous prefix (lookbehind-guarded `~`/`/` + single lazy body)
 // mirrors CREDENTIAL_PATH_RE in lib/bot_errors_redaction.py. The previous
 // `(?:~|/[^\s]+)*` prefix allowed overlapping partitions of a long slash-path,

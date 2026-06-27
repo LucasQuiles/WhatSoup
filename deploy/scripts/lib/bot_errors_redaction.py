@@ -23,7 +23,14 @@ BEARER_VALUE_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECA
 # leading `Bearer `/`Basic ` scheme so the whole token is masked.
 KEYED_SECRET_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
-    r"([\"']?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|"
+    # BEAD-055: an optional `<alnum>_` segment lets a leading-`_` compound key
+    # (e.g. `user_access_token=`, `my_client_secret=`) anchor on its known-secret
+    # tail. The prefix class excludes `_`, so without this the leading run kept the
+    # tail from matching and the value LEAKED. Benign tails (`event_count`,
+    # `message_id`, `user_id`, `retry_count`) stay untouched — their tails are not
+    # secret-key substrings. The `*` is over `[A-Za-z0-9]` (no `_`), so it is a
+    # single linear alnum run terminated by one `_`: no catastrophic backtracking.
+    r"([\"']?(?:[A-Za-z0-9]*_)?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|"
     r"refresh[_-]?token|auth[_-]?token|cookie|password|passphrase|secret|session|token|"
     r"pat)[\"']?\s*[:=]\s*[\"']?)"
     r"((?:(?:Bearer|Basic)\s+)?[^\s\\,\"';}]+)([\"']?)",
@@ -53,7 +60,12 @@ JWT_VALUE_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z
 PEM_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
 )
-URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.IGNORECASE)
+# BEAD-054 (ReDoS): bound the scheme prefix to `{0,30}` instead of unbounded `*`.
+# The `*` form backtracked quadratically on adversarial scheme-shaped runs (e.g.
+# `apikey.`*N → ~8s on 140KB) because `[a-z0-9+.-]*` greedily consumed the whole
+# input then re-tried `://` at every offset. The bound keeps the scan LINEAR while
+# still masking creds for ANY scheme (redis/postgres/wss/https/ldap/ftp/…).
+URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,30}://)[^\s/@:]+:[^\s/@]+@", re.IGNORECASE)
 
 
 def redact_phone_like_match(match: re.Match[str], marker: str) -> str:
