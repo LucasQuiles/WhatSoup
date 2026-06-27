@@ -308,6 +308,26 @@ describe('idle session eviction — LRU ceiling and poll guard', () => {
     expect(sessions.size).toBe(1);
   });
 
+  it('cleans co-keyed per-chat state (cleanupPerChatState) when it suspends a session', async () => {
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 }); // 3h idle → evictable
+    const { runtime, sessions } = await seededRuntime({ auxchat: s });
+    const rt = runtime as unknown as {
+      sweepIdleSessions: () => void;
+      perChatTurnText: Map<string, string>;
+      perChatInboundSeqQueue: Map<string, number[]>;
+    };
+    rt.perChatTurnText.set('auxchat', 'leftover');
+    rt.perChatInboundSeqQueue.set('auxchat', [1, 2]);
+
+    rt.sweepIdleSessions();
+
+    expect(s.shutdown).toHaveBeenCalledWith(true);
+    expect(sessions.has('auxchat')).toBe(false);
+    // The canonical teardown must run — otherwise eviction leaks auxiliary state.
+    expect(rt.perChatTurnText.has('auxchat')).toBe(false);
+    expect(rt.perChatInboundSeqQueue.has('auxchat')).toBe(false);
+  });
+
   it('does NOT suspend an idle-beyond-TTL session with a turn mid-dispatch (pendingTurnText)', async () => {
     // Guards the dispatch race: pendingTurnText is set before the session ref is
     // captured for dispatch, so a sweep firing during that window must not evict.

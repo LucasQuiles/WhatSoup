@@ -1377,6 +1377,13 @@ export class AgentRuntime implements Runtime {
     log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
     // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
     this.chatSessions.delete(mapKey);
+    // Canonical teardown of all co-keyed per-chat state (operation tracker,
+    // auto-compact timers, image-coalesce buffers, turn bookkeeping). Required
+    // whenever a session leaves chatSessions — otherwise eviction leaks the very
+    // auxiliary state/timers this feature exists to bound. Next message re-spawns
+    // and repopulates. Safe at this point: the safety guards already exclude a
+    // chat with a pending turn or pending poll.
+    this.cleanupPerChatState(mapKey);
     void session.shutdown(true).catch((err) => {
       log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
     });
