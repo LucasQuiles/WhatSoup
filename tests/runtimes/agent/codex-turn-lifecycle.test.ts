@@ -145,6 +145,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
+    endTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),

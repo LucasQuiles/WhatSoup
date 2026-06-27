@@ -153,6 +153,7 @@ function makeFakeQueue() {
     getLastOpId: vi.fn(() => undefined),
     clearLastOpId: vi.fn(),
     indicateTyping: vi.fn(),
+    endTurn: vi.fn(),
   };
 }
 

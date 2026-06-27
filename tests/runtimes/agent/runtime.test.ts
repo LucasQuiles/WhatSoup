@@ -69,6 +69,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
+    endTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
@@ -545,6 +546,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
+    endTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
@@ -9126,6 +9128,44 @@ describe('AgentRuntime', () => {
       expect(view.singletonProviderToolSession?.conversationKey).toBeUndefined();
       expect(socketUpdates).toEqual([]);
       expect(mockRuntimeLogger.error).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Layer 1 wiring: endTurn() called on every result branch ─────────────
+
+  describe('typing indicator — endTurn() choke point', () => {
+    it('clears the typing indicator on a result even when the turn early-returns (usage-limit)', async () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      await runtime.handleMessage(makeMsg({ content: 'hello' }));
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+      mockQueue.endTurn.mockClear();
+
+      // Emit a usage-limit result — this is an early-break branch that would
+      // have skipped flush() before the endTurn() choke point was added.
+      capturedOnEventRef.current?.({
+        type: 'result',
+        text: 'Claude usage limit reached. Your limit will reset at 3pm.',
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      await Promise.resolve();
+
+      expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the typing indicator on a normal (flush) result branch too', async () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      await runtime.handleMessage(makeMsg({ content: 'hello' }));
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+      mockQueue.endTurn.mockClear();
+
+      // Normal result (no early break) — endTurn() must still be called once.
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 5 });
+      await Promise.resolve();
+
+      expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
     });
   });
 });
