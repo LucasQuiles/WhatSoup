@@ -765,10 +765,17 @@ export class OutboundQueue implements IOutboundQueue {
 
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
-   * received, so the typing indicator is cleared even on early-return branches
-   * of the runtime result handler that never reach flush(). Idempotent.
+   * received, so any buffered streaming fragments are delivered and the typing
+   * indicator is cleared, even on early-return branches of the runtime result
+   * handler that never reach flush(). Idempotent.
+   *
+   * Ordering: flush stream buffer first so buffered text is delivered as part of
+   * this turn rather than firing 2s later into an idle persistent session.
+   * Then stop typing. The subsequent queue.flush() on the normal path is a no-op
+   * for both (buffer already empty, typing already stopped).
    */
   endTurn(): void {
+    this.flushStreamBuffer();
     this.stopTyping();
   }
 

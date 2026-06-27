@@ -2438,6 +2438,38 @@ describe('OutboundQueue', () => {
   // ─── Layer 1: endTurn() choke point ──────────────────────────────────────
 
   describe('endTurn()', () => {
+    it('endTurn() drains the stream buffer and delivers the fragment before stopping typing', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      // Simulate an assistant_text fragment buffered mid-turn (streamTimer armed, not yet fired)
+      queue.enqueueStreamingText('buffered fragment');
+      // Buffer is pending — no send yet (streamTimer hasn't fired)
+      expect(calls).toHaveLength(0);
+
+      // endTurn() flushes the stream buffer synchronously then stops typing
+      queue.endTurn();
+      // Drain the send chain (send is async via Promise chain; zero-advance drains microtasks)
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Fragment must now be delivered
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toBe('buffered fragment');
+      // Typing must be stopped
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1);
+
+      // Advancing past TEXT_AGGREGATE_DELAY_MS must produce NO additional sends
+      // and NO composing re-asserts (orphaned streamTimer must not fire)
+      await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + TYPING_REFRESH_MS);
+      expect(calls).toHaveLength(1);
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1); // only the initial assert
+
+      // Subsequent flush() must be a no-op for both stream content and typing
+      await queue.flush();
+      expect(calls).toHaveLength(1);
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1); // still only one paused
+    });
+
     it('endTurn() clears an active typing indicator and is idempotent', async () => {
       const { messenger, typingCalls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
