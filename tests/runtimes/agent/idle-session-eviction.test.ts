@@ -188,6 +188,10 @@ async function residentRuntime(): Promise<{ runtime: AgentRuntime; sessions: Map
   await runtime.start();
   await sendAndDrain(runtime, makeMsg({ content: 'hi' }));
   mockSession.shutdown.mockClear(); // setup's inactive-path shutdown is noise for these assertions
+  // The mock turn never fires the result handler that clears pendingTurnText, so
+  // clear it to simulate turn completion — otherwise the mid-dispatch guard
+  // (correctly) blocks eviction. These tests isolate the idle-TTL behavior.
+  (runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.clear();
   const sessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
   return { runtime, sessions };
 }
@@ -297,6 +301,20 @@ describe('idle session eviction — LRU ceiling and poll guard', () => {
     const { runtime, sessions } = await seededRuntime({ pollchat: s });
     (runtime as unknown as { pendingPolls: { questions: Map<string, unknown> } })
       .pendingPolls.questions.set('pollchat', { chatJid: 'pollchat' });
+
+    (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
+
+    expect(s.shutdown).not.toHaveBeenCalled();
+    expect(sessions.size).toBe(1);
+  });
+
+  it('does NOT suspend an idle-beyond-TTL session with a turn mid-dispatch (pendingTurnText)', async () => {
+    // Guards the dispatch race: pendingTurnText is set before the session ref is
+    // captured for dispatch, so a sweep firing during that window must not evict.
+    const s = fakeSession({ lastAgoMs: 3 * 60 * 60 * 1000 }); // 3h idle
+    const { runtime, sessions } = await seededRuntime({ dispatchchat: s });
+    (runtime as unknown as { pendingTurnText: Map<string, string> })
+      .pendingTurnText.set('dispatchchat', 'hello');
 
     (runtime as unknown as { sweepIdleSessions: () => void }).sweepIdleSessions();
 

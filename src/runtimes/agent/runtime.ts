@@ -167,7 +167,7 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 // anti-thrash floor so a freshly-spawned session is never immediately evicted.
 const envPositiveInt = (key: string, fallback: number): number => {
   const raw = Number(process.env[key]);
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 };
 const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
 const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
@@ -1309,9 +1309,16 @@ export class AgentRuntime implements Runtime {
    * residency floor, awaited-poll exemption).
    */
   private isSessionSafeToEvict(mapKey: string, session: SessionManager, now: number): boolean {
+    if (session === this.controlSession) return false;    // synthetic self-heal session has its own lifecycle
     const st = session.getStatus();
     if (st.active !== true) return false;                 // not a live resident session
     if (st.turnInFlight === true) return false;           // mid-turn (covers mid-tool-call)
+    // A turn is queued/dispatching for this chat. pendingTurnText is set before the
+    // session ref is captured for dispatch and cleared at turn completion, so it
+    // closes the window where a sweep could evict a session mid-dispatch (before its
+    // watchdog arms) and the captured ref then gets respawned off-map. Fail-safe:
+    // a lingering pending turn only defers eviction, never forces it.
+    if (this.pendingTurnText.has(mapKey)) return false;
     if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
     const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
     if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
