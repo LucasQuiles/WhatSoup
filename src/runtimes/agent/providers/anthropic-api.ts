@@ -24,9 +24,15 @@ import { turnPartsToAnthropicContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
-import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
+import { waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
-import { errorMessage } from '../../../lib/error-message.ts';
+import {
+  parseProviderToolInput,
+  buildApiKeyEnv,
+  mapSharedApiError,
+  connectionErrorResult,
+  type ParsedToolInput,
+} from './api-provider-shared.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -59,10 +65,6 @@ type AnthropicContentBlock =
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
-
-type ParsedToolInput =
-  | { ok: true; input: Record<string, unknown> }
-  | { ok: false; content: string };
 
 interface ToolUseAccum {
   id: string;
@@ -277,12 +279,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
   buildEnv(): NodeJS.ProcessEnv {
     // HTTP providers don't spawn subprocesses, but the interface requires this.
-    const env: NodeJS.ProcessEnv = {};
-    const resolved = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
-    if (resolved) {
-      env.ANTHROPIC_API_KEY = resolved;
-    }
-    return env;
+    return buildApiKeyEnv('ANTHROPIC_API_KEY', { service: this.config?.apiKeyService });
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
@@ -323,9 +320,7 @@ export class AnthropicApiProvider implements ProviderSession {
         signal: this.abortController.signal,
       });
     } catch (err: unknown) {
-      const msg = errorMessage(err);
-      log.error({ err: msg, model }, 'fetch error in callApi');
-      return { text: '', terminalResultText: '_Connection error - please try again._' };
+      return connectionErrorResult(err, model, log);
     }
 
     if (!response.ok) {
@@ -348,31 +343,24 @@ export class AnthropicApiProvider implements ProviderSession {
 
       // ── User-friendly error messages ───────────────────────────────────
       // Never expose raw API error JSON to the user.
-      let friendlyMsg: string;
-      if (response.status === 400) {
-        friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
-        log.error({ status: 400, errPreview: providerPreview(errText, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
-      } else if (response.status === 429) {
-        const retryAfterMs = boundedRetryAfterMs(response.headers);
-        if (!rateLimitRetryAttempt && retryAfterMs !== null) {
-          log.warn({ status: 429, model, retryAfterMs }, 'API rate limited — retrying after Retry-After');
-          await waitForRateLimitRetry(retryAfterMs, this.abortController.signal);
-          return this.callApi(model, selfHealAttempt, true);
-        }
-        friendlyMsg = '_Rate limited - please wait a moment and try again._';
-        log.warn({ status: 429, model }, 'API rate limited');
-      } else if (response.status === 401) {
-        friendlyMsg = '_Authentication error - please contact the administrator._';
+      //
+      // 401 is Anthropic-specific (a dedicated administrator message) and MUST
+      // be handled before the shared ladder, which deliberately omits 401.
+      if (response.status === 401) {
         log.error({ status: 401, model }, 'API auth error');
-      } else if (response.status >= 500) {
-        friendlyMsg = '_Service temporarily unavailable - please try again in a moment._';
-        log.error({ status: response.status, model }, 'API server error');
-      } else {
-        friendlyMsg = `_Service error (${response.status}) - please try again._`;
-        log.error({ status: response.status, errPreview: providerPreview(errText, 300), model }, 'API error');
+        return { text: '', terminalResultText: '_Authentication error - please contact the administrator._' };
       }
 
-      return { text: '', terminalResultText: friendlyMsg };
+      const outcome = mapSharedApiError(
+        { status: response.status, headers: response.headers, errText, model, selfHealAttempt, rateLimitRetryAttempt },
+        log,
+      );
+      if (outcome.kind === 'rate-limit-retry') {
+        await waitForRateLimitRetry(outcome.retryAfterMs, this.abortController.signal);
+        return this.callApi(model, selfHealAttempt, true);
+      }
+
+      return { text: '', terminalResultText: outcome.text };
     }
 
     // ── SSE streaming ────────────────────────────────────────────────────────
@@ -520,38 +508,13 @@ export class AnthropicApiProvider implements ProviderSession {
   }
 
   private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(toolUse.inputJson || '{}');
-    } catch (err) {
-      const message = errorMessage(err);
-      log.warn({
-        err: message,
-        model,
-        toolId: toolUse.id,
-        toolName: toolUse.name,
-        argumentLength: toolUse.inputJson.length,
-      }, 'malformed Anthropic tool input; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolUse.name}" failed: malformed provider tool arguments; the tool was not executed.`,
-      };
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      log.warn({
-        model,
-        toolId: toolUse.id,
-        toolName: toolUse.name,
-        argumentType: Array.isArray(parsed) ? 'array' : typeof parsed,
-      }, 'non-object Anthropic tool input; tool call blocked');
-      return {
-        ok: false,
-        content: `Tool "${toolUse.name}" failed: provider tool arguments must be a JSON object; the tool was not executed.`,
-      };
-    }
-
-    return { ok: true, input: parsed as Record<string, unknown> };
+    return parseProviderToolInput(toolUse.inputJson, {
+      toolId: toolUse.id,
+      toolName: toolUse.name,
+      model,
+      malformedLabel: 'malformed Anthropic tool input; tool call blocked',
+      nonObjectLabel: 'non-object Anthropic tool input; tool call blocked',
+    }, log);
   }
 
 }
