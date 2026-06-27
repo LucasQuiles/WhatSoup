@@ -187,6 +187,12 @@ export interface IOutboundQueue {
   setDurability(engine: DurabilityEngine): void;
   /** Whether the queue still has buffered, in-flight, or typing work that should block eviction. */
   hasPendingWork?(): boolean;
+  /**
+   * Turn-end choke point. Called unconditionally when a `result` event is
+   * received, so the typing indicator is cleared even on early-return branches
+   * of the runtime result handler that never reach flush(). Idempotent.
+   */
+  endTurn(): void;
 }
 
 export class OutboundQueue implements IOutboundQueue {
@@ -733,6 +739,15 @@ export class OutboundQueue implements IOutboundQueue {
     if (notify) {
       this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
     }
+  }
+
+  /**
+   * Turn-end choke point. Called unconditionally when a `result` event is
+   * received, so the typing indicator is cleared even on early-return branches
+   * of the runtime result handler that never reach flush(). Idempotent.
+   */
+  endTurn(): void {
+    this.stopTyping();
   }
 
   private flushToolBuffer(): void {

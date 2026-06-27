@@ -2395,5 +2395,30 @@ describe('OutboundQueue', () => {
       ]);
     });
   });
+
+  // ─── Layer 1: endTurn() choke point ──────────────────────────────────────
+
+  describe('endTurn()', () => {
+    it('endTurn() clears an active typing indicator and is idempotent', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('working');               // arms composing + streamTimer
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      queue.endTurn();                                      // turn-end choke point
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1); // one 'paused'
+
+      queue.endTurn();                                      // idempotent: no second paused
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1);
+
+      // No further composing re-asserts after endTurn
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 2);
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      // Drain the streamTimer so the leak guard passes
+      await queue.flush();
+    });
+  });
 });
 
