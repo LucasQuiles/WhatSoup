@@ -12,8 +12,26 @@
 
 import { createChildLogger } from '../../../logger.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
+import { resolveApiKey } from './api-key-resolver.ts';
 
 type ProviderLogger = ReturnType<typeof createChildLogger>;
+
+/**
+ * Build the `buildEnv()` courtesy environment for an HTTP provider.
+ *
+ * HTTP providers don't spawn subprocesses, but the ProviderSession interface
+ * requires `buildEnv()`. Resolve the provider's API key via the keyring →
+ * env precedence chain and expose it under `envVar` ONLY when present, so a
+ * missing key yields an empty object (no leaked / placeholder entry).
+ */
+export function buildApiKeyEnv(envVar: string, opts: { service: string | undefined }): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  const resolved = resolveApiKey({ service: opts.service, envVar });
+  if (resolved) {
+    env[envVar] = resolved;
+  }
+  return env;
+}
 
 /**
  * Outcome of parsing a provider's raw tool-call arguments.

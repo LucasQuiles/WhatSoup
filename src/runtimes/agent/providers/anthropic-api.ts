@@ -27,7 +27,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
-import { parseProviderToolInput, type ParsedToolInput } from './api-provider-shared.ts';
+import { parseProviderToolInput, buildApiKeyEnv, type ParsedToolInput } from './api-provider-shared.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -274,12 +274,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
   buildEnv(): NodeJS.ProcessEnv {
     // HTTP providers don't spawn subprocesses, but the interface requires this.
-    const env: NodeJS.ProcessEnv = {};
-    const resolved = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
-    if (resolved) {
-      env.ANTHROPIC_API_KEY = resolved;
-    }
-    return env;
+    return buildApiKeyEnv('ANTHROPIC_API_KEY', { service: this.config?.apiKeyService });
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
