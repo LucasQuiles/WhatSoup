@@ -96,7 +96,14 @@ export function applyOutboundIdentityGuard(
     }
   } catch (err) {
     guardLog.warn(
-      { chatJid, caller: opts.caller, mode: opts.mode, err: (err as Error).message },
+      {
+        chatJid,
+        caller: opts.caller,
+        mode: opts.mode,
+        code: 'STORE_UNAVAILABLE' satisfies GuardCode,
+        verdict: 'warn',
+        err: (err as Error).message,
+      },
       'outbound identity store unavailable — failing open (STORE_UNAVAILABLE)',
     );
     return; // fail-open: never convert a DB blip into a blocked primary reply path
