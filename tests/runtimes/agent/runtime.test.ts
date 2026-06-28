@@ -69,6 +69,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
+    endTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
@@ -545,6 +546,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     flush: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
+    endTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
@@ -9126,6 +9128,74 @@ describe('AgentRuntime', () => {
       expect(view.singletonProviderToolSession?.conversationKey).toBeUndefined();
       expect(socketUpdates).toEqual([]);
       expect(mockRuntimeLogger.error).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Layer 1 wiring: endTurn() called on every result branch ─────────────
+
+  describe('typing indicator — endTurn() choke point', () => {
+    it('clears the typing indicator on a result even when the turn early-returns (usage-limit)', async () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      await runtime.handleMessage(makeMsg({ content: 'hello' }));
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+      mockQueue.endTurn.mockClear();
+
+      // Emit a usage-limit result — this is an early-break branch that would
+      // have skipped flush() before the endTurn() choke point was added.
+      capturedOnEventRef.current?.({
+        type: 'result',
+        text: 'Claude usage limit reached. Your limit will reset at 3pm.',
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      await Promise.resolve();
+
+      expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the typing indicator on a normal (flush) result branch too', async () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      await runtime.handleMessage(makeMsg({ content: 'hello' }));
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+      mockQueue.endTurn.mockClear();
+
+      // Normal result (no early break) — endTurn() must still be called once.
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 5 });
+      await Promise.resolve();
+
+      expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('per-chat path: endTurn() called on handleEventPerChat result (usage-limit early-break)', () => {
+      // Drive a result through the per_chat code path (handleEventPerChat →
+      // handleEventWithContext) and verify endTurn() is reached on the per-chat
+      // queue, not just the shared queue. This would fail if queue.endTurn() were
+      // removed from handleEventWithContext.
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+      const MAP_KEY = 'chat-x@s.whatsapp.net';
+      const perChatQueue = makeQueueMock(MAP_KEY);
+
+      type PerChatRuntimeView = {
+        chatQueues: Map<string, IOutboundQueue>;
+        perChatInboundSeqQueue: Map<string, number[]>;
+        handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void;
+      };
+      const view = runtime as unknown as PerChatRuntimeView;
+
+      view.chatQueues.set(MAP_KEY, perChatQueue);
+      view.perChatInboundSeqQueue.set(MAP_KEY, [1]);
+
+      // Drive a usage-limit result — early-break branch in handleEventWithContext
+      view.handleEventPerChat(MAP_KEY, {
+        type: 'result',
+        text: 'Claude usage limit reached. Your limit will reset at 3pm.',
+        inputTokens: 0,
+        outputTokens: 0,
+      }, MAP_KEY);
+
+      expect(perChatQueue.endTurn).toHaveBeenCalledTimes(1);
     });
   });
 });

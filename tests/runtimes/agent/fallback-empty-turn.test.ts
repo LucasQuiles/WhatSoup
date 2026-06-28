@@ -153,6 +153,7 @@ function makeFakeQueue() {
     getLastOpId: vi.fn(() => undefined),
     clearLastOpId: vi.fn(),
     indicateTyping: vi.fn(),
+    endTurn: vi.fn(),
   };
 }
 
@@ -430,6 +431,7 @@ describe('fallback_empty_turn alert — per-chat dedup', () => {
       getLastOpId: vi.fn(() => undefined),
       clearLastOpId: vi.fn(),
       indicateTyping: vi.fn(),
+      endTurn: vi.fn(),
     };
   }
 

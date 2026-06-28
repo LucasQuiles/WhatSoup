@@ -147,6 +147,7 @@ function makeFakeQueue(chatJid = 'chat@s.whatsapp.net') {
     getLastOpId: vi.fn(() => undefined),
     clearLastOpId: vi.fn(),
     indicateTyping: vi.fn(),
+    endTurn: vi.fn(),
   };
 }
 

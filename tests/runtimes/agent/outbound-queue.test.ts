@@ -5,6 +5,7 @@ import {
   TOOL_BATCH_MAX_AGE_MS,
   MIN_SEND_GAP_MS,
   TYPING_REFRESH_MS,
+  TYPING_MAX_MS,
   TEXT_AGGREGATE_DELAY_MS,
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
@@ -2393,6 +2394,117 @@ describe('OutboundQueue', () => {
         'in-flight send that holds the chain open',
         '🔧 Running:\n  • late update',
       ]);
+    });
+  });
+
+  // ─── Layer 2: self-bounding typing refresh ───────────────────────────────
+
+  describe('typing self-bound (TYPING_MAX_MS)', () => {
+    it('self-expires the typing refresh after TYPING_MAX_MS without a new turn', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('long turn');             // arms composing + 8s refresh
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      // Advance just past the self-bound cap; the refresh must stop re-asserting.
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS + TYPING_REFRESH_MS);
+      const assertsAtCap = typingCalls.filter((v) => v === true).length;
+
+      // No further composing after the cap
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 3);
+      expect(typingCalls.filter((v) => v === true).length).toBe(assertsAtCap);
+
+      // Drain streamTimer
+      await queue.flush();
+    });
+
+    it('a fresh startTyping within a turn grants a full TYPING_MAX_MS window from the reset point', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('chunk-1');
+      // Advance to just before the original cap would fire
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS - TYPING_REFRESH_MS);
+      queue.enqueueStreamingText('chunk-2');               // new activity → resets clock to T=0
+      const assertsAfterReset = typingCalls.filter((v) => v === true).length;
+
+      // Advance a full TYPING_MAX_MS from the reset — the interval should still
+      // be firing (the full window was granted, not just the remaining slice).
+      // We check at the midpoint and near the end of the new window.
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS / 2);
+      const assertsMidWindow = typingCalls.filter((v) => v === true).length;
+      expect(assertsMidWindow).toBeGreaterThan(assertsAfterReset);
+
+      // Near the end of the full reset window (but before it expires) — still firing
+      await vi.advanceTimersByTimeAsync(TYPING_MAX_MS / 2 - TYPING_REFRESH_MS);
+      const assertsNearEnd = typingCalls.filter((v) => v === true).length;
+      expect(assertsNearEnd).toBeGreaterThan(assertsMidWindow);
+
+      // Past the full reset window — self-bound fires, no more re-asserts
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 2);
+      const assertsAtExpiry = typingCalls.filter((v) => v === true).length;
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 3);
+      expect(typingCalls.filter((v) => v === true).length).toBe(assertsAtExpiry);
+
+      await queue.flush();
+    });
+  });
+
+  // ─── Layer 1: endTurn() choke point ──────────────────────────────────────
+
+  describe('endTurn()', () => {
+    it('endTurn() drains the stream buffer and delivers the fragment before stopping typing', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      // Simulate an assistant_text fragment buffered mid-turn (streamTimer armed, not yet fired)
+      queue.enqueueStreamingText('buffered fragment');
+      // Buffer is pending — no send yet (streamTimer hasn't fired)
+      expect(calls).toHaveLength(0);
+
+      // endTurn() flushes the stream buffer synchronously then stops typing
+      queue.endTurn();
+      // Drain the send chain (send is async via Promise chain; zero-advance drains microtasks)
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Fragment must now be delivered
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toBe('buffered fragment');
+      // Typing must be stopped
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1);
+
+      // Advancing past TEXT_AGGREGATE_DELAY_MS must produce NO additional sends
+      // and NO composing re-asserts (orphaned streamTimer must not fire)
+      await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + TYPING_REFRESH_MS);
+      expect(calls).toHaveLength(1);
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1); // only the initial assert
+
+      // Subsequent flush() must be a no-op for both stream content and typing
+      await queue.flush();
+      expect(calls).toHaveLength(1);
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1); // still only one paused
+    });
+
+    it('endTurn() clears an active typing indicator and is idempotent', async () => {
+      const { messenger, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      queue.enqueueStreamingText('working');               // arms composing + streamTimer
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      queue.endTurn();                                      // turn-end choke point
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1); // one 'paused'
+
+      queue.endTurn();                                      // idempotent: no second paused
+      expect(typingCalls.filter((v) => v === false)).toHaveLength(1);
+
+      // No further composing re-asserts after endTurn
+      await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS * 2);
+      expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+      // Drain the streamTimer so the leak guard passes
+      await queue.flush();
     });
   });
 });

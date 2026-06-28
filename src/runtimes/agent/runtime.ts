@@ -4023,6 +4023,10 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Turn-end choke point: clear the typing indicator unconditionally so no
+        // early-break branch below can leave 'composing' asserted into the idle
+        // persistent session. Idempotent with the normal-path queue.flush().
+        queue.endTurn();
         // Provider-reported turn cost: log it beside the token counts and
         // accumulate it while a fallback window is active.
         this.recordTurnCostUsd(event);
@@ -7648,6 +7652,10 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Turn-end choke point: clear the typing indicator unconditionally so no
+        // early-break branch below can leave 'composing' asserted into the idle
+        // persistent session. Idempotent with the normal-path queue.flush().
+        queue.endTurn();
         // Provider-reported turn cost: log it beside the token counts and
         // accumulate it while a fallback window is active.
         this.recordTurnCostUsd(event);
