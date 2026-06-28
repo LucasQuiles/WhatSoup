@@ -42,4 +42,23 @@ describe('deploy/scripts/heal-notify.sh', () => {
   it('uses HEALTH_PORT variable in the HEAL_URL', () => {
     expect(scriptSrc).toMatch(/127\.0\.0\.1:\$\{HEALTH_PORT\}/);
   });
+
+  it('resolves dataRoot from config.json paths.dataRoot for the marker check', () => {
+    expect(scriptSrc).toContain('.paths.dataRoot');
+    expect(scriptSrc).toContain('intentional-restart.marker');
+  });
+
+  it('suppresses crash alerts for a fresh intentional restart and consumes the marker', () => {
+    // Freshness window matches the 300s marker window.
+    expect(scriptSrc).toMatch(/-mmin\s+-5/);
+    expect(scriptSrc).toContain('suppressing crash alert');
+    expect(scriptSrc).toMatch(/rm\s+-f\s+"\$\{?RESTART_MARKER\}?"/);
+  });
+
+  it('exits before gathering crash evidence when an intentional restart is detected', () => {
+    const markerIdx = scriptSrc.indexOf('intentional-restart.marker');
+    const contextIdx = scriptSrc.indexOf('journalctl');
+    expect(markerIdx).toBeGreaterThan(-1);
+    expect(markerIdx).toBeLessThan(contextIdx);
+  });
 });

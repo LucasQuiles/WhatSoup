@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -13,9 +14,12 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertPrivateDirectorySync,
+  assertWritablePrivateFileSync,
   ensurePrivateDirectorySync,
   forceEnsurePrivateDirectorySync,
+  readFreshMarkerSync,
   writePrivateFileSync,
+  writePrivateJsonMarkerSync,
 } from '../../src/lib/private-fs.ts';
 
 let tmpRoot = '';
@@ -253,5 +257,198 @@ describe('two-algorithm split: assert-first vs mkdir-then-force-chmod', () => {
     ensurePrivateDirectorySync(dir);
 
     expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+});
+
+describe('assertWritablePrivateFileSync', () => {
+  it('returns ok (no throw) when the target does not exist (ENOENT)', () => {
+    const root = makeTmp();
+    const target = join(root, 'priv', 'missing.json');
+    expect(() => assertWritablePrivateFileSync(target, 'marker')).not.toThrow();
+  });
+
+  it('refuses a symlinked target (ELOOP) with the supplied label', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const target = join(dir, 'secret.json');
+    const decoy = join(root, 'decoy.json');
+    writeFileSync(decoy, '{}', { mode: 0o600 });
+    symlinkSync(decoy, target);
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { assertWritablePrivateFileSync(target, 'config.json'); } catch (e) { caught = e as NodeJS.ErrnoException; }
+    expect(caught?.code).toBe('ELOOP');
+    expect(caught?.message).toBe('refusing to write config.json through symlink');
+  });
+
+  it('refuses a non-regular target (EINVAL) with the supplied label', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'secret.json');
+    mkdirSync(target, { recursive: true, mode: 0o700 });
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { assertWritablePrivateFileSync(target, 'marker'); } catch (e) { caught = e as NodeJS.ErrnoException; }
+    expect(caught?.code).toBe('EINVAL');
+    expect(caught?.message).toBe('refusing to write marker over non-regular path');
+  });
+
+  it('returns ok for a pre-existing regular file', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const target = join(dir, 'real.json');
+    writeFileSync(target, '{}', { mode: 0o600 });
+
+    expect(() => assertWritablePrivateFileSync(target, 'marker')).not.toThrow();
+  });
+
+  it('defaults the label to "private file"', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const target = join(dir, 'secret.json');
+    const decoy = join(root, 'decoy.json');
+    writeFileSync(decoy, '{}', { mode: 0o600 });
+    symlinkSync(decoy, target);
+
+    expect(() => assertWritablePrivateFileSync(target)).toThrow('refusing to write private file through symlink');
+  });
+});
+
+describe('writePrivateJsonMarkerSync', () => {
+  it('atomically writes a JSON marker at mode 0600 with a trailing newline', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'priv', 'state.marker');
+    const value = { timestamp: '2026-06-28T00:00:00.000Z', cycles: 2 };
+
+    writePrivateJsonMarkerSync(markerPath, value);
+
+    expect(statSync(markerPath).mode & 0o777).toBe(0o600);
+    const raw = readFileSync(markerPath, 'utf-8');
+    expect(raw.endsWith('\n')).toBe(true);
+    expect(JSON.parse(raw)).toEqual(value);
+  });
+
+  it('overwrites an existing regular marker file', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const markerPath = join(dir, 'state.marker');
+    writeFileSync(markerPath, 'old', { mode: 0o644 });
+
+    writePrivateJsonMarkerSync(markerPath, { ok: true });
+
+    expect(statSync(markerPath).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(markerPath, 'utf-8'))).toEqual({ ok: true });
+  });
+
+  it('refuses to write through a symlinked target and leaves the decoy untouched', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const markerPath = join(dir, 'state.marker');
+    const decoy = join(root, 'outside.json');
+    writeFileSync(decoy, 'unchanged\n', { mode: 0o600 });
+    symlinkSync(decoy, markerPath);
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { writePrivateJsonMarkerSync(markerPath, { x: 1 }); } catch (e) { caught = e as NodeJS.ErrnoException; }
+    expect(caught?.code).toBe('ELOOP');
+    expect(lstatSync(markerPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(decoy, 'utf-8')).toBe('unchanged\n');
+  });
+
+  it('cleans up the temp file when the rename-time target assert fails', async () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const markerPath = join(dir, 'state.marker');
+
+    vi.resetModules();
+    let existsCalls = 0;
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        existsSync: vi.fn((p: string) => {
+          if (p === markerPath) {
+            existsCalls += 1;
+            // First target assert (pre-write): absent. Second assert
+            // (post-write, pre-rename): a symlink raced into place.
+            return existsCalls >= 2;
+          }
+          return actual.existsSync(p);
+        }),
+        lstatSync: vi.fn((p: string) => {
+          if (p === markerPath) {
+            return { isSymbolicLink: () => true, isFile: () => false } as any;
+          }
+          return actual.lstatSync(p);
+        }),
+      };
+    });
+    const { writePrivateJsonMarkerSync: writeRacing } = await import('../../src/lib/private-fs.ts');
+
+    expect(() => writeRacing(markerPath, { x: 1 })).toThrow(/through symlink/);
+    // No leftover temp files in the directory.
+    const { readdirSync } = await import('node:fs');
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp'))).toEqual([]);
+  });
+});
+
+describe('readFreshMarkerSync', () => {
+  it('returns null when the marker file is missing', () => {
+    const root = makeTmp();
+    expect(readFreshMarkerSync(join(root, 'absent.marker'), 5 * 60 * 1000)).toBeNull();
+  });
+
+  it('returns the parsed marker when it is within the freshness window', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'fresh.marker');
+    const value = { timestamp: new Date().toISOString(), cycles: 3 };
+    writeFileSync(markerPath, JSON.stringify(value), { mode: 0o600 });
+
+    const result = readFreshMarkerSync<typeof value>(markerPath, 5 * 60 * 1000);
+    expect(result).toEqual(value);
+  });
+
+  it('returns null when the marker is older than maxAgeMs', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'stale.marker');
+    const old = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify({ timestamp: old }), { mode: 0o600 });
+
+    expect(readFreshMarkerSync(markerPath, 5 * 60 * 1000)).toBeNull();
+  });
+
+  it('returns null when the timestamp is missing or unparseable (non-finite age)', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'noisy.marker');
+    writeFileSync(markerPath, JSON.stringify({ cycles: 1 }), { mode: 0o600 });
+
+    expect(readFreshMarkerSync(markerPath, 5 * 60 * 1000)).toBeNull();
+  });
+
+  it('returns null (never throws) when the marker is corrupt JSON', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'corrupt.marker');
+    writeFileSync(markerPath, '{not json', { mode: 0o600 });
+
+    expect(readFreshMarkerSync(markerPath, 5 * 60 * 1000)).toBeNull();
+  });
+
+  it('treats ageMs exactly equal to maxAgeMs as stale (exclusive upper bound)', () => {
+    const root = makeTmp();
+    const markerPath = join(root, 'edge.marker');
+    const now = new Date('2026-06-28T00:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const ts = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify({ timestamp: ts }), { mode: 0o600 });
+
+    expect(readFreshMarkerSync(markerPath, 5 * 60 * 1000)).toBeNull();
+    vi.useRealTimers();
   });
 });
