@@ -45,14 +45,14 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
     id: 'provider-fallback-state-machine',
     domain: 'provider-runtime',
     risk: 'critical',
-    signal: 'usage-limit and auth-required provider fallback transitions',
-    expectedOutcome: 'Provider fallback activates only on terminal result paths, keeps auth-required windows armed until recovery proof, and suppresses user-visible usage-limit noise from assistant text.',
+    signal: 'usage-limit, auth-required, empty-output, and probe-unusable provider fallback transitions',
+    expectedOutcome: 'Provider fallback activates only on terminal result paths, keeps independent-provider windows (auth-required, empty-output, probe-unusable) armed until recovery proof, and suppresses user-visible usage-limit noise from assistant text.',
     evidence: [
       {
         file: 'tests/runtimes/agent/provider-fallback.test.ts',
         anchors: [
           'AgentRuntime — provider fallback state machine',
-          'keeps auth-required fallback armed until a primary recovery probe succeeds',
+          'keeps %s fallback armed until a primary recovery probe succeeds',
           'AgentRuntime — usage-limit assistant_text/result asymmetry',
           'does NOT activate fallback on a usage-limit assistant_text event',
           'DOES activate fallback on a usage-limit result event (the deferred site)',

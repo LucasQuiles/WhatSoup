@@ -240,13 +240,39 @@ function oneMessageHandoffEnabled(): boolean {
   return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
 }
 
-type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error';
+type ProviderFallbackReason =
+  | 'usage-limit'
+  | 'rate-limit'
+  | 'auth-required'
+  | 'model-unavailable'
+  | 'server-error'
+  | 'empty-output'
+  | 'probe-unusable';
 
 /** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
 function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
   return value === 'usage-limit' || value === 'rate-limit'
     || value === 'auth-required' || value === 'model-unavailable'
-    || value === 'server-error';
+    || value === 'server-error' || value === 'empty-output'
+    || value === 'probe-unusable';
+}
+
+/**
+ * Reasons whose failover borrows the auth-required control semantics: the revert
+ * is gated on a fresh primary probe AND same-provider fallback entries are
+ * skipped (a re-auth/empty-primary needs an independent provider to stand in).
+ *
+ * `empty-output` / `probe-unusable` — the consecutive-empty-output and
+ * usability-probe triggers of {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}
+ * — previously reused the literal `'auth-required'` reason SOLELY to inherit
+ * these two side-effects, which then leaked into the operator-facing
+ * `provider_fallback_activated` alert as a false `reason=auth-required` (#1421).
+ * They are now first-class reasons the alert can name honestly while this helper
+ * preserves the identical control behaviour. Accepts a raw string because
+ * {@link AgentRuntime.selectFallbackEntryForWindow} carries the reason untyped.
+ */
+function fallbackRequiresIndependentProbe(reason: string | null | undefined): boolean {
+  return reason === 'auth-required' || reason === 'empty-output' || reason === 'probe-unusable';
 }
 
 /**
@@ -517,7 +543,7 @@ function contextOverflowNotice(): string {
 }
 
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  return reason === 'auth-required';
+  return fallbackRequiresIndependentProbe(reason);
 }
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
@@ -653,11 +679,21 @@ function armingFailureLogMessage(reason: ProviderFallbackReason): string {
       return 'terminal provider server-error result observed';
     case 'model-unavailable':
       return 'suppressed provider model-unavailable message from result — session will be shut down';
+    case 'empty-output':
+      return 'primary provider returned consecutive empty output — failing over';
+    case 'probe-unusable':
+      return 'primary provider usability probe flagged unusable — failing over';
   }
 }
 
 function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {
-  return reason === 'server-error' ? 'transient' : reason;
+  // empty-output / probe-unusable are transient primary failovers from the
+  // user's perspective (no hard auth/usage fault) — they reuse the existing
+  // 'transient' user copy rather than minting new user-facing templates (#1421).
+  if (reason === 'server-error' || reason === 'empty-output' || reason === 'probe-unusable') {
+    return 'transient';
+  }
+  return reason;
 }
 
 export class AgentRuntime implements Runtime {
@@ -5047,7 +5083,7 @@ export class AgentRuntime implements Runtime {
       return null;
     }
 
-    const requireIndependentProvider = reason === 'auth-required';
+    const requireIndependentProvider = fallbackRequiresIndependentProbe(reason);
     let firstEligibleIndex = -1;
     let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -5088,7 +5124,7 @@ export class AgentRuntime implements Runtime {
       emitAlertChecked(
         this.instanceName,
         'fallback_no_independent_provider',
-        'Auth-required fallback has no independent provider target',
+        'Fallback requires an independent provider target',
         `primaryProvider=${this.agentProvider} reason=${reason}`,
       );
       return null;
@@ -5147,12 +5183,13 @@ export class AgentRuntime implements Runtime {
    *   - arm after {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} consecutive empty
    *     primary turns (a healthy primary never returns two pure-empty turns).
    *
-   * Armed with the `auth-required` reason so fallback SELECTION skips
-   * same-provider entries (a broken claude-cli login breaks every claude-cli
-   * fallback too → jump straight to the independent provider) and REVERT is
-   * gated on a fresh primary probe — so it self-heals once the primary auth is
-   * restored. No-op (returns false) when already on a fallback window or when no
-   * fallback is configured. Returns true only when it armed a window this call.
+   * Armed with first-class empty-output/probe-unusable reasons while preserving
+   * the old auth-required control semantics: fallback SELECTION skips same-
+   * provider entries (a broken claude-cli login breaks every claude-cli fallback
+   * too → jump straight to the independent provider) and REVERT is gated on a
+   * fresh primary probe — so it self-heals once the primary auth is restored.
+   * No-op (returns false) when already on a fallback window or when no fallback
+   * is configured. Returns true only when it armed a window this call.
    */
   private maybeArmFallbackAfterEmptyPrimaryTurn(
     queue: IOutboundQueue,
@@ -5217,9 +5254,15 @@ export class AgentRuntime implements Runtime {
       'primary provider returned empty output — arming provider fallback',
     );
 
+    // Emit the TRUE trigger as the fallback reason so the operator-facing
+    // provider_fallback_activated alert names the real cause (empty-output /
+    // probe-unusable) instead of the misleading 'auth-required' this path used
+    // to borrow purely for its control side-effects (#1421). The probe + the
+    // independent-provider gates that 'auth-required' provided are preserved for
+    // both reasons via fallbackRequiresIndependentProbe().
     const activation = this.activateProviderFallbackAfterTerminalResult(
       null,
-      'auth-required',
+      armViaProbe ? 'probe-unusable' : 'empty-output',
       session,
       '',
     );
@@ -6384,10 +6427,9 @@ export class AgentRuntime implements Runtime {
     // "I will continue here." over "Please resend …".
     const hasContinuation =
       replay.replayScheduled && !replay.blockedByToolActivity && !credentialsMissing;
-    // Map the fallback reason to its deterministic template id. The
-    // ProviderFallbackReason union (usage-limit | rate-limit | auth-required |
-    // model-unavailable) is a subset of UserTemplateId with identical names, so
-    // this is a 1:1 mapping; the credentials-missing case overrides it below.
+    // Map the fallback reason to its deterministic user template. Some internal
+    // reasons reuse user-facing transient copy; the credentials-missing case
+    // overrides it below.
     const templateId: UserTemplateId = credentialsMissing
       ? 'credentials-missing'
       : templateForFallbackReason(activation.reason);

@@ -161,11 +161,14 @@ type FallbackView = {
   effectiveModel: string | undefined;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
-  activateProviderFallback(resetAt: Date | null, reason?: 'usage-limit' | 'rate-limit' | 'auth-required'): {
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'empty-output' | 'probe-unusable',
+  ): {
     primaryProvider: string;
     fallbackProvider: string;
     fallbackModel: string | undefined;
-    reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+    reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'empty-output' | 'probe-unusable';
     resetAt: Date | null;
     activeUntil: number;
     extended: boolean;
@@ -415,27 +418,30 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(v.lastDiagnosticBundleAt).toBe(recent);
   });
 
-  it('keeps auth-required fallback armed until a primary recovery probe succeeds', async () => {
-    const runtime = makeRuntime({
-      agentFallbackProvider: 'opencode-cli',
-      agentFallbackModel: 'minimax/MiniMax-M2.7',
-    });
-    const v = view(runtime);
-    v.probePrimaryProviderRecovered = vi.fn(() => false);
+  it.each(['auth-required', 'empty-output', 'probe-unusable'] as const)(
+    'keeps %s fallback armed until a primary recovery probe succeeds',
+    async (reason) => {
+      const runtime = makeRuntime({
+        agentFallbackProvider: 'opencode-cli',
+        agentFallbackModel: 'minimax/MiniMax-M2.7',
+      });
+      const v = view(runtime);
+      v.probePrimaryProviderRecovered = vi.fn(() => false);
 
-    v.activateProviderFallback(null, 'auth-required');
-    expect(v.effectiveProvider).toBe('opencode-cli');
-    expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
+      v.activateProviderFallback(null, reason);
+      expect(v.effectiveProvider).toBe('opencode-cli');
+      expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
-    expect(v.effectiveProvider).toBe('opencode-cli');
-    expect(v.fallbackWindow.activeUntil).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+      expect(v.effectiveProvider).toBe('opencode-cli');
+      expect(v.fallbackWindow.activeUntil).not.toBeNull();
 
-    v.probePrimaryProviderRecovered = vi.fn(() => true);
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    expect(v.fallbackWindow.activeUntil).toBeNull();
-    expect(v.effectiveProvider).toBe('claude-cli');
-  });
+      v.probePrimaryProviderRecovered = vi.fn(() => true);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(v.fallbackWindow.activeUntil).toBeNull();
+      expect(v.effectiveProvider).toBe('claude-cli');
+    },
+  );
 
   it('schedules replay of the interrupted turn only when fallback is newly armed and usable', () => {
     const runtime = makeRuntime({
