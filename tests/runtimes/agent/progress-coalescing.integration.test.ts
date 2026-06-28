@@ -27,6 +27,7 @@ const CONFIG: OperationTrackerConfig = {
   progressIntervalMs: 30_000,
   thinkingLongMs: 45_000,
   thinkingStallMs: 300_000,
+  progressPlaceholderRateLimitMs: 180_000,
   toolThresholds: {
     agent:   { expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3 },
     bash:    { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
@@ -54,6 +55,10 @@ function wire(mode: 'full' | 'minimal' | 'friendly') {
   const { messenger, calls } = makeMessenger();
   const queue = new OutboundQueue(messenger, CHAT_JID);
   queue.setToolUpdateMode(mode);
+  // Isolate the 30s per-TEXT dedupe layer under test from the persistent per-chat
+  // rate floor (covered separately in progress-placeholder-rate-floor.test.ts).
+  // These cases drive sub-180s timings where the floor would otherwise dominate.
+  queue.setProgressFloorMs(0);
   const slowEvents: ProgressEvent[] = [];
   const stalledCalls: string[] = [];
   const tracker = new OperationTracker(INSTANCE, CONFIG, {

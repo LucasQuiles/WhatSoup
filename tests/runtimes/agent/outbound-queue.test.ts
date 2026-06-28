@@ -1353,6 +1353,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('minimal');
+      queue.setProgressFloorMs(0); // isolate the 30s text-window layer; floor covered separately
 
       const event: ProgressEvent = {
         type: 'operation_slow',
@@ -1389,6 +1390,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('full');
+      queue.setProgressFloorMs(0); // isolate the 30s text-window layer; floor covered separately
 
       queue.enqueueProgressUpdate(
         { type: 'operation_slow', toolId: 't1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, expectedMs: 15_000 },
@@ -1444,6 +1446,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('friendly');
+      queue.setProgressFloorMs(0); // isolate friendlyProgressSent reset; floor covered separately
 
       const event: ProgressEvent = {
         type: 'operation_progress',
