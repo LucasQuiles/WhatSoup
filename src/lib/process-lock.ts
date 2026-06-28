@@ -80,8 +80,23 @@ function defaultReadLinuxBootId(): string {
   return readFileSync(LINUX_BOOT_ID_PATH, 'utf8');
 }
 
+// `sysctl` lives in /usr/sbin, which is NOT on the PATH of a launchd GUI agent
+// (the WhatSoup instance plists set PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin).
+// Calling bare `sysctl` there ENOENTs, so resolveBootId returned '' and the lock
+// was written with an empty bootId — silently disabling reboot-reclaim on the
+// whole macOS fleet. Try the absolute path first, then fall back to PATH lookup.
+const MAC_SYSCTL_BINS = ['/usr/sbin/sysctl', '/sbin/sysctl', 'sysctl'];
 function defaultReadMacBootTime(): string {
-  return execFileSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8' });
+  let lastErr: unknown;
+  for (const bin of MAC_SYSCTL_BINS) {
+    try {
+      const out = execFileSync(bin, ['-n', 'kern.boottime'], { encoding: 'utf8' });
+      if (out) return out;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error('sysctl produced no kern.boottime output');
 }
 
 /**
