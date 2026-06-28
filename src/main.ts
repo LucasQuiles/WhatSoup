@@ -12,6 +12,8 @@ import { createConnection } from './transport/factory.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
+import { emitAlertChecked } from './lib/emit-alert.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
@@ -57,6 +59,7 @@ import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
+import { createServiceManager } from './fleet/platform.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -288,6 +291,9 @@ if (instanceType === 'agent') {
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
+    // Composition root owns the fleet/systemd binding; inject it so the runtimes
+    // layer (which cannot import fleet) can offer the restart_self tool.
+    serviceRestarter: createServiceManager(),
   });
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {
@@ -335,6 +341,41 @@ if (instanceType === 'agent') {
 
 // 6. Wire durability to runtime and message handler
 runtime.setDurability(durability);
+
+// Self-restart resume: if a fresh intentional-restart marker is present, the
+// previous shutdown was a deliberate restart (not a crash). Consume the marker,
+// emit an info-severity completion alert with measured downtime, and queue the
+// "back online" continuity ping. This is delivered on connect via a DEDICATED,
+// un-gated path (see start()) — NOT pendingStartupMessage — because the existing
+// startup-notification path is suppressed under toolUpdateMode:'minimal'
+// (the live agent's setting) and startupNotifications, whereas a user-requested
+// restart must always confirm. Guarded so a failure here never blocks startup.
+let selfRestartBackOnline: { chatJid: string; text: string } | null = null;
+if (instanceType === 'agent' && runtime instanceof AgentRuntime) {
+  try {
+    const marker = consumeIntentionalRestartMarker(config.dataRoot);
+    if (marker) {
+      // Clamp against backward clock skew (NTP correction, VM migration) so the
+      // measured downtime never renders as a negative number.
+      const downtimeMs = Math.max(0, Date.now() - new Date(marker.timestamp).getTime());
+      if (marker.chatJid) {
+        selfRestartBackOnline = {
+          chatJid: marker.chatJid,
+          text: `✅ Back online — restarted to ${marker.reason} (down ${Math.round(downtimeMs / 1000)}s)`,
+        };
+      }
+      emitAlertChecked(
+        config.botName,
+        'self_restart_completed',
+        `intentional restart complete (${marker.code}): ${marker.reason}`,
+        `downtime_ms=${downtimeMs}`,
+        'info',
+      );
+    }
+  } catch (err) {
+    log.warn({ err }, 'self-restart resume check failed; continuing startup');
+  }
+}
 
 connectionManager.onMessage = createIngestHandler(
   db,
@@ -862,6 +903,19 @@ async function start(): Promise<void> {
     }
   } else if (!adminPhone) {
     log.warn('no admin phones configured — skipping startup notification');
+  }
+
+  // Self-restart back-online ping — delivered regardless of toolUpdateMode /
+  // startupNotifications (which suppress the generic startup notice above),
+  // because a user-requested restart must always confirm completion. Reuses the
+  // same deferred sendTracked pattern; targets the validated originating chat.
+  if (selfRestartBackOnline) {
+    const resume = selfRestartBackOnline;
+    setTimeout(() => {
+      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'safe' })
+        .then(() => log.info({ chatJid: resume.chatJid }, 'sent self-restart back-online ping'))
+        .catch((err) => log.warn({ err, chatJid: resume.chatJid }, 'failed to send self-restart back-online ping'));
+    }, 3_000);
   }
 }
 

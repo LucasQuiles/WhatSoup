@@ -31,6 +31,7 @@ import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artif
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
+import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import {
@@ -364,6 +365,13 @@ export interface AgentRuntimeOptions {
   autoCompactInputTokens?: number;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
+  /**
+   * Systemd restart capability, injected from the composition root. The runtimes
+   * layer cannot import the fleet layer, so main.ts constructs the concrete
+   * ServiceManager and passes it here. When absent, the restart_self tool is not
+   * registered (the agent cannot restart itself without it).
+   */
+  serviceRestarter?: ServiceRestarter;
 }
 
 export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
@@ -665,6 +673,7 @@ export class AgentRuntime implements Runtime {
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
+  private readonly serviceRestarter: ServiceRestarter | undefined;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
@@ -1502,6 +1511,7 @@ export class AgentRuntime implements Runtime {
     this.sandbox = options?.sandbox;
     this.model = options?.model;
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
+    this.serviceRestarter = options?.serviceRestarter;
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
       this.workspaceResources,
@@ -2292,6 +2302,24 @@ export class AgentRuntime implements Runtime {
           return { sent: true, reportId: parsed.reportId, result: parsed.result };
         },
       });
+    }
+
+    // Register restart_self MCP tool (agent instance only — sandboxed instances
+    // are repair targets, not self-restarters). Routes through the existing
+    // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
+    // Requires the fleet-owned restarter injected from the composition root.
+    if (!this.sandbox && !this.sandboxPerChat && this.serviceRestarter) {
+      const serviceRestarter = this.serviceRestarter;
+      this.registry.register(buildRestartSelfTool({
+        instanceName: this.instanceName,
+        dataRoot: config.dataRoot,
+        resolveChatJid: () => this.currentTurnChatJid ?? this.activeChatJid ?? undefined,
+        sendAck: async (chatJid, text) => {
+          await sendTracked(this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' });
+        },
+        serviceManager: serviceRestarter,
+        trigger: triggerSelfRestart,
+      }));
     }
 
     this.schedulePrimaryModelUsabilityProbe('startup');

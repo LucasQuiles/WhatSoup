@@ -2,13 +2,30 @@
 set -uo pipefail
 INSTANCE="${1:?Usage: heal-notify.sh <instance-name>}"
 
+# Config root mirrors src/fleet/paths.ts: ${XDG_CONFIG_HOME:-~/.config}/whatsoup/instances/<name>/
+INSTANCE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/${INSTANCE}"
+
+# Intentional-restart suppression: a deliberate self-restart writes a private
+# marker into the instance dataRoot before asking systemd to restart. If a fresh
+# marker (<5 min) is present, this OnFailure run is a deliberate restart — not a
+# crash — so suppress the alert and consume the marker BEFORE gathering evidence.
+# Resolve dataRoot from config.json; fall back to the XDG data layout in paths.ts.
+DATA_ROOT=$(jq -r '.paths.dataRoot // empty' "${INSTANCE_CONFIG_ROOT}/config.json" 2>/dev/null || echo "")
+if [ -z "$DATA_ROOT" ]; then
+    DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/instances/${INSTANCE}"
+fi
+RESTART_MARKER="${DATA_ROOT}/intentional-restart.marker"
+if [ -f "$RESTART_MARKER" ] && [ -n "$(find "$RESTART_MARKER" -mmin -5 2>/dev/null)" ]; then
+    echo "heal-notify: intentional restart detected for ${INSTANCE}; suppressing crash alert" >&2
+    rm -f "$RESTART_MARKER"
+    exit 0
+fi
+
 # Gather evidence
 CONTEXT=$(journalctl --user -u "whatsoup@${INSTANCE}" -n 20 --no-pager -o cat 2>/dev/null || echo "no logs available")
 ERROR_LINE=$(echo "$CONTEXT" | grep -oE '"msg":"[^"]*"' | tail -1 || echo "unknown error")
 
-# Resolve this instance's own healthPort from its config.json.
-# Config root mirrors src/fleet/paths.ts: ${XDG_CONFIG_HOME:-~/.config}/whatsoup/instances/<name>/
-INSTANCE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/${INSTANCE}"
+# Resolve this instance's own healthPort from its config.json (INSTANCE_CONFIG_ROOT set above).
 HEALTH_PORT=$(jq -r '.healthPort // empty' "${INSTANCE_CONFIG_ROOT}/config.json" 2>/dev/null || echo "")
 if [ -z "$HEALTH_PORT" ] || ! printf '%s' "$HEALTH_PORT" | grep -qE '^[0-9]+$'; then
     HEALTH_PORT=9090
