@@ -84,10 +84,12 @@ run_preflight() {
   # PRE-01: npm test
   info "PRE-01  Running npm test..."
   REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-  if (cd "$REPO_ROOT" && npm test --silent > /tmp/whatsoup-test.log 2>&1); then
+  local test_log
+  test_log="$(mktemp -t whatsoup-test.XXXXXX)"
+  if (cd "$REPO_ROOT" && npm test --silent > "$test_log" 2>&1); then
     ok "PRE-01  npm test passed"
   else
-    fail "PRE-01  npm test FAILED — see /tmp/whatsoup-test.log"
+    fail "PRE-01  npm test FAILED — see $test_log"
     any_failed=true
   fi
 
@@ -125,13 +127,15 @@ run_preflight() {
   # PRE-04: Migration dry-run
   info "PRE-04  Running migration dry-run..."
   local migrate_script="$REPO_ROOT/scripts/migrate-namespace.sh"
+  local migrate_dry_log
+  migrate_dry_log="$(mktemp -t whatsoup-migrate-dry.XXXXXX)"
   if [[ ! -x "$migrate_script" ]]; then
     fail "PRE-04  Migration script not found or not executable: $migrate_script"
     any_failed=true
-  elif (bash "$migrate_script" --dry-run > /tmp/whatsoup-migrate-dry.log 2>&1); then
-    ok "PRE-04  Migration dry-run passed — see /tmp/whatsoup-migrate-dry.log"
+  elif (bash "$migrate_script" --dry-run > "$migrate_dry_log" 2>&1); then
+    ok "PRE-04  Migration dry-run passed — see $migrate_dry_log"
   else
-    fail "PRE-04  Migration dry-run FAILED — see /tmp/whatsoup-migrate-dry.log"
+    fail "PRE-04  Migration dry-run FAILED — see $migrate_dry_log"
     any_failed=true
   fi
 
@@ -213,11 +217,13 @@ run_cut03() {
   local migrate_script
   migrate_script="$(cd "$(dirname "$0")" && pwd)/migrate-namespace.sh"
 
+  local migrate_log
+  migrate_log="$(mktemp -t whatsoup-migrate.XXXXXX)"
   info "Running migration script (live — not dry-run)..."
-  if bash "$migrate_script" 2>&1 | tee /tmp/whatsoup-migrate.log; then
-    ok "CUT-03  Migration completed — see /tmp/whatsoup-migrate.log"
+  if bash "$migrate_script" 2>&1 | tee "$migrate_log"; then
+    ok "CUT-03  Migration completed — see $migrate_log"
   else
-    fail "CUT-03  Migration script failed — see /tmp/whatsoup-migrate.log"
+    fail "CUT-03  Migration script failed — see $migrate_log"
     info "Rollback note: legacy paths are untouched; restart whatsapp-bot@personal to revert"
     abort
   fi
