@@ -2,23 +2,9 @@
 // ConnectionManager — Baileys-backed WhatsApp connection with typed event emission.
 
 import { EventEmitter } from 'node:events';
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  existsSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { statSync } from 'node:fs';
 import { arch, freemem, hostname, loadavg, platform, release, totalmem, uptime as osUptime } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 
 import {
@@ -31,7 +17,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
-import { privateWriteError } from '../lib/private-fs.ts';
+import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -55,64 +41,6 @@ import { installThirdPartyConsoleRedaction } from './third-party-console-redacti
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
-
-function assertWritableMarkerTarget(path: string): void {
-  if (!existsSync(path)) return;
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink()) {
-    throw privateWriteError('refusing to write exhaustion marker through symlink', 'ELOOP');
-  }
-  if (!stat.isFile()) {
-    throw privateWriteError('refusing to write exhaustion marker over non-regular path', 'EINVAL');
-  }
-}
-
-function assertPrivateMarkerDirectory(path: string): void {
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink()) {
-    throw privateWriteError('refusing to use marker directory through symlink', 'ELOOP');
-  }
-  if (!stat.isDirectory()) {
-    throw privateWriteError('refusing to use marker directory over non-directory path', 'EINVAL');
-  }
-}
-
-function writePrivateJsonMarker(path: string, value: unknown): void {
-  const dir = dirname(path);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  assertPrivateMarkerDirectory(dir);
-  chmodSync(dir, 0o700);
-  assertWritableMarkerTarget(path);
-
-  const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
-  let fd: number | null = null;
-  try {
-    fd = openSync(tmpPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    writeFileSync(fd, JSON.stringify(value, null, 2) + '\n', 'utf-8');
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = null;
-    assertWritableMarkerTarget(path);
-    renameSync(tmpPath, path);
-    chmodSync(path, 0o600);
-    try {
-      const dirFd = openSync(dir, constants.O_RDONLY);
-      try {
-        fsyncSync(dirFd);
-      } finally {
-        closeSync(dirFd);
-      }
-    } catch {
-      // Some filesystems reject directory fsync; the file was fsynced before rename.
-    }
-  } catch (err) {
-    if (fd !== null) {
-      try { closeSync(fd); } catch { /* best effort */ }
-    }
-    try { unlinkSync(tmpPath); } catch { /* best effort */ }
-    throw err;
-  }
-}
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -613,22 +541,18 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // Check for recent exhaustion marker from a previous crash-loop
     if (config.dataRoot) {
       const markerPath = join(config.dataRoot, 'exhausted.marker');
-      try {
-        if (existsSync(markerPath)) {
-          const raw = readFileSync(markerPath, 'utf-8');
-          const marker = JSON.parse(raw) as { timestamp: string; cycles: number; instanceName: string };
-          const ageMs = Date.now() - new Date(marker.timestamp).getTime();
-          if (ageMs < 5 * 60 * 1000) {
-            this.log.warn(
-              { marker, ageMs },
-              '*** RECENT EXHAUSTION MARKER DETECTED — previous process exited after %d exhaustion cycles %dms ago ***',
-              marker.cycles,
-              ageMs,
-            );
-          }
-        }
-      } catch {
-        // Marker file missing or corrupt — ignore
+      const marker = readFreshMarkerSync<{ timestamp: string; cycles: number; instanceName: string }>(
+        markerPath,
+        5 * 60 * 1000,
+      );
+      if (marker) {
+        const ageMs = Date.now() - new Date(marker.timestamp).getTime();
+        this.log.warn(
+          { marker, ageMs },
+          '*** RECENT EXHAUSTION MARKER DETECTED — previous process exited after %d exhaustion cycles %dms ago ***',
+          marker.cycles,
+          ageMs,
+        );
       }
     }
 
@@ -1219,7 +1143,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
 
     try {
-      writePrivateJsonMarker(join(config.dataRoot, 'connection-state.json'), payload);
+      writePrivateJsonMarkerSync(join(config.dataRoot, 'connection-state.json'), payload);
     } catch (err) {
       this.log.warn({ err }, 'failed to persist connection runtime state');
     }
@@ -2448,7 +2372,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (config.dataRoot) {
         const markerPath = join(config.dataRoot, 'exhausted.marker');
         try {
-          writePrivateJsonMarker(markerPath, marker);
+          writePrivateJsonMarkerSync(markerPath, marker);
         } catch (err) {
           this.log.error({ err }, 'failed to write exhaustion marker');
         }

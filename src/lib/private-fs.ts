@@ -11,6 +11,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -18,9 +19,12 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 export function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
   const err = new Error(message) as NodeJS.ErrnoException;
@@ -116,6 +120,88 @@ export function writePrivateFileSync(
     fchmodSync(fd, mode);
   } finally {
     if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * Assert that a private file path is safe to write through: lstat the target and
+ * refuse a symlink (ELOOP) or any non-regular file (EINVAL). A missing target
+ * (ENOENT) is fine — the file may not exist yet. The caller-supplied `label` is
+ * threaded into the error messages verbatim so each consumer keeps its own
+ * "refusing to write <label> …" wording.
+ *
+ * This is the TOCTOU symlink/non-regular guard shared by the marker and config
+ * writers; it does NOT open or write the file.
+ */
+export function assertWritablePrivateFileSync(filePath: string, label = 'private file'): void {
+  if (!existsSync(filePath)) return;
+  const stat = lstatSync(filePath);
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError(`refusing to write ${label} through symlink`, 'ELOOP');
+  }
+  if (!stat.isFile()) {
+    throw privateWriteError(`refusing to write ${label} over non-regular path`, 'EINVAL');
+  }
+}
+
+/**
+ * Atomically write a private JSON marker file (mode 0600) with TOCTOU-resistant
+ * symlink refusal. The marker directory is created (recursive, 0o700) and
+ * force-chmodded, then the payload is written to a temp file in the same
+ * directory, fsynced, and renamed over the target. The directory is fsynced
+ * (best-effort) so the rename survives a crash. The target is re-asserted both
+ * before the temp write and immediately before the rename to close the TOCTOU
+ * window. On any failure the temp file is cleaned up.
+ *
+ * Behavior matches the original `writePrivateJsonMarker` lane in
+ * connection.ts (atomic tmp-write → fsync → rename → chmod 0600 → dir fsync;
+ * O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW). The serialized payload is
+ * `JSON.stringify(value, null, 2) + '\n'`.
+ */
+export function writePrivateJsonMarkerSync(filePath: string, value: unknown): void {
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertPrivateDirectorySync(dir);
+  chmodSync(dir, 0o700);
+  assertWritablePrivateFileSync(filePath, 'marker');
+
+  const tmpPath = join(dir, `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmpPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, JSON.stringify(value, null, 2) + '\n', 'utf-8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    assertWritablePrivateFileSync(filePath, 'marker');
+    renameSync(tmpPath, filePath);
+    chmodSync(filePath, 0o600);
+    fsyncDirectory(dir);
+  } catch (err) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+/**
+ * Read a private JSON marker and return it only if it is fresh — within
+ * `maxAgeMs` of its `timestamp` (ISO) field. Returns null when the file is
+ * missing, the timestamp is missing/unparseable (non-finite age), the age is
+ * `>= maxAgeMs` (exclusive upper bound), or the read/parse fails for any reason.
+ * Never throws.
+ */
+export function readFreshMarkerSync<T = unknown>(filePath: string, maxAgeMs: number): T | null {
+  try {
+    const marker = JSON.parse(readFileSync(filePath, 'utf-8')) as T & { timestamp?: string };
+    const ageMs = Date.now() - new Date(marker.timestamp as string).getTime();
+    if (!Number.isFinite(ageMs) || ageMs >= maxAgeMs) return null;
+    return marker as T;
+  } catch {
+    // Marker file missing, unreadable, corrupt, or otherwise unusable — treat as absent.
+    return null;
   }
 }
 
