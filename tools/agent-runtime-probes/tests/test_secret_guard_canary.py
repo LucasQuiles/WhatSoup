@@ -262,7 +262,7 @@ def test_settings_summary_missing_file_returns_empty_counts():
 
 def test_settings_summary_invalid_permissions_non_dict_falls_back_to_empty():
     """When permissions key is not a dict, allow/deny fall back to empty lists."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({"permissions": "not-a-dict"}))
     try:
         result = settings_summary(tmp)
@@ -274,7 +274,7 @@ def test_settings_summary_invalid_permissions_non_dict_falls_back_to_empty():
 
 def test_settings_summary_permissions_with_non_list_allow_and_deny():
     """When allow/deny are not lists, they fall back to empty lists."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({"permissions": {"allow": "Bash", "deny": 42}}))
     try:
         result = settings_summary(tmp)
@@ -286,7 +286,7 @@ def test_settings_summary_permissions_with_non_list_allow_and_deny():
 
 def test_settings_summary_non_dict_enabled_plugins_treated_as_empty():
     """When enabledPlugins is not a list, it is treated as empty."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({"enabledPlugins": "not-a-list"}))
     try:
         result = settings_summary(tmp)
@@ -297,7 +297,7 @@ def test_settings_summary_non_dict_enabled_plugins_treated_as_empty():
 
 def test_settings_summary_hooks_with_pretool_matchers():
     """When hooks contains PreToolUse list with matcher items, matchers are extracted."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({
         "hooks": {
             "PreToolUse": [
@@ -319,7 +319,7 @@ def test_settings_summary_hooks_with_pretool_matchers():
 
 def test_settings_summary_hooks_non_list_pretool_skipped():
     """When PreToolUse is not a list, direct_pretool_matchers is empty."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({"hooks": {"PreToolUse": "not-a-list"}}))
     try:
         result = settings_summary(tmp)
@@ -331,7 +331,7 @@ def test_settings_summary_hooks_non_list_pretool_skipped():
 
 def test_settings_summary_secret_deny_glob_detected():
     """has_secret_file_deny_glob is True when deny list contains .env or .config/secrets entries."""
-    tmp = Path(tempfile.mktemp(suffix=".json"))
+    _fd, _name = tempfile.mkstemp(suffix=".json"); os.close(_fd); tmp = Path(_name)
     tmp.write_text(json.dumps({
         "permissions": {
             "allow": [],
@@ -743,7 +743,7 @@ def test_observability_guard_correlation_no_guard_events_verdict():
 
 def test_run_hook_timeout_returns_timeout_status():
     """When subprocess times out, run_hook returns status='timeout' (lines 268-269)."""
-    fake_script = Path(tempfile.mktemp(suffix=".py"))
+    _fd, _name = tempfile.mkstemp(suffix=".py"); os.close(_fd); fake_script = Path(_name)
     fake_script.write_text("import time; time.sleep(60)\n")
     try:
         result = run_hook(fake_script, "Bash", {"command": "echo test"}, timeout=0.01)
@@ -757,7 +757,7 @@ def test_run_hook_timeout_returns_timeout_status():
 
 def test_run_hook_json_decode_error_sets_decision_unknown():
     """When stdout is not valid JSON, decision is 'unknown' (lines 285-286)."""
-    fake_script = Path(tempfile.mktemp(suffix=".py"))
+    _fd, _name = tempfile.mkstemp(suffix=".py"); os.close(_fd); fake_script = Path(_name)
     fake_script.write_text("print('not-valid-json')\n")
     try:
         result = run_hook(fake_script, "Bash", {"command": "echo test"}, timeout=5.0)
@@ -769,7 +769,7 @@ def test_run_hook_json_decode_error_sets_decision_unknown():
 
 def test_run_hook_empty_stdout_parse_status():
     """When stdout is empty, parse_status is 'empty_stdout' and decision defaults to 'allow'."""
-    fake_script = Path(tempfile.mktemp(suffix=".py"))
+    _fd, _name = tempfile.mkstemp(suffix=".py"); os.close(_fd); fake_script = Path(_name)
     fake_script.write_text("import sys; sys.exit(0)\n")
     try:
         result = run_hook(fake_script, "Read", {"file_path": "/tmp/test"}, timeout=5.0)
@@ -782,7 +782,7 @@ def test_run_hook_empty_stdout_parse_status():
 
 def test_run_hook_valid_json_allow_decision():
     """When stdout is valid JSON with permissionDecision, that decision is extracted."""
-    fake_script = Path(tempfile.mktemp(suffix=".py"))
+    _fd, _name = tempfile.mkstemp(suffix=".py"); os.close(_fd); fake_script = Path(_name)
     output = json.dumps({
         "hookSpecificOutput": {
             "permissionDecision": "deny",
