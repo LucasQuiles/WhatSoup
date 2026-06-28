@@ -82,4 +82,12 @@ describe('insecure-tempfile guard', () => {
     const fromData = f.filter((x) => x.file.endsWith('no_shebang_data'));
     expect(fromData).toEqual([]);
   });
+
+  it('FAIL-CLOSED: throws on an unreadable/nonexistent root rather than returning a clean result', () => {
+    // Security contract: an IO fault must NOT be swallowed into an empty (clean-looking)
+    // finding list — that would false-pass the block gate. The scan must propagate the
+    // error so the CLI's catch in main() fails closed (exit 2). Runtime-verified: a
+    // nonexistent root yields `FATAL ENOENT … exit 2`; this locks that propagation in.
+    expect(() => scanForInsecureTempfile(resolve(here, '../fixtures/__definitely_not_a_real_dir__'))).toThrow();
+  });
 });
