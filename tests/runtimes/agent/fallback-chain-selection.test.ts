@@ -94,6 +94,14 @@ function makeMessenger(): Messenger {
 }
 
 type FallbackEntry = { provider: string; model?: string };
+type ProviderFallbackReason =
+  | 'usage-limit'
+  | 'rate-limit'
+  | 'auth-required'
+  | 'model-unavailable'
+  | 'server-error'
+  | 'empty-output'
+  | 'probe-unusable';
 
 function makeRuntime(overrides: {
   agentFallbackProvider?: string;
@@ -118,12 +126,12 @@ type FallbackView = {
   effectiveModel: string | undefined;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: ProviderFallbackReason,
   ): {
     primaryProvider: string;
     fallbackProvider: string;
     fallbackModel: string | undefined;
-    reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+    reason: ProviderFallbackReason;
     resetAt: Date | null;
     activeUntil: number;
     extended: boolean;
@@ -284,6 +292,36 @@ describe('fallback chain selection', () => {
       expect.stringContaining('primaryProvider=claude-cli'),
     );
   });
+
+  it.each(['empty-output', 'probe-unusable'] as const)(
+    'does not arm %s fallback when every configured fallback shares the primary provider',
+    (reason) => {
+      const runtime = makeRuntime({
+        model: 'claude-fable-5',
+        agentFallbacks: [
+          { provider: 'claude-cli', model: 'claude-opus-4-8' },
+          { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+        ],
+      });
+
+      const activation = view(runtime).activateProviderFallback(null, reason);
+
+      expect(activation).toBeNull();
+      expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
+      expect(view(runtime).effectiveProvider).toBe('claude-cli');
+      expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
+      expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+        { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: false },
+        { provider: 'claude-cli', model: 'claude-sonnet-4-6', eligible: false },
+      ]);
+      expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+        'test',
+        'fallback_no_independent_provider',
+        'Fallback requires an independent provider target',
+        expect.stringContaining(`reason=${reason}`),
+      );
+    },
+  );
 
   it('fails open to entry zero when every keyed chain entry is missing credentials', () => {
     lookupCredentialMock.mockReturnValue(null);

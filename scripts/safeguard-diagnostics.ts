@@ -293,7 +293,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [
       'does NOT activate fallback on a usage-limit assistant_text event',
       'does not silently replay a turn after tool activity started',
-      'keeps auth-required fallback armed until a primary recovery probe succeeds',
+      'keeps %s fallback armed until a primary recovery probe succeeds',
       'does NOT block activation when the fallback key is absent (warn-only)',
       'uses providerConfig.apiKeyService for same-provider API fallback key presence',
     ],

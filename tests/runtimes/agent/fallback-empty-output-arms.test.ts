@@ -15,10 +15,11 @@
  *     primary unusable, OR
  *   - after EMPTY_OUTPUT_FALLBACK_THRESHOLD (=2) consecutive empty primary
  *     turns.
- * Armed with the `auth-required` reason so fallback SELECTION skips
- * same-provider entries (a broken claude-cli login breaks every claude-cli
- * fallback too) and REVERT is gated on a fresh primary probe (self-heals on
- * owner re-login).
+ * Armed with first-class empty-output/probe-unusable reasons while preserving
+ * the old auth-required control semantics: fallback SELECTION skips same-
+ * provider entries (a broken claude-cli login breaks every claude-cli fallback
+ * too) and REVERT is gated on a fresh primary probe (self-heals on owner
+ * re-login).
  *
  * Mirrors the harness in fallback-empty-turn.test.ts.
  */
@@ -193,6 +194,12 @@ const UNUSABLE_PROBE = {
 
 const FALLBACK = { agentFallbackProvider: 'opencode-cli', agentFallbackModel: 'minimax/minimax-m2' };
 
+function fallbackActivatedAlerts(): Array<[string, string, string, string, string?]> {
+  return vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'provider_fallback_activated') as Array<
+    [string, string, string, string, string?]
+  >;
+}
+
 describe('empty-output arms provider fallback', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -221,11 +228,13 @@ describe('empty-output arms provider fallback', () => {
     const state = runtime.getFallbackState();
     expect(state.fallbackActiveUntil).not.toBeNull();
     // #1421: the consecutive-empty-output trigger reports its TRUE reason, not
-    // the 'auth-required' it used to borrow for control side-effects. The
-    // independent-provider gate that 'auth-required' provided is preserved —
-    // effectiveProvider is still the independent backup.
+    // the 'auth-required' it used to borrow for control side-effects.
     expect(state.fallbackReason).toBe('empty-output');
     expect(state.effectiveProvider).toBe('opencode-cli');
+    const activated = fallbackActivatedAlerts();
+    expect(activated).toHaveLength(1);
+    expect(activated[0][3]).toContain('reason=empty-output');
+    expect(activated[0][3]).not.toContain('reason=auth-required');
     // Counter resets once armed.
     expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
   });
@@ -240,10 +249,13 @@ describe('empty-output arms provider fallback', () => {
     const state = runtime.getFallbackState();
     expect(state.fallbackActiveUntil).not.toBeNull();
     // #1421: the probe-unusable fast-path reports its TRUE reason, not
-    // 'auth-required'. The independent-provider gate is still applied
-    // (effectiveProvider is the independent backup).
+    // 'auth-required'.
     expect(state.fallbackReason).toBe('probe-unusable');
     expect(state.effectiveProvider).toBe('opencode-cli');
+    const activated = fallbackActivatedAlerts();
+    expect(activated).toHaveLength(1);
+    expect(activated[0][3]).toContain('reason=probe-unusable');
+    expect(activated[0][3]).not.toContain('reason=auth-required');
   });
 
   it('does NOT arm on a single empty turn with no adverse probe signal', () => {

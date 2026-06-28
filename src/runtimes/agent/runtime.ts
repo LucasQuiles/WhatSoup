@@ -5124,7 +5124,7 @@ export class AgentRuntime implements Runtime {
       emitAlertChecked(
         this.instanceName,
         'fallback_no_independent_provider',
-        'Auth-required fallback has no independent provider target',
+        'Fallback requires an independent provider target',
         `primaryProvider=${this.agentProvider} reason=${reason}`,
       );
       return null;
@@ -5183,12 +5183,13 @@ export class AgentRuntime implements Runtime {
    *   - arm after {@link EMPTY_OUTPUT_FALLBACK_THRESHOLD} consecutive empty
    *     primary turns (a healthy primary never returns two pure-empty turns).
    *
-   * Armed with the `auth-required` reason so fallback SELECTION skips
-   * same-provider entries (a broken claude-cli login breaks every claude-cli
-   * fallback too → jump straight to the independent provider) and REVERT is
-   * gated on a fresh primary probe — so it self-heals once the primary auth is
-   * restored. No-op (returns false) when already on a fallback window or when no
-   * fallback is configured. Returns true only when it armed a window this call.
+   * Armed with first-class empty-output/probe-unusable reasons while preserving
+   * the old auth-required control semantics: fallback SELECTION skips same-
+   * provider entries (a broken claude-cli login breaks every claude-cli fallback
+   * too → jump straight to the independent provider) and REVERT is gated on a
+   * fresh primary probe — so it self-heals once the primary auth is restored.
+   * No-op (returns false) when already on a fallback window or when no fallback
+   * is configured. Returns true only when it armed a window this call.
    */
   private maybeArmFallbackAfterEmptyPrimaryTurn(
     queue: IOutboundQueue,
@@ -6426,10 +6427,9 @@ export class AgentRuntime implements Runtime {
     // "I will continue here." over "Please resend …".
     const hasContinuation =
       replay.replayScheduled && !replay.blockedByToolActivity && !credentialsMissing;
-    // Map the fallback reason to its deterministic template id. The
-    // ProviderFallbackReason union (usage-limit | rate-limit | auth-required |
-    // model-unavailable) is a subset of UserTemplateId with identical names, so
-    // this is a 1:1 mapping; the credentials-missing case overrides it below.
+    // Map the fallback reason to its deterministic user template. Some internal
+    // reasons reuse user-facing transient copy; the credentials-missing case
+    // overrides it below.
     const templateId: UserTemplateId = credentialsMissing
       ? 'credentials-missing'
       : templateForFallbackReason(activation.reason);
