@@ -4,6 +4,11 @@
  * /tmp, bare mktemp without a private dir/template). Read-only /tmp references, comments,
  * docstrings, and assertions are NOT flagged. No baseline — fix, don't grandfather.
  *
+ * Extensionless files are classified by shebang (first line):
+ *   #!...python  → python matchers
+ *   #!...(ba|da|k|z)?sh  → shell matchers
+ *   otherwise   → skipped (binary / data file guard)
+ *
  * Known limitations (dataflow analysis required; do NOT add fragile regex for these):
  *   os.path.join("/tmp", x)  write-targets are not detected.
  *   shutil.copy(..., "/tmp/...")  write-targets are not detected.
@@ -44,17 +49,34 @@ function scanFile(abs: string, rel: string): Finding[] {
   const out: Finding[] = [];
   const py = abs.endsWith('.py');
   const sh = abs.endsWith('.sh');
-  if (!py && !sh) return out;
+  // A file with a dot-bearing extension that is NOT .py/.sh is skipped without reading.
+  const hasDotInBase = path.basename(abs).includes('.');
+  if (!py && !sh && hasDotInBase) return out;
+
   const lines = readFileSync(abs, 'utf8').split('\n');
+
+  // Extensionless: classify by shebang on first line; skip if not a py/sh script.
+  let isPy = py;
+  let isSh = sh;
+  if (!py && !sh) {
+    const firstLine = lines[0] ?? '';
+    if (/^#!.*python/.test(firstLine)) {
+      isPy = true;
+    } else if (/^#!.*\b(?:ba|da|k|z)?sh\b/.test(firstLine)) {
+      isSh = true;
+    } else {
+      return out; // no recognised shebang — skip (binary / data guard)
+    }
+  }
   lines.forEach((raw, i) => {
     if (isComment(raw)) return;
     const line = raw.split('#')[0]; // drop trailing comments for matching
     const push = (kind: Finding['kind']) =>
       out.push({ file: rel, line: i + 1, kind, snippet: raw.trim().slice(0, 120) });
-    if (py && PY_MKTEMP.test(line)) push('py-mktemp');
-    if (py && PY_TMP_WRITE.test(line)) push('py-tmp-write');
-    if (sh && SH_REDIRECT.test(line)) push('sh-redirect');
-    if (sh && SH_MKTEMP_BARE.test(line)) push('sh-mktemp');
+    if (isPy && PY_MKTEMP.test(line)) push('py-mktemp');
+    if (isPy && PY_TMP_WRITE.test(line)) push('py-tmp-write');
+    if (isSh && SH_REDIRECT.test(line)) push('sh-redirect');
+    if (isSh && SH_MKTEMP_BARE.test(line)) push('sh-mktemp');
   });
   return out;
 }

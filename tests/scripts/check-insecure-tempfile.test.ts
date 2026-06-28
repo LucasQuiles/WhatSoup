@@ -62,4 +62,24 @@ describe('insecure-tempfile guard', () => {
     const fixtureFindings = findings.filter((f) => f.file.startsWith(fixturePrefix));
     expect(fixtureFindings).toEqual([]);
   });
+
+  // Extensionless shebang coverage (closes silent-skip of 7 real scripts)
+  it('SHB-1: flags extensionless python shebang file with tempfile.mktemp as py-mktemp', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-mktemp' && x.file.endsWith('shebang_py_tool'))).toBe(true);
+  });
+  it('SHB-2: flags extensionless bash shebang file with /tmp redirect as sh-redirect', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'sh-redirect' && x.file.endsWith('shebang_sh_tool'))).toBe(true);
+  });
+  it('SHB-3: does NOT flag extensionless python shebang file using mkstemp (safe)', () => {
+    const f = scanForInsecureTempfile(greenDir);
+    const fromSafe = f.filter((x) => x.file.endsWith('shebang_py_safe'));
+    expect(fromSafe).toEqual([]);
+  });
+  it('SHB-4: does NOT flag extensionless file with no shebang even if body has insecure patterns', () => {
+    const f = scanForInsecureTempfile(greenDir);
+    const fromData = f.filter((x) => x.file.endsWith('no_shebang_data'));
+    expect(fromData).toEqual([]);
+  });
 });
