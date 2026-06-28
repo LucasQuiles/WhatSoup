@@ -74,6 +74,16 @@ export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
  * after real continued silence — still reaches the user.
  */
 export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
+/**
+ * Default persistent per-chat minimum spacing between progress placeholders.
+ * Unlike PROGRESS_TEXT_DEDUPE_WINDOW_MS (a 30s per-TEXT window cleared every turn),
+ * this floor is keyed on the conversation, survives flush()/abortTurn(), and is
+ * checked BEFORE the text window — so it caps the total placeholder rate on long
+ * turns regardless of text uniqueness or turn boundaries. Mirrors the proven
+ * ReplyGuaranteeManager per-chat fallback floor. Per-instance override via
+ * config.operationTracker.progressPlaceholderRateLimitMs (0 disables).
+ */
+export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 180_000;
 /** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
 const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
@@ -198,6 +208,15 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly recentTerminalTextKeys = new Map<string, TerminalTextDedupeEntry>();
   /** Rendered progress-placeholder text → timestamp of last enqueue, for short-window coalescing. */
   private readonly recentProgressTextAt = new Map<string, number>();
+  /**
+   * Timestamp of the last ACTUALLY-EMITTED progress placeholder. Powers the
+   * persistent per-chat rate floor. Deliberately NOT cleared by flush()/abortTurn()
+   * so the floor spans turns; only reset when the conversation itself changes.
+   */
+  private lastProgressEmittedAt: number | undefined;
+  /** Per-chat progress-placeholder rate floor (ms). 0 disables. Override via config/test setter. */
+  private progressFloorMs: number =
+    config.operationTracker?.progressPlaceholderRateLimitMs ?? PROGRESS_PLACEHOLDER_RATE_FLOOR_MS;
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -547,6 +566,29 @@ export class OutboundQueue implements IOutboundQueue {
    */
   private enqueueProgress(text: string): void {
     const now = Date.now();
+
+    // Persistent per-chat rate FLOOR \u2014 checked BEFORE the text-dedupe window.
+    // The text window (recentProgressTextAt) is a 30s per-TEXT collapser cleared
+    // every turn; it cannot cap elapsed-bearing stall text (unique each fire),
+    // does not survive flush()/abortTurn(), and lets slow\u2192stall escalation emit
+    // two distinct texts. This floor is keyed on the conversation, survives turn
+    // boundaries, and bounds the total placeholder rate. A floor-suppressed nudge
+    // re-arms the typing indicator (no-op while the refresh interval is already
+    // running; re-asserts it if typing had stopped), so suppression never causes
+    // dead-air — the alive signal is preserved across the suppressed window.
+    if (
+      this.progressFloorMs > 0 &&
+      this.lastProgressEmittedAt !== undefined &&
+      now - this.lastProgressEmittedAt < this.progressFloorMs
+    ) {
+      this.startTyping();
+      log.info(
+        { chatJid: this.chatJid, floorMs: this.progressFloorMs },
+        'progress placeholder suppressed by per-chat rate floor',
+      );
+      return;
+    }
+
     this.pruneProgressTextDedupe(now);
     const lastAt = this.recentProgressTextAt.get(text);
     if (lastAt !== undefined && now - lastAt < PROGRESS_TEXT_DEDUPE_WINDOW_MS) {
@@ -556,7 +598,18 @@ export class OutboundQueue implements IOutboundQueue {
       return;
     }
     this.recentProgressTextAt.set(text, now);
+    // Record the floor slot only on an ACTUAL emit (passed both floor and text window).
+    this.lastProgressEmittedAt = now;
     this.enqueue(text);
+  }
+
+  /**
+   * Override the per-chat progress-placeholder rate floor (ms). 0 disables.
+   * Production value comes from config; this setter supports per-instance runtime
+   * tuning and deterministic tests.
+   */
+  setProgressFloorMs(ms: number): void {
+    this.progressFloorMs = Math.max(0, ms);
   }
 
   private pruneProgressTextDedupe(now: number): void {

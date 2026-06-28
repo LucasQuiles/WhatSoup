@@ -55,6 +55,10 @@ function bench(mode: 'full' | 'minimal' | 'friendly'): Bench {
   } as unknown as Messenger;
   const queue = new OutboundQueue(messenger, CHAT_JID);
   queue.setToolUpdateMode(mode);
+  // This suite benchmarks the 30s per-TEXT dedupe layer in isolation. Disable the
+  // persistent per-chat rate floor (covered in progress-placeholder-rate-floor.test.ts),
+  // which would otherwise dominate these sub-180s scenarios.
+  queue.setProgressFloorMs(0);
   return {
     queue,
     calls,

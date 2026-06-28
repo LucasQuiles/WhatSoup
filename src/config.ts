@@ -129,6 +129,12 @@ export interface OperationTrackerConfig {
   progressIntervalMs: number;
   thinkingLongMs: number;
   thinkingStallMs: number;
+  /**
+   * Persistent per-chat minimum spacing (ms) between progress placeholders.
+   * Caps the "Still working…" flood on long turns regardless of placeholder text
+   * uniqueness or turn boundaries. 0 disables the floor. Default 180_000.
+   */
+  progressPlaceholderRateLimitMs: number;
   toolThresholds: Record<string, ToolThreshold>;
 }
 
@@ -894,6 +900,8 @@ export const config = {
     progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30_000,
     thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45_000,
     thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 300_000,
+    progressPlaceholderRateLimitMs:
+      (instance?.operationTracker?.progressPlaceholderRateLimitMs as number | undefined) ?? 180_000,
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
