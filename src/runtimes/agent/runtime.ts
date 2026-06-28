@@ -5581,12 +5581,17 @@ export class AgentRuntime implements Runtime {
         // operator-visible transition (a restart mid-window; repeated
         // restores are the crash-loop signature), so it gets its own
         // additive source instead of silence.
+        // A restore is a RESUMPTION, not a new fault: the activation already
+        // fired before the restart and its window is still open. Paging an
+        // operator to "investigate/remediate" a healthy service restart mid-
+        // window is noise. Downgraded to 'info' (BE-G3 gap 2).
         emitAlertChecked(
           this.instanceName,
           'provider_fallback_restored',
           'Provider fallback window restored after restart',
           `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'}`
             + ` until=${new Date(until).toISOString()} probeAttempts=${this.fallbackProbeAttempts}`,
+          'info',
         );
       } else {
         this.fallbackMetrics.recordActivation();
@@ -6564,11 +6569,16 @@ export class AgentRuntime implements Runtime {
       oldSession: args.oldSession,
     }).then(() => {
       this.fallbackMetrics.recordReplay();
+      // A completed replay is a HEALTHY lifecycle event: the interrupted turn
+      // was successfully handed off to the fallback provider. Not operator-
+      // actionable — downgraded to 'info' (BE-G3 gap 2). The failure branch
+      // below keeps its critical default (a failed replay IS actionable).
       emitAlertChecked(
         this.instanceName,
         'provider_fallback_replayed',
         'Interrupted turn replayed on fallback provider',
         `reason=${args.activation.reason} provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'}`,
+        'info',
       );
     }).catch((err) => {
       log.error({
