@@ -36,9 +36,22 @@ describe('insecure-tempfile guard', () => {
     const f = scanForInsecureTempfile(redDir);
     expect(f.some((x) => x.kind === 'sh-redirect' && /\btee\s+-/.test(x.snippet))).toBe(true);
   });
+  it('FIX-A: flags f-string /tmp write-target open(f"/tmp/...", "w") as py-tmp-write', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-tmp-write' && x.snippet.includes('open(f"'))).toBe(true);
+  });
+  it('FIX-A: flags f-string pathlib Path(f"/tmp/...").write_text() as py-tmp-write', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-tmp-write' && x.snippet.includes('write_text') && x.snippet.includes('f"/tmp/'))).toBe(true);
+  });
   it('does NOT flag read-only refs, comments, mktemp -d, templated mktemp, or safe X-run template (FP-1)', () => {
     const f = scanForInsecureTempfile(greenDir);
     expect(f).toEqual([]);
+  });
+  it('FIX-B: does NOT flag mktemp --directory (GNU long form)', () => {
+    const f = scanForInsecureTempfile(greenDir);
+    const mkdirFindings = f.filter((x) => x.kind === 'sh-mktemp');
+    expect(mkdirFindings).toEqual([]);
   });
   it('excludes guard fixture corpus on full-tree scan (gate-green reachable)', () => {
     // Scanning from the repo root must NOT include the guard's own intentional-

@@ -8,16 +8,16 @@ file,line,kind,disposition,reason
 scripts/cutover.sh,87,sh-redirect,fix,shell redirect to /tmp — world-writable predictable log path
 scripts/cutover.sh,131,sh-redirect,fix,shell redirect to /tmp — world-writable predictable log path
 scripts/cutover.sh,217,sh-redirect,fix,shell redirect to /tmp via tee — world-writable predictable log path
-tests/fixtures/insecure-tempfile/red/sample.py,3,py-mktemp,fix,tempfile.mktemp() predictable path — TOCTOU race condition
-tests/fixtures/insecure-tempfile/red/sample.py,4,py-mktemp,fix,tempfile.mktemp() predictable path — TOCTOU race condition
-tests/fixtures/insecure-tempfile/red/sample.py,5,py-tmp-write,fix,/tmp write-target — predictable world-writable path
-tests/fixtures/insecure-tempfile/red/sample.py,6,py-tmp-write,fix,/tmp write-target — predictable world-writable path
-tests/fixtures/insecure-tempfile/red/sample.py,7,py-tmp-write,fix,/tmp write-target via pathlib.open — predictable world-writable path
-tests/fixtures/insecure-tempfile/red/sample.py,8,py-tmp-write,fix,/tmp write-target via pathlib.open mode= — predictable world-writable path
-tests/fixtures/insecure-tempfile/red/sample.sh,2,sh-redirect,fix,shell redirect to /tmp — world-writable predictable path
-tests/fixtures/insecure-tempfile/red/sample.sh,3,sh-mktemp,fix,bare mktemp no private dir — predictable shared namespace
-tests/fixtures/insecure-tempfile/red/sample.sh,4,sh-redirect,fix,tee -a to /tmp — world-writable predictable path
-tests/fixtures/insecure-tempfile/red/sample.sh,5,sh-redirect,fix,tee --append to /tmp — world-writable predictable path
+tests/fixtures/insecure-tempfile/red/sample.py,3,py-mktemp,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.py,4,py-mktemp,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.py,5,py-tmp-write,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.py,6,py-tmp-write,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.py,7,py-tmp-write,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.py,8,py-tmp-write,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.sh,2,sh-redirect,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.sh,3,sh-mktemp,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.sh,4,sh-redirect,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
+tests/fixtures/insecure-tempfile/red/sample.sh,5,sh-redirect,fixture-permanent,intentional RED corpus — guard-excluded via self-exclusion; not a real finding to fix
 tools/agent-runtime-probes/tests/test_enrichment_control_fixtures.py,149,py-mktemp,fix,tempfile.mktemp() predictable path — TOCTOU race condition
 tools/agent-runtime-probes/tests/test_enrichment_control_fixtures.py,159,py-mktemp,fix,tempfile.mktemp() predictable path — TOCTOU race condition
 tools/agent-runtime-probes/tests/test_enrichment_control_fixtures.py,168,py-mktemp,fix,tempfile.mktemp() predictable path — TOCTOU race condition

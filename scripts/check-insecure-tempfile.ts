@@ -3,6 +3,13 @@
  * Detects CREATION/WRITE only (tempfile.mktemp(, /tmp write-targets, shell redirect to
  * /tmp, bare mktemp without a private dir/template). Read-only /tmp references, comments,
  * docstrings, and assertions are NOT flagged. No baseline — fix, don't grandfather.
+ *
+ * Known limitations (dataflow analysis required; do NOT add fragile regex for these):
+ *   os.path.join("/tmp", x)  write-targets are not detected.
+ *   shutil.copy(..., "/tmp/...")  write-targets are not detected.
+ *   os.open("/tmp/...")  write-targets are not detected.
+ * f-string /tmp write-targets (e.g. open(f"/tmp/{name}","w"), Path(f"/tmp/{x}").write_text())
+ * ARE detected — the regex allows an optional string prefix (f/r/b) before each quote.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -19,13 +26,15 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage']);
 // Flag both tempfile.mktemp( calls and direct-import form (kind py-mktemp)
 const PY_MKTEMP = /\b(?:tempfile\.mktemp\s*\(|from\s+tempfile\s+import\s+(?:\w+\s*,\s*)*mktemp\b)/;
 // /tmp/<name> as a write/create target: open(...,'w'|'a'|'x') positional or mode=kw,
-// pathlib .open() with write mode, write_text, write_bytes, mkdir, touch
+// pathlib .open() with write mode, write_text, write_bytes, mkdir, touch.
+// Optional Python string prefix (f/r/b and combos, case-insensitive) is allowed before
+// each /tmp/ literal so f-string paths like open(f"/tmp/{x}","w") are also detected.
 const PY_TMP_WRITE =
-  /(?:open\(\s*["']\/tmp\/[^"']+["']\s*,\s*["'][wax]|open\(\s*["']\/tmp\/[^"']+["'][^)]*mode\s*=\s*["'][wax]|["']\/tmp\/[^"']+["']\s*\)\s*\.\s*(?:write_text|write_bytes|mkdir|touch|open\s*\(\s*(?:["'][wax]|[^)]*mode\s*=\s*["'][wax])))/;
+  /(?:open\(\s*(?:[rfbRFB]{1,2})?["']\/tmp\/[^"']+["']\s*,\s*["'][wax]|open\(\s*(?:[rfbRFB]{1,2})?["']\/tmp\/[^"']+["'][^)]*mode\s*=\s*["'][wax]|(?:[rfbRFB]{1,2})?["']\/tmp\/[^"']+["']\s*\)\s*\.\s*(?:write_text|write_bytes|mkdir|touch|open\s*\(\s*(?:["'][wax]|[^)]*mode\s*=\s*["'][wax])))/;
 // Shell redirects to /tmp and tee (with optional flags) writing to /tmp
 const SH_REDIRECT = /(?:>>?|\bcat\s*>)\s*\/tmp\/\S+|\btee\b(?:\s+-\S+)*\s+\/tmp\/\S+/;
-// Bare mktemp: no -d, no $TMPDIR/$TMP reference, no X{3,} template
-const SH_MKTEMP_BARE = /\bmktemp\b(?!\s+-d)(?![^\n]*["']?\$\{?(?:TMPDIR|TMP)\b)(?![^\n]*X{3,})/;
+// Bare mktemp: no -d / --directory, no $TMPDIR/$TMP reference, no X{3,} template
+const SH_MKTEMP_BARE = /\bmktemp\b(?!\s+(?:-d\b|--directory\b))(?![^\n]*["']?\$\{?(?:TMPDIR|TMP)\b)(?![^\n]*X{3,})/;
 
 function isComment(line: string): boolean {
   return line.trimStart().startsWith('#');

@@ -332,7 +332,7 @@ export const fitnessRules = [
     title: 'No insecure temp-file creation in python or shell',
     category: 'test',
     rationale:
-      'tempfile.mktemp() and hardcoded /tmp write-targets create predictable paths (TOCTOU race, cross-user readable). Fixed repo-wide; this rule blocks regression. Detects creation/write only, not read-only references.',
+      'tempfile.mktemp() and hardcoded /tmp write-targets create predictable paths (TOCTOU race, cross-user readable). Fixed repo-wide; this rule blocks regression. Detects creation/write only, not read-only references. f-string /tmp write-targets are covered; os.path.join/shutil/os.open /tmp write-targets are a known detector gap (dataflow analysis required to avoid false positives).',
     detect: 'mechanical',
     rings: ['guard', 'ci'],
     severity: 'block',
