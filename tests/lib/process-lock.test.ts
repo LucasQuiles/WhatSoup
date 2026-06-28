@@ -420,4 +420,21 @@ describe('resolveBootId', () => {
     });
     expect(id).toBe('');
   });
+
+  // Regression: a launchd GUI agent's PATH excludes /usr/sbin where `sysctl`
+  // lives, so the default macOS probe must call sysctl by absolute path.
+  // Without the fix this returns '' under a stripped PATH (bare `sysctl`
+  // ENOENTs) — which silently disables reboot-reclaim on the macOS fleet.
+  // Gated to darwin; on Linux the default probe reads /proc and this is a no-op.
+  it('reads the macOS boot id even when /usr/sbin is absent from PATH (launchd env)', () => {
+    if (process.platform !== 'darwin') return;
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = '/usr/bin:/bin';
+      expect(resolveBootId()).not.toBe('');
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
 });
