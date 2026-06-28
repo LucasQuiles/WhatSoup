@@ -180,7 +180,11 @@ describe('fallback chain selection', () => {
     });
   });
 
-  it('reports configured chain eligibility as unknown before an arm-time selection pass', () => {
+  it('reports configured chain eligibility from credential presence before an arm-time selection pass', () => {
+    // Idle eligibility surfaces real credential presence so an uncredentialed
+    // fallback tier is visible in /health before any window arms: present key →
+    // eligible:true, mapped-but-absent key → eligible:false.
+    lookupCredentialMock.mockImplementation((svc) => svc === 'minimax' ? 'mm-key' : null);
     const runtime = makeRuntime({
       agentFallbacks: [
         { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
@@ -189,8 +193,8 @@ describe('fallback chain selection', () => {
     });
 
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([
-      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: null },
-      { provider: 'openai-api', model: 'gpt-4o-mini', eligible: null },
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: true },
+      { provider: 'openai-api', model: 'gpt-4o-mini', eligible: false },
     ]);
   });
 
