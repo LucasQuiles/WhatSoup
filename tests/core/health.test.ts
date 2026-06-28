@@ -1516,9 +1516,12 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  it('degrades agent health on empty-output AFTER a successful turn (real regression, not a boot artifact)', async () => {
+  it('degrades agent health on a CURRENT, SUSTAINED empty-output stall after a successful turn (#1433)', async () => {
+    // A real regression: a turn proved out, then empty-output came after it and has
+    // persisted past the debounce but is still recent (within the staleness bound).
     db.close();
     const db2 = makeDb();
+    const now = Date.now();
     const deps = makeDeps(db2, {
       instanceType: 'agent',
       runtime: {
@@ -1528,9 +1531,9 @@ describe('GET /health', () => {
             turnCapability: {
               modelUsable: null,
               modelUsabilityStatus: 'usable',
-              lastSuccessfulTurnAt: 1_781_316_030_000, // proved a turn → grace no longer applies
+              lastSuccessfulTurnAt: now - 5 * 60 * 1000,
               lastTurnErrorClass: 'empty-output',
-              lastTurnErrorAt: 1_781_316_060_000,
+              lastTurnErrorAt: now - 3 * 60 * 1000, // 3m old: past 1m debounce, under 15m stale
             },
           },
         }),
@@ -1543,6 +1546,108 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(status).toBe(200);
     expect(json.status).toBe('degraded');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a STALE idle empty-output after a successful turn (#1433 idle-stuck self-clear)', async () => {
+    // rb-bot/mini7: one empty-output turn after a success, then the bot went idle.
+    // With no further turns the trailing error never clears; previously this pinned
+    // the instance to degraded forever. A stale (idle, >15m old) empty-output is a
+    // benign artifact and must self-clear; a genuinely-broken model is still caught
+    // independently via model_usable===false.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 92 * 60 * 1000,
+              lastTurnErrorClass: 'empty-output',
+              lastTurnErrorAt: now - 90 * 60 * 1000, // 90m idle → stale → benign
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    db2.close();
+  });
+
+  it('keeps agent health healthy when an empty-output is superseded by a later success (#1433 flap kill)', async () => {
+    // ar-bot/mini2: empty/success turns alternate. Once a success lands AFTER the
+    // empty-output, the model has recovered — health must not flap to degraded.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 30 * 1000, // success came AFTER the error
+              lastTurnErrorClass: 'empty-output',
+              lastTurnErrorAt: now - 90 * 1000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    db2.close();
+  });
+
+  it('keeps agent health healthy on a fresh empty-output within the debounce window (#1433 transient damp)', async () => {
+    // A single just-now empty-output that has not yet persisted past the debounce
+    // must not trip degraded — the next turn is given a chance to succeed.
+    db.close();
+    const db2 = makeDb();
+    const now = Date.now();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: null,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: now - 2 * 60 * 1000,
+              lastTurnErrorClass: 'empty-output',
+              lastTurnErrorAt: now - 10 * 1000, // 10s old: still inside the 1m debounce
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
     db2.close();
   });
 
