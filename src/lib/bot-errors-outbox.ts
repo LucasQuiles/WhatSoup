@@ -105,7 +105,12 @@ const AUTHORIZATION_BEARER = /\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s
 // authorization header.
 const AUTHORIZATION_KEYED =
   /(^|[^A-Za-z0-9_]|\\n)(["']?authorization["']?\s*[:=]\s*["']?)(?!(?:Bearer|Basic)\s)([^\s\\,"';}]+)(["']?)/gi;
-const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
+// Case-insensitive like the Python SSOT `BEARER_VALUE_RE` (fixes the lowercase
+// `bearer <token>` leak), with the scheme captured so the original case is
+// preserved on redaction. Intentionally OMITS Python's `{8,}` length floor: TS
+// stays STRICTER (redacts short bearer tokens too, e.g. `Bearer abc.def`) — a
+// safe divergence (over-redaction), never an under-redaction.
+const BEARER_VALUE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
 // Mirror of the Python SSOT `WHATSAPP_SERVICE_UNIT_RE`: a systemd/launchd unit
@@ -128,8 +133,11 @@ const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 // which backtracked catastrophically (ReDoS) when the required suffix failed.
 const CREDENTIAL_PATH =
   /(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])\/)[^\s"',;}]*?(?:\.config\/secrets\/[^\s"',;}]+|\.config\/whatsoup\/[^\s"',;}]+|\.local\/share\/whatsoup\/instances\/[^\s"',;}]*\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s"',;}]+)?))\b/gi;
-const KEYED_PHONE_LIKE = /\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|\s+)(\+?\d{10,16})\b/gi;
-const CONTEXT_PHONE_LIKE = /\b(for)(\s+)(\+?\d{10,16})\b/gi;
+// Separator `[\s_-]+` mirrors the Python SSOT (KEYED_PHONE_LIKE_RE /
+// CONTEXT_PHONE_LIKE_RE): `_`/`-`-keyed phones (e.g. `msisdn_12025550181`,
+// `phone_+1…`, `for_+1…`) must redact, not just whitespace-separated ones (L3-001).
+const KEYED_PHONE_LIKE = /\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|[\s_-]+)(\+?\d{10,16})\b/gi;
+const CONTEXT_PHONE_LIKE = /\b(for)([\s_-]+)(\+?\d{10,16})\b/gi;
 const PHONE_LIKE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;
 
 function redactPhoneLike(value: string): string {
@@ -206,7 +214,7 @@ function redactText(value: string): string {
     .replace(AUTHORIZATION_BEARER, '$1[REDACTED]')
     .replace(AUTHORIZATION_KEYED, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
     .replace(SECRETISH_ASSIGNMENT, (_match, pre: string, keySep: string, _value: string, closeQuote: string) => `${pre}${keySep}[REDACTED]${closeQuote}`)
-    .replace(BEARER_VALUE, 'Bearer [REDACTED]'));
+    .replace(BEARER_VALUE, '$1[REDACTED]'));
 }
 
 // Stable export for parity testing (`tests/redaction-parity.test.ts`). The
