@@ -62,7 +62,7 @@ name: good
 description: "Use when generating a redacted runtime report for local probes. Do not use when editing runtime configuration."
 ---
 
-This body contains sk-secretshouldnotleak and must never be emitted.
+This body contains canary-must-not-leak and must never be emitted.
 """,
     )
     write_skill(
@@ -112,7 +112,7 @@ Duplicate body B.
 
 def assert_no_fixture_content(rendered: str) -> None:
     for forbidden in [
-        "sk-secretshouldnotleak",
+        "canary-must-not-leak",
         "pcsk_secretshouldnotleak",
         "This body contains",
         "More secret body text",

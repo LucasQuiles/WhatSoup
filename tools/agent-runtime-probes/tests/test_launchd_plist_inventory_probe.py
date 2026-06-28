@@ -80,12 +80,12 @@ def fixture_tree(root: Path) -> tuple[Path, Path]:
             "ProgramArguments": [
                 f"{home}/private/bin/run-secret.sh",
                 "--token",
-                "sk-secretshouldnotleak",
+                "canary-must-not-leak",
             ],
             "EnvironmentVariables": {
                 "PATH": f"{home}/private/bin:/usr/bin",
                 "PINECONE_API_KEY": "pcsk_secretshouldnotleak",
-                "SECRET_TOKEN": "sk-secretshouldnotleak",
+                "SECRET_TOKEN": "canary-must-not-leak",
             },
             "RunAtLoad": True,
             "KeepAlive": {"Crashed": True},
@@ -95,7 +95,7 @@ def fixture_tree(root: Path) -> tuple[Path, Path]:
             "StandardErrorPath": f"{home}/private/logs/err.log",
         },
     )
-    (launch_agents / "bad-secret.plist").write_text("sk-secretshouldnotleak <not plist>", encoding="utf-8")
+    (launch_agents / "bad-secret.plist").write_text("canary-must-not-leak <not plist>", encoding="utf-8")
     managed = root / "managed-components.json"
     write_json(
         managed,
@@ -124,7 +124,7 @@ def assert_no_fixture_values(rendered: str) -> None:
     for forbidden in [
         "secret-bot",
         "run-secret.sh",
-        "sk-secretshouldnotleak",
+        "canary-must-not-leak",
         "pcsk_secretshouldnotleak",
         f"{Path.home()}/private",
         "secret-watchdog",

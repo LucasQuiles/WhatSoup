@@ -146,7 +146,7 @@ def test_different_seed_changes_random_and_padding():
 
 def test_malformed_query_fixtures_typed_invalid():
     # UNHAPPY: a non-list JSON top level is malformed -> typed invalid, not silent empty.
-    bad = Path(tempfile.mktemp(prefix="cape_bad_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_bad_", suffix=".json"); os.close(_fd); bad = Path(_name)
     bad.write_text('{"not": "a list"}')
     r = _report(query_fixtures_path=bad)
     assert r["parse_status"] == "invalid"
@@ -156,7 +156,7 @@ def test_malformed_query_fixtures_typed_invalid():
 
 def test_malformed_json_query_fixtures_typed_invalid():
     # UNHAPPY: invalid JSON -> MalformedQueryFixtureError -> typed invalid report.
-    bad = Path(tempfile.mktemp(prefix="cape_badjson_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_badjson_", suffix=".json"); os.close(_fd); bad = Path(_name)
     bad.write_text("{ this is not json")
     r = _report(query_fixtures_path=bad)
     assert r["parse_status"] == "invalid"
@@ -165,7 +165,7 @@ def test_malformed_json_query_fixtures_typed_invalid():
 
 def test_missing_required_field_typed_invalid():
     # UNHAPPY: a fixture entry missing `gold` -> typed invalid.
-    bad = Path(tempfile.mktemp(prefix="cape_missing_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_missing_", suffix=".json"); os.close(_fd); bad = Path(_name)
     bad.write_text(json.dumps([{"query_id": "x", "query": "hi"}]))
     r = _report(query_fixtures_path=bad)
     assert r["parse_status"] == "invalid"
@@ -183,7 +183,7 @@ def test_missing_query_fixtures_file_typed_invalid():
 
 def test_empty_query_fixtures_degraded():
     # UNHAPPY: an empty (valid) list -> degraded marker, never a fabricated success.
-    empty = Path(tempfile.mktemp(prefix="cape_empty_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_empty_", suffix=".json"); os.close(_fd); empty = Path(_name)
     empty.write_text("[]")
     r = _report(query_fixtures_path=empty)
     assert r["status"] == "degraded"
@@ -195,7 +195,7 @@ def test_empty_query_fixtures_degraded():
 def test_out_dir_write_error_typed():
     # UNHAPPY: an unwritable out-dir surfaces a typed out_dir_write_error, not a swallow.
     # Point out-dir under a regular file so mkdir fails with OSError.
-    blocker = Path(tempfile.mktemp(prefix="cape_block_"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_block_"); os.close(_fd); blocker = Path(_name)
     blocker.write_text("i am a file")
     out_dir = blocker / "sub"
     buf = io.StringIO()
@@ -230,7 +230,7 @@ def test_report_is_metadata_only_no_content_leak():
 
 
 def test_caller_supplied_fixtures_used():
-    good = Path(tempfile.mktemp(prefix="cape_good_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_good_", suffix=".json"); os.close(_fd); good = Path(_name)
     good.write_text(json.dumps([
         {"query_id": "c1", "query": "Q?", "gold": "A gold answer here.",
          "irrelevant": ["unrelated fact one"],
@@ -251,7 +251,7 @@ def test_token_estimate_heuristic():
 
 def test_random_arm_falls_back_without_irrelevant_pool():
     # When fixtures carry no irrelevant facts, the random arm still produces a noise item.
-    good = Path(tempfile.mktemp(prefix="cape_norand_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_norand_", suffix=".json"); os.close(_fd); good = Path(_name)
     good.write_text(json.dumps([{"query_id": "c1", "query": "Q?", "gold": "gold text"}]))
     out_dir = Path(tempfile.mkdtemp(prefix="cape_norand_out_"))
     r = _report(query_fixtures_path=good, out_dir=out_dir)
@@ -263,7 +263,7 @@ def test_random_arm_falls_back_without_irrelevant_pool():
 
 def test_malformed_near_miss_text_counted_invalid():
     # UNHAPPY: a near-miss whose `text` is missing/empty is unverifiable -> invalid count.
-    good = Path(tempfile.mktemp(prefix="cape_nmtext_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_nmtext_", suffix=".json"); os.close(_fd); good = Path(_name)
     good.write_text(json.dumps([
         {"query_id": "c1", "query": "Q?", "gold": "gold",
          "near_miss": [{"text": "", "asserted_value": "1", "correct_value": "2"}]},
@@ -287,7 +287,7 @@ def test_cli_entrypoint_emits_valid_json():
 
 def test_cli_malformed_fixtures_exit_nonzero():
     # UNHAPPY e2e: malformed fixture file -> nonzero exit + typed invalid report.
-    bad = Path(tempfile.mktemp(prefix="cape_cli_bad_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_cli_bad_", suffix=".json"); os.close(_fd); bad = Path(_name)
     bad.write_text("not json at all {")
     proc = subprocess.run(
         [sys.executable, str(PROBE_PATH), "--seed", str(SEED), "--query-fixtures", str(bad)],
@@ -302,7 +302,7 @@ def test_empty_required_field_is_malformed():
     # A required field must be a NON-EMPTY string (guard `not isinstance(value, str) or not value`).
     # An empty string is malformed; an and->or weakening would accept it (isinstance is True, so the
     # conjunction is False). The existing tests use MISSING fields, not empty ones.
-    bad = Path(tempfile.mktemp(prefix="cape_empty_", suffix=".json"))
+    _fd, _name = tempfile.mkstemp(prefix="cape_empty_", suffix=".json"); os.close(_fd); bad = Path(_name)
     bad.write_text(json.dumps([{"query_id": "x", "query": "", "gold": "g"}]))
     try:
         r = _report(query_fixtures_path=bad)

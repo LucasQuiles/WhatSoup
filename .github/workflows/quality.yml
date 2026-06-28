@@ -195,6 +195,9 @@ jobs:
       - name: Instance config integrity guard
         run: npm run guard:instance-config
 
+      - name: Insecure tempfile guard
+        run: npm run guard:insecure-tempfile
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 

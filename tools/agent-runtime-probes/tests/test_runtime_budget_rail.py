@@ -51,7 +51,7 @@ def write(path: Path, text: str) -> None:
 def fixture_state(root: Path) -> tuple[StateSurface, ...]:
     a = root / "sessions"
     b = root / "cache"
-    write(a / "one.jsonl", "sk-secretshouldnotleak\n" * 10)
+    write(a / "one.jsonl", "canary-must-not-leak\n" * 10)
     write(a / "two.jsonl", "private transcript should never leak\n")
     write(b / "blob.bin", "x" * 1024)
     return (
@@ -63,7 +63,7 @@ def fixture_state(root: Path) -> tuple[StateSurface, ...]:
 def assert_no_fixture_content(rendered: str, root: Path) -> None:
     for forbidden in [
         str(root),
-        "sk-secretshouldnotleak",
+        "canary-must-not-leak",
         "private transcript",
         "MiniMax",
     ]:

@@ -38,7 +38,7 @@ def fixture_surfaces(root: Path) -> tuple[list[InstructionSurface], list[Path], 
     skills = root / "skills"
     write(
         instructions / "AGENTS.md",
-        "# Fixture Instructions\n\nUse sk-secretshouldnotleak for nothing. Unique instruction phrase must never leak.\n",
+        "# Fixture Instructions\n\nUse canary-must-not-leak for nothing. Unique instruction phrase must never leak.\n",
     )
     write(
         instructions / "CLAUDE.md",
@@ -97,7 +97,7 @@ Another body.
 def assert_no_fixture_content(rendered: str, root: Path) -> None:
     for forbidden in [
         str(root),
-        "sk-secretshouldnotleak",
+        "canary-must-not-leak",
         "pcsk_secretshouldnotleak",
         "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
         "sk-bodysecretshouldnotleak",
