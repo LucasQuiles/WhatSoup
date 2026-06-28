@@ -286,6 +286,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-unit-drift` | `npm run guard:unit-drift` | `package.json` | internal | active | Compare checked-in systemd user units with installed units |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |
+| `cli:npm.guard-insecure-tempfile` | `npm run guard:insecure-tempfile` | `package.json` | stable | active | Reject insecure temp-file creation in python + shell (tempfile.mktemp / mktemp import, /tmp write-target literals, shell redirect/tee to /tmp, unsafe mktemp templates) |
 | `cli:npm.guard-instance-config` | `npm run guard:instance-config` | `package.json` | stable | active | Verify instance config.json files for memory-config integrity and health-port map integrity |
 | `cli:npm.guard-boundaries` | `npm run guard:boundaries` | `package.json` | stable | active | Deterministic ring import-boundary check with grandfathered baseline (new cross-ring violations block) |
 | `cli:npm.guard-ring-boundaries` | `npm run guard:ring-boundaries` | `package.json` | stable | active | Alias for guard:boundaries |
