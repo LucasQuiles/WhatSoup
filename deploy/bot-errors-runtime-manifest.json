@@ -17,6 +17,15 @@
       ]
     },
     {
+      "path": "deploy/scripts/bot-errors-tree-provenance.py",
+      "sha256": "6b287906de52f744f60668111aa1d1916102083b9ea467cfc3c7e510f0fb95d6",
+      "mustContain": [
+        "tree_provenance_inventory",
+        "def redact_ref",
+        "def redact_path_segment"
+      ]
+    },
+    {
       "path": "deploy/scripts/bot-errors-health-check.py",
       "sha256": "b07fbec272c8dc2112677b09eb1b7fd0677bbda41f937a2f9bfef809bd5c5a73",
       "mustContain": [

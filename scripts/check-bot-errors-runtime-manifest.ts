@@ -45,6 +45,10 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/bot-errors-health-check.py',
   'deploy/scripts/bot-errors-heartbeat-watchdog.py',
   'deploy/scripts/bot-errors-q-loop.py',
+  // Executed live: bot-errors-health-check.py exec_module()s this sibling on every
+  // --daily run (health-check.py:5432-5449), so a tamper/drift of it runs in
+  // production. It must carry a runtime-manifest hash like the other live scripts.
+  'deploy/scripts/bot-errors-tree-provenance.py',
   'src/lib/bot-errors-outbox.ts',
   'deploy/scripts/bot-errors-collector.py',
   'deploy/scripts/bot-errors-emit.py',
