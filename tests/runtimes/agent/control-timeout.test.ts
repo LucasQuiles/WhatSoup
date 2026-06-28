@@ -54,6 +54,7 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     setDurability: vi.fn(),
     enqueuePoll: vi.fn(async (sendFn: () => Promise<void>) => sendFn()),
     setPollPending: vi.fn(),
+    endTurn: vi.fn(),
   };
 
   return { mockSession, mockQueue };

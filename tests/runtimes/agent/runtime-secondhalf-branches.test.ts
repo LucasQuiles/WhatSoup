@@ -79,6 +79,7 @@ const {
     enqueuePoll: vi.fn(async (fn: () => Promise<void>) => { await fn(); }),
     hasPendingPoll: vi.fn(() => false),
     setPollPending: vi.fn(),
+    endTurn: vi.fn(),
     targetChatJid: '15550001@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
