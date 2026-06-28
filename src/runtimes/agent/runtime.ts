@@ -889,8 +889,17 @@ export class AgentRuntime implements Runtime {
     return this.crashes.count(mapKey);
   }
 
+  /**
+   * Window for the health-degraded crash signal (#1427). A crash older than this
+   * no longer degrades health, so a transient crash that immediately recovers
+   * clears within the window instead of pinning status=degraded forever. Sustained
+   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), so
+   * a short window here only governs the soft "crashed recently" health hint.
+   */
+  private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * 60_000;
+
   private getRecentCrashCount(): number {
-    return this.crashes.recentTotal();
+    return this.crashes.recentWithin(AgentRuntime.CRASH_HEALTH_DECAY_WINDOW_MS);
   }
 
   private decrementCrashCount(mapKey: string): void {
