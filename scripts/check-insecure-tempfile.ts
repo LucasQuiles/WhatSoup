@@ -16,15 +16,19 @@ export interface Finding {
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage']);
-const PY_MKTEMP = /\btempfile\.mktemp\s*\(/;
-// /tmp/<name> as a write/create target: open(...,'w'|'a'|'x'), write_text, mkdir, redirect
-const PY_TMP_WRITE = /(open\(\s*["']\/tmp\/[^"']+["']\s*,\s*["'][wax]|["']\/tmp\/[^"']+["']\s*\)\s*\.\s*(write_text|write_bytes|mkdir|touch))/;
-const SH_REDIRECT = /(>>?|\b(?:tee|cat\s*>))\s*\/tmp\/\S+/;
-const SH_MKTEMP_BARE = /\bmktemp\b(?!\s+-d)(?![^\n]*["']?\$\{?(?:TMPDIR|TMP)\b)(?![^\n]*\.XXX)/;
+// Flag both tempfile.mktemp( calls and direct-import form (kind py-mktemp)
+const PY_MKTEMP = /\b(?:tempfile\.mktemp\s*\(|from\s+tempfile\s+import\s+(?:\w+\s*,\s*)*mktemp\b)/;
+// /tmp/<name> as a write/create target: open(...,'w'|'a'|'x') positional or mode=kw,
+// pathlib .open() with write mode, write_text, write_bytes, mkdir, touch
+const PY_TMP_WRITE =
+  /(?:open\(\s*["']\/tmp\/[^"']+["']\s*,\s*["'][wax]|open\(\s*["']\/tmp\/[^"']+["'][^)]*mode\s*=\s*["'][wax]|["']\/tmp\/[^"']+["']\s*\)\s*\.\s*(?:write_text|write_bytes|mkdir|touch|open\s*\(\s*(?:["'][wax]|[^)]*mode\s*=\s*["'][wax])))/;
+// Shell redirects to /tmp and tee (with optional flags) writing to /tmp
+const SH_REDIRECT = /(?:>>?|\bcat\s*>)\s*\/tmp\/\S+|\btee\b(?:\s+-\S+)*\s+\/tmp\/\S+/;
+// Bare mktemp: no -d, no $TMPDIR/$TMP reference, no X{3,} template
+const SH_MKTEMP_BARE = /\bmktemp\b(?!\s+-d)(?![^\n]*["']?\$\{?(?:TMPDIR|TMP)\b)(?![^\n]*X{3,})/;
 
-function isComment(line: string, py: boolean): boolean {
-  const t = line.trimStart();
-  return py ? t.startsWith('#') : t.startsWith('#');
+function isComment(line: string): boolean {
+  return line.trimStart().startsWith('#');
 }
 
 function scanFile(abs: string, rel: string): Finding[] {
@@ -34,7 +38,7 @@ function scanFile(abs: string, rel: string): Finding[] {
   if (!py && !sh) return out;
   const lines = readFileSync(abs, 'utf8').split('\n');
   lines.forEach((raw, i) => {
-    if (isComment(raw, py)) return;
+    if (isComment(raw)) return;
     const line = raw.split('#')[0]; // drop trailing comments for matching
     const push = (kind: Finding['kind']) =>
       out.push({ file: rel, line: i + 1, kind, snippet: raw.trim().slice(0, 120) });

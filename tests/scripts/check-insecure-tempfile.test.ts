@@ -20,7 +20,23 @@ describe('insecure-tempfile guard', () => {
     expect(kinds(f).has('sh-redirect')).toBe(true);
     expect(kinds(f).has('sh-mktemp')).toBe(true);
   });
-  it('does NOT flag read-only refs, comments, mktemp -d, or templated mktemp', () => {
+  it('FN-3: flags direct "from tempfile import mktemp" as py-mktemp', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-mktemp' && x.snippet.includes('from tempfile import'))).toBe(true);
+  });
+  it('FN-2: flags open() with keyword mode= argument as py-tmp-write', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-tmp-write' && x.snippet.includes('mode='))).toBe(true);
+  });
+  it('FN-1: flags pathlib Path.open() with write mode as py-tmp-write', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'py-tmp-write' && x.snippet.includes('.open('))).toBe(true);
+  });
+  it('FN-4: flags tee with flags before /tmp target as sh-redirect', () => {
+    const f = scanForInsecureTempfile(redDir);
+    expect(f.some((x) => x.kind === 'sh-redirect' && /\btee\s+-/.test(x.snippet))).toBe(true);
+  });
+  it('does NOT flag read-only refs, comments, mktemp -d, templated mktemp, or safe X-run template (FP-1)', () => {
     const f = scanForInsecureTempfile(greenDir);
     expect(f).toEqual([]);
   });
