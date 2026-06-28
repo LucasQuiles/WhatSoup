@@ -40,4 +40,13 @@ describe('insecure-tempfile guard', () => {
     const f = scanForInsecureTempfile(greenDir);
     expect(f).toEqual([]);
   });
+  it('excludes guard fixture corpus on full-tree scan (gate-green reachable)', () => {
+    // Scanning from the repo root must NOT include the guard's own intentional-
+    // violation fixtures — those would make the blocking gate permanently un-greenable.
+    const repoRoot = resolve(here, '../..');
+    const findings = scanForInsecureTempfile(repoRoot);
+    const fixturePrefix = 'tests/fixtures/insecure-tempfile/';
+    const fixtureFindings = findings.filter((f) => f.file.startsWith(fixturePrefix));
+    expect(fixtureFindings).toEqual([]);
+  });
 });

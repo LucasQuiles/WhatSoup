@@ -52,13 +52,24 @@ function scanFile(abs: string, rel: string): Finding[] {
 
 export function scanForInsecureTempfile(root: string): Finding[] {
   const findings: Finding[] = [];
+  // Self-corpus exclusion: when walking from a repo root, skip the guard's own
+  // intentional-violation fixtures so they don't pollute gate results and make
+  // the blocking gate permanently un-greenable. The check is relative-path-
+  // based, so it does NOT fire when the scan root IS the fixture directory
+  // (unit tests call scanForInsecureTempfile(redDir) directly — those must
+  // still find violations).
+  const FIXTURE_CORPUS = 'tests/fixtures/insecure-tempfile';
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       if (SKIP_DIRS.has(name)) continue;
       const abs = path.join(dir, name);
       const st = statSync(abs);
-      if (st.isDirectory()) walk(abs);
-      else findings.push(...scanFile(abs, path.relative(root, abs)));
+      if (st.isDirectory()) {
+        if (path.relative(root, abs) === FIXTURE_CORPUS) continue;
+        walk(abs);
+      } else {
+        findings.push(...scanFile(abs, path.relative(root, abs)));
+      }
     }
   };
   walk(root);
