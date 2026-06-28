@@ -220,7 +220,11 @@ describe('empty-output arms provider fallback', () => {
     driveTurn(runtime, queue, null, 2);
     const state = runtime.getFallbackState();
     expect(state.fallbackActiveUntil).not.toBeNull();
-    expect(state.fallbackReason).toBe('auth-required');
+    // #1421: the consecutive-empty-output trigger reports its TRUE reason, not
+    // the 'auth-required' it used to borrow for control side-effects. The
+    // independent-provider gate that 'auth-required' provided is preserved —
+    // effectiveProvider is still the independent backup.
+    expect(state.fallbackReason).toBe('empty-output');
     expect(state.effectiveProvider).toBe('opencode-cli');
     // Counter resets once armed.
     expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
@@ -235,7 +239,10 @@ describe('empty-output arms provider fallback', () => {
     driveTurn(runtime, queue, null, 1);
     const state = runtime.getFallbackState();
     expect(state.fallbackActiveUntil).not.toBeNull();
-    expect(state.fallbackReason).toBe('auth-required');
+    // #1421: the probe-unusable fast-path reports its TRUE reason, not
+    // 'auth-required'. The independent-provider gate is still applied
+    // (effectiveProvider is the independent backup).
+    expect(state.fallbackReason).toBe('probe-unusable');
     expect(state.effectiveProvider).toBe('opencode-cli');
   });
 
