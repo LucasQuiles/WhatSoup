@@ -193,6 +193,16 @@ function agentRuntimeDetailsForHealth(
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
+// #1433 — a post-first-turn `empty-output` is benign-by-default (the model
+// returned one empty turn and typically recovers on the next). It only degrades
+// when it is a CURRENT (came after the last successful turn), SUSTAINED stall:
+//  - DEBOUNCE: must persist this long un-superseded before degrading, so a single
+//    transient empty turn followed by a success never flaps the health body.
+//  - STALE: a trailing empty-output older than this with no recovery is treated as
+//    a benign idle artifact and self-clears (an idle bot has no turn to clear it);
+//    a genuinely-broken model is still caught independently by model_usable===false.
+const EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS = 60 * 1000; // 1 minute
+const EMPTY_OUTPUT_STALE_MS = 15 * 60 * 1000; // 15 minutes
 
 type AuthFailureClass =
   | 'none'
@@ -921,25 +931,43 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const turnCapability = deps.instanceType === 'agent'
         ? normalizeAgentTurnCapability(runtimeSnapshot?.details ?? null)
         : null;
-      // A boot/recovery empty-output artifact is benign for degrade purposes:
-      // the boot sequence stamps last_turn_error_class='empty-output' ~1s after
-      // restart while the bot is idle, and because last_successful_turn_at stays
-      // null (no real turn yet) the sticky flag never self-clears — falsely
-      // degrading the instance forever. This mirrors the pre-first-turn half of
-      // the runtime's EMPTY_OUTPUT_ARM_STARTUP_GRACE gate (see runtime.ts),
-      // applied without the time-box because health is a steady-state signal, not
-      // a fast fallback trigger. Safety: a genuinely-broken-at-boot model is still
-      // caught independently via model_usable===false (the startup usability
-      // probe), any non-empty-output error class still degrades, and empty-output
-      // AFTER a proven turn (a real regression) still degrades.
-      const bootEmptyOutputArtifact =
-        turnCapability !== null &&
-        turnCapability.last_turn_error_class === 'empty-output' &&
-        turnCapability.last_successful_turn_at === null;
+      // `empty-output` is a known-transient/benign turn-error class and must not
+      // pin or flap the health body (#1433). It degrades only as a CURRENT,
+      // SUSTAINED stall; every other shape is benign:
+      //   1. Boot/pre-first-turn (last_successful_turn_at === null): the boot
+      //      sequence stamps empty-output ~1s after restart while the bot is idle
+      //      and it never self-clears — always benign (no real turn has failed).
+      //   2. Superseded by a success (last_successful_turn_at >= last_turn_error_at):
+      //      the model already recovered — benign. This kills the active flap where
+      //      empty/success turns alternate.
+      //   3. Within the debounce window: a fresh trailing empty-output that has not
+      //      yet persisted — benign, so a single empty turn followed by a success
+      //      never trips.
+      //   4. Older than the staleness bound with no recovery: a benign idle
+      //      artifact (an idle bot has no turn to clear it) — self-clears.
+      // Safety: a genuinely-broken model is still caught independently via
+      // model_usable===false (the usability probe), and any non-empty-output error
+      // class degrades immediately. Only a current, sustained, non-stale
+      // empty-output stall (window [debounce, stale] after a proven turn) degrades.
+      const emptyOutputError =
+        turnCapability !== null && turnCapability.last_turn_error_class === 'empty-output';
+      const postTurnEmptyOutputIsCurrent =
+        emptyOutputError &&
+        turnCapability.last_successful_turn_at !== null &&
+        turnCapability.last_turn_error_at !== null &&
+        turnCapability.last_turn_error_at > turnCapability.last_successful_turn_at;
+      const postTurnEmptyOutputAgeMs =
+        postTurnEmptyOutputIsCurrent && turnCapability.last_turn_error_at !== null
+          ? Date.now() - turnCapability.last_turn_error_at
+          : null;
+      const emptyOutputIsDegrading =
+        postTurnEmptyOutputAgeMs !== null &&
+        postTurnEmptyOutputAgeMs >= EMPTY_OUTPUT_DEGRADE_DEBOUNCE_MS &&
+        postTurnEmptyOutputAgeMs <= EMPTY_OUTPUT_STALE_MS;
       const turnCapabilityErrorIsDegraded =
         turnCapability !== null &&
         turnCapability.last_turn_error_class !== null &&
-        !bootEmptyOutputArtifact;
+        (emptyOutputError ? emptyOutputIsDegrading : true);
       const turnCapabilityIsDegraded =
         turnCapability !== null &&
         (turnCapability.model_usable === false || turnCapabilityErrorIsDegraded);
