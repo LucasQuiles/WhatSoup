@@ -139,8 +139,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     if (envVal) return envVal;
   }
   const lookupEnvAfterKeyringMiss = (): string | null => {
-    if (envFirst || options.skipEnv === true) return null;
-    return lookupEnv();
+    const envVal = (envFirst || options.skipEnv === true) ? null : lookupEnv();
+    if (envVal) return envVal;
+    // Terminal fallback: opencode-backed providers store their key in opencode's
+    // own auth.json (service id == opencode provider id). An opencode session
+    // would authenticate from there, so credential PRESENCE must consult it —
+    // otherwise pre-flight emits a false `fallback_credential_missing`. Returns
+    // null for any non-opencode service (auth.json won't contain it).
+    return readOpenCodeAuthKey(service);
   };
 
   // 2. Try platform keyring
@@ -340,6 +346,45 @@ function fileStoreRead(service: string): string | null {
   try {
     const val = fs.readFileSync(fileStorePath(service), 'utf-8').trim();
     return val || null;
+  } catch {
+    return null;
+  }
+}
+
+let _openCodeAuthDirOverride: string | null = null;
+
+/** Test hook — point the opencode auth-store dir at a temp dir (null restores default). */
+export function _setOpenCodeAuthDirForTests(dir: string | null): void {
+  _openCodeAuthDirOverride = dir;
+}
+
+function openCodeAuthPath(): string {
+  if (_openCodeAuthDirOverride) return path.join(_openCodeAuthDirOverride, 'auth.json');
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'opencode', 'auth.json');
+}
+
+/**
+ * Read an API key from opencode's own credential store (`auth.json`), keyed by
+ * opencode provider id (== the service name resolveProviderKeyService derives,
+ * e.g. `minimax`). Returns the trimmed key or null on any miss/parse error.
+ *
+ * Why this exists: opencode-backed fallback providers authenticate from this
+ * file, not WhatSoup's keyring/env. Without consulting it, credential PRESENCE
+ * pre-flight emits a false `fallback_credential_missing` (e.g. minimax) even
+ * though the opencode session would authenticate fine. Used as the terminal
+ * fallback in lookupCredential so all pre-flight/verify sites benefit.
+ */
+export function readOpenCodeAuthKey(provider: string): string | null {
+  try {
+    const raw = fs.readFileSync(openCodeAuthPath(), 'utf-8');
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const entry = data[provider];
+    if (entry && typeof entry === 'object') {
+      const key = (entry as { key?: unknown }).key;
+      if (typeof key === 'string' && key.trim()) return key.trim();
+    }
+    return null;
   } catch {
     return null;
   }
