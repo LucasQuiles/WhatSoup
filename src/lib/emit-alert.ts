@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import {
+  buildBotErrorsEvent,
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
   type BotErrorsOutboxWrite,
@@ -79,7 +80,7 @@ export type AlertEmissionStatus = 'durably_queued' | 'legacy_accepted_unconfirme
 
 export interface AlertEmissionResult {
   ok: boolean;
-  channel: 'outbox' | 'legacy' | 'none';
+  channel: 'outbox' | 'legacy' | 'none' | 'sink';
   status: AlertEmissionStatus;
   outbox?: BotErrorsOutboxWrite;
   legacy?: LegacyAlertResult;
@@ -176,6 +177,40 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
 }
 
 /**
+ * WHATSOUP_ALERT_SINK — dry-run capture surface. When set to a writable path,
+ * alert/clear emissions are appended to that file (one JSON object per line,
+ * redacted via {@link buildBotErrorsEvent} for parity with the durable outbox)
+ * and NOTHING is paged: no durable outbox event, no legacy WhatsApp helper
+ * spawn. This lets an alert verifier observe operator-facing alerts (e.g.
+ * `provider_fallback_activated`, `fallback_no_independent_provider`) at runtime
+ * without paging a live operator. Opt-in only; unset in production.
+ */
+function alertSinkPath(): string | null {
+  const raw = process.env['WHATSOUP_ALERT_SINK']?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+function captureToAlertSink(
+  sink: string,
+  input: {
+    eventType: 'alert' | 'clear';
+    instance: string;
+    source: string;
+    summary: string;
+    evidence: string;
+    severity: BotErrorsSeverity;
+    criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+  },
+): AlertEmissionResult {
+  // Reuse buildBotErrorsEvent so the captured record is identical-shape AND
+  // redacted exactly like a real outbox event — a secret in evidence must never
+  // leak to the sink file.
+  const event = buildBotErrorsEvent(input);
+  appendFileSync(sink, `${JSON.stringify(event)}\n`);
+  return { ok: true, channel: 'sink', status: 'durably_queued' };
+}
+
+/**
  * Durable alert emission. Writes an atomic local outbox event for the BOT ERRORS
  * dispatcher. Falls back to the legacy helper only if the local write fails.
  */
@@ -187,6 +222,10 @@ export function emitAlert(
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
 ): AlertEmissionResult {
+  const sink = alertSinkPath();
+  if (sink) {
+    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+  }
   try {
     const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
@@ -220,6 +259,18 @@ export function clearAlertSource(
   evidence = `repair_lane:${instance}`,
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
 ): AlertEmissionResult {
+  const sink = alertSinkPath();
+  if (sink) {
+    return captureToAlertSink(sink, {
+      eventType: 'clear',
+      instance,
+      source,
+      summary: `alert source cleared: ${source}`,
+      evidence,
+      severity: 'info',
+      criticalAsset,
+    });
+  }
   try {
     const outbox = writeBotErrorsEvent({
       eventType: 'clear',

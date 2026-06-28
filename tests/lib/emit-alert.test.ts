@@ -948,3 +948,72 @@ describe('clearAlertSource', () => {
     ]));
   });
 });
+
+describe('WHATSOUP_ALERT_SINK dry-run capture', () => {
+  let sinkDir = '';
+  let sinkPath = '';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
+    if (outboxDir) rmSync(outboxDir, { recursive: true, force: true });
+    outboxDir = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-'));
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = outboxDir;
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    sinkDir = mkdtempSync(join(tmpdir(), 'alert-sink-'));
+    sinkPath = join(sinkDir, 'alerts.jsonl');
+    process.env['WHATSOUP_ALERT_SINK'] = sinkPath;
+    resetEmitAlertThrottle();
+  });
+
+  afterEach(() => {
+    delete process.env['WHATSOUP_ALERT_SINK'];
+    if (sinkDir) rmSync(sinkDir, { recursive: true, force: true });
+    sinkDir = '';
+  });
+
+  it('captures the alert tuple to the sink and pages nothing (no outbox event, no legacy spawn)', () => {
+    const ok = emitAlertChecked(
+      'whatsoup-prod',
+      'provider_fallback_activated',
+      'Provider fallback window activated',
+      'reason=empty-output provider=opencode-cli',
+    );
+
+    const lines = readFileSync(sinkPath, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      eventType: 'alert',
+      severity: 'critical',
+      instance: 'whatsoup-prod',
+      source: 'provider_fallback_activated',
+      summary: 'Provider fallback window activated',
+      evidence: 'reason=empty-output provider=opencode-cli',
+    });
+    // The whole point: NO durable outbox event, NO operator page.
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(ok).toBe(true);
+  });
+
+  it('appends multiple records and routes clears through the sink too', () => {
+    emitAlertChecked('i', 's1', 'sum1', 'reason=probe-unusable');
+    clearAlertSourceChecked('i', 's1', 'repair_lane:i');
+
+    const lines = readFileSync(sinkPath, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ eventType: 'alert', source: 's1', evidence: 'reason=probe-unusable' });
+    expect(JSON.parse(lines[1]!)).toMatchObject({ eventType: 'clear', source: 's1', severity: 'info' });
+    expect(readdirSync(outboxDir)).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('redacts secrets before they reach the sink file (parity with the outbox)', () => {
+    emitAlertChecked('i', 'leak_probe', 'token leak', `key ${AWS_KEY_SAMPLE} leaked`);
+
+    const raw = readFileSync(sinkPath, 'utf8');
+    expect(raw).not.toContain(AWS_KEY_SAMPLE);
+  });
+});
