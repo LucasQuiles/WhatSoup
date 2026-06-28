@@ -327,4 +327,15 @@ export const fitnessRules = [
     severity: 'warn',
     source: ['feedback:feedback_runner_api_verification'],
   },
+  {
+    id: 'test.insecure-tempfile',
+    title: 'No insecure temp-file creation in python or shell',
+    category: 'test',
+    rationale:
+      'tempfile.mktemp() and hardcoded /tmp write-targets create predictable paths (TOCTOU race, cross-user readable). Fixed repo-wide; this rule blocks regression. Detects creation/write only, not read-only references.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'block',
+    source: ['codeql:py/insecure-temporary-file', 'spec:2026-06-27-insecure-tempfile'],
+  },
 ] satisfies FitnessRule[];

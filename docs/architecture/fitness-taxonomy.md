@@ -71,6 +71,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `test.typecheck-all-required` | mechanical | block | guard, ci | Require the full test TypeScript config in push and merge verification. |
 | `test.skip-categorization` | ast | advisory | eslint | Separate environment-dependent skips from timing-dependent skips. |
 | `test.red-green-required` | semantic | advisory | sdlc | Prefer tests that prove pre-fix failure over tests that only pin current behavior. |
+| `test.insecure-tempfile` | mechanical | block | guard, ci | Block `tempfile.mktemp()` and hardcoded `/tmp` write-targets in python/shell; detects creation/write only (read-only refs allowed). |
 
 ## Meta
 
