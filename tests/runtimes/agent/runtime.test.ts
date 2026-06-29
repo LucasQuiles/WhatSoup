@@ -8548,6 +8548,40 @@ describe('AgentRuntime', () => {
       expect(state.pendingPolls.questions.has(groupJid)).toBe(true);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
+
+    it('QR-036 — admin-only group poll does NOT downgrade to first-vote-wins when group metadata is unavailable (fail-closed)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState & {
+        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
+        fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
+      };
+      await runtime.start();
+
+      // Transient group-metadata fetch failure → null admin set.
+      const spy = vi.spyOn(state, 'fetchGroupAdminJids').mockResolvedValue(null);
+
+      const pollId = 'POLL_QR036';
+      const mapKey = `send_poll:${pollId}`;
+      // Fire-and-forget the awaiter (its promise resolves only on a qualifying vote / timeout).
+      void state.registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000);
+
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
+      await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
+
+      const pending = state.pendingPolls.questions.get(mapKey);
+      expect(pending).toBeDefined();
+      // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
+      // this was downgraded to 'first-vote-wins', letting any member resolve).
+      expect(pending!.resolution).toBe('admin-only');
+      expect(pending!.adminJids ?? null).toBeNull();
+
+      // A non-admin vote must NOT resolve the gated decision.
+      state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
+      expect(pending!.answersCollected[0]).toBeUndefined();
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+    });
   });
 
   // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
