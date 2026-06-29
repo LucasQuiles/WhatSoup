@@ -204,6 +204,18 @@ jobs:
       - name: Safeguard diagnostics
         run: npm run guard:safeguard-diagnostics
 
+      # These two guards previously ran ONLY in the local .husky/pre-push hook
+      # (bypassable via --no-verify / web-UI / hookless clone). Their unit tests
+      # run in the suite, but a unit test validates the guard's logic on fixtures
+      # — it does NOT run the guard against the real repo, so live arc-binding /
+      # critical-surface drift would ship. Run the guards against the tree here
+      # (L5-01). Both pass clean on main, so this only catches future drift.
+      - name: ARC binding drift guard
+        run: npm run guard:arc-binding-drift
+
+      - name: BOT ERRORS critical surface guard
+        run: npm run guard:bot-errors-critical-surface
+
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 
