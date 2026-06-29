@@ -91,9 +91,21 @@ ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
 ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
 
 # --- Bot health check ---
-bot_json="$(curl --fail --silent --show-error --max-time 8 "$BOT_HEALTH" 2>>"$LOG" || true)"
-if [ -z "$bot_json" ]; then
+# Capture the body EVEN on an HTTP error status. A logged-out / terminally
+# auth-failed bot returns HTTP 503 *with* a body carrying
+# whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
+# and send us down the "unreachable" restart path, restart-looping a bot a
+# restart cannot fix. So: no --fail; capture body + code; treat only a real
+# TRANSPORT failure (no HTTP response at all) as unreachable, and let the
+# decision block below act on the body (incl. the terminal-no-restart branch).
+bot_resp="$(curl --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
+curl_rc=$?
+bot_code="${bot_resp##*$'\n'}"
+bot_json="${bot_resp%$'\n'*}"
+if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
   restart_label "$BOT_LABEL" "health endpoint unreachable"
+elif [ -z "$bot_json" ]; then
+  restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
 else
   BOT_JSON="$bot_json" python3 - <<'PY' || restart_label "$BOT_LABEL" "unhealthy JSON response"
 import datetime as dt
@@ -108,6 +120,28 @@ conn = whatsapp.get("connection") or {}
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
+auth_failure_class = conn.get("auth_failure_class")
+
+# Terminal auth failures cannot be fixed by a restart — the bond is gone
+# server-side (device_removed / 401), pairing is required, or the local auth
+# store is unrestorably corrupt. Kicking the bot here only replays the
+# cold-start burst against a dead bond every cooldown window (the restart-loop
+# risk on a logged-out instance, e.g. ml-bot/mini8). Stop and wait for a human
+# relink. The bot emits its own one-shot `whatsapp_device_bond_lost` critical
+# alert at logout time, so the watchdog stays silent (no duplicate page) and
+# simply declines to restart. Mirrors `authFailureIsUnhealthy` in
+# src/core/health.ts; the class is surfaced at whatsapp.connection.auth_failure_class.
+TERMINAL_AUTH_FAILURES = (
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "local_corruption_unrestorable",
+)
+if auth_failure_class in TERMINAL_AUTH_FAILURES:
+    print(
+        f"terminal auth_failure_class={auth_failure_class!r}: human relink required, not restarting",
+        file=sys.stderr,
+    )
+    sys.exit(0)
 
 STALE_PONG_SECONDS = 360
 RECOVERING_STATES = ("connecting", "reconnecting", "cooldown")
