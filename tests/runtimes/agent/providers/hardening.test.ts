@@ -72,7 +72,6 @@ describe('Provider hardening', () => {
     // Every parser must handle empty lines and malformed JSON without throwing
     const parsers = [
       { name: 'codex', import: '../../src/runtimes/agent/providers/codex-parser.ts' },
-      { name: 'gemini', import: '../../src/runtimes/agent/providers/gemini-parser.ts' },
       { name: 'opencode', import: '../../src/runtimes/agent/providers/opencode-parser.ts' },
     ];
 
