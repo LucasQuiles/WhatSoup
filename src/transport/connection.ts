@@ -282,6 +282,19 @@ function redactDiagnosticString(value: string): string {
     );
 }
 
+/**
+ * Auth-bond issue strings come from hardenPrivateTree as `code`, `code:rel`, or
+ * `code:rel:errorMessage`. `rel` is a Baileys session filename that embeds a contact
+ * JID/phone, and `errorMessage` can carry an absolute auth path. The detail is NEVER
+ * emitted raw into the durable bond event: keep the diagnostic code (the triage signal)
+ * and replace all detail with a stable short hash for correlating repeats.
+ */
+function redactAuthBondIssue(issue: string): string {
+  const sep = issue.indexOf(':');
+  if (sep === -1) return issue;
+  return `${issue.slice(0, sep)}:<redacted:${shortHash(issue.slice(sep + 1), 16)}>`;
+}
+
 function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
   if (key && isSensitiveDiagnosticKey(key)) return '<redacted>';
   if (typeof value === 'string') return redactDiagnosticString(value);
@@ -994,7 +1007,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reconnectDecision: event.reconnectDecision ?? null,
       baileysVersion: event.baileysVersion ?? null,
       authBondStatus: event.authBondStatus ?? null,
-      authBondIssues: event.authBondIssues ?? [],
+      authBondIssues: (event.authBondIssues ?? []).map(redactAuthBondIssue),
       authDirMode: event.authDirMode ?? null,
       authDirMtime: event.authDirMtime ?? null,
       credentialMode: event.credsMode ?? null,
@@ -1019,7 +1032,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private authBondEventDigest(snapshot: AuthBondSnapshot): Record<string, unknown> {
     return {
       status: snapshot.status,
-      issues: [...snapshot.issues],
+      issues: snapshot.issues.map(redactAuthBondIssue),
       authRoot: {
         pathHash: shortHash(snapshot.authDir.path, 20),
         exists: snapshot.authDir.exists,
