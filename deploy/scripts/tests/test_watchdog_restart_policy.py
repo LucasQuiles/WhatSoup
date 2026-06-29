@@ -264,6 +264,18 @@ class TestTerminalAuthFailureNoRestart:
         }
         assert _run_decision(body) != 0
 
+    def test_non_terminal_restorable_corruption_still_restarts(self):
+        # local_corruption_restorable is NOT terminal (a restart can recover from
+        # backup). It must fall through to liveness and restart — guards against a
+        # copy-paste error adding it to TERMINAL_AUTH_FAILURES.
+        body = {
+            "status": "unhealthy",
+            "whatsapp": {"connected": False,
+                         "connection": {"state": "close",
+                                        "auth_failure_class": "local_corruption_restorable"}},
+        }
+        assert _run_decision(body) != 0
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

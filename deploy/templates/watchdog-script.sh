@@ -107,7 +107,7 @@ if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
 elif [ -z "$bot_json" ]; then
   restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
 else
-  BOT_JSON="$bot_json" python3 - <<'PY' || restart_label "$BOT_LABEL" "unhealthy JSON response"
+  BOT_JSON="$bot_json" python3 - <<'PY' 2>>"$LOG" || restart_label "$BOT_LABEL" "unhealthy JSON response"
 import datetime as dt
 import json
 import os

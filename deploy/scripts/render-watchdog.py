@@ -47,7 +47,14 @@ EXIT_IO_ERROR = 5
 
 
 def _valid_port(value: str) -> bool:
-    return bool(re.fullmatch(r"[0-9]{1,5}", value)) and 1 <= int(value) <= 65535
+    # Reject non-numeric, out-of-range, AND leading-zero forms ("00009"): curl
+    # would treat :00009 as a live port and the watchdog would restart-loop on an
+    # unreachable URL. Canonical decimal only.
+    return (
+        bool(re.fullmatch(r"[0-9]{1,5}", value))
+        and 1 <= int(value) <= 65535
+        and str(int(value)) == value
+    )
 
 
 def render(template_text: str, *, bot_name: str, bot_port: str, fleet_port: str,
@@ -66,8 +73,14 @@ def render(template_text: str, *, bot_name: str, bot_port: str, fleet_port: str,
 
 
 def find_placeholders(text: str) -> list[str]:
-    """Return the known placeholder tokens still present in text (sorted, unique)."""
-    return sorted({t for t in PLACEHOLDER_TOKENS if t in text})
+    """Return the known placeholder tokens still present in text (sorted, unique).
+
+    Word-boundary match (no surrounding word char) so a token that is a substring
+    of a legit identifier — e.g. USERNAME inside FLEET_USERNAME_SUFFIX — is NOT a
+    false positive. Underscored tokens (__HOME__) still match when quoted/spaced.
+    """
+    return sorted({t for t in PLACEHOLDER_TOKENS
+                   if re.search(rf"(?<!\w){re.escape(t)}(?!\w)", text)})
 
 
 def sha256(text: str) -> str:

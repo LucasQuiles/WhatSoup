@@ -114,6 +114,14 @@ def test_render_out_of_range_port_exits_3():
     assert proc.returncode == 3
 
 
+def test_render_leading_zero_port_exits_3():
+    # "00009" -> curl treats :00009 as a live port and restart-loops; reject it.
+    proc = _run("render", "--template", str(_TEMPLATE), "--bot-name", "rb-bot",
+                "--bot-port", "00009", "--fleet-port", "9099",
+                "--home", "/Users/rachel", "--json")
+    assert proc.returncode == 3, proc.stdout
+
+
 def test_verify_catches_raw_template():
     # The live churn bug: an unrendered template installed verbatim. verify must
     # flag it as unsubstituted (exit 2) and name the surviving tokens.
@@ -121,7 +129,7 @@ def test_verify_catches_raw_template():
     assert proc.returncode == 2, proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["status"] == "unsubstituted"
-    for tok in ("BOT_PORT", "FLEET_PORT", "BOT_NAME", "__HOME__"):
+    for tok in ("BOT_PORT", "FLEET_PORT", "BOT_NAME", "USERNAME", "__HOME__"):
         assert tok in payload["placeholders_remaining"], payload
 
 
@@ -141,3 +149,11 @@ def test_find_placeholders_exact_no_false_positives():
     sample = 'data=os.environ["BOT_JSON"]\nTERMINAL_AUTH_FAILURES=(...)\nRECOVERING_STATES=()\n'
     assert rw.find_placeholders(sample) == []
     assert rw.find_placeholders('BOT_HEALTH="http://x:BOT_PORT/"') == ["BOT_PORT"]
+
+
+def test_find_placeholders_no_username_substring_false_positive():
+    # USERNAME embedded in a larger identifier must NOT be flagged (word boundary).
+    assert rw.find_placeholders("FLEET_USERNAME_SUFFIX=x\nBOT_USERNAMES=all") == []
+    assert rw.find_placeholders("# operator account: USERNAME") == ["USERNAME"]
+    # __HOME__ still detected when quoted/spaced despite its underscores.
+    assert rw.find_placeholders('HOME_DIR="__HOME__"') == ["__HOME__"]

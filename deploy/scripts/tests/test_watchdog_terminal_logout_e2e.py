@@ -44,19 +44,17 @@ _CRASHED_BODY = (
 )
 
 
-def _render(home: Path, bot_port: str = "9999", fleet_port: str = "9998") -> Path:
+def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str = "9998") -> Path:
     text = _TEMPLATE.read_text(encoding="utf-8")
     rendered = (
         text.replace("__HOME__", str(home))
-        .replace("BOT_PORT", bot_port)
         .replace("FLEET_PORT", fleet_port)
-        .replace("BOT_NAME", "test-bot")
+        .replace("BOT_PORT", bot_port)
+        .replace("BOT_NAME", bot_name)
         .replace("USERNAME", os.environ.get("USER", "tester"))
     )
-    # The template hardcodes HOME_DIR=/Users/rachel via NODE_BIN/HOME lines that
-    # survive token substitution only through __HOME__; force HOME_DIR to our tmp.
-    rendered = rendered.replace('HOME_DIR="/Users/rachel"', f'HOME_DIR="{home}"')
-    script = home / "test-bot-watchdog"
+    # __HOME__ substitution already sets HOME_DIR (template: HOME_DIR="__HOME__").
+    script = home / f"{bot_name}-watchdog"
     script.write_text(rendered, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script
@@ -69,13 +67,20 @@ def _make_stubs(home: Path, bot_body: str) -> Path:
     binroot = home / ".local" / "bin"
     binroot.mkdir(parents=True, exist_ok=True)
     calls = binroot / "launchctl.calls"
-    # Stub curl: bot health -> body + "\n503" (no --fail in caller); fleet -> "\n200".
+    # Stub curl. The bot-health endpoint simulates HTTP 503-with-body. Crucially
+    # the stub HONORS --fail: real `curl --fail` discards a 503 body and exits 22,
+    # so if the watchdog ever regresses to --fail this stub reproduces that and the
+    # no-kickstart test fails (a true falsifier, not theater). Fleet -> 200.
     curl = binroot / "curl"
     curl.write_text(
         "#!/bin/sh\n"
-        "for a in \"$@\"; do case \"$a\" in *9999/health) "
-        f"printf '%s\\n503' '{bot_body}'; exit 0;; "
-        "*9998/*) printf 'ok'; exit 0;; esac; done\n"
+        "has_fail=false\n"
+        'for a in "$@"; do [ "$a" = "--fail" ] && has_fail=true; done\n'
+        'for a in "$@"; do case "$a" in\n'
+        "  *9999/health) $has_fail && exit 22; "
+        f"printf '%s\\n503' '{bot_body}'; exit 0;;\n"
+        "  *9998/*) printf 'ok\\n200'; exit 0;;\n"
+        "esac; done\n"
         "printf '\\n000'; exit 7\n",
         encoding="utf-8",
     )
@@ -92,14 +97,14 @@ def _make_stubs(home: Path, bot_body: str) -> Path:
     return calls
 
 
-def _run(tmp_path: Path, bot_body: str) -> str:
+def _run(tmp_path: Path, bot_body: str, bot_name: str) -> str:
     home = tmp_path / "home"
     home.mkdir()
-    script = _render(home)
+    script = _render(home, bot_name)
     calls = _make_stubs(home, bot_body)
-    # The script's single-instance lock is a fixed /tmp path keyed on BOT_NAME;
-    # clear any residue from a prior run so the script doesn't early-exit.
-    lock = Path("/tmp/com.whatsoup.test-bot-watchdog.lock")
+    # Lock is /tmp/com.whatsoup.<bot_name>-watchdog.lock; a unique bot_name per
+    # test avoids an xdist cross-test lock race. Clear residue so we don't early-exit.
+    lock = Path(f"/tmp/com.whatsoup.{bot_name}-watchdog.lock")
     if lock.exists():
         try:
             lock.rmdir()
@@ -111,18 +116,32 @@ def _run(tmp_path: Path, bot_body: str) -> str:
 
 
 def test_logged_out_503_does_not_kickstart_bot(tmp_path):
-    calls = _run(tmp_path, _LOGGED_OUT_BODY)
-    # The body reached the decision block and the terminal branch declined to
-    # restart: no kickstart of the bot label anywhere in the launchctl calls.
-    assert "kickstart" not in calls or "com.whatsoup.test-bot" not in calls, (
+    calls = _run(tmp_path, _LOGGED_OUT_BODY, "term-bot")
+    # Prove the script reached the health check (ensure_loaded -> `launchctl print`)
+    # before concluding "no kickstart" — else an early exit passes vacuously.
+    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    assert "kickstart" not in calls or "com.whatsoup.term-bot" not in calls, (
         f"logged-out bot must not be kickstarted; launchctl calls were:\n{calls}"
     )
 
 
+def test_logged_out_503_multiline_body_does_not_kickstart(tmp_path):
+    # A pretty-printed 503 body (internal newlines) must still parse + suppress
+    # through the bash ${bot_resp%$'\\n'*} body extraction.
+    import json
+    body = json.dumps(json.loads(_LOGGED_OUT_BODY), indent=2)
+    calls = _run(tmp_path, body, "term-ml-bot")
+    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    assert "kickstart" not in calls or "com.whatsoup.term-ml-bot" not in calls, (
+        f"multiline logged-out body must not kickstart; calls:\n{calls}"
+    )
+
+
 def test_crashed_503_still_kickstarts_bot(tmp_path):
-    calls = _run(tmp_path, _CRASHED_BODY)
+    calls = _run(tmp_path, _CRASHED_BODY, "crash-bot")
+    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
     # Guard against over-suppression: a non-terminal 503 still restarts.
-    assert "kickstart" in calls and "com.whatsoup.test-bot" in calls, (
+    assert "kickstart" in calls and "com.whatsoup.crash-bot" in calls, (
         f"crashed (non-terminal) bot must still be kickstarted; calls were:\n{calls}"
     )
 
