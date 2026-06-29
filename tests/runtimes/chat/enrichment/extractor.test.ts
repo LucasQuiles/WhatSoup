@@ -83,6 +83,30 @@ describe('extractFacts', () => {
     vi.clearAllMocks();
   });
 
+  // ── QR-041: sender attribution is validated against the trusted batch ──────
+
+  it('QR-041: blanks an LLM sender_jid that is not an actual sender in the batch (no victim attribution)', async () => {
+    // The batch has ONE real participant.
+    const msgs = [makeStoredMsg({ senderJid: '15551230008@s.whatsapp.net' })];
+    // Crafted content makes the LLM attribute the fact to a NON-participant (a victim).
+    const provider = mockProvider(JSON.stringify([
+      validFactJson({ sender_jid: '15550100199@s.whatsapp.net', text: 'prefers X' }),
+    ]));
+    const facts = await extractFacts(provider, msgs);
+    expect(facts).toHaveLength(1);
+    expect(facts[0].senderJid).not.toBe('15550100199@s.whatsapp.net'); // not attributed to the victim
+    expect(facts[0].senderJid).toBe('');                               // blanked (not a batch sender)
+  });
+
+  it('QR-041: keeps a sender_jid that IS a real participant in the batch', async () => {
+    const msgs = [makeStoredMsg({ senderJid: '15551230008@s.whatsapp.net' })];
+    const provider = mockProvider(JSON.stringify([
+      validFactJson({ sender_jid: '15551230008@s.whatsapp.net' }),
+    ]));
+    const facts = await extractFacts(provider, msgs);
+    expect(facts[0].senderJid).toBe('15551230008@s.whatsapp.net');
+  });
+
   // ── Positive ────────────────────────────────────────────────────────────
 
   it('returns ExtractedFact[] with correct fields from valid JSON array', async () => {
