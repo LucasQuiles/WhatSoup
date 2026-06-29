@@ -39,7 +39,7 @@ describe('preConnectRecovery — stranded turn_done reconciliation (QR-035)', ()
     engine.markTurnDone(seq);
     engine.preConnectRecovery();
     const row = db.raw.prepare('SELECT terminal_reason FROM inbound_events WHERE seq = ?').get(seq) as { terminal_reason: string | null };
-    expect(row.terminal_reason).toBeTruthy();
+    expect(row.terminal_reason).toBe('recovered_turn_done');
   });
 
   it('still marks a stranded processing inbound (no terminal op) as failed (no regression)', () => {
