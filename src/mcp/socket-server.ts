@@ -53,6 +53,11 @@ export class WhatSoupSocketServer {
     return this.connectionSessions.size;
   }
 
+  /** Configured concurrent-connection cap on the underlying server (QR-059); 0 before start(). */
+  get maxConnections(): number {
+    return this.server?.maxConnections ?? 0;
+  }
+
   start(): void {
     // Crash recovery: remove stale socket file if present
     try {
@@ -62,6 +67,13 @@ export class WhatSoupSocketServer {
     }
 
     const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
+    // QR-059: cap concurrent connections. Legit clients (the instance's own agent subprocess
+    // holding one persistent MCP session + short-lived per-call fleet mcpCall connections) use
+    // single-digit concurrency, so 128 is generous headroom while bounding a connection-flood /
+    // slow-loris fan-out from a compromised agent to N held sockets (each already ≤1MB via
+    // MAX_BUF). No idle timeout is added: legit MCP sessions are legitimately long-idle between
+    // tool calls, so an idle-destroy would break them — the count cap bounds the blast radius.
+    const MAX_CONNECTIONS = 128;
 
     let clientCounter = 0;
 
@@ -137,6 +149,8 @@ export class WhatSoupSocketServer {
         log.error({ err }, 'socket error');
       });
     });
+
+    this.server.maxConnections = MAX_CONNECTIONS;
 
     this.server.listen(this.socketPath, () => {
       log.info({ socketPath: this.socketPath }, 'MCP socket server listening');
