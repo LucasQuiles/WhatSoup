@@ -114,6 +114,10 @@ export function startMediaBridge(
 
   const server = createServer((socket) => {
     activeSockets.add(socket);
+    // QR-053: UTF-8-decode the line-delimited JSON-RPC stream so a multibyte char
+    // split across a read boundary isn't silently corrupted to U+FFFD (the bytes here
+    // are file PATHS in JSON, not raw media — the media flows via the filesystem).
+    socket.setEncoding('utf8');
     let buf = '';
 
     socket.on('close', () => {

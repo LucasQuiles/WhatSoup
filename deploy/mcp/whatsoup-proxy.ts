@@ -23,6 +23,9 @@ if (!socketPath) {
 }
 
 const socket = createConnection(socketPath);
+// QR-053: UTF-8-decode so a multibyte char split across a read boundary is not
+// silently corrupted to U+FFFD before the line-delimited JSON-RPC is parsed.
+socket.setEncoding('utf8');
 
 socket.on('error', (err: NodeJS.ErrnoException) => {
   const response = {
@@ -36,7 +39,7 @@ socket.on('error', (err: NodeJS.ErrnoException) => {
 
 // Relay socket responses → stdout
 let socketBuf = '';
-socket.on('data', (chunk: Buffer) => {
+socket.on('data', (chunk: string) => {
   socketBuf += chunk.toString();
   const lines = socketBuf.split('\n');
   socketBuf = lines.pop() ?? '';
