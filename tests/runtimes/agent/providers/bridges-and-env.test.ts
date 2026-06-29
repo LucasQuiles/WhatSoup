@@ -9,7 +9,6 @@ import {
   generateMcpConfigFile,
   convertMcpToolsToOpenAI,
   convertMcpToolsToAnthropic,
-  getMcpStrategy,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 import { ClaudeProvider } from '../../../../src/runtimes/agent/providers/claude.ts';
 import { buildMcpLaunchCommand } from '../../../../src/core/mcp-launcher.ts';
@@ -404,26 +403,6 @@ describe('convertMcpToolsToAnthropic', () => {
       description: 'List all chats',
       input_schema: { type: 'object', properties: {} },
     });
-  });
-});
-
-describe('getMcpStrategy', () => {
-  it('claude-cli → config_file', () => {
-    expect(getMcpStrategy('claude-cli')).toBe('config_file');
-  });
-
-  it('opencode-cli → config_file', () => {
-    // opencode-cli is a config-file provider: it reads an on-disk opencode.json
-    // (the `mcp` block) rather than receiving tools over a native API bridge.
-    expect(getMcpStrategy('opencode-cli')).toBe('config_file');
-  });
-
-  it('openai-api → native_bridge', () => {
-    expect(getMcpStrategy('openai-api')).toBe('native_bridge');
-  });
-
-  it('unknown → none', () => {
-    expect(getMcpStrategy('unknown-provider')).toBe('none');
   });
 });
 

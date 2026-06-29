@@ -14,7 +14,6 @@ import {
   type OpencodeProviderConfig,
 } from '../../../core/provider-mcp-config.ts';
 import type {
-  McpMode,
   ProviderMcpBridge,
   ProviderMcpTool,
   ProviderMcpToolResult,
@@ -105,28 +104,6 @@ export function convertMcpToolsToAnthropic(
     description: tool.description,
     input_schema: tool.inputSchema,
   }));
-}
-
-// ---------------------------------------------------------------------------
-// Strategy selector
-// ---------------------------------------------------------------------------
-
-/**
- * Determine if a provider needs a config file or uses direct tool bridging.
- */
-export function getMcpStrategy(providerId: string): McpMode {
-  switch (providerId) {
-    case 'claude-cli':
-    case 'codex-cli':
-    case 'gemini-cli':
-    case 'opencode-cli':
-      return 'config_file';
-    case 'openai-api':
-    case 'anthropic-api':
-      return 'native_bridge';
-    default:
-      return 'none';
-  }
 }
 
 /**

@@ -8,7 +8,6 @@ import { registerAllTools } from '../../../../src/mcp/register-all.ts';
 import { PresenceCache } from '../../../../src/transport/presence-cache.ts';
 import {
   generateMcpConfigFile,
-  getMcpStrategy,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
 vi.mock('../../../../src/logger.ts', () => ({
@@ -622,7 +621,6 @@ describe('agent provider conformance', () => {
         const tools = registry.listTools({ tier: 'global' });
         const config = generateMcpConfigFile(provider.id, '/tmp/whatsoup.sock', '/tmp/proxy.ts');
 
-        expect(getMcpStrategy(provider.id)).toBe('config_file');
         expect(config).not.toBeNull();
         expect((config as { mcpServers: Record<string, unknown> }).mcpServers.whatsoup).toBeDefined();
         expect(tools.length).toBeGreaterThanOrEqual(100);
