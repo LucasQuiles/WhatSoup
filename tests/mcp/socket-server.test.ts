@@ -288,6 +288,49 @@ describe('WhatSoupSocketServer', () => {
     expect(response.result.content[0].text).toContain('echoed: hello');
   });
 
+  it('QR-042: snapshots the session per request — a concurrent updateActorJid cannot race an in-flight tool', async () => {
+    let started = false;
+    let release!: () => void;
+    const blocked = new Promise<void>((r) => { release = r; });
+    let observedActorJid: string | undefined = 'UNSET';
+
+    registry.register(
+      makeTool({
+        name: 'slow_actor_tool',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async (_params, toolSession) => {
+          started = true;
+          await blocked;                            // stay in-flight across the racing mutation
+          observedActorJid = toolSession.actorJid;  // read AFTER the concurrent updateActorJid
+          return 'done';
+        },
+      }),
+    );
+
+    server = new WhatSoupSocketServer(socketPath, registry, makeSession({ actorJid: 'actor-A' }));
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Dispatch the tool call; the handler blocks and stays in-flight.
+    const callPromise = sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 42, method: 'tools/call',
+      params: { name: 'slow_actor_tool', arguments: {} },
+    });
+    await vi.waitFor(() => { expect(started).toBe(true); });
+
+    // Next-turn mutation while the previous turn's tool is still in-flight (the QR-042 race window).
+    server.updateActorJid('actor-B');
+
+    // Unblock → the handler now reads its session's actorJid.
+    release();
+    await callPromise;
+
+    // The in-flight tool MUST observe its dispatch-time actor ('actor-A'), not the racing 'actor-B'.
+    // Without the per-request snapshot it reads the shared, mutated connSession → 'actor-B'.
+    expect(observedActorJid).toBe('actor-A');
+  });
+
   // --- notifications ---
 
   it('notification (no id field) gets no response', async () => {
