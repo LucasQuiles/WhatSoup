@@ -64,6 +64,7 @@ describe('database retention', () => {
       toolCalls: 1,
       factExportQueue: 1,
       metricsHourly: 0,
+      decryptionFailures: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
     expect(rowCount('outbound_ops')).toBe(1);
@@ -96,6 +97,25 @@ describe('database retention', () => {
     expect(columnValues('metrics_hourly', 'bucket').sort()).toEqual(
       [insideBucket, recentBucket].sort(),
     );
+  });
+
+  it('QR-066: prunes stale decryption_failures by last_seen_at, preserving a still-recurring one', () => {
+    // Stale (no activity in 40 days) — must be reaped.
+    db.raw.prepare(`
+      INSERT INTO decryption_failures (message_id, chat_jid, conversation_key, sender_jid, error_message, raw_key, last_seen_at)
+      VALUES ('old-df', 'chat@g.us', 'c1', 's1@s.whatsapp.net', 'err', '{}', datetime('now', '-40 days'))
+    `).run();
+    // Still recurring (seen recently) — must be preserved even though created long ago.
+    db.raw.prepare(`
+      INSERT INTO decryption_failures (message_id, chat_jid, conversation_key, sender_jid, error_message, raw_key, created_at, last_seen_at)
+      VALUES ('hot-df', 'chat@g.us', 'c1', 's1@s.whatsapp.net', 'err', '{}', datetime('now', '-90 days'), datetime('now', '-1 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result.decryptionFailures).toBe(1);
+    expect(rowCount('decryption_failures')).toBe(1);
+    expect(columnValues('decryption_failures', 'message_id')).toEqual(['hot-df']);
   });
 
   it('prunes a malformed/unparseable bucket rather than leaking it forever (#1108 hardening)', () => {
@@ -172,6 +192,7 @@ describe('database retention', () => {
       toolCalls: 0,
       factExportQueue: 0,
       metricsHourly: 0,
+      decryptionFailures: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
     expect(rowCount('outbound_ops')).toBe(2);
