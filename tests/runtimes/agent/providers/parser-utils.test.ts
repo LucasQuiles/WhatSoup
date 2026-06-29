@@ -134,6 +134,24 @@ describe('extractMessage', () => {
     expect(extractMessage(42)).toBeNull();
     expect(extractMessage(true)).toBeNull();
   });
+
+  // QR-070: deeply-nested provider JSON must NOT blow the call stack. A
+  // provider stdout line nested ~20k deep parses fine (V8 parses iteratively)
+  // but unbounded recursion in extractMessage throws an uncaught RangeError in
+  // the session stdout handler → instance shutdown (DoS). The depth bound makes
+  // it degrade gracefully (return null past the limit) instead of throwing.
+  it('does not throw on deeply-nested input (depth-bounded — QR-070)', () => {
+    let deep: Record<string, unknown> = { error: 'leaf' };
+    for (let i = 0; i < 20000; i++) deep = { error: deep };
+    expect(() => extractMessage(deep)).not.toThrow();
+    expect(extractMessage(deep)).toBeNull();
+  });
+
+  it('still finds a message within the depth bound', () => {
+    let nested: Record<string, unknown> = { error: 'found-me' };
+    for (let i = 0; i < 10; i++) nested = { error: nested };
+    expect(extractMessage(nested)).toBe('found-me');
+  });
 });
 
 describe('extractTokenCounts', () => {
