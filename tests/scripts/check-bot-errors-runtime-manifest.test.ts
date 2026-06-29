@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   checkBotErrorsRuntimeManifest,
+  computeRequiredRuntimePaths,
   REQUIRED_RUNTIME_MANIFEST_PATHS,
   run,
 } from '../../scripts/check-bot-errors-runtime-manifest.ts';
@@ -45,7 +46,34 @@ describe('check-bot-errors-runtime-manifest guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
-    expect(result.checked).toBe(REQUIRED_RUNTIME_MANIFEST_PATHS.length);
+    expect(result.checked).toBe(computeRequiredRuntimePaths(repoRoot).length);
+  });
+
+  it('globs deploy/scripts python so a NEW unpinned, unsuppressed script fails closed (L6-06)', () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, 'deploy', 'scripts'), { recursive: true });
+    writeFileSync(path.join(root, 'deploy', 'scripts', 'newcomer.py'), 'print("new")\n', 'utf8');
+    writeManifest(root, []);
+
+    const result = checkBotErrorsRuntimeManifest(root);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toContainEqual(
+      expect.objectContaining({ code: 'missing-required-path', path: 'deploy/scripts/newcomer.py' }),
+    );
+  });
+
+  it('does NOT require a suppressed operator-CLI script to be pinned (L6-06 suppress-list)', () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, 'deploy', 'scripts'), { recursive: true });
+    writeFileSync(path.join(root, 'deploy', 'scripts', 'bot-errors-maintenance.py'), 'print("cli")\n', 'utf8');
+    writeManifest(root, []);
+
+    const result = checkBotErrorsRuntimeManifest(root);
+
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ code: 'missing-required-path', path: 'deploy/scripts/bot-errors-maintenance.py' }),
+    );
   });
 
   it('fails closed when a manifest file hash drifts', () => {
