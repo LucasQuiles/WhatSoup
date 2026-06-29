@@ -98,7 +98,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
@@ -2913,7 +2913,7 @@ export class AgentRuntime implements Runtime {
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
         try {
-          const convKey = toConversationKey(chatJid);
+          const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
@@ -7353,7 +7353,7 @@ export class AgentRuntime implements Runtime {
     sinceUnixSec: number,
   ): Promise<boolean> {
     try {
-      const convKey = toConversationKey(chatJid);
+      const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
 
@@ -7441,7 +7441,7 @@ export class AgentRuntime implements Runtime {
           if (mapKey) this.resumeFailedHandling.delete(mapKey);
 
           try {
-            const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
+            const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
               this.pendingSystemResults.mark(mapKey);
