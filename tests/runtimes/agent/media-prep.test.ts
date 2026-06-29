@@ -384,7 +384,8 @@ describe('media-prep', () => {
       rawMessage: { message: { documentMessage: { mimetype: 'application/pdf' } } },
     });
     await prepareContentForAgent(msg);
-    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/pdf');
+    // QR-057: downloadMedia now also receives the declared fileLength (undefined — none in this stub).
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/pdf', undefined);
   });
 
   it('falls back to octet-stream MIME for document when rawMessage has no mimetype', async () => {
@@ -396,7 +397,7 @@ describe('media-prep', () => {
       rawMessage: { message: { documentMessage: {} } },
     });
     await prepareContentForAgent(msg);
-    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/octet-stream');
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/octet-stream', undefined);
   });
 
   // ── prepareContentForAgent: descriptive-only types ──────────────────────
