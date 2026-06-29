@@ -40,16 +40,9 @@ const log = createChildLogger('session-manager');
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
 
-/**
- * Hard cap on the retained INCOMPLETE stdout line (QR-064). A provider that
- * streams a large no-newline blob would otherwise accumulate the whole thing in
- * `stdoutBufferStr` (one `+=` per chunk, the trailing un-terminated line is kept
- * across chunks) with ZERO completed lines → unbounded parent-process memory.
- * A legitimate provider event is newline-terminated JSON well under this bound,
- * so a partial line exceeding it can never become a valid event: drop it (the
- * MCP socket's MAX_BUF analogue; stderr is already bounded via slice(-500)).
- * 16 MiB is generous vs. any realistic single event line.
- */
+/** Cap on the retained no-newline stdout line (QR-064): a provider streaming a
+ * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
+ * MCP socket MAX_BUF analogue; 16 MiB >> any real event line. */
 export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 /** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
 export const TURN_WATCHDOG_MS = 600_000;
@@ -721,21 +714,10 @@ export class SessionManager {
     this.materializeStdoutChunks();
     const lines = this.stdoutBufferStr.split('\n');
     this.stdoutBufferStr = lines.pop() ?? '';
-    // QR-064: bound the retained incomplete line. A provider streaming a large
-    // no-newline blob would otherwise grow stdoutBufferStr unbounded (parent
-    // OOM). A partial line past MAX_STDOUT_LINE_BYTES can never be a valid
-    // newline-terminated event, so drop it — completed lines parsed this call
-    // are already returned, and a subsequent newline starts a clean line.
+    // QR-064: drop a runaway no-newline buffer past the cap (never a valid
+    // newline-terminated event) to bound parent memory.
     if (this.stdoutBufferStr.length > MAX_STDOUT_LINE_BYTES) {
-      log.warn(
-        {
-          sessionId: this.sessionId,
-          provider: this.provider,
-          bytes: this.stdoutBufferStr.length,
-          cap: MAX_STDOUT_LINE_BYTES,
-        },
-        'provider stdout line exceeded cap — dropping runaway no-newline buffer',
-      );
+      log.warn({ sessionId: this.sessionId, provider: this.provider, bytes: this.stdoutBufferStr.length, cap: MAX_STDOUT_LINE_BYTES }, 'provider stdout line exceeded cap — dropping runaway no-newline buffer');
       this.stdoutBufferStr = '';
     }
     return lines;
