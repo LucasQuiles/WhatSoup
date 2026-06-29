@@ -886,7 +886,8 @@ describe('SessionManager', () => {
 
     await sm.spawnSession();
     const turn = sm.sendTurn('stall this turn').catch((err) => err as Error);
-    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    // openai-api descriptor hard timeout = 10 min (NOT the 30-min default) — L1-F1
+    await vi.advanceTimersByTimeAsync(600_000 + 1);
     const err = await turn;
 
     expect(err).toBeInstanceOf(Error);
@@ -897,7 +898,7 @@ describe('SessionManager', () => {
       sessionId: expect.stringMatching(/^openai-api-\d+$/),
       dbRowId: 42,
     }));
-    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('30 minutes'));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('10 minutes'));
     expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
     vi.useRealTimers();
   });
@@ -4208,11 +4209,12 @@ describe('session.ts uncovered-branch coverage', () => {
     });
     await sm.spawnSession();
     const turn = sm.sendTurn('stall').catch((e) => e as Error);
-    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    // openai-api descriptor hard timeout = 10 min (NOT the 30-min default) — L1-F1
+    await vi.advanceTimersByTimeAsync(600_000 + 1);
     const err = await turn;
     expect((err as Error).message).toBe('watchdog-abort');
     expect(killSpy).toHaveBeenCalled();
-    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('30 minutes'));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('10 minutes'));
     vi.useRealTimers();
   });
 

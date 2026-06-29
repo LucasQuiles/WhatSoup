@@ -19,6 +19,7 @@ import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, bu
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
 import { buildBaseChildEnv, type BuildBaseChildEnvOptions } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
+import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
@@ -1491,17 +1492,22 @@ export class SessionManager {
   }
 
   private armWatchdog(): void {
-    // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker
-    this.watchdogHard = setTimeout(() => this.handleWatchdogHard(), WATCHDOG_HARD_MS);
+    // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
+    // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
+    // instead of a single hardcoded constant (L1-F1).
+    this.watchdogHard = setTimeout(() => this.handleWatchdogHard(), watchdogHardMsForProvider(this.provider));
   }
 
   private handleWatchdogHard(): void {
     this.watchdogHard = null;
     if (!this.active) return;
 
+    const inactivityMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
+    const terminationNotice = `_Session terminated after ${inactivityMinutes} minutes of inactivity — restarting._`;
+
     if (this.managedProviderSession !== null) {
       log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
-      this.notifyUser?.('_Session terminated after 30 minutes of inactivity — restarting._');
+      this.notifyUser?.(terminationNotice);
       this.crashManagedProviderSession('managed provider turn watchdog fired');
       return;
     }
@@ -1511,7 +1517,7 @@ export class SessionManager {
     // Notify user with a specific message before the kill — the generic crash
     // notice ("Agent session crashed") follows via the exit handler, but this
     // message explains WHY it was terminated.
-    this.notifyUser?.('_Session terminated after 30 minutes of inactivity — restarting._');
+    this.notifyUser?.(terminationNotice);
     this.child?.kill('SIGKILL');
   }
 
