@@ -6,8 +6,6 @@ export * from './errors.ts';
 export * from './error-codes.ts';
 export * from './events.ts';
 export * from './extensions.ts';
-export * from './fanout.ts';
-export * from './queue.ts';
 export * from './subscription.ts';
 
 // Re-export domain refs from src/core for adapter convenience.
