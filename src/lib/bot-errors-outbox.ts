@@ -85,13 +85,20 @@ export interface BotErrorsOutboxWrite {
 //   * C3 (`token=Bearer <secret>` leak): the VALUE capture optionally consumes a
 //     leading `Bearer `/`Basic ` scheme so the whole token is masked (the bare
 //     `[^\s…]+` value stopped at the space after `Bearer`, leaking the secret).
-// BEAD-055: the optional `(?:[A-Za-z0-9]*_)?` segment mirrors the Python SSOT so a
-// leading-`_` compound key (`user_access_token=`, `my_client_secret=`) anchors on
-// its known-secret tail instead of leaking. Benign tails (`event_count`,
-// `message_id`, `user_id`, `retry_count`) stay untouched. The `*` is over
-// `[A-Za-z0-9]` (no `_`) — a single linear alnum run, no catastrophic backtracking.
+// BEAD-055 + QR-052: mirror of the Python SSOT `KEYED_SECRET_RE`. Two compound-key
+// shapes anchor on a known-secret tail instead of leaking:
+//   (a) multi-underscore compounds — `(?:[A-Za-z0-9]+_)*` consumes ANY number of
+//       `<alnum>_` segments (BEAD-055 allowed only ONE → `AWS_SESSION_TOKEN=` /
+//       `AWS_SECRET_ACCESS_KEY=` leaked). Each segment ends in a literal `_`, so the
+//       split is deterministic: no catastrophic backtracking.
+//   (b) camelCase-glued keys — `[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|
+//       api[_-]?key)` catches `sessionToken=`/`bearerToken=`/`idToken=`; the `{1,40}`
+//       bound caps prefix backtracking (ReDoS-safe).
+// `secret[_-]?access[_-]?key` is an explicit entry for the AWS compound (secret word
+// is mid-key, ends in `KEY`). Benign tails (`event_count`, `message_id`, `session_id`,
+// `user_id`, `retry_count`) stay untouched — their tails are not secret-key words.
 const SECRETISH_ASSIGNMENT =
-  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:[A-Za-z0-9]*_)?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
+  /(^|[^A-Za-z0-9_]|\\n)(["']?(?:[A-Za-z0-9]+_)*(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
 // Mirror of the Python SSOT `AUTHORIZATION_BEARER_RE`: an `authorization` header
 // carrying a `Bearer` OR `Basic` scheme. C2 fix — the prior form matched only
 // `Authorization: Bearer …` (capital, colon-only, Bearer-only) and normalised the
