@@ -2364,6 +2364,15 @@ export class AgentRuntime implements Runtime {
         },
         serviceManager: serviceRestarter,
         trigger: triggerSelfRestart,
+        // QR-047: admin gate, same resolve+isAdminPhone check the other admin paths use.
+        assertAdmin: (session) => {
+          const phone = session.actorJid ? resolvePhoneFromJid(session.actorJid, this.db) : null;
+          if (!phone || !isAdminPhone(phone, config.adminPhones)) {
+            throw new Error(
+              `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
+            );
+          }
+        },
       }));
     }
 
