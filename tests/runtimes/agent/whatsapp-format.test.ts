@@ -361,3 +361,24 @@ describe('repairChunkFormatting', () => {
     expect(result[2]).toBe('*close*');
   });
 });
+
+describe('markdownToWhatsApp — bracket-transform DoS bound (QR-083)', () => {
+  it('does not blow up O(n^2) on a long bracket-heavy reply (event-loop DoS)', () => {
+    const huge = '['.repeat(200_000);
+    const start = Date.now();
+    const out = markdownToWhatsApp(huge);
+    const elapsed = Date.now() - start;
+    // Without the length guard this is multi-second (quadratic). With it, the
+    // oversized bracket blob skips the expensive transforms → near-instant.
+    expect(elapsed).toBeLessThan(200);
+    // Oversized text is returned (un-mangled is fine; brackets left as-is).
+    expect(out.length).toBeGreaterThan(0);
+  });
+
+  it('still converts brackets/links for normal-size replies (below the cap)', () => {
+    expect(markdownToWhatsApp('see [the docs](https://x.example)')).toContain('the docs (https://x.example)');
+    expect(markdownToWhatsApp('a [bare] ref')).toBe('a bare ref');
+    // bold still applies regardless
+    expect(markdownToWhatsApp('**hi**')).toBe('*hi*');
+  });
+});
