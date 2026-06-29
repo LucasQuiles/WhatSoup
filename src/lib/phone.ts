@@ -56,16 +56,29 @@ export function isAdminPhone(phone: string | number | null | undefined, adminPho
   // Exact match first (fast path)
   if (adminPhones.has(rawPhone)) return true;
 
-  // Suffix match: either the phone ends with an admin entry or vice versa
-  // Minimum 7 digits required to prevent degenerate matches from misconfigured entries
+  // QR-033: this is an AUTH boundary (admin commands, elevated access), so it must
+  // NOT be a fuzzy suffix match. The previous bidirectional `>=7-digit` suffix test
+  // granted admin to ANY number ending in the admin's (country-code-less) digits — an
+  // attacker who provisions a number ending in / prefixing the admin's trailing digits
+  // gained full admin — and to any 7+-digit suffix of the admin's number.
+  //
+  // Replacement: exact digit match, OR a strictly country-code-tolerant match — the
+  // longer form must equal the shorter plus a 1-3 digit prefix (E.164 country codes
+  // are 1-3 digits). This still matches "admin configured without the country code"
+  // (e.g. 5551230006 vs 15551230006) but rejects junk-prefix and short-suffix
+  // escalation. The floor is raised to 8 digits so a 7-digit stub cannot suffix-match
+  // a real number; an international admin whose national number is <8 digits must be
+  // configured with its full country code.
   const digits = normalizePhone(rawPhone);
-  if (digits.length < 7) return false;
+  if (digits.length < 8) return false;
   for (const admin of adminPhones) {
     const adminDigits = normalizePhone(admin);
-    if (adminDigits.length < 7) continue;
-    if (digits.endsWith(adminDigits) || adminDigits.endsWith(digits)) {
-      return true;
-    }
+    if (adminDigits.length < 8) continue;
+    if (digits === adminDigits) return true;
+    const longer = digits.length >= adminDigits.length ? digits : adminDigits;
+    const shorter = digits.length >= adminDigits.length ? adminDigits : digits;
+    const ccLen = longer.length - shorter.length;
+    if (ccLen >= 1 && ccLen <= 3 && longer.endsWith(shorter)) return true;
   }
   return false;
 }
