@@ -212,6 +212,7 @@ describe('database retention', () => {
         terminalDurabilityDays: 30,
         exportedFactDays: 30,
         metricsHourlyDays: 180,
+        decryptionFailureDays: 30,
       });
 
       insertOldCompleteInbound('immediate-in');
@@ -242,6 +243,7 @@ describe('database retention', () => {
         terminalDurabilityDays: 30,
         exportedFactDays: 30,
         metricsHourlyDays: 180,
+        decryptionFailureDays: 30,
       });
       const emptyResult = {
         inboundEvents: 0,
@@ -249,6 +251,7 @@ describe('database retention', () => {
         toolCalls: 0,
         factExportQueue: 0,
         metricsHourly: 0,
+        decryptionFailures: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
         .mockRejectedValueOnce(new Error('immediate-retention-failed'))
