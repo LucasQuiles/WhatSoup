@@ -8,15 +8,23 @@ import { nextCronRun } from '../cron.ts';
 
 /**
  * Guard for `poll.sqlite` specs. `query_only` blocks writes but not cross-database
- * reads or runtime knob flips, so reject statements that could exfiltrate beyond
- * the intended query: ATTACH/DETACH (pull in other DB files), PRAGMA, and
- * multi-statement bodies. Defense-in-depth for admin-gated specs (#1096).
+ * reads, runtime knob flips, or CPU/time, so reject statements that could exfiltrate
+ * beyond the intended query or freeze the synchronous DatabaseSync: ATTACH/DETACH
+ * (pull in other DB files), PRAGMA, multi-statement bodies, and recursive CTEs.
+ * Defense-in-depth for admin-gated specs (#1096, QR-026).
  */
 export function isSafeSqliteSql(sql: string): boolean {
   // Strip one optional trailing semicolon; any remaining ';' implies 2+ statements.
   const trimmed = sql.trim().replace(/;\s*$/, '');
   if (trimmed.includes(';')) return false;
   if (/\b(attach|detach|pragma)\b/i.test(trimmed)) return false;
+  // QR-026: a recursive CTE runs unbounded CPU under query_only (writes blocked, compute
+  // is not), and node:sqlite DatabaseSync is synchronous with no statement-time interrupt.
+  // The poller's MAX_SQLITE_ROWS cap only bounds row-RETURNING queries — a count/aggregate
+  // over a recursive CTE (e.g. `WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r
+  // WHERE x<1e12) SELECT count(*) FROM r`) returns ONE row and freezes the whole process
+  // before the cap can fire. poll.sqlite monitoring specs never need recursion — reject it.
+  if (/\brecursive\b/i.test(trimmed)) return false;
   return true;
 }
 

@@ -161,6 +161,18 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
     expect(isSafeSqliteSql('SELECT 1; SELECT 2')).toBe(false); // multi-statement
   });
 
+  it('QR-026: isSafeSqliteSql rejects recursive CTEs (unbounded-CPU vector under query_only)', () => {
+    // A count/aggregate over a recursive CTE returns ONE row → the poller row-cap can't
+    // bound it, and node:sqlite DatabaseSync has no statement-time interrupt → whole-process
+    // freeze. Reject at validation so it never executes.
+    expect(
+      isSafeSqliteSql('WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r WHERE x<1000000000) SELECT count(*) FROM r'),
+    ).toBe(false);
+    expect(isSafeSqliteSql('with recursive cnt(n) as (select 1 union all select n+1 from cnt) select n from cnt')).toBe(false);
+    // A NON-recursive CTE remains allowed — only the recursive keyword is the CPU vector.
+    expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages LIMIT 10) SELECT * FROM recent')).toBe(true);
+  });
+
   it('validateTriggerSpec rejects a poll.sqlite spec with ATTACH', () => {
     expect(() =>
       validateTriggerSpec('poll.sqlite', {
