@@ -629,7 +629,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     return this.shutdown();
   }
 
-  async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
+  async sendMessage(chatJid: string, text: string, messageId?: string): Promise<SubmissionReceipt> {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
@@ -665,19 +665,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     let result;
+    // QR-028: when the caller supplies a stable messageId (reused across retries
+    // of one logical send), pass it through as the Baileys key.id so a
+    // slow-but-delivered message is server-deduped on retry instead of doubled.
+    // Only pass the options arg when an id is present, so the common no-id path
+    // calls sock.sendMessage with the same arity as before.
+    const content = hasMentions ? { text: formatted, mentions } : { text: formatted };
+    if (hasMentions) this.log.info({ mentions }, 'Outbound message includes mentions');
     try {
-      if (hasMentions) {
-        this.log.info({ mentions }, 'Outbound message includes mentions');
-        result = await withSendTimeout(
-          this.sock.sendMessage(chatJid, { text: formatted, mentions }),
-          'sendMessage',
-        );
-      } else {
-        result = await withSendTimeout(
-          this.sock.sendMessage(chatJid, { text: formatted }),
-          'sendMessage',
-        );
-      }
+      result = await withSendTimeout(
+        messageId
+          ? this.sock.sendMessage(chatJid, content, { messageId })
+          : this.sock.sendMessage(chatJid, content),
+        'sendMessage',
+      );
     } finally {
       if (autoTyping !== 'off') {
         await this.setTyping(chatJid, 'paused');

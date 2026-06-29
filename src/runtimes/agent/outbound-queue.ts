@@ -896,6 +896,13 @@ export class OutboundQueue implements IOutboundQueue {
       this.durability.markSending(opId);
     }
 
+    // QR-028: one stable WhatsApp-shaped message id for this logical send,
+    // REUSED across every retry attempt. A send that times out (SEND_TIMEOUT_MS)
+    // may already be on the wire; retrying with the SAME id lets the server
+    // dedupe it instead of delivering the reply twice. 32 uppercase-hex chars
+    // (a dashless UUID) is a valid, unique key.id.
+    const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
+
     let lastErr: unknown;
     for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
       try {
@@ -903,7 +910,7 @@ export class OutboundQueue implements IOutboundQueue {
         let receipt;
         try {
           receipt = await Promise.race([
-            this.messenger.sendMessage(this.chatJid, text),
+            this.messenger.sendMessage(this.chatJid, text, stableMessageId),
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
                 () => reject(new Error('SEND_TIMEOUT')),
