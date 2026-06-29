@@ -1297,3 +1297,94 @@ describe('database.ts uncovered-branch coverage', () => {
     db.close();
   });
 });
+
+// ─── markMessagesDeleted (QR-063 revoke wiring) ──────────────────────────────
+
+describe('markMessagesDeleted (revoke / delete-for-everyone)', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function insertMsg(messageId: string, content = `body ${messageId}`): void {
+    db.raw
+      .prepare(
+        `INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content, content_text, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550100001@s.whatsapp.net',
+        '15550100001',
+        '15550100001@s.whatsapp.net',
+        messageId,
+        content,
+        content,
+        1700000000,
+      );
+  }
+
+  function deletedAt(messageId: string): string | null {
+    return (
+      db.raw
+        .prepare('SELECT deleted_at FROM messages WHERE message_id = ?')
+        .get(messageId) as { deleted_at: string | null } | undefined
+    )?.deleted_at ?? null;
+  }
+
+  it('soft-deletes the targeted message ids and reports the count', () => {
+    insertMsg('m1');
+    insertMsg('m2');
+    insertMsg('m3');
+
+    const n = db.markMessagesDeleted(['m1', 'm3']);
+
+    expect(n).toBe(2);
+    expect(deletedAt('m1')).not.toBeNull();
+    expect(deletedAt('m3')).not.toBeNull();
+  });
+
+  it('leaves non-targeted siblings live', () => {
+    insertMsg('keep');
+    insertMsg('revoke');
+
+    db.markMessagesDeleted(['revoke']);
+
+    expect(deletedAt('keep')).toBeNull();
+    expect(deletedAt('revoke')).not.toBeNull();
+  });
+
+  it('is idempotent — already-deleted rows are not re-counted', () => {
+    insertMsg('m1');
+    expect(db.markMessagesDeleted(['m1'])).toBe(1);
+    // Second revoke for the same id changes nothing (AND deleted_at IS NULL).
+    expect(db.markMessagesDeleted(['m1'])).toBe(0);
+  });
+
+  it('treats an empty id list as a no-op (no SQL, count 0)', () => {
+    insertMsg('m1');
+    expect(db.markMessagesDeleted([])).toBe(0);
+    expect(deletedAt('m1')).toBeNull();
+  });
+
+  it('removes the revoked content from FTS so it cannot be recalled', () => {
+    insertMsg('m1', 'xyzrevoked secret content');
+    const before = db.raw
+      .prepare('SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?')
+      .all('xyzrevoked') as Array<{ rowid: number }>;
+    expect(before.length).toBe(1);
+
+    db.markMessagesDeleted(['m1']);
+
+    const after = db.raw
+      .prepare('SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?')
+      .all('xyzrevoked') as Array<{ rowid: number }>;
+    expect(after.length).toBe(0);
+  });
+});
