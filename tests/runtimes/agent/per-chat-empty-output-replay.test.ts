@@ -139,6 +139,7 @@ function makeFakeQueue(chatJid = 'chat@s.whatsapp.net') {
   return {
     targetChatJid: chatJid,
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueResultText: vi.fn(),
     enqueueStreamingText: vi.fn(),
     enqueueToolUpdate: vi.fn(),

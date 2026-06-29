@@ -61,6 +61,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   // method that isn't reflected here — the mock cannot silently diverge.
   const mockQueue = {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -538,6 +539,7 @@ async function emitSuccessfulCompactResult(inputTokens = 0): Promise<void> {
 function makeQueueMock(targetChatJid: string): IOutboundQueue {
   return {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -4380,6 +4382,30 @@ describe('AgentRuntime', () => {
 
     expect(runtimeState.outboundQueues.has('recreated@s.whatsapp.net')).toBe(true);
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'recreated@s.whatsapp.net');
+  });
+
+  it('shared createOutboundQueue inherits the prior queue token for the same chat (QR-069)', async () => {
+    const { OutboundQueue: MockOutboundQueueCtor } = await import('../../../src/runtimes/agent/outbound-queue.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const runtimeState = runtime as unknown as {
+      createOutboundQueue: (chatJid: string, reason: string) => unknown;
+      outboundQueues: Map<string, IOutboundQueue>;
+    };
+
+    // Seed a prior queue for the chat exposing a known echo-guard token. A
+    // replacement built by createOutboundQueue must INHERIT it (3-arg ctor),
+    // so the predecessor's still-active group cooldown does not flood-suppress
+    // the replacement's first reply.
+    const priorToken = 'inherited-token-qr069';
+    runtimeState.outboundQueues.set('inherit@s.whatsapp.net', {
+      getSenderToken: () => priorToken,
+    } as unknown as IOutboundQueue);
+
+    runtimeState.createOutboundQueue('inherit@s.whatsapp.net', 'test replacement');
+
+    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'inherit@s.whatsapp.net', priorToken);
   });
 
   it('shared queue sweep timer is started with the runtime and cleared on shutdown', async () => {
