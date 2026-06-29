@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -40,6 +40,9 @@ interface ManifestFileEntry {
   mustContain: string[];
 }
 
+// Historical explicit allowlist — retained for reference/back-compat. Completeness is now a
+// GLOB (see computeRequiredRuntimePaths): every deploy/scripts python file must be pinned or
+// suppressed, so new live scripts default to GUARDED instead of silently unpinned (L6-06).
 export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/bot-errors-dispatcher.py',
   'deploy/scripts/bot-errors-health-check.py',
@@ -59,6 +62,47 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/bot-errors-gui-session-monitor.py',
   'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
 ] as const;
+
+// Python scripts under deploy/scripts that are intentionally NOT integrity-pinned because they
+// are operator CLIs (run by hand, not a live runtime path) or a known-orphaned monitor. Adding a
+// script here is a deliberate, reviewable exemption — the alternative is to pin it.
+export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
+  'deploy/scripts/bot-errors-maintenance.py', // operator CLI: declare planned maintenance windows
+  'deploy/scripts/retire-outbound-quarantine.py', // operator CLI: retire a known unsafe quarantine
+  'deploy/scripts/bot-errors-runtime-staleness.py', // orphaned monitor — pending wire-or-remove (L6-02)
+]);
+
+// Runtime files that must be pinned but are not covered by the deploy/scripts python glob.
+export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
+  'src/lib/bot-errors-outbox.ts',
+  'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
+] as const;
+
+const PYTHON_RUNTIME_DIRS = ['deploy/scripts', 'deploy/scripts/lib'] as const;
+
+function listPythonRuntimeScripts(cwd: string): string[] {
+  const found: string[] = [];
+  for (const dir of PYTHON_RUNTIME_DIRS) {
+    const absolute = path.resolve(cwd, dir);
+    if (!existsSync(absolute)) continue;
+    for (const name of readdirSync(absolute)) {
+      if (name.endsWith('.py')) found.push(`${dir}/${name}`);
+    }
+  }
+  return found;
+}
+
+/**
+ * Compute the set of runtime files that MUST be integrity-pinned: every python file under
+ * deploy/scripts (top-level + lib/, excluding the tests/ subdir) that is not explicitly
+ * suppressed, plus the non-python EXPLICIT_REQUIRED_RUNTIME_PATHS. This makes the manifest a
+ * glob, not an allowlist — a newly added live script fails the guard until it is pinned or
+ * deliberately suppressed (L6-06).
+ */
+export function computeRequiredRuntimePaths(cwd: string = process.cwd()): string[] {
+  const python = listPythonRuntimeScripts(cwd).filter((p) => !SUPPRESSED_RUNTIME_PATHS.has(p));
+  return Array.from(new Set([...EXPLICIT_REQUIRED_RUNTIME_PATHS, ...python])).sort();
+}
 
 function finding(
   code: RuntimeManifestFindingCode,
@@ -148,7 +192,7 @@ function parseManifestEntries(payload: unknown): {
 export function checkBotErrorsRuntimeManifest(
   cwd = process.cwd(),
   manifestPath = 'deploy/bot-errors-runtime-manifest.json',
-  requiredPaths: readonly string[] = REQUIRED_RUNTIME_MANIFEST_PATHS,
+  requiredPaths: readonly string[] = computeRequiredRuntimePaths(cwd),
 ): RuntimeManifestCheckResult {
   const absoluteManifestPath = path.resolve(cwd, manifestPath);
   let payload: unknown;

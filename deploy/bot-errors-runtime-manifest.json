@@ -217,6 +217,37 @@
         "--dry-run",
         "--config-check"
       ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-selfcheck.py",
+      "sha256": "540151d8557e62fcdfd78524e47ad4617f378c4d368c567beb6b787cc8f4fb16",
+      "mustContain": [
+        "SAFE_HEAL_CLASSES",
+        "HEAL_WINDOW_SECONDS"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-sentinel.py",
+      "sha256": "56499d5aea5cf69e3e5845f1c7478647d0621faed07bf1d91f67193d84af2a12",
+      "mustContain": [
+        "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
+        "DEFAULT_HYSTERESIS_CYCLES"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/classify_health.py",
+      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "mustContain": [
+        "def classify(d: object) -> str:"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/sentinel_pin.py",
+      "sha256": "8e81245be97438015a903dd68e2266d0c0a0166ac7ad523e7ad696c252bfc631",
+      "mustContain": [
+        "class PinLoadError(Exception):",
+        "class Pin:"
+      ]
     }
   ]
 }
