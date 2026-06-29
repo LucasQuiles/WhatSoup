@@ -168,6 +168,7 @@ export function getRecentMessages(db: Database, conversationKey: string, limit: 
   const rows = db.raw.prepare(`
     SELECT * FROM messages
     WHERE conversation_key = @conversation_key
+      AND deleted_at IS NULL
     ORDER BY timestamp DESC, pk DESC
     LIMIT @limit
   `).all({ conversation_key: conversationKey, limit }) as Record<string, unknown>[];
@@ -190,6 +191,7 @@ export function getMessagesSince(
     SELECT * FROM messages
     WHERE conversation_key = @conversation_key
       AND timestamp > @since
+      AND deleted_at IS NULL
     ORDER BY timestamp ASC, pk ASC
     LIMIT @limit
   `).all({ conversation_key: conversationKey, since: sinceUnixSec, limit }) as Record<string, unknown>[];
