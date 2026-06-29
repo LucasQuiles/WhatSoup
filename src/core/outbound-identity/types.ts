@@ -41,5 +41,5 @@ export interface IdentityStore {
   /** Any warm signal: contacts row, access_list allowed, or a prior inbound message. */
   isWarm(phoneJid: string, barePhone: string): boolean;
   /** True if the group JID exists in the groups table. */
-  isKnownGroup(groupJid: string): boolean;
+  isApprovedGroup(groupJid: string): boolean;
 }
