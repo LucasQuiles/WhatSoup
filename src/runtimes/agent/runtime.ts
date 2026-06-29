@@ -1738,6 +1738,15 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
+          // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
+          // progress timer + slow/stall setTimeouts that are cleared only by
+          // shutdown() keyed on the canonical mapKey — leaving it under lidKey
+          // leaks the timer and loses the chat's in-flight progress/stall state.
+          const opTracker = this.operationTrackers.get(lidKey);
+          if (opTracker) {
+            this.operationTrackers.delete(lidKey);
+            this.operationTrackers.set(canonical, opTracker);
+          }
           this.crashes.rekey(lidKey, canonical);
           const contentType = this.perChatTurnContentType.get(lidKey);
           if (contentType !== undefined) {
