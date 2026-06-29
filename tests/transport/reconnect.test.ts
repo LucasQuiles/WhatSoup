@@ -156,6 +156,37 @@ function closeEvent(statusCode: number | undefined) {
   };
 }
 
+function loggedOutStreamErrorEvent(conflictType: string | null, extra: Record<string, unknown> = {}) {
+  const conflictNode = conflictType === null
+    ? []
+    : [{ tag: 'conflict', attrs: { type: conflictType } }];
+  return {
+    'connection.update': {
+      connection: 'close',
+      lastDisconnect: {
+        error: {
+          output: { statusCode: 401 },
+          data: {
+            tag: 'stream:error',
+            attrs: { code: '401' },
+            content: conflictNode,
+          },
+          ...extra,
+        },
+      },
+    },
+  };
+}
+
+function readBondEvents(): Array<Record<string, any>> {
+  const eventPath = join(testDataRoot, 'bond-events.ndjson');
+  return readFileSync(eventPath, 'utf-8')
+    .trimEnd()
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+}
+
 /** Fire a connection.update open event. */
 function openEvent() {
   return { 'connection.update': { connection: 'open' } };
@@ -543,6 +574,94 @@ describe('ConnectionManager — terminal conditions', () => {
     // Advance well past any backoff
     await vi.advanceTimersByTimeAsync(120_000);
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('an inspected non-device_removed 401 gets one bounded reconnect and durable conflict evidence', async () => {
+    vi.setSystemTime(new Date('2026-05-10T09:00:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit(loggedOutStreamErrorEvent('replaced'));
+
+    expect(emitAlertMock).not.toHaveBeenCalled();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      reconnectAttempts: 1,
+      reconnectPhase: 'backoff',
+      lastStatusCode: 401,
+      lastDisconnectReason: 'loggedOut',
+    });
+
+    const eventPath = join(testDataRoot, 'bond-events.ndjson');
+    expect(statSync(eventPath).mode & 0o777).toBe(0o600);
+    const closeEvent = readBondEvents().find(event => event.event === 'connection_close' && event.statusCode === 401);
+    expect(closeEvent).toMatchObject({
+      event: 'connection_close',
+      reason: 'loggedOut',
+      conflictType: 'replaced',
+      reconnectDecision: 'reconnect:auth-401-unclassified',
+    });
+
+    await manager.shutdown();
+  });
+
+  it('a device_removed 401 writes a redacted terminal bond event before parking', async () => {
+    vi.setSystemTime(new Date('2026-05-10T09:05:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit(loggedOutStreamErrorEvent('device_removed', {
+      message: 'removed 15555550123@s.whatsapp.net after phone 14155551234 with token do-not-print',
+      creds: { advSecretKey: 'do-not-print', registrationId: 1234 },
+      nested: {
+        remoteJid: '15555550123@s.whatsapp.net',
+        linkedPhone: '14155551234',
+      },
+    }));
+
+    expect(emitAlertMock).toHaveBeenCalledOnce();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'disconnected',
+      connected: false,
+      lastStatusCode: 401,
+      lastDisconnectReason: 'loggedOut',
+    });
+
+    const eventPath = join(testDataRoot, 'bond-events.ndjson');
+    expect(statSync(eventPath).mode & 0o777).toBe(0o600);
+    const eventText = readFileSync(eventPath, 'utf-8');
+    const events = readBondEvents();
+    const closeEvent = events.find(event => event.event === 'connection_close' && event.statusCode === 401);
+    const bondLostEvent = events.find(event => event.event === 'device_bond_lost' && event.statusCode === 401);
+
+    expect(closeEvent).toMatchObject({
+      event: 'connection_close',
+      reason: 'loggedOut',
+      conflictType: 'device_removed',
+      reconnectDecision: 'exit:logged-out',
+    });
+    expect(bondLostEvent).toMatchObject({
+      event: 'device_bond_lost',
+      reason: 'loggedOut',
+      conflictType: 'device_removed',
+    });
+    expect(eventText).toContain('<jid:');
+    expect(eventText).toContain('<number:');
+    expect(eventText).not.toContain('15555550123@s.whatsapp.net');
+    expect(eventText).not.toContain('14155551234');
+    expect(eventText).not.toContain('do-not-print');
+    expect(eventText).not.toContain(testAuthDir);
+    expect(eventText).not.toContain(testStateRoot);
+    expect(eventText).not.toContain(testDataRoot);
 
     await manager.shutdown();
   });
