@@ -1,6 +1,6 @@
 # Agent-job dispatch gap — `create_agent_job` cron beads never run their prompt
 
-**Status:** diagnosed, fix proposed, NOT yet implemented or deployed.
+**Status:** FIXED in code on branch `fix/agent-job-dispatch-durability` — NOT yet merged or deployed (deploy = fleet restart, requires Lucas's go-ahead).
 **Date:** 2026-06-29
 **Author:** ana-bot (operator-agent), at Lucas Quiles's request.
 **Severity:** high — a scheduled `agent_job` silently no-ops every fire. Production impact: the
@@ -133,6 +133,63 @@ new surface; Design B is a larger build. Recommendation: Design A.
   named error kind and an operator-safe alert — never a silent success.
 - Keep the existing circuit breaker (poller.ts:1067-1079): repeated dispatch failures pause the
   trigger and notify, rather than retry-storming.
+
+## Implementation (as-built on `fix/agent-job-dispatch-durability`)
+
+Design A was implemented, with one correction to the original sketch.
+
+### Correction: dispatch via `handleMessage`, not `turnQueue.enqueue`
+
+The original Design A note assumed enqueuing through the global `TurnQueue`/`processTurn`.
+That path is **shared-mode only**. The operator-agent (`ana-bot`) runs
+`agentOptions.sessionScope: per_chat`, where `processTurn`/the global queue is NOT the active
+path. The fix instead routes the synthetic turn through `AgentRuntime.handleMessage()`, the
+mode-agnostic public entrypoint that already fans out correctly to shared / per_chat / single.
+
+### Change A — agent-job dispatch (Bug 1)
+
+- `poller.ts`: added `AgentJobDispatchFn` (`AgentJobContext` → `AgentJobDispatchResult`),
+  injected via `TriggerPollerOptions.agentJobDispatch`. In the `schedule.cron`/`schedule.at_time`
+  branch the poller now looks up the linked bead; if `bead.kind === 'agent_job'` it calls
+  `dispatchAgentJob`, otherwise it keeps the plain "cron tick fired" notification.
+- On successful dispatch the run is `ok` with `fired:false` (no bare notification — the agent
+  turn does the visible work in-chat). The bead body is the prompt.
+- `runtime.ts`: added `AgentRuntime.dispatchAgentJob(ctx)` — builds a synthetic `IncomingMessage`
+  (admin sender JID, report chat, body as content, `isSyntheticJob:true`) and fires
+  `handleMessage` fire-and-forget.
+- `types.ts`: added `IncomingMessage.isSyntheticJob`; the runtime's inline imperative extractor is
+  guarded by `!msg.isSyntheticJob` so a daily scheduled prompt does not spawn a proposed task bead
+  on every fire.
+- `main.ts`: wires `agentJobDispatch: runtime instanceof AgentRuntime ? (ctx) => runtime.dispatchAgentJob(ctx) : undefined`.
+
+### Change B — timezone passthrough (Bug 2)
+
+- `poller.ts` `scheduleNextFire`: parses `tz` from `spec_json` and calls
+  `nextCronRun(parsed.expr, now, parsed.tz)`.
+- `triggers.ts` `computeNextFireAt`: same fix at creation time so a freshly created job's first
+  fire is correct.
+
+### Fail-loud behaviour (verified by tests)
+
+`dispatchAgentJob` fails CLOSED — `status:'failed'`, `fired:true` (immediate operator alert), and
+a named `errorKind` — for: empty bead body (`agent_job_empty_body`), no dispatcher wired
+(`agent_job_dispatcher_unavailable`), dispatcher threw (`agent_job_dispatch_threw`), enqueue
+rejected (`agent_job_enqueue_rejected`). **Note on the circuit breaker:** a `schedule.cron`
+trigger always reschedules to its next tick, so the interval circuit breaker does NOT auto-pause a
+cron agent_job. This is intentional — auto-pausing a once-daily invoicing job after 5 failed days
+would be the exact *silent* failure we forbid. Instead every failed fire emits its own alert; the
+job stays active and keeps trying (and alerting) daily.
+
+### Tests
+
+`tests/core/substrate/poller.test.ts` — added `describe('TriggerPoller — agent_job dispatch')`:
+cron agent_job runs the prompt as a turn (dispatcher called with body + report chat, no
+notification, run `ok`, rescheduled active); fail-closed with alert when no dispatcher wired;
+fail-closed on enqueue rejection; repeated cron failures alert every fire and never silently
+auto-pause; tz honoured (`30 15 * * *` America/New_York from 2026-06-29T12:00Z → next fire
+2026-06-29T19:30Z, i.e. 3:30 PM EDT, not 15:30 UTC). Full suite: 15329 passing; the only failures
+are 3 pre-existing environmental ones (ffmpeg/transcription + a deploy health-check), confirmed
+present on baseline with these changes stashed. `npm run typecheck` clean.
 
 ## Deploy constraint
 

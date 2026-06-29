@@ -848,6 +848,13 @@ const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   // poll.url is gated default-OFF (F2 Slice B). When enabled, the poller fetches
   // through the shared ssrfSafeAgent stack (default urlFetch = fetchUrlGuarded).
   enableUrlWatch: config.advanced.enableUrlWatch,
+  // Agent-job dispatch: only the agent runtime can run a turn. On agent
+  // instances, a schedule.* fire whose linked bead is an agent_job RUNS the
+  // prompt as a turn; on non-agent instances it is left UNSET so such a fire
+  // fails CLOSED instead of posting a bare "cron tick" that never runs.
+  agentJobDispatch: runtime instanceof AgentRuntime
+    ? (jobCtx) => runtime.dispatchAgentJob(jobCtx)
+    : undefined,
 });
 triggerPoller.start();
 
