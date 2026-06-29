@@ -248,6 +248,14 @@
         "class PinLoadError(Exception):",
         "class Pin:"
       ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-runtime-staleness.py",
+      "sha256": "6897f37a9b3a3fbf9b06be04a917965008e69e833a331fb93b9f25a5e1568160",
+      "mustContain": [
+        "Runtime code-staleness monitor",
+        "runtime_stale"
+      ]
     }
   ]
 }

@@ -1,0 +1,11 @@
+[Unit]
+Description=BOT ERRORS runtime code-staleness monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/LAB/WhatSoup
+EnvironmentFile=%h/.config/whatsoup/bot-errors.env
+ExecStart=/usr/bin/python3 %h/LAB/WhatSoup/deploy/scripts/bot-errors-runtime-staleness.py --once
+SyslogIdentifier=bot-errors-runtime-staleness

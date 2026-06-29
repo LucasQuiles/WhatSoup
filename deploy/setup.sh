@@ -24,6 +24,8 @@ BOT_ERRORS_SYSTEMD_UNITS=(
   "bot-errors-health-check.timer"
   "bot-errors-heartbeat-watchdog.service"
   "bot-errors-heartbeat-watchdog.timer"
+  "bot-errors-runtime-staleness.service"
+  "bot-errors-runtime-staleness.timer"
 )
 
 read_env_file_value() {
@@ -480,6 +482,6 @@ else
   echo ""
   echo "  To run BOT ERRORS monitoring after filling ~/.config/whatsoup/bot-errors.env:"
   echo "     systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service"
-  echo "     systemctl --user enable --now bot-errors-deadman.timer bot-errors-health-check.timer bot-errors-heartbeat-watchdog.timer"
+  echo "     systemctl --user enable --now bot-errors-deadman.timer bot-errors-health-check.timer bot-errors-heartbeat-watchdog.timer bot-errors-runtime-staleness.timer"
 fi
 echo ""

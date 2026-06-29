@@ -69,7 +69,6 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
 export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
   'deploy/scripts/bot-errors-maintenance.py', // operator CLI: declare planned maintenance windows
   'deploy/scripts/retire-outbound-quarantine.py', // operator CLI: retire a known unsafe quarantine
-  'deploy/scripts/bot-errors-runtime-staleness.py', // orphaned monitor — pending wire-or-remove (L6-02)
 ]);
 
 // Runtime files that must be pinned but are not covered by the deploy/scripts python glob.
