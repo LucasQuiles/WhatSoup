@@ -21,9 +21,9 @@ import type { IncomingMessage } from '../../../src/core/types.ts';
 
 // ─── Stubs ───────────────────────────────────────────────────────────────────
 
-interface DurabilityStub extends Pick<DurabilityEngine, 'markInboundSkipped' | 'markInboundFailed'> {}
+interface DurabilityStub extends Pick<DurabilityEngine, 'markInboundSkipped' | 'markInboundFailed' | 'markContinuityCandidateIfNoTerminalOutbound'> {}
 
-interface ReplyGuaranteeStub extends Pick<ReplyGuaranteeManager, 'disarm'> {}
+interface ReplyGuaranteeStub extends Pick<ReplyGuaranteeManager, 'disarm' | 'isArmed'> {}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -62,9 +62,11 @@ beforeEach(() => {
   durability = {
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
+    markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
   } as unknown as DurabilityStub;
   replyGuarantee = {
     disarm: vi.fn(),
+    isArmed: vi.fn(() => true),
   } as unknown as ReplyGuaranteeStub;
   coalescer = new ImageCoalescer(
     () => durability as unknown as DurabilityEngine,
@@ -135,9 +137,22 @@ describe('ImageCoalescer.markSeqFailed — branch coverage', () => {
   it('disarms and marks the representative seq failed when durability is wired', () => {
     coalescer.markSeqFailed('chat-1', 42);
 
+    expect(replyGuarantee.isArmed).toHaveBeenCalledWith(42);
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(42, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
     expect(replyGuarantee.disarm).toHaveBeenCalledTimes(1);
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
     expect(durability.markInboundFailed).toHaveBeenCalledTimes(1);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
+  });
+
+  it('does not mark a continuity candidate when the representative seq is not armed', () => {
+    vi.mocked(replyGuarantee.isArmed).mockReturnValueOnce(false);
+
+    coalescer.markSeqFailed('chat-1', 42);
+
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
     expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
   });
 

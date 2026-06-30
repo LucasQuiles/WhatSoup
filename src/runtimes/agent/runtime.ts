@@ -1473,6 +1473,7 @@ export class AgentRuntime implements Runtime {
       }
       this.perChatInboundSeqQueue.set(mapKey, seqQueue);
       this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(representativeSeq);
+      this.replyGuarantee?.arm({ inboundSeq: representativeSeq, chatJid });
 
       // Set state for this turn
       this.perChatTurnContentType.set(mapKey, 'image');

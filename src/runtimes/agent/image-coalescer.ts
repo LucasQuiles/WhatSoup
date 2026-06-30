@@ -84,8 +84,20 @@ export class ImageCoalescer {
   markSeqFailed(mapKey: string, seq: number): void {
     const durability = this.getDurability();
     if (!durability) return;
+    const replyGuarantee = this.getReplyGuarantee();
     try {
-      this.getReplyGuarantee()?.disarm(seq);
+      if (replyGuarantee?.isArmed(seq)) {
+        durability.markContinuityCandidateIfNoTerminalOutbound(
+          seq,
+          'runtime_fault_no_terminal_outbound',
+          'runtime_fault_disarm',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative continuity candidate');
+    }
+    try {
+      replyGuarantee?.disarm(seq);
       durability.markInboundFailed(seq);
     } catch (err) {
       log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative seq failed');

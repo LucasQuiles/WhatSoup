@@ -2568,17 +2568,32 @@ describe('AgentRuntime', () => {
         durability: {
           markInboundSkipped: ReturnType<typeof vi.fn>;
           markInboundFailed: ReturnType<typeof vi.fn>;
+          markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn>;
+        } | null;
+        replyGuarantee: {
+          arm: ReturnType<typeof vi.fn>;
+          disarm: ReturnType<typeof vi.fn>;
+          isArmed: ReturnType<typeof vi.fn>;
+          shutdown: ReturnType<typeof vi.fn>;
         } | null;
       };
       const durability = {
         markInboundSkipped: vi.fn(),
         markInboundFailed: vi.fn(),
+        markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
+      };
+      const replyGuarantee = {
+        arm: vi.fn(),
+        disarm: vi.fn(),
+        isArmed: vi.fn(() => true),
+        shutdown: vi.fn(),
       };
       mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
       mockSession.sendTurn.mockRejectedValueOnce(new Error('send failed'));
 
       await runtime.start();
       state.durability = durability;
+      state.replyGuarantee = replyGuarantee;
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-fail-1', content: 'image one', contentType: 'image', inboundSeq: 151 }));
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-fail-2', content: 'image two', contentType: 'image', inboundSeq: 152 }));
 
@@ -2586,6 +2601,10 @@ describe('AgentRuntime', () => {
 
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
       expect(durability.markInboundSkipped).toHaveBeenCalledWith(151, 'coalesced_image');
+      expect(replyGuarantee.arm).toHaveBeenCalledWith({ inboundSeq: 152, chatJid: 'test@s.whatsapp.net' });
+      expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+        .toHaveBeenCalledWith(152, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
+      expect(replyGuarantee.disarm).toHaveBeenCalledWith(152);
       expect(durability.markInboundFailed).toHaveBeenCalledWith(152);
       expect(state.imageCoalesce.buffers.has('test@s.whatsapp.net')).toBe(false);
       expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
