@@ -63,6 +63,7 @@
     "fleet:rotate-token": "bash scripts/run-with-pinned-node.sh scripts/fleet-rotate-token.ts",
     "arc:runtime-proof": "bash scripts/run-with-pinned-node.sh scripts/arc-runtime-proof.ts",
     "provider:parity": "bash scripts/run-with-pinned-node.sh scripts/provider-parity-report.ts",
+    "continuity:review-proof": "bash scripts/run-with-pinned-node.sh scripts/continuity-review-proof.ts",
     "release:snapshot": "bash scripts/run-with-pinned-node.sh scripts/release-snapshot-plan.ts",
     "leaks:anonymize": "bash scripts/run-with-pinned-node.sh scripts/anonymize-private-literals.ts",
     "work-index:regen": "bash scripts/run-with-pinned-node.sh scripts/work-index.ts",

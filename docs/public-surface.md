@@ -259,6 +259,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
 | `cli:npm.arc-runtime-proof` | `npm run arc:runtime-proof` | `package.json` | beta | active | Emit the ARC runtime-enforcement `verification-record` from runtime health plus drift-free installed binding metadata; fails closed on missing emission contract, drift, or secret-like artifacts |
 | `cli:npm.provider-parity` | `npm run provider:parity` | `package.json` | beta | active | Read-only redacted provider/fallback parity report from captured provider-status and provider-probe inputs; exits 0/1/2 for green, non-green, and parse/redaction failures |
+| `cli:npm.continuity-review-proof` | `npm run continuity:review-proof` | `package.json` | beta | active | Read-only redacted continuity review intents proof from an already-migrated `bot.db`; fails closed on missing schema, unmigrated DBs, or secret-like artifacts |
 | `cli:npm.release-snapshot` | `npm run release:snapshot` | `package.json` | beta | active | Read-only release snapshot planner and manifest-backed drift checker; live release mutation still requires separate approval |
 | `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
 | `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |

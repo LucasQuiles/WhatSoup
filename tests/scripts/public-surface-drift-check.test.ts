@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +86,19 @@ describe('public surface drift check', () => {
 
   it('passes for the live repository registry', () => {
     expect(findPublicSurfaceDrift({ cwd: repoRoot })).toEqual([]);
+  });
+
+  it('documents the continuity review proof command as an operator-facing npm surface', () => {
+    const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const registry = readFileSync(path.join(repoRoot, 'docs/public-surface.md'), 'utf8');
+
+    expect(packageJson.scripts?.['continuity:review-proof']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/continuity-review-proof.ts',
+    );
+    expect(registry).toContain('`cli:npm.continuity-review-proof` | `npm run continuity:review-proof`');
+    expect(registry).toContain('continuity review intents');
   });
 
   it('flags a missing source path with row context', () => {
