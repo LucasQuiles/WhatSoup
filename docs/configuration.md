@@ -76,6 +76,7 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 |----------|------|---------|-------------|
 | `MAX_TOKENS` | integer | `750` | Maximum tokens in a single LLM response. Parsed by `intEnv()` — invalid values fall back to the default. |
 | `RATE_LIMIT_PER_HOUR` | integer | `45` | Maximum messages per user per hour (chat runtime). |
+| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts:928`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
 
 ### Access Control
 
@@ -161,6 +162,9 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
 | `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. |
 | `WHATSOUP_REPO_ROOT` | path | `process.cwd()` | Repository root scanned for the ARC binding file reported under the `arc` key of `GET /health` (`src/core/health.ts:1059`); a missing/unparseable file degrades to `{loaded:false,reason}` without failing the process. Only needed when the process CWD is not the repo checkout. |
+| `WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS` | integer (ms) | `30000` | Fleet health-poller (`src/fleet/health-poller.ts:23`): minimum time an instance must stay continuously unreachable before an `instance_unreachable` alert fires — debounces transient probe failures. |
+| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS` | integer | `2` | Fleet health-poller (`src/fleet/health-poller.ts:27`): consecutive degraded `GET /health` body polls required before a `health_body_degraded` alert fires. Floored to a minimum of `1`. |
+| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS` | integer (ms) | `10000` | Fleet health-poller (`src/fleet/health-poller.ts:31`): minimum dwell time in the degraded state (applied alongside `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS`) before a `health_body_degraded` alert fires. |
 
 #### Agent compact endpoint
 
