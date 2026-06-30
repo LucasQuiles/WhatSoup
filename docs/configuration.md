@@ -1170,6 +1170,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 30 | Adds `scheduled_messages.timezone` (IANA zone) so recurring schedules evaluate their cron in the user's timezone (DST-aware); `NULL` preserves the legacy UTC interpretation (`runMigration30`) |
 | 31 | Adds the `llm_attempts` table (`sender_jid`, `attempt_at`) — records every LLM invocation, separate from the `rate_limits` (successful-response) counter, so outage/retry LLM cost is observable without charging the user's response rate-limit (`runMigration31`) |
 | 32 | Adds `scheduled_messages.send_started_at` so scheduler crash recovery can distinguish pre-send claims from uncertain in-flight sends and fail closed instead of blindly replaying accepted messages (`runMigration32`) |
+| 33 | Adds `auth_loss_signal` with active-signal and classifier indexes so auth-loss evidence can be recorded once, resolved after stable authenticated-open dwell, and counted across later recurrences (`runMigration33`) |
 
 ---
 

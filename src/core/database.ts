@@ -730,6 +730,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [30, runMigration30],
   [31, runMigration31],
   [32, runMigration32],
+  [33, runMigration33],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -808,6 +809,35 @@ function runMigration32(db: DatabaseSync): void {
     SET send_started_at = unixepoch()
     WHERE status = 'processing' AND send_started_at IS NULL
   `);
+}
+
+const MIGRATION_33_AUTH_LOSS_SIGNAL = `
+CREATE TABLE IF NOT EXISTS auth_loss_signal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance TEXT NOT NULL,
+  host TEXT NOT NULL,
+  classifier TEXT NOT NULL CHECK (classifier IN ('logged_out', 'weak_logged_out_signal')),
+  reason TEXT NOT NULL CHECK (reason IN (
+    'explicit_auth_loss',
+    'weak_signal_persisted',
+    'whatsapp_auth_loss_with_disconnect_corroboration'
+  )),
+  confidence TEXT NOT NULL CHECK (confidence IN ('confirmed', 'inferred', 'ambiguous')),
+  observed_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_reason TEXT CHECK (resolved_reason IN ('stable_authenticated_open') OR resolved_reason IS NULL),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_loss_signal_instance_created
+  ON auth_loss_signal(instance, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_auth_loss_signal_instance_classifier
+  ON auth_loss_signal(instance, classifier, created_at);
+`;
+
+function runMigration33(db: DatabaseSync): void {
+  db.exec(MIGRATION_33_AUTH_LOSS_SIGNAL);
 }
 
 function runMigration27(db: DatabaseSync): void {
