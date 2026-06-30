@@ -30,6 +30,7 @@ describe('WorkspaceSweeper', () => {
     const sweeper = new WorkspaceSweeper(false, new Map(), () => false);
     sweeper.start();
     expect(sweeper.timer).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('start() arms a timer and is idempotent; stop() clears it and is idempotent', () => {
@@ -43,6 +44,7 @@ describe('WorkspaceSweeper', () => {
     expect(sweeper.timer).toBeNull();
     sweeper.stop();
     expect(sweeper.timer).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('sweep() is a no-op when sandboxPerChat is false', () => {
