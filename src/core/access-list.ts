@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, isLidJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -179,4 +179,19 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
 
   // Personal JID or other — delegate to extractLocal
   return extractLocal(jid);
+}
+
+/**
+ * Canonical conversation_key for a chat JID, mirroring the live-ingest contract
+ * (src/core/ingest.ts: `!isGroup && isLidJid(chatJid) ? resolvePhoneFromJid : toConversationKey`).
+ * A LID DM resolves to its phone-based key so the same person's history-sync /
+ * chat-sync rows share ONE conversation thread with the phone-keyed live messages
+ * (QR-037 / QR-043). For non-LID JIDs (personal / group / sms) and UNMAPPED LIDs
+ * this is identical to `toConversationKey` — `resolvePhoneFromJid` falls back to the
+ * normalized LID number — so the only behavior change is that a MAPPED LID DM,
+ * previously split under the raw LID number, now keys to the resolved phone.
+ */
+export function canonicalConversationKey(jid: string, db: Database): string {
+  if (isLidJid(jid)) return resolvePhoneFromJid(jid, db);
+  return toConversationKey(jid);
 }
