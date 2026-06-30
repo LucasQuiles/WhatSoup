@@ -206,7 +206,13 @@ export class DurabilityEngine {
          SELECT seq, continuity_candidate_reason, continuity_candidate_source
          FROM inbound_events
          WHERE continuity_candidate_reason IS NOT NULL
-           AND continuity_candidate_source IS NOT NULL`,
+           AND continuity_candidate_source IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM outbound_ops
+             WHERE outbound_ops.source_inbound_seq = inbound_events.seq
+               AND outbound_ops.is_terminal = 1
+           )`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,

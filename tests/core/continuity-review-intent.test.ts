@@ -25,6 +25,12 @@ function reviewIntents(db: Database): ContinuityReviewIntentRow[] {
   `).all() as ContinuityReviewIntentRow[];
 }
 
+function reviewIntentColumns(db: Database): string[] {
+  return (
+    db.raw.prepare("PRAGMA table_info('continuity_review_intents')").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+}
+
 describe('continuity review intent queue', () => {
   let db: Database;
   let engine: DurabilityEngine;
@@ -36,6 +42,25 @@ describe('continuity review intent queue', () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it('stores only review metadata and no chat, message, auth, send, or drain fields', () => {
+    const columns = reviewIntentColumns(db);
+    expect(columns).toEqual(['inbound_seq', 'status', 'reason', 'source', 'created_at', 'completed_at']);
+    expect(columns).not.toEqual(
+      expect.arrayContaining([
+        'chat_jid',
+        'conversation_key',
+        'recipient',
+        'text',
+        'body',
+        'payload',
+        'auth',
+        'token',
+        'send',
+        'drain',
+      ]),
+    );
   });
 
   it('enqueues exactly one unsent human-review intent for a marked stranded inbound', () => {
@@ -76,6 +101,29 @@ describe('continuity review intent queue', () => {
     engine.markInboundFailed(failed);
 
     engine.preConnectRecovery();
+
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 0 });
+    expect(reviewIntents(db)).toEqual([]);
+  });
+
+  it('does not enqueue a marked row if terminal outbound proof appears before review capture', () => {
+    const seq = engine.journalInbound('review-intent-late-terminal', 'review-key-5', 'review-jid-5', 'agent');
+    expect(
+      engine.markContinuityCandidateIfNoTerminalOutbound(
+        seq,
+        'crash_reclaim_no_terminal_outbound',
+        'pre_connect_recovery',
+      ),
+    ).toBe(true);
+    engine.createOutboundOp({
+      conversationKey: 'review-key-5',
+      chatJid: 'review-jid-5',
+      opType: 'text',
+      payload: '{"text":"terminal outbound appeared after marker"}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: seq,
+      isTerminal: true,
+    });
 
     expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 0 });
     expect(reviewIntents(db)).toEqual([]);
