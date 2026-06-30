@@ -14,6 +14,9 @@ import {
   prepareWorkerStaging,
   redactForWorker,
   resolveCheckerPath,
+  resolveSafeExporterPath,
+  run,
+  safeExportScanFindings,
   shouldDispatch,
 } from '../../scripts/qregistry-loop.ts';
 
@@ -179,6 +182,136 @@ describe('qregistry loop helpers', () => {
 
     expect(resolved).toBe('/lab/qRegistry/scripts/qregistry-check.py');
     expect(resolved).not.toContain('/Users/');
+  });
+
+  it('resolves the shared safe exporter without hard-coding a local home path', () => {
+    expect(resolveSafeExporterPath('/repo/WhatSoup', { QREGISTRY_SAFE_EXPORTER: '/opt/q/safe.py' }, () => false)).toBe(
+      '/opt/q/safe.py',
+    );
+
+    const worktreeRoot = '/lab/WhatSoup/.worktrees/qregistry-loop-surface';
+    const resolved = resolveSafeExporterPath(
+      worktreeRoot,
+      {},
+      (candidate) => candidate === '/lab/qRegistry/scripts/qregistry-safe-export.py',
+    );
+
+    expect(resolved).toBe('/lab/qRegistry/scripts/qregistry-safe-export.py');
+    expect(resolved).not.toContain('/Users/');
+  });
+
+  it('detects unsafe identifiers in safe-export candidates before worker dispatch', () => {
+    const groupId = ['120363', '427253', '262639'].join('');
+    const userId = ['1555', '123', '4567'].join('');
+    const lidId = ['abcdef', '123456', '7890'].join('');
+    const groupJid = `${groupId}@${'g.us'}`;
+    const userJid = `${userId}@${'s.whatsapp.net'}`;
+    const lid = `${lidId}@${'lid'}`;
+    const pairingCode = `${'ABCD'}-${'1234'}`;
+    const text = JSON.stringify({
+      groupJid,
+      userJid,
+      lid,
+      authPath: 'instances/ad-bot/auth/creds.json',
+      tokenLine: `token=${lidId}`,
+      pairingCode,
+      authorization: `Bearer ${'token'}1234567890`,
+    });
+
+    expect(safeExportScanFindings(text)).toEqual([
+      'raw_whatsapp_user_or_group_jid',
+      'raw_lid',
+      'bearer_token',
+      'secret_assignment',
+      'auth_creds_path',
+      'pairing_code',
+    ]);
+  });
+
+  it('stages the safe qRegistry export, not the raw register, for worker plans', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qregistry-loop-safe-export-'));
+    writeFileSync(path.join(dir, 'qregistry.ndjson'), `${entry()}\n`, 'utf8');
+    const checker = path.join(dir, 'checker.py');
+    writeFileSync(checker, 'import sys\nprint("checker ok")\nsys.exit(0)\n', 'utf8');
+    const exporter = path.join(dir, 'safe-export.py');
+    writeFileSync(exporter, [
+      'import json, sys',
+      'out = sys.argv[sys.argv.index("--out") + 1]',
+      'register = sys.argv[sys.argv.index("--register") + 1]',
+      'data = {"artifact_type":"qregistry.safe_export.v0","source_register":"qregistry.ndjson","source_rows":1,"entries":[{"id":"QR-900","title":"safe"}]}',
+      'open(out, "w").write(json.dumps(data) + "\\n")',
+      'print("SAFE_EXPORT rows=1 out=" + out)',
+    ].join('\n'), 'utf8');
+
+    const status = run([
+      '--repo',
+      dir,
+      '--checker',
+      checker,
+      '--safe-exporter',
+      exporter,
+      '--no-dispatch',
+      '--force',
+    ], { ...process.env, PYTHON: 'python3' });
+
+    expect(status).toBe(0);
+    const runsRoot = path.join(dir, 'raw', 'qregistry-loop', 'runs');
+    const runName = readFileSync(path.join(dir, 'raw', 'qregistry-loop', 'register.sha256'), 'utf8').trim();
+    expect(runName).toMatch(/^[a-f0-9]{64}$/);
+    const runDirs = readFileSync(path.join(dir, 'raw', 'qregistry-loop', 'last-run.txt'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    expect(runDirs).toHaveLength(1);
+    const runDir = path.join(runsRoot, runDirs[0]!);
+    const summary = JSON.parse(readFileSync(path.join(runDir, 'summary.json'), 'utf8')) as {
+      safeExport?: { status?: string; path?: string };
+    };
+    expect(summary.safeExport?.status).toBe('ok');
+    expect(path.basename(summary.safeExport?.path ?? '')).toBe('qregistry.safe-export.json');
+    const staged = readFileSync(path.join(runDir, 'staged-files.json'), 'utf8') as unknown as string;
+    expect(staged).toContain('qregistry.safe-export.json');
+    expect(staged).not.toContain('qregistry.ndjson');
+  });
+
+  it('fails closed before dispatch when the safe export contains forbidden patterns', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qregistry-loop-bad-safe-export-'));
+    writeFileSync(path.join(dir, 'qregistry.ndjson'), `${entry()}\n`, 'utf8');
+    const checker = path.join(dir, 'checker.py');
+    writeFileSync(checker, 'import sys\nprint("checker ok")\nsys.exit(0)\n', 'utf8');
+    const exporter = path.join(dir, 'bad-safe-export.py');
+    writeFileSync(exporter, [
+      'import json, sys',
+      'out = sys.argv[sys.argv.index("--out") + 1]',
+      'jid = "".join(["120363", "427253", "262639"]) + "@" + "g.us"',
+      'open(out, "w").write(json.dumps({"artifact_type":"qregistry.safe_export.v0","title":jid}) + "\\n")',
+      'print("SAFE_EXPORT rows=1 out=" + out)',
+    ].join('\n'), 'utf8');
+
+    const status = run([
+      '--repo',
+      dir,
+      '--checker',
+      checker,
+      '--safe-exporter',
+      exporter,
+      '--force',
+    ], { ...process.env, PYTHON: 'python3', PATH: '/usr/bin:/bin' });
+
+    expect(status).toBe(2);
+    const runDirs = readFileSync(path.join(dir, 'raw', 'qregistry-loop', 'last-run.txt'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    const runDir = path.join(dir, 'raw', 'qregistry-loop', 'runs', runDirs[0]!);
+    const summary = JSON.parse(readFileSync(path.join(runDir, 'summary.json'), 'utf8')) as {
+      reason?: string;
+      dispatch?: boolean;
+      safeExport?: { findings?: string[] };
+    };
+    expect(summary.reason).toBe('safe-export-scan-failed');
+    expect(summary.dispatch).toBe(false);
+    expect(summary.safeExport?.findings).toEqual(['raw_whatsapp_user_or_group_jid']);
   });
 
   it('uses an explicit child-process environment allowlist', () => {
