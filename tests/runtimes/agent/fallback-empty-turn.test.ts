@@ -242,6 +242,37 @@ describe('zero-text fallback turn signal', () => {
     );
   });
 
+  it('per-chat empty fallback result is not marked as a runtime-fault continuity candidate', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    const markContinuityCandidateIfNoTerminalOutbound = vi.fn();
+    const completeTurn = vi.fn();
+    (runtime as unknown as {
+      durability: {
+        completeTurn: typeof completeTurn;
+        markContinuityCandidateIfNoTerminalOutbound: typeof markContinuityCandidateIfNoTerminalOutbound;
+      };
+    }).durability = { completeTurn, markContinuityCandidateIfNoTerminalOutbound };
+    v(runtime).activateProviderFallback(null);
+
+    const queue = makeFakeQueue();
+    v(runtime).handleEventWithContext(
+      { type: 'result', text: null },
+      queue,
+      null,
+      'conv',
+      1,
+      'mapkey',
+    );
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('no reply'),
+    );
+    expect(markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+  });
+
   it('per-chat path, fallback active, NON-empty result: increments served only, no alert, no notice', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
