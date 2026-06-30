@@ -2175,6 +2175,7 @@ export class AgentRuntime implements Runtime {
             this.cleanupSharedCrashTurnState();
             // Mark inbound event failed so it doesn't stay stuck in processing
             if (this.durability && this.currentInboundSeq !== undefined) {
+              this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
               this.replyGuarantee?.disarm(this.currentInboundSeq);
               this.durability.markInboundFailed(this.currentInboundSeq);
               this.currentInboundSeq = undefined;
@@ -2478,6 +2479,7 @@ export class AgentRuntime implements Runtime {
           `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
         );
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -2498,6 +2500,7 @@ export class AgentRuntime implements Runtime {
         );
         // Mark inbound event as failed so it doesn't stay stuck in 'processing'
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -3064,6 +3067,7 @@ export class AgentRuntime implements Runtime {
         this.pendingTurnActorJid.delete(mapKey);
         if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
+          this.markRuntimeFaultContinuityCandidate(failedSeq);
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq);
         }
@@ -3195,6 +3199,19 @@ export class AgentRuntime implements Runtime {
     if (inboundSeq === undefined) return;
     this.durability?.completeInbound(inboundSeq, terminalReason);
     this.replyGuarantee?.disarm(inboundSeq);
+  }
+
+  private markRuntimeFaultContinuityCandidate(inboundSeq: number | undefined): void {
+    if (inboundSeq === undefined || !this.durability || !this.replyGuarantee?.isArmed(inboundSeq)) return;
+    try {
+      this.durability.markContinuityCandidateIfNoTerminalOutbound(
+        inboundSeq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      );
+    } catch (err) {
+      log.warn({ err, inboundSeq }, 'failed to mark runtime-fault continuity candidate');
+    }
   }
 
   /**
@@ -7096,6 +7113,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
+            this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
             this.replyGuarantee?.disarm(this.currentInboundSeq);
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
@@ -7153,6 +7171,7 @@ export class AgentRuntime implements Runtime {
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
     if (this.durability && inboundSeq !== undefined) {
+      this.markRuntimeFaultContinuityCandidate(inboundSeq);
       this.replyGuarantee?.disarm(inboundSeq);
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
