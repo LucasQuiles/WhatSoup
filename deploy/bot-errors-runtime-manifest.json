@@ -83,7 +83,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "54005e76acf3876772e53dd38e6d000df4c46938de210c683760697197d77bc4",
+      "sha256": "3fe939866829ae41460833e4c6e1bd1f8738fdd128b808d6602d53c59975c209",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -96,7 +96,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "de61c690343d334b508d2852bb5dca4558f2f26796bf355af3d582a1c6bba50a",
+      "sha256": "4d1bf30c2a9bf289ed93b9325cb1bb3fb007f85a518e9508e27134d3f480a8cc",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
