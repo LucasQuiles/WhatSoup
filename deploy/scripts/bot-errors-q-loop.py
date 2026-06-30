@@ -89,16 +89,20 @@ def target_kind(target: str) -> str:
     return "unknown"
 
 
-def q_loop_target_coverage(intended_target: str) -> dict[str, Any]:
+def q_loop_target_coverage(intended_target: str, bridged_targets: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
     bot_errors_target = str(BOT_ERRORS_JID or "").strip()
     intended = str(intended_target or "").strip()
     targets_equal = bool(bot_errors_target and intended and bot_errors_target == intended)
+    bridge_targets = {str(target or "").strip() for target in (bridged_targets or [])}
+    route_bridge_present = bool(intended and intended in bridge_targets)
     if not bot_errors_target:
         coverage = "missing_bot_errors_target"
     elif not intended:
         coverage = "missing_intended_target"
     elif targets_equal:
         coverage = "covered"
+    elif route_bridge_present:
+        coverage = "bridged"
     else:
         coverage = "routing_mismatch"
     return {
@@ -107,6 +111,7 @@ def q_loop_target_coverage(intended_target: str) -> dict[str, Any]:
         "intended_target_present": bool(intended),
         "intended_target_kind": target_kind(intended),
         "targets_equal": targets_equal,
+        "route_bridge_present": route_bridge_present,
         "coverage": coverage,
     }
 

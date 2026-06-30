@@ -156,11 +156,53 @@ print(json.dumps(m.q_loop_target_coverage(intended_target), sort_keys=True))
       coverage: 'routing_mismatch',
       intended_target_kind: 'group',
       intended_target_present: true,
+      route_bridge_present: false,
       targets_equal: false,
     });
     expect(result).not.toContain('@g.us');
     expect(result).not.toContain('11111111');
     expect(result).not.toContain('22222222');
+  });
+
+  it('reports intended target as bridged only when an explicit bridge covers it', () => {
+    const result = python(`${importModulePrelude()}
+import json
+bot_errors_target = ("1" * 8) + "@g.us"
+intended_target = ("2" * 8) + "@g.us"
+unrelated_target = ("3" * 8) + "@g.us"
+m.BOT_ERRORS_JID = bot_errors_target
+print(json.dumps({
+  "covered": m.q_loop_target_coverage(intended_target, bridged_targets=[intended_target]),
+  "uncovered": m.q_loop_target_coverage(intended_target, bridged_targets=[unrelated_target]),
+}, sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      covered: {
+        coverage: string;
+        route_bridge_present: boolean;
+        targets_equal: boolean;
+      };
+      uncovered: {
+        coverage: string;
+        route_bridge_present: boolean;
+        targets_equal: boolean;
+      };
+    };
+
+    expect(diagnostic.covered).toMatchObject({
+      coverage: 'bridged',
+      route_bridge_present: true,
+      targets_equal: false,
+    });
+    expect(diagnostic.uncovered).toMatchObject({
+      coverage: 'routing_mismatch',
+      route_bridge_present: false,
+      targets_equal: false,
+    });
+    expect(result).not.toContain('@g.us');
+    expect(result).not.toContain('11111111');
+    expect(result).not.toContain('22222222');
+    expect(result).not.toContain('33333333');
   });
 
   it('diagnoses stale awaiting-Q behavior even when heartbeat phase is monitoring', () => {
