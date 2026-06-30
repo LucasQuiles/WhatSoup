@@ -132,4 +132,60 @@ print(state["phase"])
 `);
     expect(result).toBe('monitoring');
   });
+
+  it('reports collaboration target coverage without exposing raw group ids', () => {
+    const result = python(`${importModulePrelude()}
+import json
+bot_errors_target = ("1" * 8) + "@g.us"
+intended_target = ("2" * 8) + "@g.us"
+m.BOT_ERRORS_JID = bot_errors_target
+print(json.dumps(m.q_loop_target_coverage(intended_target), sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      bot_errors_target_kind: string;
+      bot_errors_target_present: boolean;
+      coverage: string;
+      intended_target_kind: string;
+      intended_target_present: boolean;
+      targets_equal: boolean;
+    };
+
+    expect(diagnostic).toEqual({
+      bot_errors_target_kind: 'group',
+      bot_errors_target_present: true,
+      coverage: 'routing_mismatch',
+      intended_target_kind: 'group',
+      intended_target_present: true,
+      targets_equal: false,
+    });
+    expect(result).not.toContain('@g.us');
+    expect(result).not.toContain('11111111');
+    expect(result).not.toContain('22222222');
+  });
+
+  it('diagnoses stale awaiting-Q behavior even when heartbeat phase is monitoring', () => {
+    const result = python(`${importModulePrelude()}
+import json
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 1000
+state["last_q_message_at"] = 0
+print(json.dumps(m.q_response_wait_diagnostic(state, current=1000 + (25 * 60)), sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      awaiting_q: boolean;
+      awaiting_q_age_seconds: number;
+      last_q_message_age_seconds: number | null;
+      phase: string;
+      status: string;
+    };
+
+    expect(diagnostic).toEqual({
+      awaiting_q: true,
+      awaiting_q_age_seconds: 1500,
+      last_q_message_age_seconds: null,
+      phase: 'monitoring',
+      status: 'stale_awaiting_q',
+    });
+  });
 });
