@@ -133,6 +133,7 @@ type DurabilityStatements = {
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
+  enqueueContinuityReviewIntents: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -199,6 +200,13 @@ export class DurabilityEngine {
              continuity_candidate_source = ?,
              continuity_candidate_marked_at = COALESCE(continuity_candidate_marked_at, datetime('now'))
          WHERE seq = ? AND continuity_candidate_reason IS NULL`,
+      ),
+      enqueueContinuityReviewIntents: prepare(
+        `INSERT OR IGNORE INTO continuity_review_intents (inbound_seq, reason, source)
+         SELECT seq, continuity_candidate_reason, continuity_candidate_source
+         FROM inbound_events
+         WHERE continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_source IS NOT NULL`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -400,6 +408,10 @@ export class DurabilityEngine {
     const terminalOp = this.statements.getTerminalOutboundForInbound.get(seq) as { id: number } | undefined;
     if (terminalOp) return false;
     return this.markContinuityCandidate(seq, reason, source);
+  }
+
+  enqueueContinuityReviewIntents(): { inserted: number } {
+    return { inserted: Number(this.statements.enqueueContinuityReviewIntents.run().changes) };
   }
 
   markInboundSkipped(seq: number, reason: string): void {

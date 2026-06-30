@@ -731,6 +731,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [31, runMigration31],
   [32, runMigration32],
   [33, runMigration33],
+  [34, runMigration34],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -847,6 +848,23 @@ function runMigration33(db: DatabaseSync): void {
   if (!names.has('continuity_candidate_marked_at')) {
     db.exec('ALTER TABLE inbound_events ADD COLUMN continuity_candidate_marked_at TEXT');
   }
+}
+
+function runMigration34(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS continuity_review_intents (
+      inbound_seq INTEGER PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK (status IN ('pending_review', 'dismissed', 'resolved')),
+      reason TEXT NOT NULL
+        CHECK (reason IN ('crash_reclaim_no_terminal_outbound', 'runtime_fault_no_terminal_outbound')),
+      source TEXT NOT NULL
+        CHECK (source IN ('pre_connect_recovery', 'runtime_fault_disarm')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (inbound_seq) REFERENCES inbound_events(seq)
+    )
+  `);
 }
 
 function runMigration27(db: DatabaseSync): void {

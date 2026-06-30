@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 33 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 34 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1092,6 +1092,47 @@ describe('scheduled_messages send-start migration contract', () => {
         'raw-runtime-string',
         'unknown-source',
       );
+    }).toThrow();
+
+    db.close();
+  });
+});
+
+describe('continuity review intent migration contract', () => {
+  it('migration 34 creates an inbound-seq keyed human review intent table', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 34')
+      .get() as { version: number } | undefined;
+    const cols = (
+      db.raw.prepare("PRAGMA table_info('continuity_review_intents')").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+
+    expect(version?.version).toBe(34);
+    expect(cols).toEqual(['inbound_seq', 'status', 'reason', 'source', 'created_at', 'completed_at']);
+    db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      'migration-34-marker',
+      'migration-34-conv',
+      'migration-34-jid',
+      'crash_reclaim_no_terminal_outbound',
+      'pre_connect_recovery',
+    );
+    db.raw.prepare(`
+      INSERT INTO continuity_review_intents (inbound_seq, reason, source)
+      VALUES (1, ?, ?)
+    `).run('crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
+
+    expect(() => {
+      db.raw.prepare(`
+        INSERT INTO continuity_review_intents (inbound_seq, reason, source)
+        VALUES (1, ?, ?)
+      `).run('raw-runtime-string', 'unknown-source');
     }).toThrow();
 
     db.close();
