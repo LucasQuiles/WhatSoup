@@ -207,6 +207,7 @@ export class DurabilityEngine {
          FROM inbound_events
          WHERE continuity_candidate_reason IS NOT NULL
            AND continuity_candidate_source IS NOT NULL
+           AND continuity_candidate_marked_at IS NOT NULL
            AND NOT EXISTS (
              SELECT 1
              FROM outbound_ops

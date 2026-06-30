@@ -128,4 +128,27 @@ describe('continuity review intent queue', () => {
     expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 0 });
     expect(reviewIntents(db)).toEqual([]);
   });
+
+  it('does not enqueue rows with forged marker enums but no marker timestamp', () => {
+    db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id,
+        conversation_key,
+        chat_jid,
+        processing_status,
+        continuity_candidate_reason,
+        continuity_candidate_source
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      'review-intent-forged-marker',
+      'review-key-6',
+      'review-jid-6',
+      'failed',
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 0 });
+    expect(reviewIntents(db)).toEqual([]);
+  });
 });
