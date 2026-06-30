@@ -66,3 +66,38 @@ describe('sse.ts EOF trailing-frame flush', () => {
     expect(await collect(stream)).toEqual([]);
   });
 });
+
+describe('sse.ts unbounded-buffer cap (QR-064)', () => {
+  // A compromised/malfunctioning provider streaming one unterminated `data:`
+  // line (no '\n') grows the parser's partial-line buffer unbounded → OOM. The
+  // parser must abort once the un-newlined buffer exceeds MAX_SSE_BUF, mirroring
+  // the subprocess-stdout cap in session.ts.
+  const OVER = 1024 * 1024 + 1; // > MAX_SSE_BUF (1 MiB)
+
+  it('throws when a single no-newline line exceeds the cap', async () => {
+    const stream = makeStream([`data: ${'A'.repeat(OVER)}`]);
+    await expect(collect(stream)).rejects.toThrow(/SSE|buffer|exceed/i);
+  });
+
+  it('throws when a no-newline line accumulates past the cap across chunks', async () => {
+    const half = 'A'.repeat(600 * 1024); // two chunks, no newline → ~1.2 MiB
+    const stream = makeStream([`data: ${half}`, half]);
+    await expect(collect(stream)).rejects.toThrow(/SSE|buffer|exceed/i);
+  });
+
+  it('ALLOWS a large but under-cap newline-terminated line', async () => {
+    const big = 'A'.repeat(1024 * 1024 - 1024); // < cap, then a newline flushes it
+    const stream = makeStream([`data: ${big}\n`]);
+    expect(await collect(stream)).toEqual([big]);
+  });
+
+  it('ALLOWS many small lines whose TOTAL exceeds the cap (per-line buffer stays small)', async () => {
+    // 200k lines of `data: x\n` ≈ 1.4 MiB total, but each is flushed on its
+    // newline so the retained buffer never approaches the cap → no throw.
+    const n = 200_000;
+    const stream = makeStream(['data: x\n'.repeat(n)]);
+    const out = await collect(stream);
+    expect(out.length).toBe(n);
+    expect(out[0]).toBe('x');
+  });
+});
