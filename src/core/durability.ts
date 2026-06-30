@@ -85,6 +85,13 @@ export interface ContinuityReviewIntentSafeRow {
   terminalOutboundExists: boolean;
 }
 
+export interface ContinuityReviewIntentProofSafeRow extends ContinuityReviewIntentSafeRow {
+  actionAudit: {
+    actorRecorded: boolean;
+    reasonRecorded: boolean;
+  };
+}
+
 export interface ContinuityReviewIntentActionParams {
   actor: string;
   reason: string;
@@ -155,6 +162,7 @@ type DurabilityStatements = {
   markContinuityCandidate: PreparedStatement;
   enqueueContinuityReviewIntents: PreparedStatement;
   listContinuityReviewIntentsSafe: PreparedStatement;
+  listContinuityReviewIntentProofsSafe: PreparedStatement;
   dismissContinuityReviewIntent: PreparedStatement;
   resolveContinuityReviewIntent: PreparedStatement;
   markInboundSkipped: PreparedStatement;
@@ -254,6 +262,25 @@ export class DurabilityEngine {
            ) AS terminal_outbound_exists
          FROM continuity_review_intents
          WHERE continuity_review_intents.status = 'pending_review'
+         ORDER BY continuity_review_intents.inbound_seq ASC`,
+      ),
+      listContinuityReviewIntentProofsSafe: prepare(
+        `SELECT
+           continuity_review_intents.inbound_seq,
+           continuity_review_intents.status,
+           continuity_review_intents.reason,
+           continuity_review_intents.source,
+           continuity_review_intents.created_at,
+           continuity_review_intents.completed_at,
+           (continuity_review_intents.completed_by IS NOT NULL) AS actor_recorded,
+           (continuity_review_intents.completion_reason IS NOT NULL) AS reason_recorded,
+           EXISTS (
+             SELECT 1
+             FROM outbound_ops
+             WHERE outbound_ops.source_inbound_seq = continuity_review_intents.inbound_seq
+               AND outbound_ops.is_terminal = 1
+           ) AS terminal_outbound_exists
+         FROM continuity_review_intents
          ORDER BY continuity_review_intents.inbound_seq ASC`,
       ),
       dismissContinuityReviewIntent: prepare(
@@ -513,6 +540,33 @@ export class DurabilityEngine {
       createdAt: row.created_at,
       completedAt: row.completed_at,
       terminalOutboundExists: row.terminal_outbound_exists === 1,
+    }));
+  }
+
+  listContinuityReviewIntentProofsSafe(): ContinuityReviewIntentProofSafeRow[] {
+    type DbRow = {
+      inbound_seq: number;
+      status: string;
+      reason: ContinuityCandidateReason;
+      source: ContinuityCandidateSource;
+      created_at: string;
+      completed_at: string | null;
+      actor_recorded: number;
+      reason_recorded: number;
+      terminal_outbound_exists: number;
+    };
+    return (this.statements.listContinuityReviewIntentProofsSafe.all() as DbRow[]).map((row) => ({
+      inboundSeq: row.inbound_seq,
+      status: row.status,
+      reason: row.reason,
+      source: row.source,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+      terminalOutboundExists: row.terminal_outbound_exists === 1,
+      actionAudit: {
+        actorRecorded: row.actor_recorded === 1,
+        reasonRecorded: row.reason_recorded === 1,
+      },
     }));
   }
 

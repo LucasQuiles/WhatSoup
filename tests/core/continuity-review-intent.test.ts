@@ -310,4 +310,92 @@ describe('continuity review intent queue', () => {
       completion_reason: 'operator rejected duplicate candidate',
     });
   });
+
+  it('exports safe proof metadata for pending, resolved, and dismissed review intents', () => {
+    const pending = engine.journalInbound('review-intent-proof-pending', 'review-key-10', 'review-jid-10', 'agent');
+    const resolved = engine.journalInbound('review-intent-proof-resolved', 'review-key-11', 'review-jid-11', 'agent');
+    const dismissed = engine.journalInbound('review-intent-proof-dismissed', 'review-key-12', 'review-jid-12', 'agent');
+    for (const seq of [pending, resolved, dismissed]) {
+      expect(
+        engine.markContinuityCandidateIfNoTerminalOutbound(
+          seq,
+          'runtime_fault_no_terminal_outbound',
+          'runtime_fault_disarm',
+        ),
+      ).toBe(true);
+    }
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 3 });
+
+    engine.createOutboundOp({
+      conversationKey: 'review-key-11',
+      chatJid: 'review-jid-11',
+      opType: 'text',
+      payload: '{"text":"resolved terminal proof body"}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: resolved,
+      isTerminal: true,
+    });
+    expect(engine.resolveContinuityReviewIntent(resolved, {
+      actor: 'operator-secret-id',
+      reason: 'contains review-key-11 and resolved terminal proof body',
+    })).toEqual({ updated: true, terminalOutboundExists: true });
+    expect(engine.dismissContinuityReviewIntent(dismissed, {
+      actor: 'operator-secret-id',
+      reason: 'contains review-jid-12 and dismissal explanation',
+    })).toEqual({ updated: true });
+
+    const proof = engine.listContinuityReviewIntentProofsSafe();
+
+    expect(proof).toEqual([
+      {
+        inboundSeq: pending,
+        status: 'pending_review',
+        reason: 'runtime_fault_no_terminal_outbound',
+        source: 'runtime_fault_disarm',
+        createdAt: expect.any(String),
+        completedAt: null,
+        terminalOutboundExists: false,
+        actionAudit: {
+          actorRecorded: false,
+          reasonRecorded: false,
+        },
+      },
+      {
+        inboundSeq: resolved,
+        status: 'resolved',
+        reason: 'runtime_fault_no_terminal_outbound',
+        source: 'runtime_fault_disarm',
+        createdAt: expect.any(String),
+        completedAt: expect.any(String),
+        terminalOutboundExists: true,
+        actionAudit: {
+          actorRecorded: true,
+          reasonRecorded: true,
+        },
+      },
+      {
+        inboundSeq: dismissed,
+        status: 'dismissed',
+        reason: 'runtime_fault_no_terminal_outbound',
+        source: 'runtime_fault_disarm',
+        createdAt: expect.any(String),
+        completedAt: expect.any(String),
+        terminalOutboundExists: false,
+        actionAudit: {
+          actorRecorded: true,
+          reasonRecorded: true,
+        },
+      },
+    ]);
+    const serialized = JSON.stringify(proof);
+    expect(serialized).not.toContain('review-key-10');
+    expect(serialized).not.toContain('review-key-11');
+    expect(serialized).not.toContain('review-key-12');
+    expect(serialized).not.toContain('review-jid-10');
+    expect(serialized).not.toContain('review-jid-11');
+    expect(serialized).not.toContain('review-jid-12');
+    expect(serialized).not.toContain('resolved terminal proof body');
+    expect(serialized).not.toContain('dismissal explanation');
+    expect(serialized).not.toContain('operator-secret-id');
+  });
 });
