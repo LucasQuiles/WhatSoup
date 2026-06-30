@@ -101,6 +101,19 @@ describe('public surface drift check', () => {
     expect(registry).toContain('continuity review intents');
   });
 
+  it('documents the continuity review proof-pack command as an operator-facing npm surface', () => {
+    const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const registry = readFileSync(path.join(repoRoot, 'docs/public-surface.md'), 'utf8');
+
+    expect(packageJson.scripts?.['continuity:review-proof-pack']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/continuity-review-proof-pack.ts',
+    );
+    expect(registry).toContain('`cli:npm.continuity-review-proof-pack` | `npm run continuity:review-proof-pack`');
+    expect(registry).toContain('manifest-backed continuity review proof pack');
+  });
+
   it('flags a missing source path with row context', () => {
     const { root, registryPath } = makeFakeRepo();
     const registry = happyRegistry.replace(
