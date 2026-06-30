@@ -88,10 +88,7 @@ export function createAtomicCredsSaver(authDir: string, getCreds: () => unknown)
   const credsPath = join(authDir, 'creds.json');
 
   return () => {
-    const next = tail.then(
-      () => writeAtomicBaileysJson(credsPath, getCreds()),
-      () => writeAtomicBaileysJson(credsPath, getCreds()),
-    );
+    const next = tail.then(() => writeAtomicBaileysJson(credsPath, getCreds()));
     tail = next.then(() => undefined, () => undefined);
     return next;
   };
