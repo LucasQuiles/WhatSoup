@@ -8581,6 +8581,7 @@ describe('AgentRuntime', () => {
       state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
       expect(pending!.answersCollected[0]).toBeUndefined();
       expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
     });
   });
 
