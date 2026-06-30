@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
 import { assertNoSecretLike } from './artifact-redaction.ts';
 
 const ARTIFACT_TYPE = 'disposable-client-canary';
@@ -38,6 +41,11 @@ export interface DisposableClientCanaryArtifact {
   raw_identifier_scan: 'pass' | 'fail';
   message_content_scan: 'pass' | 'fail';
   kill_reason: string | null;
+}
+
+interface ParsedArgs {
+  artifact: string;
+  help: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -168,4 +176,74 @@ export function validateDisposableClientCanaryArtifact(
     message_content_scan: messageContentScan,
     kill_reason: killReason,
   };
+}
+
+function usage(): string {
+  return [
+    'Usage: disposable-client-canary-artifact.ts --artifact artifact.json',
+    '',
+    'Validates a local no-send disposable-client canary proof artifact.',
+    'This command does not open a browser, log into WhatsApp, send messages, or touch auth state.',
+  ].join('\n');
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  let artifact = '';
+  let help = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--help' || arg === '-h') {
+      help = true;
+    } else if (arg === '--artifact') {
+      const value = argv[index + 1];
+      if (!value) throw new Error('--artifact requires a path');
+      artifact = value;
+      index += 1;
+    } else {
+      throw new Error(`unknown argument: ${String(arg)}`);
+    }
+  }
+  if (!help && !artifact) throw new Error('--artifact is required');
+  return { artifact, help };
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    assertNoSecretLike(message, 'canary artifact error');
+    return message;
+  } catch {
+    return 'redaction_violation: canary artifact contains secret-like values';
+  }
+}
+
+export function run(argv: string[] = process.argv.slice(2)): DisposableClientCanaryArtifact | null {
+  try {
+    const args = parseArgs(argv);
+    if (args.help) {
+      console.log(usage());
+      return null;
+    }
+    const raw = readFileSync(args.artifact, 'utf8');
+    const parsed = JSON.parse(raw);
+    const artifact = validateDisposableClientCanaryArtifact(parsed);
+    const diagnostic = [
+      'DISPOSABLE_CLIENT_CANARY_ARTIFACT',
+      'status=pass',
+      `artifact_type=${artifact.artifact_type}`,
+      `client_family=${artifact.client_family}`,
+      `linked_duration_seconds=${artifact.linked_duration_seconds}`,
+    ].join(' ');
+    assertNoSecretLike(diagnostic, 'canary artifact diagnostic');
+    console.log(diagnostic);
+    return artifact;
+  } catch (error) {
+    console.error(`disposable client canary artifact failed: ${safeErrorMessage(error)}`);
+    process.exitCode = 1;
+    return null;
+  }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  run();
 }

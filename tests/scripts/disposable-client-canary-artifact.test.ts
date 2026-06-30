@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  run,
   validateDisposableClientCanaryArtifact,
 } from '../../scripts/disposable-client-canary-artifact.ts';
+
+const tempRoots: string[] = [];
 
 function validArtifact(): Record<string, unknown> {
   return {
@@ -35,6 +41,20 @@ function phoneLikeNumber(): string {
 function rawLid(): string {
   return ['abcde', '1234567890', 'abcde', '@lid'].join('');
 }
+
+function makeTempArtifact(artifact: Record<string, unknown>): string {
+  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-canary-artifact-'));
+  tempRoots.push(root);
+  const file = path.join(root, 'artifact.json');
+  writeFileSync(file, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+  return file;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  process.exitCode = undefined;
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('disposable client canary artifact contract', () => {
   it('accepts the no-send disposable canary success artifact shape', () => {
@@ -104,5 +124,47 @@ describe('disposable client canary artifact contract', () => {
       ...validArtifact(),
       message_body: ['hello ', 'from canary'].join(''),
     })).toThrow(/message content/);
+  });
+
+  it('validates an artifact file from the command surface with safe diagnostics', () => {
+    const artifact = makeTempArtifact(validArtifact());
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const result = run(['--artifact', artifact]);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(result).toMatchObject({ artifact_type: 'disposable-client-canary' });
+    expect(stdout).toHaveBeenCalledWith(
+      'DISPOSABLE_CLIENT_CANARY_ARTIFACT status=pass artifact_type=disposable-client-canary client_family=whatsapp-web-js linked_duration_seconds=60',
+    );
+  });
+
+  it('fails closed without echoing raw artifact content when the file is unsafe', () => {
+    const raw = rawGroupJid();
+    const artifact = makeTempArtifact({
+      ...validArtifact(),
+      diagnostic: raw,
+    });
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const result = run(['--artifact', artifact]);
+
+    expect(result).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(stdout).not.toHaveBeenCalled();
+    const errorText = stderr.mock.calls.flat().join('\n');
+    expect(errorText).toContain('redaction_violation');
+    expect(errorText).not.toContain(raw);
+  });
+
+  it('prints usage without requiring a live artifact path', () => {
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const result = run(['--help']);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(result).toBeNull();
+    expect(stdout).toHaveBeenCalledWith(expect.stringContaining('--artifact'));
   });
 });
