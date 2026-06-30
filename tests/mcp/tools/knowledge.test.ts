@@ -160,7 +160,7 @@ vi.mock('../../../src/logger.ts', () => ({
   }),
 }));
 
-import { registerKnowledgeTools } from '../../../src/mcp/tools/knowledge.ts';
+import { createPineconeWatchSearch, registerKnowledgeTools } from '../../../src/mcp/tools/knowledge.ts';
 
 beforeEach(() => {
   PineconeMock.mockClear();
@@ -207,6 +207,256 @@ function registryWithKnowledgeTool(indexes: string[]): ToolRegistry {
 function parseRegistryText(result: Awaited<ReturnType<ToolRegistry['call']>>): unknown {
   return JSON.parse(result.content[0]!.text);
 }
+
+describe('createPineconeWatchSearch - registration gating', () => {
+  it('returns null when the allowed-index list is empty', () => {
+    const watchSearch = createPineconeWatchSearch([]);
+
+    expect(watchSearch).toBeNull();
+    expect(PineconeMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null when the Pinecone API key env is missing', () => {
+    delete process.env.TEST_PINECONE_API_KEY;
+
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+
+    expect(watchSearch).toBeNull();
+    expect(PineconeMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null when Pinecone client construction throws', () => {
+    PineconeMock.mockImplementationOnce(() => {
+      throw new Error('init failed');
+    });
+
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+
+    expect(watchSearch).toBeNull();
+    expect(PineconeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('filters out unknown index names', () => {
+    const watchSearch = createPineconeWatchSearch(['index-a', 'unknown-index']);
+
+    expect(watchSearch?.allowedIndexes).toEqual(['index-a']);
+  });
+
+  it('returns null when all requested indexes are unknown', () => {
+    const watchSearch = createPineconeWatchSearch(['unknown-only']);
+
+    expect(watchSearch).toBeNull();
+    expect(PineconeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createPineconeWatchSearch - records search', () => {
+  it('returns only scores from integrated-record searches', async () => {
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'doc-a', _score: 0.8, fields: { text: 'must not cross boundary' } },
+          { _id: 'doc-b', _score: 'not-a-number', fields: { text: 'ignored score' } },
+          { _id: 'doc-c', _score: 0.2, fields: { text: 'also hidden' } },
+        ],
+      },
+    });
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+    expect(watchSearch).not.toBeNull();
+
+    const result = await watchSearch!.search({
+      index: 'index-a',
+      namespace: 'ns_a',
+      query: 'watch query',
+      topK: 3,
+    });
+
+    expect(searchRecordsMock).toHaveBeenCalledWith({
+      namespace: 'ns_a',
+      query: { topK: 3, inputs: { text: 'watch query' } },
+      fields: [],
+    });
+    expect(result).toEqual({ matches: [{ score: 0.8 }, { score: 0.2 }] });
+  });
+
+  it('throws before querying when the runtime index is not a configured profile', async () => {
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'unknown-index',
+      namespace: 'ns_a',
+      query: 'watch query',
+      topK: 3,
+    })).rejects.toThrow('index "unknown-index" is not an allowlisted knowledge profile');
+    expect(searchRecordsMock).not.toHaveBeenCalled();
+  });
+
+  it('throws a project-guard error before querying records', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockResolvedValueOnce({
+      indexes: [{ name: 'index-a', host: 'index-a-wrong-project.svc.pinecone.io' }],
+    });
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'index-a',
+      namespace: 'ns_a',
+      query: 'watch query',
+      topK: 3,
+    })).rejects.toThrow('Index "index-a" is in the wrong Pinecone project for this instance.');
+    expect(searchRecordsMock).not.toHaveBeenCalled();
+  });
+
+  it('throws a missing-index project-guard error before querying records', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockResolvedValueOnce({ indexes: [] });
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'index-a',
+      namespace: 'ns_a',
+      query: 'watch query',
+      topK: 3,
+    })).rejects.toThrow('Index "index-a" was not found for the configured Pinecone key.');
+    expect(searchRecordsMock).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty score list when a records response has no hits', async () => {
+    searchRecordsMock.mockResolvedValueOnce({ result: {} });
+    const watchSearch = createPineconeWatchSearch(['index-a']);
+    expect(watchSearch).not.toBeNull();
+
+    const result = await watchSearch!.search({
+      index: 'index-a',
+      namespace: 'ns_a',
+      query: 'watch query',
+      topK: 3,
+    });
+
+    expect(result).toEqual({ matches: [] });
+    expect(searchRecordsMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createPineconeWatchSearch - vector search', () => {
+  it('embeds vector queries and returns only scores from Pinecone matches', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [[0.4, 0.5]] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    namespaceQueryMock.mockResolvedValueOnce({
+      matches: [
+        { id: 'vec-a', score: 0.95, metadata: { text: 'must not cross boundary' } },
+        { id: 'vec-b', score: undefined, metadata: { text: 'ignored score' } },
+        { id: 'vec-c', score: 0.4, metadata: { text: 'also hidden' } },
+      ],
+    });
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    const result = await watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('http://embed.local/embed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: ['vector watch'], input_type: 'query' }),
+    });
+    expect(namespaceQueryMock).toHaveBeenCalledWith('vec_a', {
+      topK: 2,
+      vector: [0.4, 0.5],
+      includeMetadata: false,
+    });
+    expect(result).toEqual({ matches: [{ score: 0.95 }, { score: 0.4 }] });
+  });
+
+  it('throws when a vector watch profile has no embed URL', async () => {
+    (configStub.memory.pinecone.knowledgeProfiles['vector-index'] as { embedUrl?: string }).embedUrl = undefined;
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    })).rejects.toThrow('vector index "vector-index" missing embedUrl');
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('throws when the embed service returns a non-OK response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    })).rejects.toThrow('embed service HTTP 503');
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('throws when the embed service returns no vectors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [] }),
+    }));
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    })).rejects.toThrow('embed service returned no vectors');
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('propagates embed transport errors without querying Pinecone', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('embed refused')));
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    await expect(watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    })).rejects.toThrow('embed refused');
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty score list when a vector response has no matches', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [[0.4, 0.5]] }),
+    }));
+    namespaceQueryMock.mockResolvedValueOnce({});
+    const watchSearch = createPineconeWatchSearch(['vector-index']);
+    expect(watchSearch).not.toBeNull();
+
+    const result = await watchSearch!.search({
+      index: 'vector-index',
+      namespace: 'vec_a',
+      query: 'vector watch',
+      topK: 2,
+    });
+
+    expect(result).toEqual({ matches: [] });
+    expect(namespaceQueryMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('registerKnowledgeTools - registration gating', () => {
   it('registers nothing when the allowed-index list is empty', () => {
