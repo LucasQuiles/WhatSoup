@@ -141,6 +141,13 @@ def q_response_wait_diagnostic(
     }
 
 
+def record_target_coverage(state: dict[str, Any]) -> None:
+    intended_target = BOT_ERRORS_EXPECTED_JID or BOT_ERRORS_JID
+    diagnostic = q_loop_target_coverage(intended_target)
+    state["target_coverage"] = diagnostic
+    log_event("target_coverage", diagnostic)
+
+
 def env_flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -769,6 +776,7 @@ def run_once(args: argparse.Namespace) -> int:
     ensure_private_dir(STATE_DIR)
     first_start = not STATE_FILE.exists()
     state = load_state()
+    record_target_coverage(state)
     if first_start and int(state.get("last_seen_pk", 0)) == 0:
         try:
             state["last_seen_pk"], lookback = bootstrap_cursor_pk(args.db)

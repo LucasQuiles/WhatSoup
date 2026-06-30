@@ -205,6 +205,48 @@ print(json.dumps({
     expect(result).not.toContain('33333333');
   });
 
+  it('persists collaboration target coverage during a runtime loop iteration', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+import argparse
+import contextlib
+import io
+import json
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+m.BOT_ERRORS_JID = ("1" * 8) + "@g.us"
+m.BOT_ERRORS_EXPECTED_JID = m.BOT_ERRORS_JID
+m.bootstrap_cursor_pk = lambda db: (0, 0)
+m.read_messages = lambda db, after_pk: []
+with contextlib.redirect_stdout(io.StringIO()):
+    m.run_once(argparse.Namespace(db="unused.sqlite", socket="", no_send=True))
+state = json.loads(m.STATE_FILE.read_text())
+event_log = m.EVENT_LOG.read_text()
+print(json.dumps({
+  "state": state.get("target_coverage"),
+  "event_log_has_suffix": "@g.us" in event_log,
+  "state_has_suffix": "@g.us" in json.dumps(state),
+}, sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      event_log_has_suffix: boolean;
+      state: { coverage: string; targets_equal: boolean } | null;
+      state_has_suffix: boolean;
+    };
+
+    expect(diagnostic.state).toMatchObject({
+      coverage: 'covered',
+      targets_equal: true,
+    });
+    expect(diagnostic.event_log_has_suffix).toBe(false);
+    expect(diagnostic.state_has_suffix).toBe(false);
+  });
+
   it('diagnoses stale awaiting-Q behavior even when heartbeat phase is monitoring', () => {
     const result = python(`${importModulePrelude()}
 import json
