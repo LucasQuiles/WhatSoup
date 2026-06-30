@@ -9,6 +9,8 @@ type ContinuityReviewIntentRow = {
   source: string;
   created_at: string;
   completed_at: string | null;
+  completed_by: string | null;
+  completion_reason: string | null;
 };
 
 function makeDb(): Database {
@@ -19,7 +21,8 @@ function makeDb(): Database {
 
 function reviewIntents(db: Database): ContinuityReviewIntentRow[] {
   return db.raw.prepare(`
-    SELECT inbound_seq, status, reason, source, created_at, completed_at
+    SELECT inbound_seq, status, reason, source, created_at, completed_at,
+           completed_by, completion_reason
     FROM continuity_review_intents
     ORDER BY inbound_seq ASC
   `).all() as ContinuityReviewIntentRow[];
@@ -46,7 +49,16 @@ describe('continuity review intent queue', () => {
 
   it('stores only review metadata and no chat, message, auth, send, or drain fields', () => {
     const columns = reviewIntentColumns(db);
-    expect(columns).toEqual(['inbound_seq', 'status', 'reason', 'source', 'created_at', 'completed_at']);
+    expect(columns).toEqual([
+      'inbound_seq',
+      'status',
+      'reason',
+      'source',
+      'created_at',
+      'completed_at',
+      'completed_by',
+      'completion_reason',
+    ]);
     expect(columns).not.toEqual(
       expect.arrayContaining([
         'chat_jid',
@@ -80,6 +92,8 @@ describe('continuity review intent queue', () => {
         source: 'pre_connect_recovery',
         created_at: expect.any(String),
         completed_at: null,
+        completed_by: null,
+        completion_reason: null,
       },
     ]);
   });
@@ -195,5 +209,105 @@ describe('continuity review intent queue', () => {
     expect(JSON.stringify(item)).not.toContain('review-jid-7');
     expect(JSON.stringify(item)).not.toContain('review-key-7');
     expect(JSON.stringify(item)).not.toContain('terminal outbound appeared before review');
+  });
+
+  it('requires operator metadata and terminal proof before resolving a review intent', () => {
+    const seq = engine.journalInbound('review-intent-action', 'review-key-8', 'review-jid-8', 'agent');
+    expect(
+      engine.markContinuityCandidateIfNoTerminalOutbound(
+        seq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      ),
+    ).toBe(true);
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 1 });
+
+    expect(() =>
+      engine.dismissContinuityReviewIntent(seq, {
+        actor: '',
+        reason: 'operator rejected duplicate candidate',
+      }),
+    ).toThrow(/actor/i);
+    expect(() =>
+      engine.dismissContinuityReviewIntent(seq, {
+        actor: 'operator:q',
+        reason: ' ',
+      }),
+    ).toThrow(/reason/i);
+
+    expect(
+      engine.resolveContinuityReviewIntent(seq, {
+        actor: 'operator:q',
+        reason: 'terminal proof appeared before review',
+      }),
+    ).toEqual({ updated: false, terminalOutboundExists: false });
+    expect(reviewIntents(db)[0]).toMatchObject({
+      inbound_seq: seq,
+      status: 'pending_review',
+      completed_at: null,
+      completed_by: null,
+      completion_reason: null,
+    });
+
+    engine.createOutboundOp({
+      conversationKey: 'review-key-8',
+      chatJid: 'review-jid-8',
+      opType: 'text',
+      payload: '{"text":"terminal proof for resolution"}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: seq,
+      isTerminal: true,
+    });
+
+    expect(
+      engine.resolveContinuityReviewIntent(seq, {
+        actor: 'operator:q',
+        reason: 'terminal proof appeared before review',
+      }),
+    ).toEqual({ updated: true, terminalOutboundExists: true });
+    expect(reviewIntents(db)[0]).toMatchObject({
+      inbound_seq: seq,
+      status: 'resolved',
+      completed_at: expect.any(String),
+      completed_by: 'operator:q',
+      completion_reason: 'terminal proof appeared before review',
+    });
+  });
+
+  it('requires operator metadata before dismissing a review intent', () => {
+    const seq = engine.journalInbound('review-intent-dismiss', 'review-key-9', 'review-jid-9', 'agent');
+    expect(
+      engine.markContinuityCandidateIfNoTerminalOutbound(
+        seq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      ),
+    ).toBe(true);
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 1 });
+
+    expect(
+      engine.dismissContinuityReviewIntent(seq, {
+        actor: 'operator:q',
+        reason: 'operator rejected duplicate candidate',
+      }),
+    ).toEqual({ updated: true });
+
+    expect(reviewIntents(db)[0]).toMatchObject({
+      inbound_seq: seq,
+      status: 'dismissed',
+      completed_at: expect.any(String),
+      completed_by: 'operator:q',
+      completion_reason: 'operator rejected duplicate candidate',
+    });
+
+    expect(engine.dismissContinuityReviewIntent(seq, {
+      actor: 'operator:q',
+      reason: 'second dismiss should not rewrite history',
+    })).toEqual({ updated: false });
+    expect(reviewIntents(db)[0]).toMatchObject({
+      inbound_seq: seq,
+      status: 'dismissed',
+      completion_reason: 'operator rejected duplicate candidate',
+    });
   });
 });

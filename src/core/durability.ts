@@ -85,6 +85,16 @@ export interface ContinuityReviewIntentSafeRow {
   terminalOutboundExists: boolean;
 }
 
+export interface ContinuityReviewIntentActionParams {
+  actor: string;
+  reason: string;
+}
+
+export interface ContinuityReviewIntentResolveResult {
+  updated: boolean;
+  terminalOutboundExists: boolean;
+}
+
 export interface RecoveryStats {
   inboundReplayed: number;
   outboundReconciled: number;
@@ -145,6 +155,8 @@ type DurabilityStatements = {
   markContinuityCandidate: PreparedStatement;
   enqueueContinuityReviewIntents: PreparedStatement;
   listContinuityReviewIntentsSafe: PreparedStatement;
+  dismissContinuityReviewIntent: PreparedStatement;
+  resolveContinuityReviewIntent: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -243,6 +255,24 @@ export class DurabilityEngine {
          FROM continuity_review_intents
          WHERE continuity_review_intents.status = 'pending_review'
          ORDER BY continuity_review_intents.inbound_seq ASC`,
+      ),
+      dismissContinuityReviewIntent: prepare(
+        `UPDATE continuity_review_intents
+         SET status = 'dismissed',
+             completed_at = datetime('now'),
+             completed_by = ?,
+             completion_reason = ?
+         WHERE inbound_seq = ?
+           AND status = 'pending_review'`,
+      ),
+      resolveContinuityReviewIntent: prepare(
+        `UPDATE continuity_review_intents
+         SET status = 'resolved',
+             completed_at = datetime('now'),
+             completed_by = ?,
+             completion_reason = ?
+         WHERE inbound_seq = ?
+           AND status = 'pending_review'`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -450,6 +480,21 @@ export class DurabilityEngine {
     return { inserted: Number(this.statements.enqueueContinuityReviewIntents.run().changes) };
   }
 
+  private validateContinuityReviewIntentAction(params: ContinuityReviewIntentActionParams): {
+    actor: string;
+    reason: string;
+  } {
+    const actor = params.actor.trim();
+    const reason = params.reason.trim();
+    if (actor.length === 0) {
+      throw new Error('continuity review action actor is required');
+    }
+    if (reason.length === 0) {
+      throw new Error('continuity review action reason is required');
+    }
+    return { actor, reason };
+  }
+
   listContinuityReviewIntentsSafe(): ContinuityReviewIntentSafeRow[] {
     type DbRow = {
       inbound_seq: number;
@@ -469,6 +514,37 @@ export class DurabilityEngine {
       completedAt: row.completed_at,
       terminalOutboundExists: row.terminal_outbound_exists === 1,
     }));
+  }
+
+  dismissContinuityReviewIntent(inboundSeq: number, params: ContinuityReviewIntentActionParams): {
+    updated: boolean;
+  } {
+    const action = this.validateContinuityReviewIntentAction(params);
+    const result = this.statements.dismissContinuityReviewIntent.run(
+      action.actor,
+      action.reason,
+      inboundSeq,
+    );
+    return { updated: result.changes === 1 };
+  }
+
+  resolveContinuityReviewIntent(
+    inboundSeq: number,
+    params: ContinuityReviewIntentActionParams,
+  ): ContinuityReviewIntentResolveResult {
+    const action = this.validateContinuityReviewIntentAction(params);
+    const terminalOutbound = this.statements.getTerminalOutboundForInbound.get(inboundSeq) as
+      | { id: number }
+      | undefined;
+    if (!terminalOutbound) {
+      return { updated: false, terminalOutboundExists: false };
+    }
+    const result = this.statements.resolveContinuityReviewIntent.run(
+      action.actor,
+      action.reason,
+      inboundSeq,
+    );
+    return { updated: result.changes === 1, terminalOutboundExists: true };
   }
 
   markInboundSkipped(seq: number, reason: string): void {

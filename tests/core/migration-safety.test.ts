@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 34 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 35 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1099,7 +1099,7 @@ describe('scheduled_messages send-start migration contract', () => {
 });
 
 describe('continuity review intent migration contract', () => {
-  it('migration 34 creates an inbound-seq keyed human review intent table', () => {
+  it('migrations 34 and 35 create an inbound-seq keyed human review intent table with action audit fields', () => {
     const db = new Database(':memory:');
     db.open();
 
@@ -1111,7 +1111,16 @@ describe('continuity review intent migration contract', () => {
     ).map((c) => c.name);
 
     expect(version?.version).toBe(34);
-    expect(cols).toEqual(['inbound_seq', 'status', 'reason', 'source', 'created_at', 'completed_at']);
+    expect(cols).toEqual([
+      'inbound_seq',
+      'status',
+      'reason',
+      'source',
+      'created_at',
+      'completed_at',
+      'completed_by',
+      'completion_reason',
+    ]);
     db.raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source

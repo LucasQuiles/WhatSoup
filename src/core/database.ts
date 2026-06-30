@@ -732,6 +732,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [32, runMigration32],
   [33, runMigration33],
   [34, runMigration34],
+  [35, runMigration35],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -865,6 +866,20 @@ function runMigration34(db: DatabaseSync): void {
       FOREIGN KEY (inbound_seq) REFERENCES inbound_events(seq)
     )
   `);
+}
+
+function runMigration35(db: DatabaseSync): void {
+  const cols = db
+    .prepare("PRAGMA table_info('continuity_review_intents')")
+    .all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has('completed_by')) {
+    db.exec('ALTER TABLE continuity_review_intents ADD COLUMN completed_by TEXT');
+  }
+  if (!names.has('completion_reason')) {
+    db.exec('ALTER TABLE continuity_review_intents ADD COLUMN completion_reason TEXT');
+  }
 }
 
 function runMigration27(db: DatabaseSync): void {
