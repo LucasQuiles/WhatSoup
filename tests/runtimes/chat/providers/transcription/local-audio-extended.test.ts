@@ -214,41 +214,26 @@ describe('runCommand — string chunk data paths', () => {
 describe('withNormalizedAudioFile', () => {
   // L129 if[0]: ffmpeg not found → throw
   it('throws "ffmpeg is not installed" when ffmpeg binary is not found (L129 if[0])', async () => {
-    // On CI / dev machines without ffmpeg at standard locations, this exercises
-    // the resolveBinaryPath(null) branch. We cannot guarantee ffmpeg is absent,
-    // so we mock resolveBinaryPath via a dynamic import after mocking existsSync.
-    // Instead, we use the known path: if ffmpeg IS present, skip; if not, assert throw.
-    //
-    // The more robust approach: mock node:fs.existsSync to return false for all paths,
-    // which forces resolveBinaryPath to return null.
-    //
-    // Since local-audio.ts is NOT mocked in this test suite (we test the real code),
-    // we can't easily intercept existsSync without vi.mock at the top level.
-    // Therefore: we test this path only when ffmpeg is provably absent.
-    //
-    // For environments WHERE ffmpeg IS present, we verify it does NOT throw.
-    // The coverage line L129 is hit in both cases via the null check.
-    //
-    // NOTE: if this test becomes flaky on machines with ffmpeg, gate it:
-    //   const hasFfmpeg = Boolean(resolveBinaryPath('ffmpeg'));
-    //   if (hasFfmpeg) { return; }
-    //
-    // Test: inject a buffer and a mime type; if ffmpeg is absent, the throw fires.
-    const buf = Buffer.from([0x00]);
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        existsSync: vi.fn(() => false),
+      };
+    });
 
     try {
-      let dir: string | undefined;
-      const result = await withNormalizedAudioFile(buf, 'audio/ogg', async (wavPath) => {
-        // If we reach here, ffmpeg was found — just check the path looks sane
-        expect(wavPath).toMatch(/\.wav$/);
-        dir = wavPath;
-        return 'ok';
-      });
-      // ffmpeg was present: verify the callback result passes through
-      expect(result).toBe('ok');
-    } catch (err) {
-      // ffmpeg was absent: verify the correct error message
-      expect((err as Error).message).toMatch(/ffmpeg is not installed/i);
+      const localAudio = await import('../../../../../src/runtimes/chat/providers/transcription/local-audio.ts');
+      const callback = vi.fn(async () => 'unreachable');
+
+      await expect(
+        localAudio.withNormalizedAudioFile(Buffer.from([0x00]), 'audio/ogg', callback),
+      ).rejects.toThrow(/ffmpeg is not installed/i);
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
     }
   });
 });
