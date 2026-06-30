@@ -3378,7 +3378,7 @@ export class AgentRuntime implements Runtime {
       }
 
       // admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-      if (pending.resolution === 'admin-wins') {
+      if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
         for (const [qIndex, votes] of pending.votesByQuestion) {
           if (pending.answersCollected[qIndex] === undefined) {
             const winner = evaluateResolutionOnTimeout(votes);
@@ -3418,7 +3418,7 @@ export class AgentRuntime implements Runtime {
     }
 
     // AskUser admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-    if (pending.resolution === 'admin-wins') {
+    if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
       for (const [qIndex, votes] of pending.votesByQuestion) {
         if (pending.answersCollected[qIndex] === undefined) {
           const winner = evaluateResolutionOnTimeout(votes);
@@ -3482,7 +3482,7 @@ export class AgentRuntime implements Runtime {
       this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
-      log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
+      log.warn({ err, chatJid }, 'failed to fetch group metadata — admin poll will fail closed');
       return null;
     }
   }
@@ -3561,8 +3561,7 @@ export class AgentRuntime implements Runtime {
           if (this.pendingPolls.questions.get(mapKey) === pending) {
             pending.adminJids = admins;
             if (admins === null) {
-              log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
-              pending.resolution = 'first-vote-wins';
+              log.warn({ mapKey, resolution }, 'admin metadata unavailable — keeping admin poll fail-closed');
             }
           }
         });
@@ -3609,8 +3608,7 @@ export class AgentRuntime implements Runtime {
     if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
       adminJids = await this.fetchGroupAdminJids(chatJid);
       if (adminJids === null) {
-        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — degrading to first-vote-wins');
-        resolvedStrategy = 'first-vote-wins';
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — keeping admin poll fail-closed');
       }
     }
 
