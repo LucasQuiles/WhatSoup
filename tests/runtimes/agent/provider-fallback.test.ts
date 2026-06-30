@@ -97,9 +97,19 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
 
 // Unit tests must never spawn the real fallback binary; 'unknown' is the
 // safe fail-open value (no alert, no version log).
+const probeBinaryCommandMock = vi.fn<
+  (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: unknown,
+  ) => Promise<{ status: 'ok' | 'failed'; output: string }>
+>(() => Promise.resolve({ status: 'failed', output: '' }));
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
   probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+  probeBinaryCommand: (binary: string, args: string[], env: NodeJS.ProcessEnv, options?: unknown) =>
+    probeBinaryCommandMock(binary, args, env, options),
 }));
 
 // ─── Imports after mocks ──────────────────────────────────────────────────────
@@ -632,6 +642,77 @@ describe('AgentRuntime — fallback key-presence guard', () => {
     view(runtime).activateProviderFallback(null);
     expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── Primary recovery probe validity ────────────────────────────────────────
+
+describe('AgentRuntime — primary recovery probe validity', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue(null);
+    probeBinaryCommandMock.mockClear();
+    probeBinaryCommandMock.mockResolvedValue({ status: 'failed', output: '' });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['openai-api', 'openai', 'gpt-5.2', 'https://api.openai.com/v1/models'],
+    ['anthropic-api', 'anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com/v1/models?limit=100'],
+  ])(
+    'does not mark %s recovered from key presence when the live API probe rejects the credential',
+    async (provider, service, model, expectedUrl) => {
+      lookupCredentialMock.mockImplementation((svc) => (svc === service ? 'present-but-invalid' : null));
+      const fetchMock = vi.fn(async () => ({
+        status: 401,
+        ok: false,
+        json: vi.fn(async () => ({ data: [] })),
+      }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const runtime = makeRuntime({
+        agentProvider: provider,
+        agentProviderConfig: { apiKeyService: service },
+        model,
+        agentFallbackProvider: 'opencode-cli',
+        agentFallbackModel: 'minimax/MiniMax-M2.7',
+      });
+
+      await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expectedUrl,
+        expect.objectContaining({
+          headers: expect.any(Object),
+          signal: expect.any(AbortSignal),
+        }),
+      );
+    },
+  );
+
+  it('does not mark opencode-cli recovered from model-prefix key presence when the live CLI probe fails auth', async () => {
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'openai' ? 'present-but-invalid' : null));
+    probeBinaryCommandMock.mockResolvedValue({
+      status: 'failed',
+      output: 'Error: invalid_api_key',
+    });
+    const runtime = makeRuntime({
+      agentProvider: 'opencode-cli',
+      model: 'openai/gpt-5.2',
+      agentFallbackProvider: 'claude-cli',
+    });
+
+    await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
+    expect(probeBinaryCommandMock).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
+      expect.objectContaining({ OPENAI_API_KEY: 'present-but-invalid' }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
   });
 });
 
