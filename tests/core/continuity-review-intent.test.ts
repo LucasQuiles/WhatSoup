@@ -151,4 +151,49 @@ describe('continuity review intent queue', () => {
     expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 0 });
     expect(reviewIntents(db)).toEqual([]);
   });
+
+  it('lists pending review intents with safe metadata and terminal-proof recheck only', () => {
+    const seq = engine.journalInbound('review-intent-safe-export', 'review-key-7', 'review-jid-7', 'agent');
+    expect(
+      engine.markContinuityCandidateIfNoTerminalOutbound(
+        seq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      ),
+    ).toBe(true);
+    expect(engine.enqueueContinuityReviewIntents()).toEqual({ inserted: 1 });
+    engine.createOutboundOp({
+      conversationKey: 'review-key-7',
+      chatJid: 'review-jid-7',
+      opType: 'text',
+      payload: '{"text":"terminal outbound appeared before review"}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: seq,
+      isTerminal: true,
+    });
+
+    const [item] = engine.listContinuityReviewIntentsSafe();
+
+    expect(Object.keys(item).sort()).toEqual([
+      'completedAt',
+      'createdAt',
+      'inboundSeq',
+      'reason',
+      'source',
+      'status',
+      'terminalOutboundExists',
+    ]);
+    expect(item).toEqual({
+      inboundSeq: seq,
+      status: 'pending_review',
+      reason: 'runtime_fault_no_terminal_outbound',
+      source: 'runtime_fault_disarm',
+      createdAt: expect.any(String),
+      completedAt: null,
+      terminalOutboundExists: true,
+    });
+    expect(JSON.stringify(item)).not.toContain('review-jid-7');
+    expect(JSON.stringify(item)).not.toContain('review-key-7');
+    expect(JSON.stringify(item)).not.toContain('terminal outbound appeared before review');
+  });
 });

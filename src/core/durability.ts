@@ -75,6 +75,16 @@ export type ContinuityCandidateSource =
   | 'pre_connect_recovery'
   | 'runtime_fault_disarm';
 
+export interface ContinuityReviewIntentSafeRow {
+  inboundSeq: number;
+  status: string;
+  reason: ContinuityCandidateReason;
+  source: ContinuityCandidateSource;
+  createdAt: string;
+  completedAt: string | null;
+  terminalOutboundExists: boolean;
+}
+
 export interface RecoveryStats {
   inboundReplayed: number;
   outboundReconciled: number;
@@ -134,6 +144,7 @@ type DurabilityStatements = {
   markInboundFailed: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   enqueueContinuityReviewIntents: PreparedStatement;
+  listContinuityReviewIntentsSafe: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -214,6 +225,24 @@ export class DurabilityEngine {
              WHERE outbound_ops.source_inbound_seq = inbound_events.seq
                AND outbound_ops.is_terminal = 1
            )`,
+      ),
+      listContinuityReviewIntentsSafe: prepare(
+        `SELECT
+           continuity_review_intents.inbound_seq,
+           continuity_review_intents.status,
+           continuity_review_intents.reason,
+           continuity_review_intents.source,
+           continuity_review_intents.created_at,
+           continuity_review_intents.completed_at,
+           EXISTS (
+             SELECT 1
+             FROM outbound_ops
+             WHERE outbound_ops.source_inbound_seq = continuity_review_intents.inbound_seq
+               AND outbound_ops.is_terminal = 1
+           ) AS terminal_outbound_exists
+         FROM continuity_review_intents
+         WHERE continuity_review_intents.status = 'pending_review'
+         ORDER BY continuity_review_intents.inbound_seq ASC`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -419,6 +448,27 @@ export class DurabilityEngine {
 
   enqueueContinuityReviewIntents(): { inserted: number } {
     return { inserted: Number(this.statements.enqueueContinuityReviewIntents.run().changes) };
+  }
+
+  listContinuityReviewIntentsSafe(): ContinuityReviewIntentSafeRow[] {
+    type DbRow = {
+      inbound_seq: number;
+      status: string;
+      reason: ContinuityCandidateReason;
+      source: ContinuityCandidateSource;
+      created_at: string;
+      completed_at: string | null;
+      terminal_outbound_exists: number;
+    };
+    return (this.statements.listContinuityReviewIntentsSafe.all() as DbRow[]).map((row) => ({
+      inboundSeq: row.inbound_seq,
+      status: row.status,
+      reason: row.reason,
+      source: row.source,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+      terminalOutboundExists: row.terminal_outbound_exists === 1,
+    }));
   }
 
   markInboundSkipped(seq: number, reason: string): void {
