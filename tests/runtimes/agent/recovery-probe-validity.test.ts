@@ -125,7 +125,13 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-type RecoveryView = { probePrimaryProviderRecovered(): Promise<boolean> };
+type RecoveryView = {
+  probePrimaryProviderRecovered(): Promise<boolean>;
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error' | 'empty-output' | 'probe-unusable',
+  ): unknown;
+};
 
 function makeRuntime(provider: string): AgentRuntime {
   const config = mockConfigRef();
@@ -220,6 +226,48 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     const v = view(makeRuntime('anthropic-api'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
     expect(probePrimaryModelUsabilityMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['usage-limit', 'rate-limit'] as const)(
+    'keyed primary: %s fallback requires model usability, not credential presence',
+    async (reason) => {
+      lookupCredentialMock.mockReturnValue('sk-present');
+      probePrimaryModelUsabilityMock.mockResolvedValue({
+        status: 'credential-unavailable',
+        provider: 'anthropic-api',
+        model: 'claude-opus-4-8[1m]',
+      });
+      const v = view(makeRuntime('anthropic-api'));
+
+      v.activateProviderFallback(null, reason);
+      lookupCredentialMock.mockClear();
+      probePrimaryModelUsabilityMock.mockClear();
+
+      await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
+      expect(lookupCredentialMock).not.toHaveBeenCalled();
+      expect(probePrimaryModelUsabilityMock).toHaveBeenCalledWith(
+        { provider: 'anthropic-api', model: 'claude-opus-4-8[1m]' },
+        expect.anything(),
+      );
+    },
+  );
+
+  it('keyed primary: quota fallback recovers when model usability is confirmed', async () => {
+    lookupCredentialMock.mockReturnValue('sk-present');
+    probePrimaryModelUsabilityMock.mockResolvedValue({
+      status: 'usable',
+      provider: 'anthropic-api',
+      model: 'claude-opus-4-8[1m]',
+    });
+    const v = view(makeRuntime('anthropic-api'));
+
+    v.activateProviderFallback(null, 'usage-limit');
+    lookupCredentialMock.mockClear();
+    probePrimaryModelUsabilityMock.mockClear();
+
+    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
   it('keyed primary: NOT recovered when the credential is absent', async () => {

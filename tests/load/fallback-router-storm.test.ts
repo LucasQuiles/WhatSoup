@@ -119,7 +119,7 @@ type Activation = {
   primaryProvider: string;
   fallbackProvider: string;
   fallbackModel: string | undefined;
-  reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+  reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error';
   resetAt: Date | null;
   activeUntil: number;
   extended: boolean;
@@ -136,7 +136,7 @@ type FallbackView = {
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): Activation | null;
   scheduleFallbackReplay(args: {
     activation: Activation;
@@ -192,7 +192,7 @@ describe('fallback router storm harness', () => {
       const mapKey = `chat-${i}`;
       v.pendingTurnText.set(mapKey, `turn ${i}`);
       v.pendingTurnActorJid.set(mapKey, `sender-${i}@s.whatsapp.net`);
-      const activation = v.activateProviderFallback(null, 'usage-limit')!;
+      const activation = v.activateProviderFallback(null, 'model-unavailable')!;
       results.push(v.scheduleFallbackReplay({
         activation,
         chatJid: `${mapKey}@s.whatsapp.net`,

@@ -120,7 +120,7 @@ type FallbackView = {
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): void;
   restorePersistedFallbackWindow(): void;
 };
@@ -156,9 +156,9 @@ describe('fallback persistence — real-DB integration', () => {
   it('activate writes a row, restore reads it, expiry clears it', () => {
     // Runtime A activates fallback — the DB must receive a real upsert.
     const runtimeA = makeRuntime(db);
-    fbView(runtimeA).activateProviderFallback(null);
+    fbView(runtimeA).activateProviderFallback(null, 'model-unavailable');
 
-    // The raw DB must have exactly one row with reason='usage-limit'.
+    // The raw DB must have exactly one row with reason='model-unavailable'.
     const row = db.raw
       .prepare(
         `SELECT active_until AS activeUntil, activated_at AS activatedAt, reason
@@ -166,7 +166,7 @@ describe('fallback persistence — real-DB integration', () => {
       )
       .get() as { activeUntil: number; activatedAt: number; reason: string } | undefined;
     expect(row).toBeDefined();
-    expect(row!.reason).toBe('usage-limit');
+    expect(row!.reason).toBe('model-unavailable');
     expect(row!.activeUntil).toBeGreaterThan(Date.now());
 
     // Runtime B over the same DB restores the window without any mocking.

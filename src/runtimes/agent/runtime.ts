@@ -543,7 +543,21 @@ function contextOverflowNotice(): string {
 }
 
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  return fallbackRequiresIndependentProbe(reason);
+  // Recovery-probe gating is intentionally BROADER than independent-provider
+  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
+  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
+  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
+  // primary and revert the moment it recovers rather than blind-waiting for the
+  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
+  return (
+    fallbackRequiresIndependentProbe(reason) ||
+    reason === 'usage-limit' ||
+    reason === 'rate-limit'
+  );
+}
+
+function fallbackRecoveryRequiresModelUsability(reason: string | null | undefined): boolean {
+  return reason === 'usage-limit' || reason === 'rate-limit';
 }
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
@@ -6215,9 +6229,9 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Probe whether the primary provider can serve again. Key-service primaries
-   * are a synchronous key-presence check; binary primaries run a real
-   * model-usability probe (timeout-bounded, never blocks the event loop) and
-   * recover only on a `usable` verdict.
+   * normally use a synchronous key-presence check; quota fallbacks and binary
+   * primaries run a real model-usability probe (timeout-bounded, never blocks
+   * the event loop) and recover only on a `usable` verdict.
    *
    * A binary primary must NOT be judged by `<binary> auth status`: an
    * expired-but-present OAuth credential makes claude-cli report
@@ -6228,17 +6242,22 @@ export class AgentRuntime implements Runtime {
    * genuinely exercises auth. Never rejects.
    */
   private async probePrimaryProviderRecovered(): Promise<boolean> {
+    const requiresUsabilityProbe = fallbackRecoveryRequiresModelUsability(this.fallbackWindow.armReason);
     const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
-    if (service) return lookupCredential(service) !== null;
-    let binary: string | null;
-    try {
-      binary = getProviderBinary(this.agentProvider);
-    } catch {
-      // getProviderBinary throws on an unknown provider; honor the never-rejects
-      // contract the revert-timer relies on by treating that as not-recovered.
-      return false;
+    if (service && !requiresUsabilityProbe) {
+      return lookupCredential(service) !== null;
     }
-    if (!binary) return false;
+    if (!service) {
+      let binary: string | null;
+      try {
+        binary = getProviderBinary(this.agentProvider);
+      } catch {
+        // getProviderBinary throws on an unknown provider; honor the never-rejects
+        // contract the revert-timer relies on by treating that as not-recovered.
+        return false;
+      }
+      if (!binary) return false;
+    }
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
       createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
