@@ -41,15 +41,28 @@ export class FallbackChain {
 
   /**
    * Snapshot of the chain with eligibility — the last selection's computed state if
-   * present, else the configured entries with unknown (null) eligibility.
+   * present, else the configured entries.
+   *
+   * Before the first window selection there is no computed `chainState`, so the
+   * idle snapshot would otherwise report `eligible: null` for every entry — which
+   * hides an uncredentialed fallback tier (e.g. an opencode-cli provider whose
+   * API key is absent) from /health and fleet provider-parity until a window
+   * actually arms. The optional `resolveEligibility` lets the caller surface real
+   * credential presence in the idle snapshot (returns `true`/`false` when a key
+   * service maps, `null` for native/unmappable providers). It is NOT consulted
+   * once a window has selected: the last selection's computed `chainState` wins.
    */
   snapshot(
     agentFallbacks: AgentFallbackEntry[],
+    resolveEligibility?: (entry: AgentFallbackEntry) => boolean | null,
   ): Array<AgentFallbackEntry & { eligible: boolean | null }> {
     if (this.chainState.length > 0) {
       return this.chainState.map((entry) => ({ ...entry }));
     }
-    return agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
+    return agentFallbacks.map((entry) => ({
+      ...entry,
+      eligible: resolveEligibility ? resolveEligibility(entry) : null,
+    }));
   }
 
   /**

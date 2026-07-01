@@ -113,6 +113,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor } from './fallback-config.ts';
+import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
   writeProviderMcpConfig,
@@ -5337,6 +5338,13 @@ export class AgentRuntime implements Runtime {
    * Health spreads this object verbatim into /health, so new fields must be
    * JSON-safe and additive.
    */
+  /**
+   * TTL-memoised resolver for idle (pre-selection) fallback eligibility. Built
+   * lazily so the keyring is consulted at most once per entry per TTL even though
+   * getFallbackState backs the frequently-polled /health endpoint.
+   */
+  private idleFallbackEligibilityResolver?: (entry: AgentFallbackEntry) => boolean | null;
+
   getFallbackState(): {
     effectiveProvider: string;
     fallbackActiveUntil: number | null;
@@ -5364,6 +5372,10 @@ export class AgentRuntime implements Runtime {
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
+    this.idleFallbackEligibilityResolver ??= makeIdleEligibilityResolver(
+      (entry) => this.fallbackKeyPresent(entry.provider, entry.model),
+      Date.now,
+    );
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackWindow.activeUntil : null,
@@ -5383,7 +5395,7 @@ export class AgentRuntime implements Runtime {
       primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks),
+      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks, this.idleFallbackEligibilityResolver),
       fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
       failedEntryCount: this.fallbackChain.failedKeys.size,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
