@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Module mocks must come before any imports that transitively load them ──
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     models: {
@@ -22,17 +29,13 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLogger,
 }));
 
 // Mock the database message functions
 vi.mock('../../../../src/core/messages.ts', () => ({
   getUnprocessedMessages: vi.fn(),
+  getUnprocessedCount: vi.fn(),
   markMessagesProcessed: vi.fn(),
   markMessagesWithError: vi.fn(),
   incrementEnrichmentRetries: vi.fn(),
@@ -63,6 +66,7 @@ import type { PineconeMemory } from '../../../../src/runtimes/chat/providers/pin
 import type { StoredMessage } from '../../../../src/core/messages.ts';
 import {
   getUnprocessedMessages,
+  getUnprocessedCount,
   markMessagesProcessed,
   markMessagesWithError,
   incrementEnrichmentRetries,
@@ -153,10 +157,13 @@ async function triggerOneCycle(poller: EnrichmentPoller): Promise<void> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('EnrichmentPoller', () => {
+  const originalRunId = process.env.MW_MIND_RUN_ID;
+
   beforeEach(() => {
     vi.clearAllMocks();
     // Default stubs for mocked modules
     vi.mocked(getUnprocessedMessages).mockReturnValue([]);
+    vi.mocked(getUnprocessedCount).mockReturnValue(0);
     vi.mocked(markMessagesProcessed).mockReturnValue(undefined);
     vi.mocked(markMessagesWithError).mockReturnValue(undefined);
     vi.mocked(incrementEnrichmentRetries).mockReturnValue(undefined);
@@ -166,10 +173,55 @@ describe('EnrichmentPoller', () => {
   });
 
   afterEach(() => {
+    if (originalRunId === undefined) {
+      delete process.env.MW_MIND_RUN_ID;
+    } else {
+      process.env.MW_MIND_RUN_ID = originalRunId;
+    }
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
   // ── Positive ────────────────────────────────────────────────────────────
+
+  it('reports unprocessedCount from the message store for the current DB', () => {
+    vi.mocked(getUnprocessedCount).mockReturnValue(17);
+
+    const { poller, db } = makePoller();
+
+    expect(poller.unprocessedCount).toBe(17);
+    expect(getUnprocessedCount).toHaveBeenCalledWith(db);
+  });
+
+  it('start schedules exactly one recurring tick and stop clears the active timer', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getUnprocessedMessages).mockReturnValue([]);
+
+    const { poller } = makePoller();
+
+    poller.stop();
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
+
+    poller.start();
+    const firstTimer = (poller as unknown as { timer: NodeJS.Timeout | null }).timer;
+    expect(firstTimer).not.toBeNull();
+
+    poller.start();
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBe(firstTimer);
+    expect(mockLogger.warn).toHaveBeenCalledWith('EnrichmentPoller.start() called while already running');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getUnprocessedMessages).toHaveBeenCalledTimes(1);
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).not.toBeNull();
+
+    poller.stop();
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      { intervalMs: 60_000 },
+      'Enrichment poller starting',
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith('Enrichment poller stopped');
+  });
 
   it('normal cycle: fetch → extract → validate → enqueue → markProcessed', async () => {
     const msg1 = makeStoredMsg({ pk: 1, chatJid: 'chat1@g.us' });
@@ -286,6 +338,37 @@ describe('EnrichmentPoller', () => {
   });
 
   // ── Negative ────────────────────────────────────────────────────────────
+
+  it('tick logs unexpected runCycle throws and reschedules while still running', async () => {
+    const { poller } = makePoller();
+    const err = new Error('unexpected cycle fault');
+    vi.spyOn(
+      poller as unknown as { runCycle(): Promise<void> },
+      'runCycle',
+    ).mockRejectedValueOnce(err);
+
+    await (poller as unknown as { tick(): Promise<void> }).tick();
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { err },
+      'enrichment: unexpected error in tick — rescheduling',
+    );
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).not.toBeNull();
+    clearTimeout((poller as unknown as { timer: NodeJS.Timeout }).timer);
+  });
+
+  it('tick does not reschedule after the poller has been stopped', async () => {
+    const { poller } = makePoller();
+    vi.spyOn(
+      poller as unknown as { runCycle(): Promise<void> },
+      'runCycle',
+    ).mockResolvedValueOnce(undefined);
+
+    poller.stop();
+    await (poller as unknown as { tick(): Promise<void> }).tick();
+
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
+  });
 
   it('self-scheduling: tick() waits for runCycle to finish before scheduling next', async () => {
     // Simulate a long-running cycle by holding extractFacts until we release it
@@ -464,6 +547,90 @@ describe('EnrichmentPoller', () => {
     expect(poller.lastRunAt).toBe(previousLastRunAt);
   });
 
+  it('logs retry counter persistence failures without marking the failed segment processed', async () => {
+    const retryErr = new Error('retry write failed');
+    vi.mocked(getUnprocessedMessages).mockReturnValue([
+      makeStoredMsg({ pk: 88, enrichmentRetries: 0 }),
+    ]);
+    vi.mocked(extractFacts).mockRejectedValue(new Error('extract failed'));
+    vi.mocked(incrementEnrichmentRetries).mockImplementation(() => {
+      throw retryErr;
+    });
+
+    const { poller } = makePoller();
+    await triggerOneCycle(poller);
+
+    expect(incrementEnrichmentRetries).toHaveBeenCalledWith(expect.anything(), [88]);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { err: retryErr },
+      'enrichment: failed to persist retry counters',
+    );
+    const processedPks = vi.mocked(markMessagesProcessed).mock.calls.flatMap((c) => c[1] as number[]);
+    expect(processedPks).not.toContain(88);
+  });
+
+  it('logs markMessagesProcessed failures and still records the cycle', async () => {
+    const markErr = new Error('processed write failed');
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 91 })]);
+    vi.mocked(extractFacts).mockResolvedValue([]);
+    vi.mocked(markMessagesProcessed).mockImplementation(() => {
+      throw markErr;
+    });
+
+    const { poller, db } = makePoller();
+    await triggerOneCycle(poller);
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { err: markErr },
+      'enrichment: failed to mark messages processed',
+    );
+    expect(markMessagesWithError).toHaveBeenCalledWith(expect.anything(), [], 'max_retries_exceeded');
+    expect(db._runFn).toHaveBeenCalledTimes(1);
+    expect(poller.lastRunAt).not.toBeNull();
+  });
+
+  it('logs markMessagesWithError failures without aborting final cycle accounting', async () => {
+    const errorErr = new Error('terminal failure write failed');
+    vi.mocked(getUnprocessedMessages).mockReturnValue([
+      makeStoredMsg({ pk: 92, enrichmentRetries: 2 }),
+    ]);
+    vi.mocked(extractFacts).mockRejectedValue(new Error('extract failed'));
+    vi.mocked(markMessagesWithError).mockImplementation(() => {
+      throw errorErr;
+    });
+
+    const { poller, db } = makePoller();
+    await triggerOneCycle(poller);
+
+    expect(markMessagesWithError).toHaveBeenCalledWith(expect.anything(), [92], 'max_retries_exceeded');
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { err: errorErr },
+      'enrichment: failed to mark messages with error',
+    );
+    expect(db._runFn).toHaveBeenCalledTimes(1);
+    expect(poller.lastRunAt).not.toBeNull();
+  });
+
+  it('logs enrichment_runs insert failures after message accounting completes', async () => {
+    const runErr = new Error('run record insert failed');
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 93 })]);
+    vi.mocked(extractFacts).mockResolvedValue([]);
+    const db = makeMockDb();
+    db._runFn.mockImplementationOnce(() => {
+      throw runErr;
+    });
+
+    const { poller } = makePoller(db);
+    await triggerOneCycle(poller);
+
+    expect(markMessagesProcessed).toHaveBeenCalledWith(expect.anything(), [93]);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { err: runErr },
+      'enrichment: failed to write enrichment_runs record',
+    );
+    expect(poller.lastRunAt).not.toBeNull();
+  });
+
   // ── T1 hardening: accounting-gated markMessagesProcessed ─────────────────
   //
   // The pre-T1 poller called markMessagesProcessed on every message in a chat
@@ -535,6 +702,73 @@ describe('EnrichmentPoller', () => {
     expect(processedPks).not.toContain(101);
     expect(processedPks).not.toContain(102);
     expect(processedPks).not.toContain(103);
+  });
+
+  it('includes run id in queue mismatch and cycle-complete logs when present', async () => {
+    process.env.MW_MIND_RUN_ID = 'run-enrich-123';
+    const msgs = [
+      makeStoredMsg({ pk: 301, chatJid: 'chatRun@g.us', messageId: 'run1' }),
+      makeStoredMsg({ pk: 302, chatJid: 'chatRun@g.us', messageId: 'run2' }),
+    ];
+    vi.mocked(getUnprocessedMessages).mockReturnValue(msgs);
+    const extracted = [
+      {
+        text: 'Fact A',
+        chatJid: 'chatRun@g.us',
+        senderJid: '15551230008@s.whatsapp.net',
+        senderName: 'TestUser',
+        memoryType: 'user_fact' as const,
+        confidence: 0.9,
+        supersedesText: '',
+        sourceMessagePks: [301],
+      },
+      {
+        text: 'Fact B',
+        chatJid: 'chatRun@g.us',
+        senderJid: '15551230008@s.whatsapp.net',
+        senderName: 'TestUser',
+        memoryType: 'user_fact' as const,
+        confidence: 0.9,
+        supersedesText: '',
+        sourceMessagePks: [302],
+      },
+    ];
+    vi.mocked(extractFacts).mockResolvedValue(extracted);
+    vi.mocked(validateFacts).mockResolvedValue(
+      extracted.map((fact) => ({ ...fact, adjustedConfidence: 0.9 })),
+    );
+    vi.mocked(enqueueFacts).mockReturnValue({
+      attempted: 2,
+      inserted: 1,
+      duplicates: 0,
+      failed: 0,
+    });
+
+    const { poller } = makePoller();
+    await triggerOneCycle(poller);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatJid: 'chatRun@g.us',
+        expected: 2,
+        attempted: 2,
+        inserted: 1,
+        duplicates: 0,
+        failed: 0,
+        segmentMessagePks: [301, 302],
+        runId: 'run-enrich-123',
+      }),
+      'enrichment: queue accounting mismatch — segment messages NOT marked processed',
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messagesProcessed: 0,
+        factsExtracted: 2,
+        factsQueued: 1,
+        runId: 'run-enrich-123',
+      }),
+      'enrichment: cycle complete',
+    );
   });
 
   it('marks all processed on full success (attempted === inserted + duplicates, failed === 0)', async () => {
