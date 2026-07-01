@@ -54,6 +54,35 @@ describe('ReplyGuaranteeManager', () => {
     });
   });
 
+  it('QR-107: a completeTurn failure AFTER a successful send does not release the rate-limit slot (no duplicate burst)', async () => {
+    const durability = makeDurability('processing');
+    // completeTurn throws (e.g. SQLITE_BUSY) AFTER sendFallback has already delivered.
+    (durability.completeTurn as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    });
+    const sendFallback = vi.fn(async () => ({ transportId: 'wamid.rgp' }));
+    const chatJid = '15550100009@s.whatsapp.net';
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 30_000,
+    });
+
+    // Turn A: fallback delivered, but completeTurn throws.
+    manager.arm({ inboundSeq: 1, chatJid });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendFallback).toHaveBeenCalledOnce(); // the "still working" message WAS delivered
+
+    // Turn B on the SAME chat times out well inside rateLimitMs. The slot must
+    // remain reserved (a fallback was already delivered) — otherwise the finalize
+    // failure is misread as a send failure and a DUPLICATE burst goes out.
+    manager.arm({ inboundSeq: 2, chatJid });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).toHaveBeenCalledOnce(); // still once — no duplicate fallback
+  });
+
   it('arms only one timer per inbound seq', async () => {
     const durability = makeDurability('processing');
     const sendFallback = vi.fn(async () => undefined);
