@@ -145,7 +145,7 @@ def expand_specs() -> list[SurfaceSpec]:
             fmt = "markdown" if path.suffix == ".md" else (path.suffix.lstrip(".") or "text")
             specs.append(SurfaceSpec(path, "opencode", "plugin", fmt, "OpenCode plugin loader", "editable_with_plugin_probe", "high"))
 
-    for pattern in ("com.q*.plist", "com.qfleet*.plist", "com.mqmac*.plist"):
+    for pattern in ("com.q*.plist", "com.qfleet*.plist", "com.maclab*.plist"):
         for path in sorted((HOME / "Library/LaunchAgents").glob(pattern)):
             specs.append(SurfaceSpec(path, "launchd", "scheduled_service", "plist", "launchd", "audit_only_without_approval", "high"))
 
