@@ -72,6 +72,80 @@ NUDGE_COOLDOWN_SECONDS = 45 * 60
 CHECKPOINT_AFTER_SECONDS = 60 * 60
 
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
+PHONE_JID_RE = re.compile(r"^\d+@s\.whatsapp\.net$")
+LID_RE = re.compile(r"^[A-Za-z0-9_-]+@lid$")
+
+
+def target_kind(target: str) -> str:
+    value = str(target or "").strip()
+    if not value:
+        return "missing"
+    if GROUP_JID_RE.match(value):
+        return "group"
+    if PHONE_JID_RE.match(value):
+        return "phone_jid"
+    if LID_RE.match(value):
+        return "lid"
+    return "unknown"
+
+
+def q_loop_target_coverage(intended_target: str, bridged_targets: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    bot_errors_target = str(BOT_ERRORS_JID or "").strip()
+    intended = str(intended_target or "").strip()
+    targets_equal = bool(bot_errors_target and intended and bot_errors_target == intended)
+    bridge_targets = {str(target or "").strip() for target in (bridged_targets or [])}
+    route_bridge_present = bool(intended and intended in bridge_targets)
+    if not bot_errors_target:
+        coverage = "missing_bot_errors_target"
+    elif not intended:
+        coverage = "missing_intended_target"
+    elif targets_equal:
+        coverage = "covered"
+    elif route_bridge_present:
+        coverage = "bridged"
+    else:
+        coverage = "routing_mismatch"
+    return {
+        "bot_errors_target_present": bool(bot_errors_target),
+        "bot_errors_target_kind": target_kind(bot_errors_target),
+        "intended_target_present": bool(intended),
+        "intended_target_kind": target_kind(intended),
+        "targets_equal": targets_equal,
+        "route_bridge_present": route_bridge_present,
+        "coverage": coverage,
+    }
+
+
+def q_response_wait_diagnostic(
+    state: dict[str, Any],
+    current: int | None = None,
+    stale_after_seconds: int = NUDGE_AFTER_SECONDS,
+) -> dict[str, Any]:
+    observed_at = now() if current is None else int(current)
+    waiting_since = int(state.get("awaiting_q_since", 0) or 0)
+    last_q_message_at = int(state.get("last_q_message_at", 0) or 0)
+    awaiting_q = waiting_since > 0
+    awaiting_age = max(0, observed_at - waiting_since) if awaiting_q else 0
+    if not awaiting_q:
+        status = "not_waiting"
+    elif awaiting_age >= stale_after_seconds:
+        status = "stale_awaiting_q"
+    else:
+        status = "awaiting_q"
+    return {
+        "awaiting_q": awaiting_q,
+        "awaiting_q_age_seconds": awaiting_age,
+        "last_q_message_age_seconds": max(0, observed_at - last_q_message_at) if last_q_message_at > 0 else None,
+        "phase": str(state.get("phase") or "unknown"),
+        "status": status,
+    }
+
+
+def record_target_coverage(state: dict[str, Any]) -> None:
+    intended_target = BOT_ERRORS_EXPECTED_JID or BOT_ERRORS_JID
+    diagnostic = q_loop_target_coverage(intended_target)
+    state["target_coverage"] = diagnostic
+    log_event("target_coverage", diagnostic)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -702,6 +776,7 @@ def run_once(args: argparse.Namespace) -> int:
     ensure_private_dir(STATE_DIR)
     first_start = not STATE_FILE.exists()
     state = load_state()
+    record_target_coverage(state)
     if first_start and int(state.get("last_seen_pk", 0)) == 0:
         try:
             state["last_seen_pk"], lookback = bootstrap_cursor_pk(args.db)

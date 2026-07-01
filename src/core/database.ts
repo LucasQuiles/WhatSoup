@@ -1369,6 +1369,24 @@ export class Database {
     return Number(result.changes);
   }
 
+  /**
+   * Apply a WhatsApp message EDIT by WhatsApp message id. Overwrites both
+   * `content` and `content_text` with the new (plain-text) body and stamps
+   * `edited_at`; updating content_text fires the messages_fts_update trigger so
+   * the FTS index reflects the corrected text (old text is no longer recallable).
+   * Only currently-live rows are edited (`deleted_at IS NULL`) so a revoked
+   * message cannot be resurrected via a late edit. Returns the number of rows
+   * updated (0 for an unknown or already-deleted id — a safe no-op). This is the
+   * edit-half counterpart to markMessagesDeleted (the revoke half).
+   */
+  markMessageEdited(messageId: string, newContent: string): number {
+    const result = this.db.prepare(
+      `UPDATE messages SET content = ?, content_text = ?, edited_at = datetime('now')
+       WHERE message_id = ? AND deleted_at IS NULL`,
+    ).run(newContent, newContent, messageId);
+    return Number(result.changes);
+  }
+
   /** Expose the underlying DatabaseSync for query modules. */
   get raw(): DatabaseSync {
     return this.db;

@@ -409,6 +409,18 @@ connectionManager.on('messageDeleted', (messageIds: string[]) => {
   }
 });
 
+connectionManager.on('messageEdited', (messageId: string, newContent: string) => {
+  try {
+    const count = db.markMessageEdited(messageId, newContent);
+    log.info(
+      { messageId, applied: count > 0 },
+      'messageEdited: applied WhatsApp message edit to local store',
+    );
+  } catch (err) {
+    log.error({ err, messageId }, 'messageEdited: failed to apply message edit');
+  }
+});
+
 connectionManager.on('contactsUpsert', (contacts) => {
   try {
     handleContactsUpsert(db, contacts);
