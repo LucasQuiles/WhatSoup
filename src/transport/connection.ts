@@ -25,7 +25,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts'
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
 import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.ts';
-import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
+import type { Messenger, IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
@@ -629,11 +629,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     return this.shutdown();
   }
 
-  async sendMessage(chatJid: string, text: string, messageId?: string): Promise<SubmissionReceipt> {
+  async sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt> {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
-    applyOutboundIdentityGuard(chatJid, { caller: 'agent', mode: this.identityMode }, this.identityStore);
+    // QR-086: honour an OPTIONAL infra caller token so the guard's SYSTEM_CALLERS
+    // exemption (spec §4.2 step B — infra never floored) is reachable. Only
+    // trusted infra (health admin /send via sendTracked) sets opts.caller;
+    // every other path leaves it undefined → 'agent' → full cold-floor.
+    applyOutboundIdentityGuard(chatJid, { caller: opts?.caller ?? 'agent', mode: this.identityMode }, this.identityStore);
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
@@ -674,8 +678,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (hasMentions) this.log.info({ mentions }, 'Outbound message includes mentions');
     try {
       result = await withSendTimeout(
-        messageId
-          ? this.sock.sendMessage(chatJid, content, { messageId })
+        opts?.messageId
+          ? this.sock.sendMessage(chatJid, content, { messageId: opts.messageId })
           : this.sock.sendMessage(chatJid, content),
         'sendMessage',
       );

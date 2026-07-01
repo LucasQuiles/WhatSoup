@@ -924,7 +924,7 @@ export class OutboundQueue implements IOutboundQueue {
         let receipt;
         try {
           receipt = await Promise.race([
-            this.messenger.sendMessage(this.chatJid, text, stableMessageId),
+            this.messenger.sendMessage(this.chatJid, text, { messageId: stableMessageId }),
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
                 () => reject(new Error('SEND_TIMEOUT')),
