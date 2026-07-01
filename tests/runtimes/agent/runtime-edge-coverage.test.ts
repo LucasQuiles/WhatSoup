@@ -284,6 +284,7 @@ vi.mock('../../../src/core/media-download.ts', () => ({
 
 import { RESPONSE_WORKFLOWS } from '../../../src/runtimes/agent/response-registry.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { getRecentMessages, type StoredMessage } from '../../../src/core/messages.ts';
 import { getSessionTokenSnapshot } from '../../../src/runtimes/agent/session-db.ts';
 
 type QueueMock = IOutboundQueue & {
@@ -329,6 +330,11 @@ type RuntimeView = {
   perChatTurnText: Map<string, string>;
   perChatAssistantItemText: Map<string, Map<string, string>>;
   resumeFailedHandling: Set<string>;
+  pendingSystemResults: {
+    counts: Map<string | undefined, number>;
+    mark: (scopeKey?: string) => void;
+    unmark: (scopeKey?: string) => void;
+  };
   imageCoalesce: {
     buffers: Map<string, {
       timer: ReturnType<typeof setTimeout>;
@@ -347,7 +353,7 @@ type RuntimeView = {
   handleEvent(event: AgentEvent): void;
   handlePerChatCrash: ReturnType<typeof vi.fn>;
   handleCrashNotify: ReturnType<typeof vi.fn>;
-  handleResumeFailed: ReturnType<typeof vi.fn>;
+  handleResumeFailed(chatJid: string): void;
   activateProviderFallback(resetAt: Date | null, reason?: string): {
     reason: 'usage-limit' | 'auth-required' | 'rate-limit' | 'server-error' | 'model-unavailable' | 'empty-output' | 'probe-unusable';
     fallbackProvider: string;
@@ -498,6 +504,28 @@ function makeDb(): Database {
   } as unknown as Database;
 }
 
+function makeStoredMessage(overrides: Partial<StoredMessage> = {}): StoredMessage {
+  return {
+    pk: 1,
+    chatJid: '15551237777@s.whatsapp.net',
+    conversationKey: '15551237777',
+    senderJid: 'sender-edge@s.whatsapp.net',
+    senderName: 'Sender Edge',
+    messageId: 'message-edge',
+    content: 'previous chat context',
+    contentType: 'text',
+    isFromMe: false,
+    timestamp: 1_781_095_200,
+    quotedMessageId: null,
+    enrichmentProcessedAt: null,
+    enrichmentRetries: 0,
+    createdAt: '2026-06-10T09:20:00.000Z',
+    mediaPath: null,
+    contentText: 'previous chat context',
+    ...overrides,
+  };
+}
+
 function makeMessenger(groupMetadata?: ReturnType<typeof vi.fn>): Messenger & {
   sendMessage: ReturnType<typeof vi.fn>;
   sendMedia: ReturnType<typeof vi.fn>;
@@ -556,6 +584,12 @@ function installDurabilityStub(runtime: AgentRuntime) {
   return durability;
 }
 
+async function drainMicrotasks(iterations = 8): Promise<void> {
+  for (let i = 0; i < iterations; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe('AgentRuntime edge coverage', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -570,6 +604,8 @@ describe('AgentRuntime edge coverage', () => {
     mockRuntimeLogger.debug.mockClear();
     mockRunDiagnosticBundle.mockClear();
     mockBuildDiagnosticProbes.mockClear();
+    vi.mocked(getRecentMessages).mockReset();
+    vi.mocked(getRecentMessages).mockReturnValue([]);
     mockConfig.adminPhones = new Set<string>();
     mockConfig.controlPeers = new Map<string, string>();
     delete process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'];
@@ -1751,6 +1787,157 @@ describe('AgentRuntime edge coverage', () => {
       expect.objectContaining({ mapKey }),
       'image coalesce flush skipped during resume-failed recovery',
     );
+  });
+
+  it('recovers recent context and replays the pending turn after resume failure', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
+    const state = view(runtime);
+    const session = makeSession();
+    const chatJid = '15551237777@s.whatsapp.net';
+    const mapKey = '15551237777';
+    const mark = vi.fn<(scopeKey?: string) => void>();
+    const unmark = vi.fn<(scopeKey?: string) => void>();
+    const coalesceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    state.chatSessions.set(mapKey, session);
+    state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
+    state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+    state.imageCoalesce.buffers.set(mapKey, {
+      timer: coalesceTimer,
+      msg: { chatJid },
+    });
+    state.pendingSystemResults.mark = mark;
+    state.pendingSystemResults.unmark = unmark;
+    vi.mocked(getRecentMessages).mockReturnValueOnce([
+      makeStoredMessage({
+        pk: 1,
+        messageId: 'older-context',
+        senderName: 'Ada',
+        content: 'older context',
+        timestamp: 1_781_095_100,
+      }),
+      makeStoredMessage({
+        pk: 2,
+        messageId: 'newer-media',
+        senderJid: 'grace-edge@s.whatsapp.net',
+        senderName: null,
+        content: null,
+        contentType: 'image',
+        timestamp: 1_781_095_200,
+      }),
+    ]);
+
+    state.handleResumeFailed(chatJid);
+    await drainMicrotasks();
+
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
+    expect(getRecentMessages).toHaveBeenCalledWith(expect.anything(), mapKey, 30);
+    expect(mark).toHaveBeenCalledWith(mapKey);
+    expect(unmark).not.toHaveBeenCalled();
+    expect(session.sendTurn).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('[CONTEXT RECOVERY'),
+    );
+    const sendTurnCalls = session.sendTurn.mock.calls as unknown as Array<[string]>;
+    expect(sendTurnCalls[0]![0]).toContain('[media]');
+    expect(sendTurnCalls[0]![0]).toContain('Ada: older context');
+    expect(session.sendTurn).toHaveBeenNthCalledWith(2, 'lost user turn after rejected resume');
+    expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
+  });
+
+  it('unmarks failed context recovery and still replays the pending turn', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
+    const state = view(runtime);
+    const session = makeSession();
+    const chatJid = '15551237778@s.whatsapp.net';
+    const mapKey = '15551237778';
+    const mark = vi.fn<(scopeKey?: string) => void>();
+    const unmark = vi.fn<(scopeKey?: string) => void>();
+
+    session.sendTurn
+      .mockRejectedValueOnce(new Error('context pipe closed'))
+      .mockResolvedValueOnce(undefined);
+    state.chatSessions.set(mapKey, session);
+    state.pendingTurnText.set(mapKey, 'turn survives context failure');
+    state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+    state.pendingSystemResults.mark = mark;
+    state.pendingSystemResults.unmark = unmark;
+    vi.mocked(getRecentMessages).mockReturnValueOnce([
+      makeStoredMessage({
+        chatJid,
+        conversationKey: mapKey,
+        content: 'context that fails to send',
+      }),
+    ]);
+
+    state.handleResumeFailed(chatJid);
+    await drainMicrotasks();
+
+    expect(mark).toHaveBeenCalledWith(mapKey);
+    expect(unmark).toHaveBeenCalledWith(mapKey);
+    expect(session.sendTurn).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('context that fails to send'),
+    );
+    expect(session.sendTurn).toHaveBeenNthCalledWith(2, 'turn survives context failure');
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), chatJid }),
+      'context recovery failed — starting blank session',
+    );
+    expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
+  });
+
+  it('drops stale pending-turn state when replay after resume failure cannot be sent', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
+    const state = view(runtime);
+    const session = makeSession();
+    const chatJid = '15551237779@s.whatsapp.net';
+    const mapKey = '15551237779';
+
+    session.sendTurn.mockRejectedValueOnce(new Error('replay pipe closed'));
+    state.chatSessions.set(mapKey, session);
+    state.pendingTurnText.set(mapKey, 'stale pending turn');
+    state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+
+    state.handleResumeFailed(chatJid);
+    await drainMicrotasks();
+
+    expect(getRecentMessages).toHaveBeenCalledWith(expect.anything(), mapKey, 30);
+    expect(session.sendTurn).toHaveBeenCalledWith('stale pending turn');
+    expect(state.pendingTurnText.has(mapKey)).toBe(false);
+    expect(state.pendingTurnActorJid.has(mapKey)).toBe(false);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), chatJid }),
+      'pending turn replay failed',
+    );
+    expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
+  });
+
+  it('aborts resume-failure replay if the fresh session is removed during spawn', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
+    const state = view(runtime);
+    const session = makeSession();
+    const chatJid = '15551237780@s.whatsapp.net';
+    const mapKey = '15551237780';
+
+    session.spawnSession.mockImplementationOnce(async () => {
+      state.chatSessions.delete(mapKey);
+    });
+    state.chatSessions.set(mapKey, session);
+    state.pendingTurnText.set(mapKey, 'do not replay to stale session');
+
+    state.handleResumeFailed(chatJid);
+    await drainMicrotasks();
+
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    expect(getRecentMessages).not.toHaveBeenCalled();
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid, mapKey }),
+      'handleResumeFailed: session was replaced or removed during spawn — aborting replay',
+    );
+    expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
 
   it('normalizes assistant text deltas across incomplete and complete item events', () => {
