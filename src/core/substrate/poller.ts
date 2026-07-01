@@ -1103,8 +1103,10 @@ export class TriggerPoller {
 
     if (t.kind === 'schedule.cron') {
       try {
-        const parsed = JSON.parse(t.spec_json) as { expr: string };
-        nextFireAt = nextCronRun(parsed.expr, now);
+        // QR-092: honor the persisted tz on reschedule (parity with computeNextFireAt
+        // and the scheduled_messages path); default to UTC when absent.
+        const parsed = JSON.parse(t.spec_json) as { expr: string; tz?: string };
+        nextFireAt = nextCronRun(parsed.expr, now, parsed.tz ?? 'UTC');
       } catch (err) {
         log.error({ err, triggerId: t.id }, 'cron next-fire computation failed');
         nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
