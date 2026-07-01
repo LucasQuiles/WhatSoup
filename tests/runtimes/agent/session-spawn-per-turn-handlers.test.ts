@@ -56,6 +56,7 @@ import { spawn } from 'node:child_process';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
 
@@ -202,6 +203,36 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     child._exitCb!(0, null);
     await new Promise((resolve) => setImmediate(resolve));
 
+    expect(onCrash).not.toHaveBeenCalled();
+  });
+
+  it('clean exit drains a final non-newline-terminated result event', async () => {
+    const events: AgentEvent[] = [];
+    const { sm, onCrash } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    const finalResultLine = JSON.stringify({
+      type: 'step_finish',
+      part: {
+        reason: 'stop',
+        tokens: { input: 17, output: 23 },
+        cost: 0.0042,
+      },
+    });
+    child.stdout.emit('data', Buffer.from(finalResultLine));
+    child._exitCb!(0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'result',
+        text: null,
+        inputTokens: 17,
+        outputTokens: 23,
+        costUsd: 0.0042,
+      }),
+    ]);
     expect(onCrash).not.toHaveBeenCalled();
   });
 
