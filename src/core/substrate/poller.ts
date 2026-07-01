@@ -434,6 +434,7 @@ export class TriggerPoller {
     const row = this.db.prepare(
       `SELECT started_at FROM trigger_runs
        WHERE trigger_id = ? AND status = 'ok'
+         AND json_valid(output_json)
          AND json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL
        ORDER BY started_at DESC, id DESC
        LIMIT 1`,
