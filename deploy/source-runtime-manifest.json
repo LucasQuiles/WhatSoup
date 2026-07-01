@@ -32,7 +32,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "a0953049c3c57510955bef7b0385333fb946036ac9c2269c6bf04d9c57f9c442",
+      "sha256": "66c63088909debf0e035226cd67c8931ab1bc694801f01e8dc6524449763f7c6",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -51,7 +51,7 @@
     },
     {
       "path": "src/transport/auth-disconnect-policy.ts",
-      "sha256": "c3bbf053b0ee1082183ac5a0ce84c23e0ba3b4de1ada6768e75cad74710e3452",
+      "sha256": "b34d45ee7bf3d0ccb6a5953f114a94b40da7b2ef2b08dddf1dce7ab177e5d781",
       "mustContain": [
         "decideDisconnectAction",
         "logged-out",
