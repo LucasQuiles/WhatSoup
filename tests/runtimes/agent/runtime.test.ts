@@ -403,7 +403,7 @@ import { tmpdir } from 'node:os';
 function makeDb(): Database {
   return {
     raw: {
-      prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
+      prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) })),
       exec: vi.fn(),
     },
   } as unknown as Database;
@@ -652,6 +652,7 @@ describe('AgentRuntime', () => {
     );
     // Reset voice reply config to default (never) between tests
     mockConfig.voiceReply = 'never';
+    mockConfig.adminPhones = new Set<string>(['15550100001']);
     mockConfig.controlPeers.clear();
     mockConfig.toolUpdateMode = 'full';
     mockConfig.toolUpdateRedirectJid = null;
@@ -2912,6 +2913,133 @@ describe('AgentRuntime', () => {
     }), 'Control queue not found');
   });
 
+  it('emit_heal_result fixed path notifies loops and clears the control slot', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    mockConfig.controlPeers.set('loops', '15550100002');
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    const emitHealResult = getRegisteredTool(runtime, 'emit_heal_result');
+    const timeout = fakeTimerHandle('emit-heal-result-timeout');
+    const controlQueue = {
+      sendControlMessage: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const controlKey = ['control', 'heal.internal'].join('@');
+    const runtimeState = runtime as unknown as {
+      activeControlReportId: string | null;
+      controlSessionTimeout: ReturnType<typeof setTimeout> | null;
+      chatQueues: Map<string, unknown>;
+    };
+    runtimeState.activeControlReportId = 'report-fixed';
+    runtimeState.controlSessionTimeout = timeout;
+    runtimeState.chatQueues.set(controlKey, controlQueue);
+
+    const result = await emitHealResult.handler({
+      reportId: 'report-fixed',
+      errorClass: 'crash__boom',
+      result: 'fixed',
+      commitSha: 'abc1234',
+      diagnosis: 'fixed it',
+    });
+
+    expect(result).toEqual({ sent: true, reportId: 'report-fixed', result: 'fixed' });
+    expect(controlQueue.sendControlMessage).toHaveBeenCalledWith(
+      '15550100002@s.whatsapp.net',
+      'HEAL_COMPLETE',
+      {
+        reportId: 'report-fixed',
+        errorClass: 'crash__boom',
+        result: 'fixed',
+        commitSha: 'abc1234',
+        diagnosis: 'fixed it',
+      },
+      undefined,
+    );
+    expect(runtimeState.activeControlReportId).toBeNull();
+    expect(runtimeState.controlSessionTimeout).toBeNull();
+    expect(sentMessages).toEqual([]);
+  });
+
+  it('emit_heal_result escalates to loops and admin before dispatching the next queued report', async () => {
+    const queuedRow = {
+      report_id: 'report-next',
+      error_class: 'service_crash__next',
+      error_type: 'service_crash',
+      state: 'queued',
+      attempt_count: 1,
+      cooldown_until: null,
+      context: '{"type":"service_crash","recentLogs":"next stack"}',
+      created_at: '2026-06-10T09:58:00Z',
+    };
+    const prepare = vi.fn((sql: string) => {
+      if (sql.includes('SELECT report_id, error_class, state FROM heal_reports')) {
+        return { all: vi.fn(() => []) };
+      }
+      if (sql.includes("SELECT * FROM heal_reports WHERE state = 'queued'")) {
+        return { get: vi.fn(() => queuedRow) };
+      }
+      return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+    });
+    const db = {
+      raw: { prepare, exec: vi.fn() },
+    } as unknown as Database;
+    const { messenger, sentMessages } = makeMessenger();
+    mockConfig.controlPeers.set('loops', '15550100002');
+    mockConfig.adminPhones = new Set(['15550100003']);
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    const emitHealResult = getRegisteredTool(runtime, 'emit_heal_result');
+    const controlQueue = {
+      sendControlMessage: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const controlKey = ['control', 'heal.internal'].join('@');
+    const runtimeState = runtime as unknown as {
+      activeControlReportId: string | null;
+      chatQueues: Map<string, unknown>;
+      handleControlTurn: ReturnType<typeof vi.fn>;
+    };
+    runtimeState.activeControlReportId = 'report-escalate';
+    runtimeState.chatQueues.set(controlKey, controlQueue);
+    runtimeState.handleControlTurn = vi.fn(async () => {});
+
+    const result = await emitHealResult.handler({
+      reportId: 'report-escalate',
+      errorClass: 'crash__boom',
+      result: 'escalate',
+      diagnosis: 'needs human repair',
+    });
+
+    expect(result).toEqual({ sent: true, reportId: 'report-escalate', result: 'escalate' });
+    expect(controlQueue.sendControlMessage).toHaveBeenCalledWith(
+      '15550100002@s.whatsapp.net',
+      'HEAL_ESCALATE',
+      {
+        reportId: 'report-escalate',
+        errorClass: 'crash__boom',
+        diagnosis: 'needs human repair',
+      },
+      undefined,
+    );
+    expect(sentMessages).toEqual([
+      {
+        jid: '15550100003@s.whatsapp.net',
+        text: '[HEAL_ESCALATE] Repair for crash__boom escalated.\n\nneeds human repair',
+      },
+    ]);
+    expect(runtimeState.activeControlReportId).toBeNull();
+    expect(runtimeState.handleControlTurn).toHaveBeenCalledWith(
+      'report-next',
+      JSON.stringify({
+        type: 'service_crash',
+        recentLogs: 'next stack',
+        reportId: 'report-next',
+        errorClass: 'service_crash__next',
+      }),
+    );
+  });
+
   // ─── B02: STDIN_WRITE_TIMEOUT handling ────────────────────────────────────
 
   it('handleMessage catches STDIN_WRITE_TIMEOUT and sends user-facing message', async () => {
@@ -3658,6 +3786,223 @@ describe('AgentRuntime', () => {
 
     expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(queue.enqueueText).not.toHaveBeenCalled();
+  });
+
+  it('shared-session event switch handles init, AskUser fallthrough, compact, tool errors, and post-turn tool suppression', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const tracker = {
+      onAnyActivity: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+      onTurnComplete: vi.fn(),
+    };
+
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      outboundQueues: Map<string, IOutboundQueue>;
+      operationTracker: typeof tracker;
+      postTurnGate: Set<string>;
+      singleTurnHadToolActivity: boolean;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.session = Object.assign({}, mockSession, {
+      tickWatchdog: vi.fn(),
+      trackToolStart: vi.fn(),
+      trackToolEnd: vi.fn(),
+    });
+    state.operationTracker = tracker;
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    state.handleEvent({ type: 'init', sessionId: 'shared-session-id' });
+    expect(mockRuntimeLogger.debug).toHaveBeenCalledWith(
+      { chatJid: '111@s.whatsapp.net', sessionId: 'shared-session-id' },
+      'session init',
+    );
+
+    state.handleEvent({
+      type: 'tool_use',
+      toolId: 'ask-user-shared',
+      toolName: 'AskUserQuestion',
+      toolInput: { question: 'Pick one', options: ['A', 'B'] },
+    });
+    expect(state.singleTurnHadToolActivity).toBe(true);
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: expect.any(String),
+    }));
+    expect(tracker.onToolStart).toHaveBeenCalledWith(
+      'ask-user-shared',
+      'AskUserQuestion',
+      expect.any(String),
+    );
+
+    state.handleEvent({ type: 'compact_boundary' });
+    expect(queue.indicateTyping).toHaveBeenCalledTimes(1);
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context compacted'));
+    expect(tracker.onAnyActivity).toHaveBeenCalled();
+
+    state.handleEvent({
+      type: 'tool_result',
+      toolId: 'ask-user-shared',
+      isError: true,
+      content: 'E'.repeat(240),
+    });
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'error',
+    }));
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('ask-user-shared');
+    expect(state.activeToolNames.has('__global__')).toBe(false);
+
+    (queue.enqueueToolUpdate as ReturnType<typeof vi.fn>).mockClear();
+    state.postTurnGate.add('__global__');
+    state.handleEvent({
+      type: 'tool_use',
+      toolId: 'phantom-tool',
+      toolName: 'Bash',
+      toolInput: { command: 'date' },
+    });
+
+    expect(queue.enqueueToolUpdate).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      { toolName: 'Bash' },
+      'post-turn gate: suppressed phantom tool_use (shared)',
+    );
+  });
+
+  it('singleton crash callback marks the active inbound failed and keeps heal-report failures contained', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.controlPeers.set('q', '15550100004');
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+    const durability = {
+      markInboundFailed: vi.fn(),
+    };
+    const replyGuarantee = {
+      disarm: vi.fn(),
+    };
+    const state = runtime as unknown as {
+      currentInboundSeq: number | undefined;
+      durability: typeof durability;
+      replyGuarantee: typeof replyGuarantee;
+      ensureSessionAndQueueSync(chatJid: string): void;
+    };
+    state.durability = durability;
+    state.replyGuarantee = replyGuarantee;
+    state.currentInboundSeq = 77;
+
+    state.ensureSessionAndQueueSync('crash-single@s.whatsapp.net');
+    capturedOnCrashRef.current?.({
+      exitCode: 1,
+      signal: null,
+      sessionId: 'session-crash',
+      dbRowId: 12,
+      provider: 'claude-cli',
+      crashClass: 'boom',
+      stderrPreview: 'stack trace',
+    });
+
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(77);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(77);
+    expect(state.currentInboundSeq).toBeUndefined();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to emit heal report for session crash',
+    );
+
+    mockRuntimeLogger.warn.mockClear();
+    capturedOnCrashRef.current?.({
+      exitCode: null,
+      signal: null,
+      sessionId: 'session-crash-null-exit',
+      dbRowId: 13,
+      provider: undefined,
+      crashClass: undefined,
+      stderrPreview: undefined,
+    });
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to emit heal report for session crash',
+    );
+  });
+
+  it('startup-resumed shared crash callback marks the active inbound failed', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.controlPeers.set('q', '15550100004');
+    mockGetActiveSession.mockReturnValue({
+      id: 8,
+      session_id: 'startup-shared-crash',
+      chat_jid: 'startup-crash@s.whatsapp.net',
+      claude_pid: 0,
+      status: 'active',
+      started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      last_message_at: null,
+      message_count: 0,
+    });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'shared' });
+    const durability = {
+      getSessionCheckpoint: vi.fn(() => ({
+        session_id: 'startup-shared-crash',
+        updated_at: new Date(Date.now() - 5 * 60_000).toISOString().replace('Z', ''),
+      })),
+      upsertSessionCheckpoint: vi.fn(),
+      markInboundFailed: vi.fn(),
+    };
+    const replyGuarantee = {
+      disarm: vi.fn(),
+    };
+    const state = runtime as unknown as {
+      currentInboundSeq: number | undefined;
+      durability: typeof durability;
+      replyGuarantee: typeof replyGuarantee;
+    };
+    state.durability = durability;
+    state.replyGuarantee = replyGuarantee;
+
+    await runtime.start();
+    state.currentInboundSeq = 88;
+    capturedOnCrashRef.current?.({
+      exitCode: 2,
+      signal: 'SIGTERM',
+      sessionId: 'startup-shared-crash',
+      dbRowId: 8,
+      provider: 'claude-cli',
+      crashClass: 'boom',
+      stderrPreview: 'startup trace',
+    });
+
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(88);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(88);
+    expect(state.currentInboundSeq).toBeUndefined();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to emit heal report for session crash',
+    );
+
+    mockRuntimeLogger.warn.mockClear();
+    capturedOnCrashRef.current?.({
+      exitCode: null,
+      signal: null,
+      sessionId: 'startup-shared-crash-null-exit',
+      dbRowId: 9,
+      provider: undefined,
+      crashClass: undefined,
+      stderrPreview: undefined,
+    });
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to emit heal report for session crash',
+    );
   });
 
   it('tool_result with isError enqueues tool error update', async () => {
@@ -6698,6 +7043,283 @@ describe('AgentRuntime', () => {
         '15551230006',
         { sessionStatus: 'ended' },
       );
+    });
+
+    it('proactive resume skips invalid, stale, and already-active checkpoints before resuming a service-key chat', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+      try {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const state = runtime as unknown as {
+          chatSessions: Map<string, unknown>;
+        };
+        state.chatSessions.set('already-active@lid', mockSession);
+        mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
+
+        const mockDurability = {
+          getResumableCheckpoints: vi.fn(() => [
+            { conversation_key: 'missing-session' },
+            { conversation_key: 'stale-dm' },
+            { conversation_key: 'already-active' },
+            { conversation_key: '15551230009_at_s.whatsapp.net' },
+          ]),
+          getSessionCheckpoint: vi.fn((key: string) => {
+            if (key === 'missing-session') return null;
+            if (key === 'stale-dm') {
+              return {
+                session_id: 'stale-session',
+                updated_at: '2026-06-10T08:00:00',
+              };
+            }
+            if (key === 'already-active') {
+              return {
+                session_id: 'duplicate-session',
+                updated_at: '2026-06-10T09:59:00',
+              };
+            }
+            return {
+              session_id: 'service-session',
+              updated_at: '2026-06-10T09:59:00',
+            };
+          }),
+          upsertSessionCheckpoint: vi.fn(),
+        };
+        (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+        await runtime.start();
+
+        expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+        expect(mockSession.spawnSession).toHaveBeenCalledWith('service-session');
+        expect(state.chatSessions.has('already-active@lid')).toBe(true);
+        expect(state.chatSessions.has('15551230009@s.whatsapp.net')).toBe(true);
+        expect(mockDurability.upsertSessionCheckpoint).toHaveBeenCalledWith(
+          'stale-dm',
+          { sessionStatus: 'ended' },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('proactive resume callbacks drop orphaned events and clean inactive queues on notify', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
+      mockSession.getStatus.mockReturnValue({
+        active: false,
+        pid: null,
+        sessionId: 'dm-sess-callbacks',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+
+      const mockDurability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: '15551230007' },
+        ]),
+        getSessionCheckpoint: vi.fn((_key: string) => ({ session_id: 'dm-sess-callbacks' })),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, unknown>;
+        chatQueues: Map<string, typeof mockQueue>;
+        handleEventPerChat: ReturnType<typeof vi.fn>;
+      };
+      state.handleEventPerChat = vi.fn();
+
+      await runtime.start();
+
+      const mapKey = [...state.chatSessions.keys()][0] ?? '';
+      expect(mapKey).toBe('15551230007@lid');
+      const resumedQueue = state.chatQueues.get(mapKey);
+      expect(resumedQueue).toBeDefined();
+
+      capturedNotifyUserRef.current?.('resume callback notice');
+
+      expect(resumedQueue?.abortTurn).toHaveBeenCalledTimes(1);
+      expect(state.chatSessions.has(mapKey)).toBe(false);
+      expect(state.chatQueues.has(mapKey)).toBe(false);
+      expect(sentMessages).toEqual([
+        { jid: '15551230007@lid', text: 'resume callback notice' },
+      ]);
+
+      capturedOnEventRef.current?.({ type: 'result', text: 'late result' });
+
+      expect(state.handleEventPerChat).not.toHaveBeenCalled();
+      expect(mockRuntimeLogger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({
+          initialMapKey: mapKey,
+          chatJid: '15551230007@lid',
+          eventType: 'result',
+        }),
+        'event dropped — session key missing for per-chat callback',
+      );
+    });
+
+    it('proactive resume injects missed messages and unmarks failed continuation sends', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+      try {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+        mockSession.getStatus.mockReturnValue({
+          active: true,
+          pid: 123,
+          sessionId: 'dm-sess-continuation',
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: null,
+        });
+        mockSession.sendTurn.mockRejectedValueOnce(new Error('stdin closed'));
+
+        const mockDurability = {
+          getResumableCheckpoints: vi.fn(() => [
+            { conversation_key: '15551230008' },
+          ]),
+          getSessionCheckpoint: vi.fn((_key: string) => ({
+            session_id: 'dm-sess-continuation',
+            updated_at: '2026-06-10T09:59:00',
+          })),
+          upsertSessionCheckpoint: vi.fn(),
+        };
+        (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+        const state = runtime as unknown as {
+          injectMissedMessages: ReturnType<typeof vi.fn>;
+          pendingSystemResults: {
+            mark: ReturnType<typeof vi.fn>;
+            unmark: ReturnType<typeof vi.fn>;
+          };
+        };
+        state.injectMissedMessages = vi.fn(async () => true);
+        state.pendingSystemResults.mark = vi.fn();
+        state.pendingSystemResults.unmark = vi.fn();
+
+        await runtime.start();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(state.injectMissedMessages).toHaveBeenCalledWith(
+          mockSession,
+          '15551230008@lid',
+          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
+        );
+        expect(state.pendingSystemResults.mark).toHaveBeenCalledWith('15551230008@lid');
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(
+          '[System: session resumed after service restart — continue where you left off]',
+        );
+        expect(state.pendingSystemResults.unmark).toHaveBeenCalledWith('15551230008@lid');
+        expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            err: expect.any(Error),
+            chatJid: '15551230008@lid',
+          }),
+          'failed to send continuation turn after resume',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('proactive resume continuation stops when inactive and sends once when no messages were missed', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+      try {
+        const inactiveRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+        const inactiveDurability = {
+          getResumableCheckpoints: vi.fn(() => [
+            { conversation_key: '15551230010' },
+          ]),
+          getSessionCheckpoint: vi.fn(() => ({
+            session_id: 'inactive-session',
+            updated_at: '2026-06-10T09:59:00',
+          })),
+          upsertSessionCheckpoint: vi.fn(),
+        };
+        (inactiveRuntime as unknown as { durability: unknown }).durability = inactiveDurability;
+        const inactiveState = inactiveRuntime as unknown as {
+          injectMissedMessages: ReturnType<typeof vi.fn>;
+        };
+        inactiveState.injectMissedMessages = vi.fn(async () => true);
+        mockSession.getStatus.mockReturnValueOnce({
+          active: false,
+          pid: null,
+          sessionId: 'inactive-session',
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        });
+
+        await inactiveRuntime.start();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(inactiveState.injectMissedMessages).not.toHaveBeenCalled();
+        expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
+          '[System: session resumed after service restart — continue where you left off]',
+        );
+
+        vi.clearAllMocks();
+        mockSession.spawnSession.mockResolvedValue(undefined);
+        const activeRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+        const activeDurability = {
+          getResumableCheckpoints: vi.fn(() => [
+            { conversation_key: '15551230011' },
+          ]),
+          getSessionCheckpoint: vi.fn(() => ({
+            session_id: 'active-session',
+            updated_at: '2026-06-10T09:59:00',
+          })),
+          upsertSessionCheckpoint: vi.fn(),
+        };
+        (activeRuntime as unknown as { durability: unknown }).durability = activeDurability;
+        const activeState = activeRuntime as unknown as {
+          injectMissedMessages: ReturnType<typeof vi.fn>;
+          pendingSystemResults: {
+            mark: ReturnType<typeof vi.fn>;
+            unmark: ReturnType<typeof vi.fn>;
+          };
+        };
+        activeState.injectMissedMessages = vi.fn(async () => false);
+        activeState.pendingSystemResults.mark = vi.fn();
+        activeState.pendingSystemResults.unmark = vi.fn();
+        mockSession.getStatus.mockReturnValue({
+          active: true,
+          pid: 123,
+          sessionId: 'active-session',
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: null,
+        });
+        mockSession.sendTurn.mockResolvedValue(undefined);
+
+        await activeRuntime.start();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(activeState.injectMissedMessages).toHaveBeenCalledWith(
+          mockSession,
+          '15551230011@lid',
+          Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
+        );
+        expect(activeState.pendingSystemResults.mark).toHaveBeenCalledTimes(1);
+        expect(activeState.pendingSystemResults.mark).toHaveBeenCalledWith('15551230011@lid');
+        expect(activeState.pendingSystemResults.unmark).not.toHaveBeenCalled();
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(
+          '[System: session resumed after service restart — continue where you left off]',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
