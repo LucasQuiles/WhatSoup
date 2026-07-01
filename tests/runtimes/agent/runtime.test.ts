@@ -6134,6 +6134,96 @@ describe('AgentRuntime', () => {
     expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 42);
   });
 
+  it('sandboxPerChat: stale_live sessions are terminated and marked orphaned during start()', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 43,
+      sessionId: 'ses-live-stale',
+      claudePid: 4321,
+      chatJid: 'stale-live@s.whatsapp.net',
+      conversationKey: 'stale-live',
+      status: 'active',
+      classification: 'stale_live',
+      reason: 'superseded by checkpoint',
+    }]);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    runtime.setDurability({} as any);
+
+    try {
+      await runtime.start();
+      expect(killSpy).toHaveBeenCalledWith(4321, 'SIGTERM');
+      expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 43);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        {
+          id: 43,
+          pid: 4321,
+          conversationKey: 'stale-live',
+          reason: 'superseded by checkpoint',
+        },
+        'reaping stale session',
+      );
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it('sandboxPerChat: ambiguous startup sessions warn without terminating or orphaning', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 44,
+      sessionId: 'ses-ambiguous',
+      claudePid: 9876,
+      chatJid: 'ambiguous@s.whatsapp.net',
+      conversationKey: 'ambiguous',
+      status: 'active',
+      classification: 'ambiguous',
+      reason: 'ownership unverified',
+    }]);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    runtime.setDurability({} as any);
+
+    try {
+      await runtime.start();
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(mockMarkOrphaned).not.toHaveBeenCalledWith(db, 44);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        {
+          id: 44,
+          pid: 9876,
+          conversationKey: 'ambiguous',
+          reason: 'ownership unverified',
+        },
+        'ambiguous session — not touching',
+      );
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
   it('sandboxPerChat: eager session resume skipped on start()', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
