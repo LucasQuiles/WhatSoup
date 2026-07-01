@@ -104,6 +104,39 @@ describe('downloadMedia — negative', () => {
   });
 });
 
+describe('downloadMedia — QR-057 pre-fetch fileLength guard', () => {
+  it('rejects BEFORE invoking the download function when declared fileLength exceeds the cap', async () => {
+    const downloadFn = vi.fn().mockResolvedValue(Buffer.alloc(1024));
+
+    const result = await downloadMedia(downloadFn, 'video/mp4', 100 * MB);
+
+    expect(result).toStrictEqual(null);
+    // The whole point: the blob is never buffered into memory.
+    expect(downloadFn).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when declared fileLength is under the cap', async () => {
+    const fakeBuffer = Buffer.alloc(2048, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+
+    const result = await downloadMedia(downloadFn, 'audio/ogg', 1 * MB);
+
+    expect(result).not.toBeNull();
+    expect(result!.buffer).toBe(fakeBuffer);
+    expect(downloadFn).toHaveBeenCalledOnce();
+  });
+
+  it('proceeds (back-compat) when declared fileLength is omitted', async () => {
+    const fakeBuffer = Buffer.alloc(512, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+
+    const result = await downloadMedia(downloadFn, 'image/jpeg');
+
+    expect(result).not.toBeNull();
+    expect(downloadFn).toHaveBeenCalledOnce();
+  });
+});
+
 describe('downloadMedia — image resize integration', () => {
   it('calls resizeImageIfNeeded with correct args for image downloads', async () => {
     const fakeBuffer = Buffer.alloc(1024, 0x42);

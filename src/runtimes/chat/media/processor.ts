@@ -8,7 +8,7 @@ import type { Database } from '../../../core/database.ts';
 import { extractFrames } from './video.ts';
 import { extractUrls, extractLinkContent } from './links.ts';
 import { extractDocumentText } from './documents.ts';
-import { extractRawMime } from '../../../core/media-mime.ts';
+import { extractRawMime, extractRawFileLength } from '../../../core/media-mime.ts';
 
 const log = createChildLogger('media:processor');
 
@@ -78,7 +78,7 @@ export async function processMedia(
     if (contentType === 'image') {
       mimeType = extractRawMime(msg.rawMessage, 'image') ?? mimeType;
     }
-    const result = await downloadMedia(downloadFn, mimeType);
+    const result = await downloadMedia(downloadFn, mimeType, extractRawFileLength(msg.rawMessage, contentType));
     if (!result) {
       return { content: `[${label} — couldn't download]`, images: [] };
     }
@@ -100,7 +100,7 @@ export async function processMedia(
 
     // Extract real MIME type from raw WhatsApp message when available
     const audioMime = extractRawMime(msg.rawMessage, 'audio') ?? 'audio/ogg';
-    const result = await downloadMedia(downloadFn, audioMime);
+    const result = await downloadMedia(downloadFn, audioMime, extractRawFileLength(msg.rawMessage, 'audio'));
     if (!result) {
       return { content: "[audio — couldn't download]", images: [] };
     }
@@ -127,7 +127,7 @@ export async function processMedia(
 
     // Extract real MIME type from raw WhatsApp message when available
     const videoMime = extractRawMime(msg.rawMessage, 'video') ?? 'video/mp4';
-    const result = await downloadMedia(downloadFn, videoMime);
+    const result = await downloadMedia(downloadFn, videoMime, extractRawFileLength(msg.rawMessage, 'video'));
     if (!result) {
       return { content: "[video — couldn't download]", images: [] };
     }
@@ -167,7 +167,7 @@ export async function processMedia(
     const fileName = content ?? 'document';
     // Extract real MIME type from raw WhatsApp message when available
     const docMime = extractRawMime(msg.rawMessage, 'document') ?? 'application/octet-stream';
-    const result = await downloadMedia(downloadFn, docMime);
+    const result = await downloadMedia(downloadFn, docMime, extractRawFileLength(msg.rawMessage, 'document'));
     if (!result) {
       return { content: "[document — couldn't download]", images: [] };
     }
