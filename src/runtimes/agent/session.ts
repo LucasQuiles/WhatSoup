@@ -1903,6 +1903,7 @@ export class SessionManager {
     startedAt: string | null;
     messageCount: number;
     lastMessageAt: string | null;
+    turnInFlight: boolean;
   } {
     return {
       active: this.active,
@@ -1911,6 +1912,11 @@ export class SessionManager {
       startedAt: this.startedAt,
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
+      // Derived signal: the turn watchdog is armed for the duration of an
+      // in-flight turn (armWatchdog on dispatch, tickWatchdog on progress,
+      // clearTurnWatchdog at turn end), so an armed hard watchdog == a turn is
+      // running. The idle-session sweep uses this to never suspend mid-turn.
+      turnInFlight: this.watchdogHard !== null,
     };
   }
 

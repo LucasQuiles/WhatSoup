@@ -466,7 +466,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
 
     await sm.spawnSession();
 
@@ -483,7 +483,22 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
+  });
+
+  it('getStatus().turnInFlight tracks the turn watchdog (armed during a turn)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    expect(sm.getStatus().turnInFlight).toBe(false); // no turn yet → watchdog not armed
+
+    sm.tickWatchdog();                               // provider progress arms the watchdog (turn in flight)
+    expect(sm.getStatus().turnInFlight).toBe(true);
+
+    sm.clearTurnWatchdog();                          // turn end clears the watchdog
+    expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
   it('init event updates sessionId via updateSessionId', async () => {
@@ -570,6 +585,7 @@ describe('SessionManager', () => {
       startedAt: null,
       messageCount: 0,
       lastMessageAt: null,
+      turnInFlight: false,
     });
   });
 
@@ -598,6 +614,7 @@ describe('SessionManager', () => {
       startedAt: expect.any(String),
       messageCount: 0,
       lastMessageAt: null,
+      turnInFlight: false,
     });
   });
 
