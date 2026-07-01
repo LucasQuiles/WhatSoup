@@ -5653,6 +5653,50 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
   });
 
+  it('shared: STDIN_WRITE_TIMEOUT notifies the originating chat without breaking the queue', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 456,
+      sessionId: 'ses_shared',
+      startedAt: new Date().toISOString(),
+      messageCount: 0,
+      lastMessageAt: null,
+    });
+    mockSession.sendTurn.mockRejectedValueOnce(new Error('STDIN_WRITE_TIMEOUT: agent not reading input'));
+
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    await runtime.start();
+
+    await expect(sendAndDrainShared(runtime, makeMsg({
+      chatJid: 'chat-timeout@g.us',
+      senderJid: '15550100001@s.whatsapp.net',
+      senderName: 'Taylor',
+      content: 'wake up',
+      isGroup: true,
+    }))).resolves.toBeUndefined();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(
+      expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
+    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith(
+      expect.stringContaining('wake up'),
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatJid: 'chat-timeout@g.us',
+        sessionId: 'ses_shared',
+        pid: 456,
+      }),
+      'stdin write timed out — notifying user',
+    );
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(
+      'Agent is not responding — try /new to start a fresh session.',
+    );
+  });
+
   it('shared: binds global MCP context to the active turn conversation', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
