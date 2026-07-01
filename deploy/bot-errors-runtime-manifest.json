@@ -109,7 +109,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "b866bf12d5c9b4bb350f494d88588ebe3c2bcfba2cd25c95093f104e3db75f25",
+      "sha256": "f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
@@ -165,7 +165,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "a09825da92814c3f9afaa475c915c120c4db274384f2c82352792d25e901ad62",
+      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
