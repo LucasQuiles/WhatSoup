@@ -9144,6 +9144,102 @@ describe('AgentRuntime', () => {
       expect(injected).not.toContain('(no answer)');
     });
 
+    it('ignores duplicate multi-question poll votes from a stale retained poll mapping', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger([
+        { waMessageId: 'POLL_DUP_Q1', hasSecret: true },
+        { waMessageId: 'POLL_DUP_Q2', hasSecret: true },
+      ]);
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-two-question-duplicate',
+        toolInput: {
+          questions: [
+            {
+              question: 'First question?',
+              header: 'First',
+              options: [
+                { label: 'First A', description: 'First option' },
+                { label: 'First B', description: 'Second option' },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: 'Second question?',
+              header: 'Second',
+              options: [
+                { label: 'Second A', description: 'First option' },
+                { label: 'Second B', description: 'Second option' },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(2));
+      mockSession.sendTurn.mockClear();
+      mockRuntimeLogger.debug.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_DUP_Q2',
+        chatJid: pollSends[1].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Second B'],
+      });
+
+      const state = runtime as unknown as {
+        pendingPolls: {
+          questions: Map<string, {
+            answersCollected: Record<number, string>;
+            pollMessageIdToQuestionIndex: Map<string, number>;
+          }>;
+        };
+      };
+      const pending = state.pendingPolls.questions.get('5678@s.whatsapp.net');
+      expect(pending?.answersCollected[1]).toBe('Second B');
+      expect(pending?.pollMessageIdToQuestionIndex.has('POLL_DUP_Q2')).toBe(false);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      // Simulate stale/corrupt persisted state where the already-answered poll id
+      // was retained or restored. The duplicate guard must still prevent overwrite.
+      pending?.pollMessageIdToQuestionIndex.set('POLL_DUP_Q2', 1);
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_DUP_Q2',
+        chatJid: pollSends[1].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Second A'],
+      });
+
+      expect(pending?.answersCollected[1]).toBe('Second B');
+      expect(mockRuntimeLogger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({ pollMessageId: 'POLL_DUP_Q2', index: 1 }),
+        'duplicate poll vote ignored',
+      );
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_DUP_Q1',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['First A'],
+      });
+
+      await vi.waitFor(() => {
+        expect(sendTurnTexts().filter((arg) => arg.includes('[User answered poll]'))).toHaveLength(1);
+      });
+      const injected = sendTurnTexts().find((arg) => arg.includes('[User answered poll]'))!;
+      expect(injected).toContain('A: First A');
+      expect(injected).toContain('A: Second B');
+      expect(injected).not.toContain('A: Second A');
+    });
+
     it('treats text while a poll is pending as a free-text Other answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OTHER', hasSecret: true });
       const db = makeDb();
