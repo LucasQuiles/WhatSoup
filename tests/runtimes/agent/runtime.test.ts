@@ -8816,6 +8816,94 @@ describe('AgentRuntime', () => {
       // No separate follow-up description message
     });
 
+    it('falls back to text when one AskUserQuestion poll send throws after a prior poll succeeds', async () => {
+      const { messenger } = makePollMessenger({ waMessageId: 'POLL_UNUSED', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const pollSender = (messenger as unknown as { sendPollMessage: ReturnType<typeof vi.fn> }).sendPollMessage;
+
+      pollSender
+        .mockResolvedValueOnce({ waMessageId: 'POLL_FIRST', hasSecret: true })
+        .mockRejectedValueOnce(new Error('poll send unavailable'));
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-send-throws',
+        toolInput: {
+          questions: [
+            {
+              question: 'Which database?',
+              header: 'DB',
+              options: [
+                { label: 'PostgreSQL', description: 'Relational, ACID compliant' },
+                { label: 'SQLite', description: 'Embedded, zero-config' },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: 'Which cache?',
+              header: 'Cache',
+              options: [
+                { label: 'Redis', description: 'Networked cache' },
+                { label: 'Memory', description: 'In-process cache' },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledTimes(2));
+
+      expect(pollSender).toHaveBeenNthCalledWith(
+        1,
+        expect.any(String),
+        'Which database?',
+        ['PostgreSQL — Relational, ACID compliant', 'SQLite — Embedded, zero-config', 'Other — propose a different option'],
+        1,
+      );
+      expect(pollSender).toHaveBeenNthCalledWith(
+        2,
+        expect.any(String),
+        'Which cache?',
+        ['Redis — Networked cache', 'Memory — In-process cache', 'Other — propose a different option'],
+        1,
+      );
+      expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatJid: expect.any(String),
+          err: expect.any(Error),
+          question: 'Which cache?',
+        }),
+        'failed to send poll for AskUserQuestion',
+      );
+
+      const state = runtime as unknown as {
+        pendingPolls: { questions: Map<string, { mode: 'poll' | 'textFallback'; pollMessageIdToQuestionIndex: Map<string, number> }> };
+      };
+      const pending = state.pendingPolls.questions.get('5678@s.whatsapp.net');
+      expect(pending?.mode).toBe('textFallback');
+      expect(pending?.pollMessageIdToQuestionIndex.size).toBe(0);
+
+      const fallbackText = mockQueue.enqueueText.mock.calls[0][0] as string;
+      expect(fallbackText).toContain('Which database?');
+      expect(fallbackText).toContain('1. *PostgreSQL*');
+      expect(fallbackText).toContain('2. *SQLite*');
+      expect(fallbackText).toContain('Reply with option number or text');
+
+      const secondFallbackText = mockQueue.enqueueText.mock.calls[1][0] as string;
+      expect(secondFallbackText).toContain('Which cache?');
+      expect(secondFallbackText).toContain('1. *Redis*');
+      expect(secondFallbackText).toContain('2. *Memory*');
+      expect(secondFallbackText).toContain('Reply with option number or text');
+    });
+
     it('does not duplicate long option details in immediate text fallback after poll send fails', async () => {
       const { messenger } = makePollMessenger({ waMessageId: 'POLL_FAIL_LONG_DETAILS', hasSecret: false });
       const db = makeDb();
