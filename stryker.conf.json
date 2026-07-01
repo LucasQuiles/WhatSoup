@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing for WhatSoup. Coverage% proves a line executed; mutation testing proves the (adversarial/unhappy) assertions would CATCH a regression. Scoped to the high-value memory/retrieval/consolidation modules (QR-003/005/011 hotspots) to keep runs tractable; widen `mutate` as coverage closes. Activate: npm install -D @stryker-mutator/core @stryker-mutator/vitest-runner",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "coverageAnalysis": "perTest",
+  "reporters": ["clear-text", "progress", "html", "json"],
+  "htmlReporter": { "fileName": "raw/mutation/index.html" },
+  "jsonReporter": { "fileName": "raw/mutation/stryker.json" },
+  "mutate": [
+    "src/memory/**/*.ts",
+    "src/mcp/tools/knowledge.ts",
+    "src/mcp/tools/memory-write.ts",
+    "src/runtimes/chat/enrichment/**/*.ts",
+    "src/runtimes/chat/providers/pinecone.ts",
+    "!src/**/*.test.ts"
+  ],
+  "thresholds": { "high": 90, "low": 75, "break": 65 },
+  "tempDirName": "raw/mutation/.stryker-tmp",
+  "concurrency": 4
+}
