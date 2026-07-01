@@ -56,6 +56,46 @@ describe('triggers core', () => {
     expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
   });
 
+  it('listTriggers supports unfiltered and status-only reads', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'status-list', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'c', actor: 'u',
+    });
+    pauseTrigger(db.raw, t.id, { actor: 'u' });
+
+    expect(listTriggers(db.raw).map(row => row.id)).toContain(t.id);
+    expect(listTriggers(db.raw, { status: 'paused' }).map(row => row.id)).toEqual([t.id]);
+    expect(listTriggers(db.raw, { status: 'active' })).toEqual([]);
+  });
+
+  it('poll intervals schedule next_fire_at relative to creation time', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'interval', ownerJid: 'mw', actor: 'u' });
+    const before = Math.floor(Date.now() / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.file',
+      spec: { path: '/tmp/interval-watch', watch: 'exists' },
+      reportChatJid: 'c', intervalSeconds: 90, actor: 'u',
+    });
+    const after = Math.floor(Date.now() / 1000);
+
+    expect(t.next_fire_at).toBeGreaterThanOrEqual(before + 90);
+    expect(t.next_fire_at).toBeLessThanOrEqual(after + 90);
+  });
+
+  it('createTrigger rolls back when event persistence fails after insert', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'rollback-create', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec('DROP TABLE bead_events');
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'c', actor: 'u',
+    })).toThrow(/bead_events/i);
+
+    const count = db.raw.prepare('SELECT COUNT(*) AS c FROM bead_triggers WHERE bead_id = ?').get(bead.id) as { c: number };
+    expect(count.c).toBe(0);
+  });
+
   it('pauseTrigger sets status=paused, clears next_fire_at', () => {
     const bead = createBead(db.raw, { kind: 'agent_job', title: 'x', ownerJid: 'mw', actor: 'u' });
     const t = createTrigger(db.raw, { beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' }, reportChatJid: 'c', actor: 'u' });
@@ -65,6 +105,22 @@ describe('triggers core', () => {
       status: 'paused',
       next_fire_at: null,
     });
+  });
+
+  it('pauseTrigger rejects missing ids before opening a transaction', () => {
+    expect(() => pauseTrigger(db.raw, 999_999, { actor: 'u' })).toThrow(/trigger 999999 not found/);
+  });
+
+  it('pauseTrigger rolls back status changes when event persistence fails', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'pause-rollback', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, { beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' }, reportChatJid: 'c', actor: 'u' });
+    const before = listTriggers(db.raw, { beadId: bead.id })[0];
+    db.raw.exec('DROP TABLE bead_events');
+
+    expect(() => pauseTrigger(db.raw, t.id, { actor: 'u' })).toThrow(/bead_events/i);
+
+    const after = listTriggers(db.raw, { beadId: bead.id })[0];
+    expect(after).toMatchObject({ status: before.status, next_fire_at: before.next_fire_at });
   });
 
   it('extendTrigger clamps; rejects past time', () => {
@@ -77,6 +133,28 @@ describe('triggers core', () => {
     extendTrigger(db.raw, t.id, { until: now + 10 * 86400, maxTtlHours: 72, actor: 'u' });
     expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBeLessThanOrEqual(now + 72 * 3600 + 5);
     expect(() => extendTrigger(db.raw, t.id, { until: now - 10, maxTtlHours: 72, actor: 'u' })).toThrow(/future/i);
+  });
+
+  it('extendTrigger rejects missing ids after validating a future until value', () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    expect(() => extendTrigger(db.raw, 999_999, { until: future, maxTtlHours: 72, actor: 'u' }))
+      .toThrow(/trigger 999999 not found/);
+  });
+
+  it('extendTrigger rolls back terminal_at changes when event persistence fails', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'extend-rollback', ownerJid: 'mw', actor: 'u' });
+    const now = Math.floor(Date.now() / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'c', requestedTerminalAt: now + 3600, maxTtlHours: 72, actor: 'u',
+    });
+    const before = listTriggers(db.raw, { beadId: bead.id })[0];
+    db.raw.exec('DROP TABLE bead_events');
+
+    expect(() => extendTrigger(db.raw, t.id, { until: now + 7200, maxTtlHours: 72, actor: 'u' }))
+      .toThrow(/bead_events/i);
+
+    expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBe(before.terminal_at);
   });
 
   it('event.message persists with next_fire_at NULL (reserved scaffold, not polled)', () => {
