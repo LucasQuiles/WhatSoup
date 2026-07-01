@@ -39,6 +39,11 @@ import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '..
 const log = createChildLogger('session-manager');
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
+
+/** Cap on the retained no-newline stdout line (QR-064): a provider streaming a
+ * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
+ * MCP socket MAX_BUF analogue; 16 MiB >> any real event line. */
+export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
 /** @deprecated Use WATCHDOG_SOFT_MS / WATCHDOG_HARD_MS instead. Kept for test backward-compat. */
 export const TURN_WATCHDOG_MS = 600_000;
 
@@ -709,6 +714,12 @@ export class SessionManager {
     this.materializeStdoutChunks();
     const lines = this.stdoutBufferStr.split('\n');
     this.stdoutBufferStr = lines.pop() ?? '';
+    // QR-064: drop a runaway no-newline buffer past the cap (never a valid
+    // newline-terminated event) to bound parent memory.
+    if (this.stdoutBufferStr.length > MAX_STDOUT_LINE_BYTES) {
+      log.warn({ sessionId: this.sessionId, provider: this.provider, bytes: this.stdoutBufferStr.length, cap: MAX_STDOUT_LINE_BYTES }, 'provider stdout line exceeded cap — dropping runaway no-newline buffer');
+      this.stdoutBufferStr = '';
+    }
     return lines;
   }
 
