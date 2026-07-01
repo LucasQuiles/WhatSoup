@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 33 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 34 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1050,6 +1050,49 @@ describe('scheduled_messages send-start migration contract', () => {
       .prepare('SELECT version FROM schema_migrations WHERE version = 32')
       .get() as { version: number } | undefined;
     expect(version?.version).toBe(32);
+
+    db.close();
+  });
+
+  it('migration 34 adds inbound continuity candidate marker columns', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    const cols = (
+      db.raw.prepare("PRAGMA table_info('inbound_events')").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 34')
+      .get() as { version: number } | undefined;
+
+    expect(version?.version).toBe(34);
+    expect(cols).toContain('continuity_candidate_reason');
+    expect(cols).toContain('continuity_candidate_source');
+    expect(cols).toContain('continuity_candidate_marked_at');
+    db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      'migration-33-runtime-marker',
+      'migration-33-runtime-conv',
+      'migration-33-runtime-jid',
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    expect(() => {
+      db.raw.prepare(`
+        INSERT INTO inbound_events (
+          message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        'migration-33-invalid-marker',
+        'migration-33-invalid-conv',
+        'migration-33-invalid-jid',
+        'raw-runtime-string',
+        'unknown-source',
+      );
+    }).toThrow();
 
     db.close();
   });

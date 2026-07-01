@@ -113,6 +113,10 @@ export class ReplyGuaranteeManager {
     this.armed.delete(inboundSeq);
   }
 
+  isArmed(inboundSeq: number | undefined): boolean {
+    return inboundSeq !== undefined && this.armed.has(inboundSeq);
+  }
+
   shutdown(): void {
     for (const { timer } of this.armed.values()) {
       this.clearTimer(timer);

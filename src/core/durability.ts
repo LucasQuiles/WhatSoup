@@ -67,6 +67,14 @@ export interface ActiveSessionCheckpointRow {
   session_status: string;
 }
 
+export type ContinuityCandidateReason =
+  | 'crash_reclaim_no_terminal_outbound'
+  | 'runtime_fault_no_terminal_outbound';
+
+export type ContinuityCandidateSource =
+  | 'pre_connect_recovery'
+  | 'runtime_fault_disarm';
+
 export interface RecoveryStats {
   inboundReplayed: number;
   outboundReconciled: number;
@@ -124,6 +132,7 @@ type DurabilityStatements = {
   markTurnDone: PreparedStatement;
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
+  markContinuityCandidate: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -184,6 +193,13 @@ export class DurabilityEngine {
       ),
       markInboundFailed: prepare(
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error' WHERE seq = ?`,
+      ),
+      markContinuityCandidate: prepare(
+        `UPDATE inbound_events
+         SET continuity_candidate_reason = ?,
+             continuity_candidate_source = ?,
+             continuity_candidate_marked_at = COALESCE(continuity_candidate_marked_at, datetime('now'))
+         WHERE seq = ? AND continuity_candidate_reason IS NULL`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -372,6 +388,24 @@ export class DurabilityEngine {
 
   markInboundFailed(seq: number): void {
     this.statements.markInboundFailed.run(seq);
+  }
+
+  markContinuityCandidate(
+    seq: number,
+    reason: ContinuityCandidateReason,
+    source: ContinuityCandidateSource,
+  ): boolean {
+    return this.statements.markContinuityCandidate.run(reason, source, seq).changes === 1;
+  }
+
+  markContinuityCandidateIfNoTerminalOutbound(
+    seq: number,
+    reason: ContinuityCandidateReason,
+    source: ContinuityCandidateSource,
+  ): boolean {
+    const terminalOp = this.statements.getTerminalOutboundForInbound.get(seq) as { id: number } | undefined;
+    if (terminalOp) return false;
+    return this.markContinuityCandidate(seq, reason, source);
   }
 
   markInboundSkipped(seq: number, reason: string): void {
@@ -673,6 +707,7 @@ export class DurabilityEngine {
         const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
 
         if (!terminalOp) {
+          this.markContinuityCandidate(ev.seq, 'crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
           this.markInboundFailed(ev.seq);
           log.info(
             { inboundSeq: ev.seq },
