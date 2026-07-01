@@ -76,9 +76,14 @@ def watchdog_recovery_confirmations() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", 2)
 
 
+def max_awaiting_q_age_seconds() -> int:
+    return positive_env_int_or_default("BOT_ERRORS_MAX_AWAITING_Q_AGE", 20 * 60)
+
+
 # Incident key for q-loop usage-window capacity events. Kept distinct from the
 # genuine-failure key ("q_loop:supervisor") so capacity is never paged critical.
 Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
+Q_LOOP_AWAITING_Q_KEY = "q_loop:awaiting_q"
 
 # q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
 # capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
@@ -118,7 +123,7 @@ def incident_severity(key: str, escalated: bool) -> str:
     self-recovering capacity event must never page critical regardless of age
     or suppression count -- the only response is to wait for the window reset.
     """
-    if is_capacity_incident_key(key):
+    if is_capacity_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
         return "warning"
     return "critical" if escalated else "warning"
 
@@ -1331,6 +1336,23 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
                         f"age_seconds={unavailable_age} last_q_unavailable_at={last_seen} "
                         f"detail={detail}"
                     )
+            else:
+                waiting_since = finite_epoch(state.get("awaiting_q_since"))
+                waiting_max = max_awaiting_q_age_seconds()
+                if waiting_since is not None and waiting_since > 0:
+                    waiting_age = max(0, now_epoch() - waiting_since)
+                    if waiting_age > waiting_max:
+                        last_q_message_at = finite_epoch(state.get("last_q_message_at"))
+                        last_q_age = (
+                            max(0, now_epoch() - last_q_message_at)
+                            if last_q_message_at is not None and last_q_message_at > 0
+                            else "missing"
+                        )
+                        problems[Q_LOOP_AWAITING_Q_KEY] = (
+                            f"q-loop awaiting Q stale: age_seconds={waiting_age} "
+                            f"max={waiting_max} phase={phase or 'unknown'} "
+                            f"last_q_message_age_seconds={last_q_age} detail={detail}"
+                        )
     if "dispatcher" in checks:
         age, detail = file_age(state_root() / "dispatcher-state.json")
         if age is None or age > args.max_dispatcher_age:
