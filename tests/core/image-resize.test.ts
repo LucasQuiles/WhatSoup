@@ -315,4 +315,31 @@ describe('resizeImageIfNeeded', () => {
       expect(result.buffer.length).toBeLessThan(buf.length);
     });
   });
+
+  // ── QR-055: decompression-bomb pixel guard ──
+  describe('decompression-bomb pixel guard (QR-055)', () => {
+    it('skips resize (degrades to original) for an image exceeding the pixel cap, without decoding it', async () => {
+      // ~50.4MP (8000x6300) — over the 50MP cap. A solid-colour PNG of these dimensions is
+      // small compressed (a decompression bomb passes the 25MB byte cap), but decoding it
+      // would force a ~150MB+ libvips allocation. The guard must skip the decode.
+      const buf = await makeLargeImage(8000, 6300, 'png');
+
+      const result = await resizeImageIfNeeded(buf, 'image/png');
+
+      // Defect (unfixed): proceeds to toBuffer() and returns resized:true after a 50MP decode.
+      // Fixed: the metadata dimension check skips the decode → resized:false, original buffer.
+      expect(result.resized).toBe(false);
+      expect(result.buffer).toBe(buf);
+      expect(result.originalWidth).toBe(8000);
+      expect(result.originalHeight).toBe(6300);
+    });
+
+    it('still resizes a large-but-under-cap image (guard does not over-trigger)', async () => {
+      // 4000x3000 = 12MP, well under the 50MP cap but over the 1920px dimension → resizes.
+      const buf = await makeLargeImage(4000, 3000, 'png');
+      const result = await resizeImageIfNeeded(buf, 'image/png');
+      expect(result.resized).toBe(true);
+      expect(result.finalWidth).toBeLessThanOrEqual(1920);
+    });
+  });
 });
