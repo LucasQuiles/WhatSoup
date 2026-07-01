@@ -240,6 +240,16 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
   return { mockConfig, mockSynthesizeSpeech, mockWriteTempFile };
 });
 
+const { mockPrepareContentForAgent, actualPrepareContentForAgentRef } = vi.hoisted(() => {
+  const actualPrepareContentForAgentRef: {
+    current: ((...args: unknown[]) => Promise<string>) | null;
+  } = { current: null };
+  return {
+    mockPrepareContentForAgent: vi.fn(),
+    actualPrepareContentForAgentRef,
+  };
+});
+
 vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
 
 // Mock ElevenLabs synthesizeSpeech for voice reply tests
@@ -252,6 +262,16 @@ vi.mock('../../../src/core/media-download.ts', () => ({
   writeTempFile: mockWriteTempFile,
   downloadMedia: vi.fn(),
 }));
+
+vi.mock('../../../src/runtimes/agent/media-prep.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/media-prep.ts')>();
+  actualPrepareContentForAgentRef.current = actual.prepareContentForAgent as (...args: unknown[]) => Promise<string>;
+  mockPrepareContentForAgent.mockImplementation((...args: unknown[]) => actualPrepareContentForAgentRef.current!(...args));
+  return {
+    ...actual,
+    prepareContentForAgent: mockPrepareContentForAgent,
+  };
+});
 
 // extractLocal is a pure function — no need to mock, but mock the module so
 // vi.mock doesn't try to load the real database-importing module chain.
@@ -693,6 +713,7 @@ describe('AgentRuntime', () => {
     mockConfig.proactiveResumeOnStartup = true;
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
+    mockPrepareContentForAgent.mockImplementation((...args: unknown[]) => actualPrepareContentForAgentRef.current!(...args));
     mockRuntimeLogger.info.mockClear();
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
@@ -2524,6 +2545,52 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueStreamingText.mock.calls.map(([text]) => text)).toEqual(['Hello ', 'world']);
     expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!');
     expect(state.perChatTurnText.has(canonicalJid)).toBe(false);
+  });
+
+  it('continues with a fallback label when media prep throws', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const durability = {
+      markInboundSkipped: vi.fn(),
+      markInboundFailed: vi.fn(),
+    };
+    mockPrepareContentForAgent.mockRejectedValueOnce(new Error('transcriber unavailable'));
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 1,
+      sessionId: 'sess',
+      startedAt: null,
+      messageCount: 0,
+      lastMessageAt: null,
+    });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    (runtime as unknown as { durability: typeof durability }).durability = durability;
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'aud-prep-fail',
+      content: null,
+      contentType: 'audio',
+      inboundSeq: 77,
+    }));
+
+    expect(mockPrepareContentForAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: 'aud-prep-fail', contentType: 'audio' }),
+      db,
+      'aud-prep-fail',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: expect.any(Error),
+        contentType: 'audio',
+        messageId: 'aud-prep-fail',
+      }),
+      'media processing failed — using fallback label',
+    );
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    expect(durability.markInboundSkipped).not.toHaveBeenCalled();
+    expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
 
   it('image coalescing flushes a batch when the timer fires', async () => {
