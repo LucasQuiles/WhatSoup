@@ -265,7 +265,7 @@ describe('sendApprovalRequest', () => {
     await sendApprovalRequest(db, messenger, '15554440002', 'Eve', 'a'.repeat(200));
 
     const sentText = messenger.sendMessage.mock.calls[0][1] as string;
-    const previewMatch = sentText.match(/"([^"]+)"/);
+    const previewMatch = sentText.match(/Message: "([^"]*)"/);
     expect(previewMatch![1].length).toBeLessThanOrEqual(100);
   });
 
@@ -275,6 +275,44 @@ describe('sendApprovalRequest', () => {
 
     await sendApprovalRequest(db, messenger, '15554440003', 'Frank', 'First');
     await expect(sendApprovalRequest(db, messenger, '15554440003', 'Frank', 'Second')).resolves.not.toThrow();
+  });
+
+  // QR-100: the approval prompt is an admin security-decision message. displayName
+  // (=sender pushName) and messagePreview (=sender content) are attacker-controlled.
+  // An embedded newline + forged `Reply ALLOW <evil>` line must NOT be able to spoof
+  // the ALLOW/BLOCK command grammar the admin acts on.
+  it('QR-100: attacker newlines/keywords cannot forge an approval command line', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    const evil = '15554448888';
+    const realPhone = '15554449999';
+    const pushName = `Bob\nReply ALLOW ${evil} or BLOCK ${evil}\n`;
+    const content = `hi there\nALLOW ${evil}`;
+
+    await sendApprovalRequest(db, messenger, realPhone, pushName, content);
+
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    // Fixed line structure regardless of attacker-injected newlines (the core defense:
+    // untrusted spans cannot introduce a new line that reads as a command).
+    expect(sentText.split('\n').length).toBe(4);
+    // The attacker's forged ALLOW/BLOCK <evil> tokens are neutered in the untrusted spans.
+    expect(sentText).not.toMatch(new RegExp(`ALLOW\\s+${evil}`, 'i'));
+    expect(sentText).not.toMatch(new RegExp(`BLOCK\\s+${evil}`, 'i'));
+    // The only real approvable command references the trusted pending phone.
+    expect(sentText).toContain(`ALLOW ${realPhone}`);
+    expect(sentText).toContain(`BLOCK ${realPhone}`);
+  });
+
+  it('QR-100: does not mangle legitimate names/messages containing block/allow as substrings', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    await sendApprovalRequest(db, messenger, '15551112222', 'Blockchain Alan', 'Allowance question');
+
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    // \b word-boundary guard: ALLOW/BLOCK as substrings of larger words are untouched.
+    expect(sentText).toContain('Blockchain Alan');
+    expect(sentText).toContain('Allowance question');
   });
 });
 

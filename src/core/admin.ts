@@ -240,6 +240,21 @@ function resolveAdminChatJid(db: Database): string | null {
   return toPersonalJid(firstAdmin);
 }
 
+/**
+ * QR-100: sanitize an attacker-controlled display field before it is interpolated
+ * into the admin approval prompt. Strips line breaks (incl. LS/PS) so an embedded
+ * `\nReply ALLOW <evil>` cannot forge a command line, neuters standalone ALLOW/BLOCK
+ * command keywords (word-boundary guarded so substrings like "Blockchain"/"Allowance"
+ * are untouched), and length-caps. Exported for unit testing.
+ */
+export function sanitizeApprovalField(raw: string, maxLen: number): string {
+  return raw
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/\b(?:ALLOW|BLOCK)\b/gi, '*')
+    .slice(0, maxLen)
+    .trim();
+}
+
 export async function sendApprovalRequest(
   db: Database,
   messenger: Messenger,
@@ -250,9 +265,21 @@ export async function sendApprovalRequest(
 ): Promise<void> {
   insertPending(db, 'phone', phone, displayName);
 
-  const preview = messagePreview.length > 100 ? messagePreview.slice(0, 100) : messagePreview;
+  // QR-100: displayName (=sender pushName) and messagePreview (=sender content) are
+  // attacker-controlled and were previously interpolated RAW into this admin
+  // security-decision prompt — an embedded newline + forged `Reply ALLOW <evil>` line
+  // could spoof the ALLOW/BLOCK command grammar. Defense: (A) STRUCTURE — label the
+  // untrusted fields as sender-provided, each on its own line, with the ALLOW/BLOCK
+  // instruction on a FIXED trailing line referencing only the trusted `phone`; and
+  // (B) SANITIZE both untrusted spans (strip line breaks so they cannot introduce a
+  // new command line, neuter standalone ALLOW/BLOCK keywords, length-cap).
+  const safeName = sanitizeApprovalField(displayName, 60);
+  const safePreview = sanitizeApprovalField(messagePreview, 100);
   const text =
-    `New contact: ${displayName} (+${phone})\nMessage: "${preview}"\nReply ALLOW ${phone} or BLOCK ${phone}`;
+    `New contact request — Name and Message below are SENDER-PROVIDED (untrusted):\n` +
+    `Name: "${safeName}"\n` +
+    `Message: "${safePreview}"\n` +
+    `To respond, reply exactly: ALLOW ${phone} or BLOCK ${phone}`;
 
   const adminJid = resolveAdminChatJid(db);
   if (!adminJid) {
