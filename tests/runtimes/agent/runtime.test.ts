@@ -1527,6 +1527,62 @@ describe('AgentRuntime', () => {
     });
   });
 
+  it('cleans up partial global MCP socket resources when startup fails', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const startErr = new Error('socket bind failed');
+    mockSocketServerInstance.start.mockImplementationOnce(() => {
+      throw startErr;
+    });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-fail' });
+
+    await expect(runtime.start()).rejects.toThrow('socket bind failed');
+
+    const state = runtime as unknown as {
+      globalSocketServer: unknown;
+      globalMcpSocketPath: string | null;
+    };
+    expect(mockSocketServerInstance.stop).toHaveBeenCalledTimes(1);
+    expect(state.globalSocketServer).toBeNull();
+    expect(state.globalMcpSocketPath).toBeNull();
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      { err: startErr, agentCwd: '/tmp/rgp-global-fail' },
+      'failed to initialize global MCP socket resources',
+    );
+  });
+
+  it('logs cleanup failures after global MCP socket startup errors', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const startErr = new Error('socket bind failed');
+    const stopErr = new Error('socket cleanup failed');
+    mockSocketServerInstance.start.mockImplementationOnce(() => {
+      throw startErr;
+    });
+    mockSocketServerInstance.stop.mockImplementationOnce(() => {
+      throw stopErr;
+    });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-stop-fail' });
+
+    await expect(runtime.start()).rejects.toThrow('socket bind failed');
+
+    const state = runtime as unknown as {
+      globalSocketServer: unknown;
+      globalMcpSocketPath: string | null;
+    };
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      { err: stopErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      'failed to clean up global socket server after startup error',
+    );
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      { err: startErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      'failed to initialize global MCP socket resources',
+    );
+    expect(state.globalSocketServer).toBeNull();
+    expect(state.globalMcpSocketPath).toBeNull();
+    expect(mockSocketServerInstance.stop).toHaveBeenCalledTimes(1);
+  });
+
   it('forwards configured system prompt into created sessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
