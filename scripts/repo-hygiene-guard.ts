@@ -81,6 +81,12 @@ const operationalReleaseHygieneFiles = new Set([
   'scripts/cutover.sh',
   'scripts/migrate-namespace.sh',
   'scripts/soak-check.sh',
+  // Health-profile + fleet-manifest operational configs. The daily-health
+  // profile_coverage check matches these entries against the REAL on-disk
+  // instance dir + active launchd service names, so the literal agent-bot
+  // label must appear here to keep the mwlab host covered (issue #1422).
+  'deploy/health-profiles/mwlab.json',
+  'deploy/bot-errors-expected-fleet.json',
 ]);
 
 const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
@@ -96,6 +102,10 @@ const operationalProtocolIdentifiers = new Set([
   'whatsoup@personal',
   'whatsoup-personal',
   'instances/personal/whatsoup.sock',
+  // Agent-bot instance label required verbatim by the daily-health
+  // profile_coverage matcher (issue #1422); allowlisted only for the
+  // operational health-profile + fleet-manifest files above.
+  'mw-bot',
 ]);
 
 // SSOT for the fleet private-host labels: the publication detection rule below,

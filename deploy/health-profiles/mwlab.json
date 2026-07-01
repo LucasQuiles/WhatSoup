@@ -11,24 +11,15 @@
   "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
     "fleet-tokens.json",
-    "instances/primary-bot/tokens.env",
-    "instances/secondary-bot/tokens.env"
+    "instances/mw-bot/tokens.env"
   ],
   "instances": [
     {
-      "name": "primary-bot",
+      "name": "mw-bot",
       "expected": "always_on",
-      "service": "com.whatsoup.primary-bot",
+      "service": "com.whatsoup.mw-bot",
       "healthPort": 9090,
-      "primaryPhoneOwner": "instance:primary-bot",
-      "expectProviderProbe": true
-    },
-    {
-      "name": "secondary-bot",
-      "expected": "always_on",
-      "service": "com.whatsoup.secondary-bot",
-      "healthPort": 9091,
-      "primaryPhoneOwner": "instance:secondary-bot"
+      "primaryPhoneOwner": "instance:mw-bot"
     }
   ]
 }
