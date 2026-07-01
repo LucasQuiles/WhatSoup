@@ -194,6 +194,82 @@ describe('process lock boot-id reclaim', () => {
     });
   });
 
+  it('reclaims a previous-boot lock to exactly one writer under concurrent double-reclaim (reclaim(k)==reclaim(k+1))', () => {
+    const lockPath = makeLockPath();
+    // One prior-boot lock with a dead holder pid — eligible for reclaim.
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 33333,
+      token: 'prior-boot-token',
+      startedAt: '2026-06-13T00:00:00.000Z',
+      bootId: 'boot-A',
+    }));
+
+    // Two current-boot acquirers race to reclaim the SAME prior-boot lock. Both
+    // observe the prior-boot lock before either unlinks; we force that exact
+    // interleaving with the beforeReclaimUnlink seam. When the OUTER acquirer
+    // reaches its identity-checked unlink (still seeing the prior-boot lock),
+    // the INNER acquirer runs a full acquisition and completes its reclaim —
+    // unlinking the prior-boot lock and linking its OWN current-boot lock.
+    // Idempotency (reclaim(k)==reclaim(k+1)) demands the outer attempt then NOT
+    // clobber the inner's freshly-linked lock and NOT become a second live
+    // writer: it must fail closed against the inner's now-live lock.
+    const outerId = { pid: 44444, token: 'outer-token', bootId: 'boot-B' };
+    const innerId = { pid: 55555, token: 'inner-token', bootId: 'boot-B' };
+    // Both instances belong to the current boot and are alive (a live holder is
+    // never evicted), so whoever links first blocks the other.
+    const isProcessAlive = (pid: number): boolean => pid === outerId.pid || pid === innerId.pid;
+
+    let innerHandle: ReturnType<typeof acquireProcessLock> | undefined;
+    let interleaved = false;
+    const outerResult = catchError(() => acquireProcessLock(lockPath, {
+      pid: outerId.pid,
+      token: outerId.token,
+      now: new Date('2026-06-21T00:00:00.000Z'),
+      bootId: outerId.bootId,
+      isProcessAlive,
+      beforeReclaimUnlink: () => {
+        // Run the second reclaim attempt exactly once, while the outer acquirer
+        // still sees the prior-boot lock and has NOT yet unlinked it.
+        if (interleaved) return;
+        interleaved = true;
+        innerHandle = acquireProcessLock(lockPath, {
+          pid: innerId.pid,
+          token: innerId.token,
+          now: new Date('2026-06-21T00:00:01.000Z'),
+          bootId: innerId.bootId,
+          isProcessAlive,
+        });
+      },
+    }));
+
+    // Exactly ONE writer reclaimed the previous boot: the inner acquirer.
+    expect(interleaved).toBe(true);
+    expect(innerHandle).toEqual({
+      path: lockPath,
+      pid: innerId.pid,
+      token: innerId.token,
+      reclaimedPreviousBoot: true,
+    });
+
+    // The other attempt failed closed — no second live writer was spawned and
+    // the winner's lock was not clobbered.
+    expect(isProcessLockError(outerResult)).toBe(true);
+    if (!isProcessLockError(outerResult)) throw new Error('expected process lock error');
+    expect(['active', 'stale']).toContain(outerResult.reason);
+    expect(outerResult.reason).toBe('active');
+    expect(outerResult.existingPid).toBe(innerId.pid);
+
+    // The on-disk lock re-read equals the single WINNER's identity: the second
+    // reclaim did not clobber the freshly-linked lock. reclaim(k+1) produced the
+    // same single-writer state as reclaim(k).
+    expect(readProcessLockPayload(lockPath)).toEqual({
+      pid: innerId.pid,
+      token: innerId.token,
+      startedAt: '2026-06-21T00:00:01.000Z',
+      bootId: innerId.bootId,
+    });
+  });
+
   it('does not unlink a lock replaced during reclaim (concurrent post-reboot start)', () => {
     const lockPath = makeLockPath();
     // A prior-boot, dead-holder lock — eligible for reclaim.
