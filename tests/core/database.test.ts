@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { unlinkSync, existsSync } from 'node:fs';
+import { unlinkSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import {
   Database,
   storeDecryptionFailure,
@@ -1190,6 +1190,251 @@ describe('database.ts uncovered-branch coverage', () => {
 
     freshDb.close();
     cleanup(freshPath, weirdLegacyPath);
+  });
+
+  it('late migrations no-op cleanly when optional legacy target tables are absent', () => {
+    const path = tmpFile();
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    const insertVersion = raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+    for (let version = 1; version <= 25; version += 1) {
+      insertVersion.run(version);
+    }
+    raw.close();
+
+    const db = new Database(path);
+    expect(() => db.open()).not.toThrow();
+
+    const versions = (
+      db.raw
+        .prepare('SELECT version FROM schema_migrations WHERE version BETWEEN 26 AND 32 ORDER BY version')
+        .all() as Array<{ version: number }>
+    ).map((row) => row.version);
+    expect(versions).toEqual([26, 27, 28, 29, 30, 31, 32]);
+
+    const absentTables = db.raw
+      .prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('messages', 'scheduled_messages', 'outbound_sends')
+        ORDER BY name
+      `)
+      .all() as Array<{ name: string }>;
+    expect(absentTables).toHaveLength(0);
+
+    const llmAttempts = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'llm_attempts'")
+      .get() as { name: string } | undefined;
+    expect(llmAttempts?.name).toBe('llm_attempts');
+
+    db.close();
+    cleanup(path);
+  });
+
+  it('late migrations skip already-upgraded outbound_sends and schedule marker columns', () => {
+    const path = tmpFile();
+    const db = new Database(path);
+    db.open();
+    db.raw.prepare(`
+      INSERT INTO outbound_sends (
+        line, caller, chat_jid, target_kind, text_hash, text_length, status
+      )
+      VALUES ('personal', 'rgp', '222@s.whatsapp.net', 'chatJid', 'hash', 4, 'sent')
+    `).run();
+    db.close();
+
+    const rewind = new DatabaseSync(path);
+    rewind.prepare('DELETE FROM schema_migrations WHERE version IN (26, 30, 32)').run();
+    rewind.close();
+
+    const reopened = new Database(path);
+    expect(() => reopened.open()).not.toThrow();
+
+    const preserved = reopened.raw
+      .prepare("SELECT caller, status FROM outbound_sends WHERE chat_jid = '222@s.whatsapp.net'")
+      .get() as { caller: string; status: string } | undefined;
+    expect(preserved).toEqual({ caller: 'rgp', status: 'sent' });
+
+    const scheduleCols = (
+      reopened.raw
+        .prepare("PRAGMA table_info('scheduled_messages')")
+        .all() as Array<{ name: string }>
+    ).map((col) => col.name);
+    expect(scheduleCols.filter((name) => name === 'timezone')).toHaveLength(1);
+    expect(scheduleCols.filter((name) => name === 'send_started_at')).toHaveLength(1);
+
+    const versions = (
+      reopened.raw
+        .prepare('SELECT version FROM schema_migrations WHERE version IN (26, 30, 32) ORDER BY version')
+        .all() as Array<{ version: number }>
+    ).map((row) => row.version);
+    expect(versions).toEqual([26, 30, 32]);
+
+    reopened.close();
+    cleanup(path);
+  });
+
+  it('importFromLegacyDb wraps ATTACH failures for existing non-database paths', () => {
+    const notDatabaseDir = mkdtempSync(join(tmpdir(), 'whatsoup-legacy-dir-'));
+    const db = new Database(':memory:');
+    db.open();
+
+    try {
+      expect(() => db.importFromLegacyDb(notDatabaseDir)).toThrow(/Failed to ATTACH legacy database/);
+    } finally {
+      db.close();
+      rmSync(notDatabaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('importFromLegacyDb skips malformed optional legacy tables while importing valid messages', () => {
+    const legacyPath = tmpFile();
+    const legacy = new DatabaseSync(legacyPath);
+    legacy.exec(`
+      CREATE TABLE messages (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT, chat_jid TEXT NOT NULL, sender_jid TEXT NOT NULL,
+        sender_name TEXT, message_id TEXT UNIQUE, content TEXT,
+        content_type TEXT NOT NULL DEFAULT 'text', is_from_me INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL, quoted_message_id TEXT,
+        enrichment_processed_at TEXT, enrichment_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE agent_sessions (bad_column TEXT NOT NULL);
+      CREATE TABLE rate_limits (bad_column TEXT NOT NULL);
+      CREATE TABLE enrichment_runs (bad_column TEXT NOT NULL);
+      INSERT INTO messages (chat_jid, sender_jid, message_id, content, timestamp, created_at)
+      VALUES ('15550100008@s.whatsapp.net', '15550100008@s.whatsapp.net', 'msg-valid', 'valid', 1700000000, datetime('now'));
+      INSERT INTO agent_sessions (bad_column) VALUES ('bad-session');
+      INSERT INTO rate_limits (bad_column) VALUES ('bad-rate');
+      INSERT INTO enrichment_runs (bad_column) VALUES ('bad-enrichment');
+    `);
+    legacy.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+    expect(() => freshDb.importFromLegacyDb(legacyPath)).not.toThrow();
+
+    const message = freshDb.raw
+      .prepare("SELECT conversation_key, content FROM messages WHERE message_id = 'msg-valid'")
+      .get() as { conversation_key: string; content: string } | undefined;
+    expect(message).toEqual({ conversation_key: '15550100008', content: 'valid' });
+
+    const counts = {
+      agentSessions: (freshDb.raw.prepare('SELECT count(*) AS n FROM agent_sessions').get() as { n: number }).n,
+      rateLimits: (freshDb.raw.prepare('SELECT count(*) AS n FROM rate_limits').get() as { n: number }).n,
+      enrichmentRuns: (freshDb.raw.prepare('SELECT count(*) AS n FROM enrichment_runs').get() as { n: number }).n,
+    };
+    expect(counts).toEqual({ agentSessions: 0, rateLimits: 0, enrichmentRuns: 0 });
+
+    freshDb.close();
+    cleanup(freshPath, legacyPath);
+  });
+
+  it('importFromLegacyDb skips legacy messages whose chat_jid cannot be canonicalized', () => {
+    const legacyPath = tmpFile();
+    const legacy = new DatabaseSync(legacyPath);
+    legacy.exec(`
+      CREATE TABLE messages (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT, chat_jid TEXT NOT NULL, sender_jid TEXT NOT NULL,
+        sender_name TEXT, message_id TEXT UNIQUE, content TEXT,
+        content_type TEXT NOT NULL DEFAULT 'text', is_from_me INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL, quoted_message_id TEXT,
+        enrichment_processed_at TEXT, enrichment_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO messages (chat_jid, sender_jid, message_id, content, timestamp, created_at)
+      VALUES
+        ('not-a-jid', '15550100009@s.whatsapp.net', 'msg-invalid', 'bad', 1700000000, datetime('now')),
+        ('15550100009@s.whatsapp.net', '15550100009@s.whatsapp.net', 'msg-good', 'good', 1700000001, datetime('now'));
+    `);
+    legacy.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+    freshDb.importFromLegacyDb(legacyPath);
+
+    const rows = freshDb.raw
+      .prepare('SELECT message_id, conversation_key FROM messages ORDER BY message_id')
+      .all() as Array<{ message_id: string; conversation_key: string }>;
+    expect(rows).toEqual([{ message_id: 'msg-good', conversation_key: '15550100009' }]);
+
+    freshDb.close();
+    cleanup(freshPath, legacyPath);
+  });
+
+  it('importFromLegacyDb rolls back copied rows when the required legacy messages table is missing', () => {
+    const legacyPath = tmpFile();
+    const legacy = new DatabaseSync(legacyPath);
+    legacy.exec(`
+      CREATE TABLE access_list (
+        subject_type TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        display_name TEXT,
+        requested_at TEXT,
+        decided_at TEXT,
+        PRIMARY KEY (subject_type, subject_id)
+      );
+      INSERT INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+      VALUES ('phone', '15550100010', 'allowed', 'Rollback', datetime('now'));
+    `);
+    legacy.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+
+    expect(() => freshDb.importFromLegacyDb(legacyPath)).toThrow(/Warm-start import failed/);
+    const accessRows = freshDb.raw.prepare('SELECT count(*) AS n FROM access_list').get() as { n: number };
+    expect(accessRows.n).toBe(0);
+    const attached = freshDb.raw
+      .prepare("PRAGMA database_list")
+      .all() as Array<{ name: string }>;
+    expect(attached.map((row) => row.name)).not.toContain('old');
+
+    freshDb.close();
+    cleanup(freshPath, legacyPath);
+  });
+
+  it('open wraps pragma failures from a closed raw connection', () => {
+    const db = new Database(':memory:');
+    db.raw.close();
+
+    expect(() => db.open()).toThrow(/Failed to set database pragmas/);
+  });
+
+  it('runPendingMigrations rolls back and wraps non-idempotent migration failures', () => {
+    const path = tmpFile();
+    const db = new Database(path);
+    db.open();
+    db.close();
+
+    const rewind = new DatabaseSync(path);
+    rewind.prepare('DELETE FROM schema_migrations WHERE version = 16').run();
+    rewind.close();
+
+    const reopened = new Database(path);
+    expect(() => reopened.open()).toThrow(/Migration 16 failed/);
+    const version = reopened.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 16')
+      .get() as { version: number } | undefined;
+    expect(version).toBeUndefined();
+    reopened.close();
+    cleanup(path);
+  });
+
+  it('close is best-effort when the raw connection is already closed', () => {
+    const db = new Database(':memory:');
+    db.open();
+    db.raw.close();
+
+    expect(() => db.close()).not.toThrow();
   });
 
   // ── clearChat (line 1230) ──────────────────────────────────────────────────
