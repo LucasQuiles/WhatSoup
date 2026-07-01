@@ -7,7 +7,6 @@ const PROVIDERS_DIR = resolve(import.meta.dirname, '../../../../src/runtimes/age
 describe('Anti-duplication enforcement', () => {
   const parserFiles = [
     'codex-parser.ts',
-    'gemini-parser.ts',
     'gemini-acp-parser.ts',
     'opencode-parser.ts',
   ];

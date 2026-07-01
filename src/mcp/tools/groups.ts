@@ -4,7 +4,11 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
+import type { Database } from '../../core/database.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { config } from '../../config.ts';
+import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
+import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
 const groupConfigs: SockToolConfig<any>[] = [
@@ -226,40 +230,10 @@ const groupConfigs: SockToolConfig<any>[] = [
       return { success: true, jid, action, participants, result };
     },
   },
-  {
-    name: 'send_group_invite',
-    description:
-      'Send a group invite message to a chat. Works in both chat-scoped and global sessions (chatJid required in global sessions).',
-    schema: z.object({
-      chatJid: z.string().optional(),
-      groupJid: z.string(),
-      inviteCode: z.string(),
-      inviteExpiration: z.number(),
-      groupName: z.string(),
-      jpegThumbnail: z.string().optional(),
-      caption: z.string().optional(),
-    }),
-    scope: 'chat',
-    targetMode: 'injected',
-    replayPolicy: 'unsafe',
-    call: async ({ chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption }, sock) => {
-      const jid = chatJid!;
-      const groupInvite: Record<string, unknown> = {
-        groupJid,
-        inviteCode,
-        inviteExpiration,
-        groupName,
-      };
-      if (jpegThumbnail !== undefined) {
-        groupInvite.jpegThumbnail = jpegThumbnail;
-      }
-      if (caption !== undefined) {
-        groupInvite.caption = caption;
-      }
-
-      return sock.sendMessage(jid, { groupInvite } as any);
-    },
-  },
+  // QR-067: send_group_invite moved to a db-aware guarded factory
+  // (makeSendGroupInvite) — it sends a group-invite link to a chatJid that is
+  // caller-supplied on the global-tier path, so it floors the egress through
+  // the outbound identity guard first.
   {
     name: 'group_revoke_invite_v4',
     description:
@@ -277,12 +251,54 @@ const groupConfigs: SockToolConfig<any>[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// QR-067: send_group_invite — db-aware guarded factory. scope:'chat'/injected so
+// chat-scoped sessions are confined to deliveryJid (the guard then allows the
+// warm own-chat); on the global path chatJid is caller-supplied, so the guard
+// floors a cold/unknown target before the group-invite link is sent.
+// ---------------------------------------------------------------------------
+
+const SendGroupInviteSchema = z.object({
+  chatJid: z.string().optional(),
+  groupJid: z.string(),
+  inviteCode: z.string(),
+  inviteExpiration: z.number(),
+  groupName: z.string(),
+  jpegThumbnail: z.string().optional(),
+  caption: z.string().optional(),
+});
+
+function makeSendGroupInvite(getSock: () => ExtendedBaileysSocket | null, db?: Database): ToolDeclaration {
+  return {
+    name: 'send_group_invite',
+    description:
+      'Send a group invite message to a chat. Works in both chat-scoped and global sessions (chatJid required in global sessions).',
+    schema: SendGroupInviteSchema,
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'unsafe',
+    handler: async (params) => {
+      const { chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption } = SendGroupInviteSchema.parse(params);
+      const jid = chatJid!;
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
+      applyOutboundIdentityGuard(jid, { caller: 'mcp', mode: config.outboundIdentityMode }, db ? new SqliteIdentityStore(db.raw) : null);
+      const groupInvite: Record<string, unknown> = { groupJid, inviteCode, inviteExpiration, groupName };
+      if (jpegThumbnail !== undefined) groupInvite.jpegThumbnail = jpegThumbnail;
+      if (caption !== undefined) groupInvite.caption = caption;
+      return sock.sendMessage(jid, { groupInvite } as Parameters<ExtendedBaileysSocket['sendMessage']>[1]);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
 export function registerGroupTools(
   getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
+  db?: Database,
 ): void {
   registerSockTools(getSock, groupConfigs, register);
+  register(makeSendGroupInvite(getSock, db)); // QR-067: guarded caller-jid egress
 }

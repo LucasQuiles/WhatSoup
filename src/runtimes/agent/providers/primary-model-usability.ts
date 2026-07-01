@@ -38,6 +38,8 @@ export type ApiModelAccessProbeResult =
 
 export interface PrimaryModelProbeAdapters {
   probeBinaryModel?: (target: { provider: string; model: string }) => Promise<BinaryModelProbeResult>;
+  // Despite the legacy name, this must exercise a generation-class API path:
+  // catalog/list-model checks can pass while quota-limited turns still fail.
   probeApiModelAccess?: (target: { provider: 'openai-api' | 'anthropic-api'; model: string }) => Promise<ApiModelAccessProbeResult>;
 }
 

@@ -9,7 +9,37 @@
  * this being on the media-ingest critical path.
  */
 import { describe, expect, it } from 'vitest';
-import { extractRawMime } from '../../src/core/media-mime.ts';
+import { extractRawMime, extractRawFileLength } from '../../src/core/media-mime.ts';
+
+describe('extractRawFileLength (QR-057)', () => {
+  it('extracts a numeric fileLength for each media type', () => {
+    expect(extractRawFileLength({ message: { imageMessage: { fileLength: 12345 } } }, 'image')).toBe(12345);
+    expect(extractRawFileLength({ message: { audioMessage: { fileLength: 6789 } } }, 'audio')).toBe(6789);
+    expect(extractRawFileLength({ message: { videoMessage: { fileLength: 99999 } } }, 'video')).toBe(99999);
+    expect(extractRawFileLength({ message: { documentMessage: { fileLength: 4096 } } }, 'document')).toBe(4096);
+  });
+
+  it('coerces a Long-like fileLength via toNumber()', () => {
+    const longLike = { toNumber: () => 26_000_000, low: 0, high: 0 };
+    expect(extractRawFileLength({ message: { videoMessage: { fileLength: longLike } } }, 'video')).toBe(26_000_000);
+  });
+
+  it('coerces a numeric-string fileLength', () => {
+    expect(extractRawFileLength({ message: { documentMessage: { fileLength: '5242880' } } }, 'document')).toBe(5242880);
+  });
+
+  it('reads the documentWithCaptionMessage wrapper', () => {
+    const raw = { message: { documentWithCaptionMessage: { message: { documentMessage: { fileLength: 777 } } } } };
+    expect(extractRawFileLength(raw, 'document')).toBe(777);
+  });
+
+  it('returns undefined when fileLength is absent, unparseable, or rawMessage is missing', () => {
+    expect(extractRawFileLength({ message: { imageMessage: {} } }, 'image')).toBeUndefined();
+    expect(extractRawFileLength({ message: { imageMessage: { fileLength: 'not-a-number' } } }, 'image')).toBeUndefined();
+    expect(extractRawFileLength(null, 'image')).toBeUndefined();
+    expect(extractRawFileLength({ message: { imageMessage: { fileLength: 100 } } }, 'sticker')).toBeUndefined();
+  });
+});
 
 describe('extractRawMime', () => {
   it('returns the mimetype for image content', () => {

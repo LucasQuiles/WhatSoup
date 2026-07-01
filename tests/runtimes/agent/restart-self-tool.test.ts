@@ -23,6 +23,7 @@ function deps(overrides: Partial<RestartSelfToolDeps> = {}): {
     sendAck,
     serviceManager,
     trigger,
+    assertAdmin: () => {}, // gate covered separately in restart-self-admin-gate.test.ts
     ...overrides,
   };
   return { deps: base, trigger, sendAck, serviceManager };

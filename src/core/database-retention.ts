@@ -13,6 +13,16 @@ export interface DatabaseRetentionConfig {
    * `src/fleet/db-reader.ts`) so pruning never removes a readable bucket.
    */
   metricsHourlyDays: number;
+  /**
+   * Retention window for the diagnostic `decryption_failures` table (QR-066).
+   * Each distinct undecryptable message_id creates a row that is only ever
+   * flipped `resolved`, never deleted — so without this the table grew
+   * unbounded (a slow disk leak under a prolonged Signal desync). Keyed on
+   * `last_seen_at`, so a still-recurring failure (seen_count incrementing) is
+   * preserved; only rows with no activity past the window are reaped. Stays
+   * well above the heal degradation-signal horizon (5 min, see core/heal.ts).
+   */
+  decryptionFailureDays: number;
 }
 
 export interface DatabaseRetentionResult {
@@ -21,6 +31,7 @@ export interface DatabaseRetentionResult {
   toolCalls: number;
   factExportQueue: number;
   metricsHourly: number;
+  decryptionFailures: number;
 }
 
 export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
@@ -28,6 +39,7 @@ export const DEFAULT_DATABASE_RETENTION: DatabaseRetentionConfig = {
   terminalDurabilityDays: 30,
   exportedFactDays: 30,
   metricsHourlyDays: 180,
+  decryptionFailureDays: 30,
 };
 
 function daysModifier(days: number): string {
@@ -83,8 +95,21 @@ export function runDatabaseRetention(
         OR datetime(bucket) < datetime('now', ?)
   `).run(metricsCutoff));
 
-  const result = { inboundEvents, outboundOps, toolCalls, factExportQueue, metricsHourly };
-  const total = inboundEvents + outboundOps + toolCalls + factExportQueue + metricsHourly;
+  // QR-066: decryption_failures gets one row per distinct undecryptable
+  // message_id (resolved rows are only flagged, never deleted), so it must be
+  // pruned like its sibling terminal tables or it grows unbounded. Reap rows
+  // with no activity past the window (last_seen_at), keeping a still-recurring
+  // failure alive; a NULL last_seen_at (shouldn't occur — schema DEFAULTs it)
+  // is also reaped so junk can't leak (mirrors the metrics_hourly NULL branch).
+  const decryptionFailureCutoff = daysModifier(retention.decryptionFailureDays);
+  const decryptionFailures = changes(db.raw.prepare(`
+    DELETE FROM decryption_failures
+     WHERE last_seen_at IS NULL
+        OR datetime(last_seen_at) < datetime('now', ?)
+  `).run(decryptionFailureCutoff));
+
+  const result = { inboundEvents, outboundOps, toolCalls, factExportQueue, metricsHourly, decryptionFailures };
+  const total = inboundEvents + outboundOps + toolCalls + factExportQueue + metricsHourly + decryptionFailures;
   if (total > 0) {
     log.info({ ...result, total }, 'database retention: deleted old terminal rows');
   }

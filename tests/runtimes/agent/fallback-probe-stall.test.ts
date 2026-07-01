@@ -371,6 +371,24 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(stallAlerts()).toHaveLength(0);
   });
 
+  it.each(['usage-limit', 'rate-limit'] as const)(
+    '(g2q) preserves early recovery for %s during a long initial window',
+    async (reason) => {
+      const runtime = makeRuntime();
+      const v = view(runtime);
+      const probe = vi.fn(() => true);
+      v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+      v.activateProviderFallback(null, reason); // default 5h window
+      expect(v.effectiveProvider).toBe('opencode-cli');
+
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(v.fallbackWindow.activeUntil).toBeNull();
+      expect(v.effectiveProvider).toBe('claude-cli');
+      expect(stallAlerts()).toHaveLength(0);
+    },
+  );
+
   it('(g2b) ignores a stale successful standing-probe result after the fallback window is re-armed', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);

@@ -8,9 +8,15 @@
 //   4. '' — missing-key signaling is the caller's responsibility
 //
 // A misconfigured service (lookupCredential returns null/empty) MUST NOT
-// fail-fast when the env var still has a usable key — fall through silently.
+// fail-fast when the env var still has a usable key — fall through to env.
+// The fall-through is deliberate (resilience) but NOT silent: it is logged so a
+// configured-service miss that silently uses the global env key — breaking
+// per-instance account isolation — is observable to operators (QR-104).
 
 import { lookupCredential } from '../../../lib/keyring.ts';
+import { createChildLogger } from '../../../logger.ts';
+
+const log = createChildLogger('api-key-resolver');
 
 export interface ResolveApiKeyOptions {
   /** Inline API key from caller (typically not used; reserved for future config). */
@@ -36,7 +42,18 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     if (fromKeyring && fromKeyring.length > 0) {
       return fromKeyring;
     }
-    // Service set but lookup miss → fall through to env (do not error).
+    // Service set but lookup miss → fall through to env (do not error). Make the
+    // fallback OBSERVABLE: warn only when the env fallback actually yields a key
+    // (the silent wrong-account case). An absent env yields '' → a visible
+    // missing-key condition downstream, which needs no warning.
+    const envFallback = process.env[opts.envVar] ?? '';
+    if (envFallback.length > 0) {
+      log.warn(
+        { service: opts.service, envVar: opts.envVar },
+        'apiKeyService configured but keyring lookup missed — falling back to env var; verify account isolation',
+      );
+    }
+    return envFallback;
   }
 
   return process.env[opts.envVar] ?? '';

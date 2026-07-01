@@ -2,6 +2,7 @@
 // Shared types for the core layer.
 
 import type { Readable } from 'node:stream';
+import type { GuardCaller } from './outbound-identity/types.ts';
 
 export type OutboundMediaSource =
   | { buffer: Buffer; stream?: never; url?: never }
@@ -21,8 +22,30 @@ export interface SubmissionReceipt {
 
 export type TypingState = boolean | 'composing' | 'recording' | 'paused';
 
+/**
+ * Per-send options. `caller` is an OPTIONAL infra/system-caller token threaded
+ * to the outbound-identity guard so the spec §4.2-step-B exemption (infra
+ * callers are never floored) is reachable. ONLY trusted infra call sites set it
+ * (the health-server admin /send); agent/MCP send paths never plumb it, so an
+ * untrusted caller cannot use it to bypass the cold floor. Absent ⇒ 'agent'.
+ */
+export interface SendOptions {
+  /**
+   * QR-028: optional stable, client-supplied message id. When reused across
+   * retries of one logical send, the transport server dedupes a slow-but-
+   * delivered message instead of delivering it twice.
+   */
+  messageId?: string;
+  caller?: GuardCaller;
+}
+
 export interface Messenger {
-  sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt>;
+  /**
+   * @param opts Optional per-send options: `messageId` (QR-028) for stable
+   *   retry-dedup, and `caller` (QR-086) for the outbound-identity guard
+   *   SYSTEM_CALLERS exemption. Both optional; absent ⇒ agent send, no dedup.
+   */
+  sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt>;
   /** Send composing/paused/recording presence update. Fire-and-forget; failures are silently ignored. */
   setTyping?(chatJid: string, typing: TypingState): Promise<void>;
   sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;

@@ -64,6 +64,7 @@ import { Database } from '../../src/core/database.ts';
 import {
   extractLocal,
   resolvePhoneFromJid,
+  canonicalConversationKey,
   lookupAccess,
   insertPending,
   insertAllowed,
@@ -771,6 +772,55 @@ describe('resolvePhoneFromJid', () => {
       expect(fromJid).toBe(fromLid);
       expect(fromJid).toBe(USER_PHONE);
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3b. canonicalConversationKey — sync paths must key LID DMs like live ingest
+//     (QR-027/037/043: history-sync / chat-sync / contacts-sync previously used
+//      toConversationKey(raw LID)=the LID number, splitting a mapped LID DM's
+//      rows from the phone-keyed live messages).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('canonicalConversationKey (QR-037/043 — sync/ingest key parity)', () => {
+  let db: Database;
+
+  beforeAll(() => {
+    db = createTestDb();
+    seedLidMappings(db);
+  });
+  afterAll(() => db.close());
+
+  it('keys a MAPPED LID DM by the resolved phone — matching live ingest, NOT the LID number', () => {
+    // This is the bug fix: toConversationKey(LID) returns the LID number, which
+    // split history/chat rows from the phone-keyed live messages.
+    expect(canonicalConversationKey(ADMIN_LID_JID, db)).toBe(ADMIN_PHONE);
+    expect(canonicalConversationKey(USER_LID_JID, db)).toBe(USER_PHONE);
+    // Proves divergence from the old (buggy) keying:
+    expect(canonicalConversationKey(ADMIN_LID_JID, db)).not.toBe(toConversationKey(ADMIN_LID_JID));
+  });
+
+  it('matches the live-ingest contract exactly (resolvePhoneFromJid for LID DMs)', () => {
+    expect(canonicalConversationKey(ADMIN_LID_JID, db)).toBe(resolvePhoneFromJid(ADMIN_LID_JID, db));
+  });
+
+  it('handles colon-device LID DMs (strips device, resolves to phone)', () => {
+    expect(canonicalConversationKey(`${ADMIN_LID}:3@lid`, db)).toBe(ADMIN_PHONE);
+  });
+
+  it('falls back to the normalized LID number for an UNMAPPED LID DM (no-op vs toConversationKey)', () => {
+    expect(canonicalConversationKey(UNKNOWN_LID_JID, db)).toBe(UNKNOWN_LID);
+    expect(canonicalConversationKey(UNKNOWN_LID_JID, db)).toBe(toConversationKey(UNKNOWN_LID_JID));
+  });
+
+  it('is a no-op for personal JIDs (same as toConversationKey)', () => {
+    expect(canonicalConversationKey(ADMIN_JID, db)).toBe(toConversationKey(ADMIN_JID));
+    expect(canonicalConversationKey(ADMIN_JID, db)).toBe(ADMIN_PHONE);
+  });
+
+  it('is a no-op for group JIDs (same as toConversationKey)', () => {
+    expect(canonicalConversationKey(GROUP_JID, db)).toBe(toConversationKey(GROUP_JID));
+    expect(canonicalConversationKey(GROUP_JID, db)).toBe('120363123456789_at_g.us');
   });
 });
 

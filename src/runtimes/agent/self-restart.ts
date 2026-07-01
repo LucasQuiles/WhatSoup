@@ -18,7 +18,7 @@ import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../../lib/private-fs.ts';
 import { createChildLogger } from '../../logger.ts';
 import { isPnJid, isGroupJid } from '../../core/jid-constants.ts';
-import type { ToolDeclaration } from '../../mcp/types.ts';
+import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
 
 const log = createChildLogger('self-restart');
 
@@ -208,6 +208,13 @@ export interface RestartSelfToolDeps {
   serviceManager: ServiceRestarter;
   /** Injected for tests; defaults to the real triggerSelfRestart bound by the runtime. */
   trigger: (opts: TriggerSelfRestartOptions) => Promise<{ ok: boolean; markerPath: string }>;
+  /**
+   * Admin gate (QR-047): throws if the turn's actor is not an instance admin.
+   * Wired at the composition root from the same resolvePhoneFromJid+isAdminPhone
+   * check the other admin-gated paths use, so a non-admin in an auto-responded
+   * chat cannot induce the agent to restart the service (prompt-injection DoS).
+   */
+  assertAdmin: (session: SessionContext) => void;
 }
 
 /**
@@ -224,7 +231,11 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     core: false,
-    handler: async (params) => {
+    handler: async (params, session) => {
+      // QR-047: hard admin gate FIRST — before ack or restart. A non-admin actor
+      // (e.g. an auto-responded chat trying a prompt-injection DoS) must not be able
+      // to restart the service. Matches the assertAdmin discipline of substrate.ts.
+      deps.assertAdmin(session);
       const { reason, code } = RestartSelfSchema.parse(params);
       const chatJid = deps.resolveChatJid();
 

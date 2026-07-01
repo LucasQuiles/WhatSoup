@@ -215,7 +215,7 @@ describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
   });
 
   it('contains full permission strings without duplicates', () => {
-    expect(REQUIRED_DENY.length).toBe(120);
+    expect(REQUIRED_DENY.length).toBe(124);
     expect(new Set(REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
     for (const permission of REQUIRED_DENY) {
       expect(permission).toMatch(/^mcp__[^_]+.*__/);
@@ -231,6 +231,27 @@ describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
       'mcp__claude_ai_Google_Calendar__create_event',
       'mcp__claude_ai_Google_Calendar__respond_to_event',
     ]));
+  });
+
+  it('QR-029: denies claude_ai Google Drive writes + Gmail sensitivity-label writes (Workspace read-only)', () => {
+    // The connector is allowed via mcp__claude_ai_* — every WRITE tool must be in the
+    // deny floor or it is reachable. These were omitted (Drive entirely; Gmail's
+    // apply_sensitive_* labels), so the agent could create/copy Drive files and apply
+    // sensitivity labels despite the "Google Workspace read-only" policy.
+    expect(REQUIRED_DENY).toEqual(expect.arrayContaining([
+      'mcp__claude_ai_Google_Drive__create_file',
+      'mcp__claude_ai_Google_Drive__copy_file',
+      'mcp__claude_ai_Gmail__apply_sensitive_message_label',
+      'mcp__claude_ai_Gmail__apply_sensitive_thread_label',
+    ]));
+    // Read-only Drive tools stay ALLOWED (must NOT be in the deny floor).
+    for (const readTool of [
+      'mcp__claude_ai_Google_Drive__read_file_content',
+      'mcp__claude_ai_Google_Drive__list_recent_files',
+      'mcp__claude_ai_Google_Drive__search_files',
+    ]) {
+      expect(REQUIRED_DENY).not.toContain(readTool);
+    }
   });
 
   it('covers the approved M365 mutation categories', () => {
