@@ -78,6 +78,17 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 | `RATE_LIMIT_PER_HOUR` | integer | `45` | Maximum messages per user per hour (chat runtime). |
 | `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts:928`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
 
+### Agent session lifecycle (per_chat / shared agent runtimes)
+
+Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs (`TURN_WATCHDOG_MS` etc.) handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_SESSION_IDLE_MS` | integer (ms) | `3600000` (1h) | Idle threshold: a resident session with no message for longer than this is suspended on the next sweep. Setting this below ~35 min can suspend a session shortly after a long (multi-minute) turn completes, since idle is measured from the turn's last message. |
+| `WHATSOUP_SESSION_SWEEP_MS` | integer (ms) | `600000` (10m) | How often the idle-session sweep runs. |
+| `WHATSOUP_MAX_SESSIONS` | integer | `12` | LRU ceiling on concurrent resident sessions. When exceeded, the longest-idle evictable sessions are suspended down toward the cap even if still within `WHATSOUP_SESSION_IDLE_MS`, bounding memory under a burst of many active chats. |
+| `WHATSOUP_SESSION_MIN_RESIDENCY_MS` | integer (ms) | `300000` (5m) | Anti-thrash floor: a freshly-spawned session is never suspended until it has lived at least this long, preventing evict→respawn churn under a burst. |
+
 ### Access Control
 
 | Variable | Type | Default | Description |

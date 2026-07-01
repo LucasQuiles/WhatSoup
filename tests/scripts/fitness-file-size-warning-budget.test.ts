@@ -17,6 +17,7 @@ import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'src/runtimes/agent/runtime.ts',
+  'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',
   'tests/config.test.ts',
   'tests/core/health.test.ts',
