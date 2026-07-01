@@ -368,6 +368,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         source: 'send_poll',
         resolution: 'admin-wins',
         votesByQuestion: new Map([[0, votes]]),
+        adminJids: new Set(['1555009@s.whatsapp.net']),
         awaitResolve: (answer: string) => { resolved = answer; },
         awaitReject: () => {},
       });
@@ -452,6 +453,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         source: 'askuser',
         resolution: 'admin-wins',
         votesByQuestion: new Map([[0, votes]]),
+        adminJids: new Set(['1555010@s.whatsapp.net']),
         toolId: 'tool-aw',
       });
       state.pendingPolls.questions.set(groupJid, pending);
