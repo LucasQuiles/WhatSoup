@@ -34,6 +34,8 @@ _ENV_KEYS = [
     "BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS",
     "BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES",
     "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS",
+    "BOT_ERRORS_AUTOCLOSE_LIVENESS_GATE",
+    "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS",
 ]
 
 
@@ -103,10 +105,16 @@ def _alert_for_key(key: str) -> dict:
 
 
 def test_autoclose_digest_is_truthful_not_self_healed(tmp_path):
-    mod = _load(tmp_path)
+    # #1429: an unverified age-out no longer closes on time alone; drive the
+    # bounded fallback (hold cap 0) so the incident closes with truthful labeling.
+    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS": "60"})
     now = int(time.time())
     key = "host-a|bot-errors-health|daily-health-fail:instance-x"
-    _write_state(mod, {key: _quiet_drift_record(now)})
+    rec = _quiet_drift_record(now)
+    # Already held past the bounded cap with recovery still unverified -> the
+    # bounded fallback closes it (labeled), not an age-alone close.
+    rec["autocloseFirstHeldAt"] = now - 3600
+    _write_state(mod, {key: rec})
     sends = _capture_sends(mod)
 
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
@@ -204,10 +212,15 @@ def test_gate_off_closes_even_when_monitoring_down(tmp_path):
 
 
 def test_autoclose_records_reopen_history_for_promotion_backstop(tmp_path):
-    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS": str(30 * 86400)})
+    mod = _load(tmp_path, {
+        "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS": str(30 * 86400),
+        "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS": "60",
+    })
     now = int(time.time())
     key = "host-a|bot-errors-health|daily-health-fail:instance-x"
-    _write_state(mod, {key: _quiet_drift_record(now)})
+    rec = _quiet_drift_record(now)
+    rec["autocloseFirstHeldAt"] = now - 3600
+    _write_state(mod, {key: rec})
     _capture_sends(mod)
 
     mod.sweep_stale_incidents(mod.state_paths())
@@ -274,3 +287,108 @@ def test_bond_lost_family_is_not_unverified_autoclosed_even_if_suppression_confi
     state = json.loads((mod.state_paths()["incident_state"]).read_text())
     assert key in state["openIncidents"]
     assert key not in state.get("staleAutocloseHistory", {})
+
+
+# ---------------------------------------------------------------------------
+# #1429: gate the age-out close on the recovery oracle with a bounded fallback.
+# An age-out close on a daily-health incident must require POSITIVE recovery
+# proof (is_verified_whatsapp_health_recovery), not elapsed time alone. When
+# recovery is not verified the incident HOLDS (reusing the liveness hold-cap),
+# then — only after the bounded cap — closes with a CLEARLY-LABELED unverified
+# close that is auditably distinct from a verified-recovery close.
+# ---------------------------------------------------------------------------
+
+_VERIFIED_PROBE = (
+    "200 status=healthy wa_connected=true state=connected "
+    "auth_bond_status=present auth_bond_creds_exists=true "
+    "auth_bond_creds_size=4096 auth_failure_class=none"
+)
+
+
+def _suppressed_log_entries(mod):
+    log_path = mod.state_paths()["logs"] / "dispatch.jsonl"
+    return [
+        json.loads(l)
+        for l in log_path.read_text().splitlines()
+        if l.strip() and json.loads(l).get("type") == "stale_renotify_suppressed"
+    ]
+
+
+def test_1429_no_recovery_proof_holds_before_cap(tmp_path):
+    # (a) An incident with NO recovery proof does NOT age-out close before the cap.
+    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS": str(7 * 86400)})
+    now = int(time.time())
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    _write_state(mod, {key: _quiet_drift_record(now)})
+    sends = _capture_sends(mod)
+
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    # No auto-close digest: recovery is not verified and the cap has not elapsed.
+    assert sends == []
+    open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
+    assert key in open_now, "unverified incident must be HELD, not aged-out closed"
+    rec = open_now[key]
+    assert rec.get("autocloseHeldForRecovery") is True
+    assert rec.get("autocloseFirstHeldAt", 0) > 0
+    suppressed = _suppressed_log_entries(mod)
+    assert suppressed and suppressed[-1]["heldForRecovery"] is True
+    assert suppressed[-1]["willAutoClose"] is False
+
+
+def test_1429_no_recovery_proof_bounded_close_after_cap(tmp_path):
+    # (b) After the bounded cap it DOES close, labeled as a bounded unverified close.
+    mod = _load(tmp_path, {"BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS": "60"})
+    now = int(time.time())
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    rec = _quiet_drift_record(now)
+    rec["autocloseFirstHeldAt"] = now - 3600  # already held past the cap
+    _write_state(mod, {key: rec})
+    sends = _capture_sends(mod)
+
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    # Bounded fallback fires: the incident is closed (removed) with a digest.
+    open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
+    assert key not in open_now
+    assert len(sends) == 1
+    # The close is CLEARLY LABELED as unverified/bounded (not verified-recovery,
+    # not self-healed) both in the digest and the dispatch log.
+    assert "self-healed" not in sends[0].lower()
+    assert "unverified" in sends[0].lower()
+    suppressed = _suppressed_log_entries(mod)
+    assert suppressed[-1]["willAutoClose"] is True
+    assert suppressed[-1]["boundedUnverifiedClose"] is True
+    assert suppressed[-1]["reason"] == "bounded_unverified_autoclose_cap_reached"
+    log_path = mod.state_paths()["logs"] / "dispatch.jsonl"
+    types = [json.loads(l).get("type") for l in log_path.read_text().splitlines() if l.strip()]
+    assert "autoclose_bounded_unverified_cap_reached" in types
+
+
+def test_1429_verified_recovery_closes_as_recovered(tmp_path):
+    # (c) An incident WITH verified recovery proof closes as recovered (no hold).
+    mod = _load(tmp_path)
+    now = int(time.time())
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    rec = _quiet_drift_record(now)
+    rec["lastEvidence"] = f"health instance-x: {_VERIFIED_PROBE}"
+    _write_state(mod, {key: rec})
+    sends = _capture_sends(mod)
+
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
+    assert key not in open_now, "verified recovery must close on the age-out path"
+    assert len(sends) == 1
+    # Closed as recovered, NOT held and NOT a bounded-unverified close.
+    suppressed = _suppressed_log_entries(mod)
+    assert suppressed[-1]["willAutoClose"] is True
+    assert suppressed[-1]["heldForRecovery"] is False
+    assert suppressed[-1]["boundedUnverifiedClose"] is False
+    log_path = mod.state_paths()["logs"] / "dispatch.jsonl"
+    types = [json.loads(l).get("type") for l in log_path.read_text().splitlines() if l.strip()]
+    assert "autoclose_recovery_verified" in types
+    assert "autoclose_bounded_unverified_cap_reached" not in types
