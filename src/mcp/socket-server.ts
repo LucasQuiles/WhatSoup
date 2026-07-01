@@ -53,6 +53,11 @@ export class WhatSoupSocketServer {
     return this.connectionSessions.size;
   }
 
+  /** Configured concurrent-connection cap on the underlying server (QR-059); 0 before start(). */
+  get maxConnections(): number {
+    return this.server?.maxConnections ?? 0;
+  }
+
   start(): void {
     // Crash recovery: remove stale socket file if present
     try {
@@ -62,6 +67,13 @@ export class WhatSoupSocketServer {
     }
 
     const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
+    // QR-059: cap concurrent connections. Legit clients (the instance's own agent subprocess
+    // holding one persistent MCP session + short-lived per-call fleet mcpCall connections) use
+    // single-digit concurrency, so 128 is generous headroom while bounding a connection-flood /
+    // slow-loris fan-out from a compromised agent to N held sockets (each already ≤1MB via
+    // MAX_BUF). No idle timeout is added: legit MCP sessions are legitimately long-idle between
+    // tool calls, so an idle-destroy would break them — the count cap bounds the blast radius.
+    const MAX_CONNECTIONS = 128;
 
     let clientCounter = 0;
 
@@ -74,6 +86,14 @@ export class WhatSoupSocketServer {
       this.activeSockets.set(clientId, socket);
 
       log.info({ clientId, socketPath: this.socketPath, connections: this.connectionSessions.size }, 'client connected');
+      // QR-053: decode the stream as UTF-8 so Node's internal StringDecoder buffers
+      // an incomplete multibyte sequence across a kernel read boundary. Without this,
+      // `chunk.toString()` decoded each ~64KB read independently and a multibyte char
+      // (emoji / non-Latin) split across the boundary was silently turned into U+FFFD
+      // — JSON.parse still succeeded, so a mangled tool arg / message body shipped with
+      // no error. With setEncoding, each 'data' chunk is already a string assembled
+      // across boundaries; the chunk.toString() below is then a no-op on the string.
+      socket.setEncoding('utf8');
       let buf = '';
 
       socket.on('close', () => {
@@ -121,7 +141,15 @@ export class WhatSoupSocketServer {
             continue;
           }
 
-          void this.handleRequest(req, connSession).then((response) => {
+          // QR-042: snapshot the session per request. connSession.actorJid /
+          // deliveryJid / conversationKey are mutated IN PLACE by updateActorJid /
+          // updateConversationKey at each turn dispatch; with fire-and-forget dispatch
+          // sharing the one connSession, a next-turn mutation could race an in-flight
+          // admin-gated tool reading actorJid (it could observe the wrong turn's actor).
+          // A shallow per-request copy pins those fields at dispatch time; the live
+          // abortSignal is preserved by reference so client-disconnect still aborts.
+          const requestSession: SessionContext = { ...connSession };
+          void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               try {
                 socket.write(JSON.stringify(response) + '\n');
@@ -137,6 +165,8 @@ export class WhatSoupSocketServer {
         log.error({ err }, 'socket error');
       });
     });
+
+    this.server.maxConnections = MAX_CONNECTIONS;
 
     this.server.listen(this.socketPath, () => {
       log.info({ socketPath: this.socketPath }, 'MCP socket server listening');

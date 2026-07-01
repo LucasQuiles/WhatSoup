@@ -143,6 +143,14 @@ export async function extractFacts(
 
   const chatJid = messages[0].chatJid;
   const pks = messages.map((m) => m.pk);
+  // QR-084: the JIDs of the bot's OWN (is_from_me) messages in this batch. A
+  // `self_fact` is recalled GLOBALLY and must originate from a genuine bot
+  // self-claim, but memory_type comes from a steerable LLM with only a prompt
+  // instruction tying it to is_from_me. Deterministically downgrade any
+  // self_fact whose attributed sender_jid is not an is_from_me sender here, so a
+  // non-is_from_me (attacker-participant) message cannot poison the global
+  // self-identity store. Parallel to the QR-041 cross-sender-attribution gate.
+  const selfSenders = new Set(messages.filter((m) => m.isFromMe).map((m) => m.senderJid));
   const conversationLog = formatMessages(messages);
 
   let raw: string;
@@ -206,6 +214,14 @@ export async function extractFacts(
     schemaDrop += 1;
   };
 
+  // QR-041: the LLM-supplied `sender_jid` is untrusted — it is derived from message
+  // CONTENT, so crafted text can make the model attribute a poisoned fact to a victim
+  // who is not even in the conversation. Only the actual senders of this batch are
+  // trusted (the envelope `senderJid`, the same value the model is shown). Accept the
+  // claimed sender_jid only when it matches a real batch sender; otherwise blank it so
+  // the fact is stored unattributed rather than attributed to an arbitrary victim.
+  const trustedSenders = new Set(messages.map((m) => m.senderJid).filter(Boolean));
+
   for (const item of parsed) {
     if (typeof item !== 'object' || item === null) {
       noteSchemaDrop(item);
@@ -214,13 +230,28 @@ export async function extractFacts(
     const obj = item as Record<string, unknown>;
 
     const text = typeof obj['text'] === 'string' ? obj['text'] : null;
-    const senderJid = typeof obj['sender_jid'] === 'string' ? obj['sender_jid'] : '';
-    const senderName = typeof obj['sender_name'] === 'string' ? obj['sender_name'] : senderJid;
+    const claimedSenderJid = typeof obj['sender_jid'] === 'string' ? obj['sender_jid'] : '';
+    const senderJid = trustedSenders.has(claimedSenderJid) ? claimedSenderJid : '';
+    // Drop the LLM-supplied name when the attribution itself was rejected (it named a
+    // non-participant); keep it only alongside a validated sender.
+    const senderName = senderJid && typeof obj['sender_name'] === 'string' ? obj['sender_name'] : senderJid;
     const rawType = typeof obj['memory_type'] === 'string' ? obj['memory_type'] : 'user_fact';
     const validTypes = ['user_fact', 'group_context', 'preference', 'correction', 'self_fact'] as const;
-    const memoryType = (validTypes as readonly string[]).includes(rawType)
+    let memoryType = (validTypes as readonly string[]).includes(rawType)
       ? (rawType as ExtractedFact['memoryType'])
       : 'user_fact';
+    // QR-084: a self_fact is recalled globally as the bot's self-identity. Only
+    // a genuine bot self-claim (attributed to an is_from_me sender in this batch)
+    // may carry that privileged type; anything else is downgraded to a per-chat
+    // user_fact so a steered LLM on attacker content cannot poison the global
+    // self-identity store.
+    if (memoryType === 'self_fact' && (!senderJid || !selfSenders.has(senderJid))) {
+      log.warn(
+        { chatJid, senderJid },
+        'extractFacts: downgrading self_fact not attributed to an is_from_me sender (QR-084)',
+      );
+      memoryType = 'user_fact';
+    }
     const confidence = typeof obj['confidence'] === 'number' ? obj['confidence'] : 0.5;
     const supersedesText =
       typeof obj['supersedes_text'] === 'string' ? obj['supersedes_text'] : '';

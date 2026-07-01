@@ -176,3 +176,53 @@ describe('provider API preview redaction', () => {
     expectPreviewRedacted(previewFrom(warnMock, 'dataPreview'), fixtures);
   });
 });
+
+// QR-079: the shared sanitizer's keyed-secret rule covered only a fixed key-name
+// denylist (api_key/access_token/refresh_token/auth_token/pat/password/secret),
+// so compound-snake and camelCase-glued secret keys LEAKED across every consumer
+// (handoff corpus -> third-party summarizer, outbound-message-safety, provider
+// logs, backups). Same root class as QR-052 (bot-errors KEYED_SECRET_RE), distinct
+// redactor. These assert the gap is closed without over-redacting benign keys.
+describe('sanitizeProviderPreviewText — compound / camelCase secret keys (QR-079)', () => {
+  // Fixture VALUES carry an `example` marker so the repo-hygiene secret-assignment
+  // guard treats them as obvious non-secrets (allowedSecretAssignmentValue); they are
+  // still 8+ chars single tokens, so the redactor's `{8,}` value match still fires.
+  const LEAKED_BEFORE: Array<[string, string]> = [
+    ['AWS multi-underscore env', 'AWS_SESSION_TOKEN=exampleAwsSessionTokenValue01'],
+    ['camelCase session token', 'sessionToken=exampleSessionTokenValue02'],
+    ['camelCase bearer token', 'bearerToken=exampleBearerTokenValue03'],
+    ['OAuth client secret', 'client_secret=exampleClientSecretValue04'],
+    ['AWS secret access key', 'aws_secret_access_key=exampleAwsSecretAccessKey05'],
+    ['bare token key', 'token=exampleBareTokenValue06'],
+    ['private key', 'private_key=examplePrivateKeyValue07'],
+  ];
+
+  it.each(LEAKED_BEFORE)('redacts the secret value: %s', (_label, input) => {
+    const out = sanitizeProviderPreviewText(input);
+    expect(out).toContain('[REDACTED]');
+    // The raw secret value must not survive.
+    expect(out).not.toBe(input);
+  });
+
+  it('still redacts the original covered keys (no regression)', () => {
+    expect(sanitizeProviderPreviewText('api_key=exampleApiKeyValue01')).toContain('api_key=[REDACTED]');
+    expect(sanitizeProviderPreviewText('password: examplePasswordValue02')).toContain('[REDACTED]');
+    expect(sanitizeProviderPreviewText('Authorization: Bearer exampleBearerHeaderValue03')).toContain('Bearer [REDACTED]');
+  });
+
+  const BENIGN: string[] = [
+    'retry_count=12345678',
+    'event_count=99999999',
+    'please pay invoice 20260145 today',
+  ];
+
+  it.each(BENIGN)('does not over-redact benign key/value: %s', (input) => {
+    expect(sanitizeProviderPreviewText(input)).toBe(input);
+  });
+
+  it('is linear on pathological underscore-key input (no catastrophic backtracking)', () => {
+    const start = Date.now();
+    sanitizeProviderPreviewText('a_'.repeat(5000) + 'token=x');
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+});

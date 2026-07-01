@@ -132,6 +132,16 @@ export class ContactsDirectory {
     }
 
     for (const key of keys) {
+      // QR-044: display-name / alias keys are derived from the untrusted pushName
+      // (any WhatsApp user can set any pushName). Once a name maps to a phone, a LATER
+      // observe with a DIFFERENT phone must NOT overwrite it — an attacker spoofing a
+      // victim's pushName ('Boss') would otherwise redirect the bot's @<Name> mention
+      // to themselves. First-writer-wins for name keys. The phone self-key (key === phone)
+      // is exempt: it is not spoofable since the key IS the resolved phone.
+      const existing = this.map.get(key);
+      if (existing !== undefined && existing !== phone && key !== phone) {
+        continue;
+      }
       if (!this.map.has(key)) {
         // Fix: use while loop to correctly drain when multiple keys are added
         // and the map may already be at or beyond capacity.

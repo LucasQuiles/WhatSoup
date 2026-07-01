@@ -98,7 +98,7 @@ import { PendingPollPersistence } from './pending-poll-persistence.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
@@ -113,6 +113,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
 import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor } from './fallback-config.ts';
+import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
   writeProviderMcpConfig,
@@ -160,6 +161,19 @@ const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
 const HEALTH_STATS_INTERVAL_MS = 60_000;
 const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+// Idle per-chat agent session lifecycle bounds. A resident session idle (no
+// message) beyond SESSION_IDLE_MS is suspended; sessions support --resume so the
+// next message rehydrates. MAX_RESIDENT_SESSIONS is an LRU ceiling so a burst of
+// distinct chats cannot pin unbounded memory; SESSION_MIN_RESIDENCY_MS is an
+// anti-thrash floor so a freshly-spawned session is never immediately evicted.
+const envPositiveInt = (key: string, fallback: number): number => {
+  const raw = Number(process.env[key]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+};
+const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
+const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
+const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
@@ -543,8 +557,19 @@ function contextOverflowNotice(): string {
 }
 
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  return fallbackRequiresIndependentProbe(reason);
+  // Recovery-probe gating is intentionally BROADER than independent-provider
+  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
+  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
+  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
+  // primary and revert the moment it recovers rather than blind-waiting for the
+  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
+  return (
+    fallbackRequiresIndependentProbe(reason) ||
+    reason === 'usage-limit' ||
+    reason === 'rate-limit'
+  );
 }
+
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
   // Routed through the central classifier (SSOT). Only fallback-arming kinds map to
@@ -753,6 +778,7 @@ export class AgentRuntime implements Runtime {
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1281,6 +1307,111 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  private startSessionSweepTimer(): void {
+    if (this.sessionSweepTimer) return;
+    this.sessionSweepTimer = setInterval(() => this.sweepIdleSessions(), SESSION_SWEEP_INTERVAL_MS);
+    this.sessionSweepTimer.unref?.();
+  }
+
+  /**
+   * True only if a resident agent session is safe to suspend right now. A session
+   * is evictable when it is live, between turns, past the minimum-residency floor,
+   * idle beyond the TTL, and not blocking on a pending poll vote. Mirrors the
+   * guards proven necessary by the eviction design (turn-in-flight, anti-thrash
+   * residency floor, awaited-poll exemption).
+   */
+  private isSessionSafeToEvict(mapKey: string, session: SessionManager, now: number): boolean {
+    if (session === this.controlSession) return false;    // synthetic self-heal session has its own lifecycle
+    const st = session.getStatus();
+    if (st.active !== true) return false;                 // not a live resident session
+    if (st.turnInFlight === true) return false;           // mid-turn (covers mid-tool-call)
+    // A turn is queued/dispatching for this chat. pendingTurnText is set before the
+    // session ref is captured for dispatch and cleared at turn completion, so it
+    // closes the window where a sweep could evict a session mid-dispatch (before its
+    // watchdog arms) and the captured ref then gets respawned off-map. Fail-safe:
+    // a lingering pending turn only defers eviction, never forces it.
+    if (this.pendingTurnText.has(mapKey)) return false;
+    if (this.pendingPolls.questions.has(mapKey)) return false; // awaiting a poll vote
+    // Images are buffered for IMAGE_COALESCE_MS before dispatch and do NOT set
+    // pendingTurnText or refresh lastMessageAt — so without this guard an idle/LRU
+    // sweep could evict mid-buffer, and cleanupPerChatState would abort the buffer,
+    // silently dropping the user's images and disarming the reply guarantee.
+    if (this.imageCoalesce.buffers.has(mapKey)) return false;
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    if (Number.isFinite(startedMs) && now - startedMs < SESSION_MIN_RESIDENCY_MS) return false; // anti-thrash floor
+    return true;
+  }
+
+  private sessionIdleMs(session: SessionManager, now: number): number {
+    const st = session.getStatus();
+    const startedMs = st.startedAt ? Date.parse(st.startedAt) : now;
+    const lastMs = st.lastMessageAt ? Date.parse(st.lastMessageAt) : startedMs;
+    return Number.isFinite(lastMs) ? now - lastMs : 0;
+  }
+
+  /** TTL-pass eligibility: safe to evict AND idle beyond the TTL. */
+  private isSessionEvictable(mapKey: string, session: SessionManager, now: number): boolean {
+    return this.isSessionSafeToEvict(mapKey, session, now) && this.sessionIdleMs(session, now) > SESSION_IDLE_MS;
+  }
+
+  /**
+   * Suspend resident per-chat agent sessions that have gone idle, so the resident
+   * session set stays bounded instead of accumulating one process (plus its MCP
+   * and browser children) per distinct chat until the host exhausts memory.
+   *
+   * Pass 1 (TTL): suspend anything idle beyond SESSION_IDLE_MS. Pass 2 (LRU
+   * ceiling): if still over MAX_RESIDENT_SESSIONS, suspend the longest-idle
+   * evictable sessions down toward the cap. Eviction goes through the session's
+   * own graceful shutdown(true) — which suspends (resumable) and routes through
+   * the exit-handler's clean-shutdown path — never an external kill.
+   */
+  private sweepIdleSessions(): void {
+    const now = Date.now();
+
+    // Pass 1 — TTL.
+    for (const [mapKey, session] of this.chatSessions) {
+      if (!this.isSessionEvictable(mapKey, session, now)) continue;
+      this.evictIdleSession(mapKey, session, 'idle-ttl');
+    }
+
+    // Pass 2 — LRU ceiling. Unlike pass 1 this evicts even sessions still within
+    // the TTL (longest-idle first), to bound memory under a burst of many active
+    // chats; it still honors the safety guards (live, between-turns, no pending
+    // poll, past the residency floor).
+    if (this.chatSessions.size > MAX_RESIDENT_SESSIONS) {
+      const overBy = this.chatSessions.size - MAX_RESIDENT_SESSIONS;
+      const candidates = [...this.chatSessions.entries()]
+        .filter(([mapKey, session]) => this.isSessionSafeToEvict(mapKey, session, now))
+        .map(([mapKey, session]) => ({ mapKey, session, idleMs: this.sessionIdleMs(session, now) }))
+        .sort((a, b) => b.idleMs - a.idleMs); // longest-idle first
+      for (const { mapKey, session } of candidates.slice(0, overBy)) {
+        this.evictIdleSession(mapKey, session, 'lru-ceiling');
+      }
+    }
+  }
+
+  private evictIdleSession(mapKey: string, session: SessionManager, reason: string): void {
+    log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
+    // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
+    this.chatSessions.delete(mapKey);
+    // Tear down the chat's outbound queue too (mirrors every other session-removal
+    // site). In per_chat mode the queue sweep never runs, so without this the queue
+    // map grows one dead entry per evicted chat under a burst — undercutting the
+    // memory bound this feature exists to enforce.
+    this.chatQueues.get(mapKey)?.abortTurn();
+    this.chatQueues.delete(mapKey);
+    // Canonical teardown of all co-keyed per-chat state (operation tracker,
+    // auto-compact timers, image-coalesce buffers, turn bookkeeping). Required
+    // whenever a session leaves chatSessions — otherwise eviction leaks the very
+    // auxiliary state/timers this feature exists to bound. Next message re-spawns
+    // and repopulates. Safe at this point: the safety guards already exclude a
+    // chat with a pending turn or pending poll.
+    this.cleanupPerChatState(mapKey);
+    void session.shutdown(true).catch((err) => {
+      log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
+    });
+  }
+
   // Tracks inbound seq for the current turn (single/shared mode)
   private currentInboundSeq: number | undefined;
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
@@ -1621,9 +1752,34 @@ export class AgentRuntime implements Runtime {
     });
   }
 
+  /**
+   * Find the echo-guard token of any existing queue still targeting this chat,
+   * across all three stores + the canonical key (QR-069). A replacement queue
+   * inherits it so the predecessor's still-active group cooldown does not
+   * silently flood-suppress the replacement's first (often terminal) reply.
+   */
+  private priorSenderTokenForChat(chatJid: string): string | undefined {
+    const canonical = canonicalizeChatJid(chatJid, this.db);
+    const prior =
+      this.outboundQueues.get(chatJid) ??
+      this.outboundQueues.get(canonical) ??
+      this.chatQueues.get(chatJid) ??
+      this.chatQueues.get(canonical) ??
+      this.queue ??
+      undefined;
+    return prior?.getSenderToken();
+  }
+
   /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
   private createOutboundQueue(chatJid: string, reason: string): OutboundQueue {
-    const q = new OutboundQueue(this.messenger, chatJid);
+    // QR-069: inherit a prior queue's echo-guard token when one exists. Pass the
+    // 3rd arg only when defined so a genuinely-new queue keeps the 2-arg
+    // construction contract (no trailing `undefined`) — mirrors the QR-028
+    // conditional-call precedent for optional positional params.
+    const priorToken = this.priorSenderTokenForChat(chatJid);
+    const q = priorToken !== undefined
+      ? new OutboundQueue(this.messenger, chatJid, priorToken)
+      : new OutboundQueue(this.messenger, chatJid);
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
@@ -1737,6 +1893,15 @@ export class AgentRuntime implements Runtime {
             const pendingActor = this.pendingTurnActorJid.get(lidKey);
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
+          }
+          // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
+          // progress timer + slow/stall setTimeouts that are cleared only by
+          // shutdown() keyed on the canonical mapKey — leaving it under lidKey
+          // leaks the timer and loses the chat's in-flight progress/stall state.
+          const opTracker = this.operationTrackers.get(lidKey);
+          if (opTracker) {
+            this.operationTrackers.delete(lidKey);
+            this.operationTrackers.set(canonical, opTracker);
           }
           this.crashes.rekey(lidKey, canonical);
           const contentType = this.perChatTurnContentType.get(lidKey);
@@ -2175,6 +2340,7 @@ export class AgentRuntime implements Runtime {
             this.cleanupSharedCrashTurnState();
             // Mark inbound event failed so it doesn't stay stuck in processing
             if (this.durability && this.currentInboundSeq !== undefined) {
+              this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
               this.replyGuarantee?.disarm(this.currentInboundSeq);
               this.durability.markInboundFailed(this.currentInboundSeq);
               this.currentInboundSeq = undefined;
@@ -2364,6 +2530,15 @@ export class AgentRuntime implements Runtime {
         },
         serviceManager: serviceRestarter,
         trigger: triggerSelfRestart,
+        // QR-047: admin gate, same resolve+isAdminPhone check the other admin paths use.
+        assertAdmin: (session) => {
+          const phone = session.actorJid ? resolvePhoneFromJid(session.actorJid, this.db) : null;
+          if (!phone || !isAdminPhone(phone, config.adminPhones)) {
+            throw new Error(
+              `restart_self is admin-only: caller "${phone ?? 'unresolved'}" is not on the instance admin list`,
+            );
+          }
+        },
       }));
     }
 
@@ -2371,6 +2546,7 @@ export class AgentRuntime implements Runtime {
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
+    this.startSessionSweepTimer();
     this.handoffDistill.start();
 
     // Restore any pending polls from the previous process so votes-in-flight
@@ -2478,6 +2654,7 @@ export class AgentRuntime implements Runtime {
           `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
         );
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -2498,6 +2675,7 @@ export class AgentRuntime implements Runtime {
         );
         // Mark inbound event as failed so it doesn't stay stuck in 'processing'
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -2913,7 +3091,7 @@ export class AgentRuntime implements Runtime {
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
         try {
-          const convKey = toConversationKey(chatJid);
+          const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
@@ -3064,6 +3242,7 @@ export class AgentRuntime implements Runtime {
         this.pendingTurnActorJid.delete(mapKey);
         if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
+          this.markRuntimeFaultContinuityCandidate(failedSeq);
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq);
         }
@@ -3195,6 +3374,19 @@ export class AgentRuntime implements Runtime {
     if (inboundSeq === undefined) return;
     this.durability?.completeInbound(inboundSeq, terminalReason);
     this.replyGuarantee?.disarm(inboundSeq);
+  }
+
+  private markRuntimeFaultContinuityCandidate(inboundSeq: number | undefined): void {
+    if (inboundSeq === undefined || !this.durability || !this.replyGuarantee?.isArmed(inboundSeq)) return;
+    try {
+      this.durability.markContinuityCandidateIfNoTerminalOutbound(
+        inboundSeq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      );
+    } catch (err) {
+      log.warn({ err, inboundSeq }, 'failed to mark runtime-fault continuity candidate');
+    }
   }
 
   /**
@@ -3378,7 +3570,7 @@ export class AgentRuntime implements Runtime {
       }
 
       // admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-      if (pending.resolution === 'admin-wins') {
+      if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
         for (const [qIndex, votes] of pending.votesByQuestion) {
           if (pending.answersCollected[qIndex] === undefined) {
             const winner = evaluateResolutionOnTimeout(votes);
@@ -3418,7 +3610,7 @@ export class AgentRuntime implements Runtime {
     }
 
     // AskUser admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-    if (pending.resolution === 'admin-wins') {
+    if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
       for (const [qIndex, votes] of pending.votesByQuestion) {
         if (pending.answersCollected[qIndex] === undefined) {
           const winner = evaluateResolutionOnTimeout(votes);
@@ -3482,7 +3674,9 @@ export class AgentRuntime implements Runtime {
       this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
-      log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
+      // QR-036: returns null → callers KEEP the admin gate (fail-closed), they no
+      // longer downgrade an admin-gated GROUP poll to first-vote-wins on this error.
+      log.warn({ err, chatJid }, 'failed to fetch group metadata — admin-gated polls keep the gate (fail-closed)');
       return null;
     }
   }
@@ -3561,8 +3755,13 @@ export class AgentRuntime implements Runtime {
           if (this.pendingPolls.questions.get(mapKey) === pending) {
             pending.adminJids = admins;
             if (admins === null) {
-              log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
-              pending.resolution = 'first-vote-wins';
+              // QR-036: fail CLOSED, not open. Keep the admin-only/admin-wins
+              // strategy with adminJids=null so NO member vote qualifies as admin
+              // (a non-admin can no longer hijack the gated decision when group
+              // metadata is transiently unavailable). Liveness is bounded by the
+              // existing soft-expiry timeout fallback (admin-wins → non-admin
+              // majority-after-timeout, admin-only → operator text-fallback).
+              log.warn({ mapKey, resolution }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
             }
           }
         });
@@ -3609,8 +3808,11 @@ export class AgentRuntime implements Runtime {
     if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
       adminJids = await this.fetchGroupAdminJids(chatJid);
       if (adminJids === null) {
-        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — degrading to first-vote-wins');
-        resolvedStrategy = 'first-vote-wins';
+        // QR-036: fail CLOSED. Keep the admin-only/admin-wins strategy with
+        // adminJids=null so no member vote qualifies as admin (no non-admin can
+        // resolve the gated decision on transient metadata failure); liveness via
+        // the soft-expiry timeout fallback.
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
       }
     }
 
@@ -4790,6 +4992,10 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
     }
+    if (this.sessionSweepTimer) {
+      clearInterval(this.sessionSweepTimer);
+      this.sessionSweepTimer = null;
+    }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -5323,6 +5529,13 @@ export class AgentRuntime implements Runtime {
    * Health spreads this object verbatim into /health, so new fields must be
    * JSON-safe and additive.
    */
+  /**
+   * TTL-memoised resolver for idle (pre-selection) fallback eligibility. Built
+   * lazily so the keyring is consulted at most once per entry per TTL even though
+   * getFallbackState backs the frequently-polled /health endpoint.
+   */
+  private idleFallbackEligibilityResolver?: (entry: AgentFallbackEntry) => boolean | null;
+
   getFallbackState(): {
     effectiveProvider: string;
     fallbackActiveUntil: number | null;
@@ -5350,6 +5563,10 @@ export class AgentRuntime implements Runtime {
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
+    this.idleFallbackEligibilityResolver ??= makeIdleEligibilityResolver(
+      (entry) => this.fallbackKeyPresent(entry.provider, entry.model),
+      Date.now,
+    );
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackWindow.activeUntil : null,
@@ -5369,7 +5586,7 @@ export class AgentRuntime implements Runtime {
       primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks),
+      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks, this.idleFallbackEligibilityResolver),
       fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
       failedEntryCount: this.fallbackChain.failedKeys.size,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
@@ -7078,6 +7295,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
+            this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
             this.replyGuarantee?.disarm(this.currentInboundSeq);
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
@@ -7135,6 +7353,7 @@ export class AgentRuntime implements Runtime {
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
     if (this.durability && inboundSeq !== undefined) {
+      this.markRuntimeFaultContinuityCandidate(inboundSeq);
       this.replyGuarantee?.disarm(inboundSeq);
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
@@ -7335,7 +7554,7 @@ export class AgentRuntime implements Runtime {
     sinceUnixSec: number,
   ): Promise<boolean> {
     try {
-      const convKey = toConversationKey(chatJid);
+      const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
 
@@ -7423,7 +7642,7 @@ export class AgentRuntime implements Runtime {
           if (mapKey) this.resumeFailedHandling.delete(mapKey);
 
           try {
-            const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
+            const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
               this.pendingSystemResults.mark(mapKey);

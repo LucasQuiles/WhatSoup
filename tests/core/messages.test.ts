@@ -83,6 +83,38 @@ describe('messages', () => {
     expect(stored.timestamp).toBe(BASE_TS);
   });
 
+  it('QR-076: getRecentMessages excludes soft-deleted (deleted_at) messages', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'keep me', timestamp: BASE_TS }));
+    storeMessageIfNew(db, makeMsg({ content: 'revoked secret', timestamp: BASE_TS + 1 }));
+    // Soft-delete the whole conversation (the wired chatCleared path).
+    db.clearChat('group1_at_g.us');
+
+    const results = getRecentMessages(db, 'group1_at_g.us', 10);
+    // RED before fix: both rows returned (no deleted_at filter) → revoked
+    // content leaks into the recalled LLM context.
+    expect(results).toHaveLength(0);
+    expect(results.map((r) => r.content).join()).not.toContain('revoked secret');
+  });
+
+  it('QR-076: getRecentMessages still returns a live message when a sibling is soft-deleted', () => {
+    storeMessageIfNew(db, makeMsg({ messageId: 'gone', content: 'deleted one', timestamp: BASE_TS }));
+    storeMessageIfNew(db, makeMsg({ messageId: 'live', content: 'kept one', timestamp: BASE_TS + 1 }));
+    // Soft-delete only the first message (mirrors a single-message revoke once wired).
+    db.raw.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE message_id = ?").run('gone');
+
+    const results = getRecentMessages(db, 'group1_at_g.us', 10);
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toBe('kept one');
+  });
+
+  it('QR-076: getMessagesSince excludes soft-deleted messages', () => {
+    storeMessageIfNew(db, makeMsg({ content: 'after-since but deleted', timestamp: BASE_TS + 5 }));
+    db.clearChat('group1_at_g.us');
+
+    const results = getMessagesSince(db, 'group1_at_g.us', BASE_TS, 30);
+    expect(results).toHaveLength(0);
+  });
+
   it('normalizes millisecond timestamps before writing messages', () => {
     const msg = makeMsg({ content: 'millisecond timestamp', timestamp: 1_777_824_570_676 });
     storeMessageIfNew(db, msg);

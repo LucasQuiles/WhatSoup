@@ -13,11 +13,12 @@ import {
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
-import { recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
+import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
+import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
 const mockLog = vi.hoisted(() => ({
@@ -139,7 +140,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Final answer for the user');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(
       'status-log@g.us',
       expect.stringContaining('Final answer'),
@@ -260,7 +261,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Ping');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', { messageId: expect.any(String) });
   });
 
   it('converts markdown checkboxes to WhatsApp box characters', async () => {
@@ -943,7 +944,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Hello retargeted');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted');
+    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith('original@s.whatsapp.net', expect.anything());
   });
 
@@ -1790,7 +1791,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Subsequent text');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', { messageId: expect.any(String) });
   });
 
   // ─── durability: markMaybeSent after retry exhaustion ────────────────────
@@ -1933,6 +1934,33 @@ describe('OutboundQueue', () => {
     expect(mockLog.warn).toHaveBeenCalled();
     const timeoutLogs = mockLog.warn.mock.calls.filter(([arg]) => arg.timeout === true);
     expect(timeoutLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── QR-028: stable message id reused across timeout retries (no dup) ──────
+
+  it('reuses ONE stable messageId across all retry attempts so a slow-but-delivered send is server-deduped', async () => {
+    const ids: Array<string | undefined> = [];
+    let callCount = 0;
+    const idMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, _text: string, opts?: SendOptions) => {
+        ids.push(opts?.messageId);
+        callCount += 1;
+        if (callCount <= 1) return new Promise<never>(() => {}); // first attempt times out
+        return { waMessageId: opts?.messageId ?? null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(idMessenger, CHAT_JID);
+    queue.enqueueText('idempotency test');
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 1); // first attempt times out
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 2_000); // retry succeeds
+    await queue.flush();
+
+    expect(ids.length).toBeGreaterThanOrEqual(2);
+    // Every attempt carried a non-empty id, and ALL attempts shared the SAME id.
+    expect(ids[0]).toMatch(/^[0-9A-F]{8,}$/);
+    expect(new Set(ids.filter((x) => x !== undefined)).size).toBe(1);
   });
 
   // ─── enqueuePoll ──────────────────────────────────────────────────────────
@@ -2506,6 +2534,38 @@ describe('OutboundQueue', () => {
       // Drain the streamTimer so the leak guard passes
       await queue.flush();
     });
+  });
+});
+
+describe('OutboundQueue — echo-guard token inheritance across replacement (QR-069)', () => {
+  const GROUP_JID = 'qr069-test-group@g.us';
+  const CFG: EchoGuardConfig = { enabled: true, groupCooldownMs: 60_000 };
+
+  beforeEach(() => __resetForTests());
+
+  it('exposes a stable per-instance token; a fresh queue gets a random non-empty token', () => {
+    const { messenger } = makeMessenger();
+    const q = new OutboundQueue(messenger, GROUP_JID);
+    expect(q.getSenderToken()).toMatch(/.+/);
+    const q2 = new OutboundQueue(messenger, GROUP_JID);
+    expect(q2.getSenderToken()).not.toBe(q.getSenderToken());
+  });
+
+  it('a replacement queue that INHERITS the prior token is exempt from the predecessor cooldown', () => {
+    const { messenger } = makeMessenger();
+    // Predecessor queue sends to the group, arming the cross-session cooldown.
+    const oldQueue = new OutboundQueue(messenger, GROUP_JID);
+    const oldToken = oldQueue.getSenderToken();
+    recordGroupOutbound(GROUP_JID, oldToken);
+
+    // BUG (QR-069): a replacement with a FRESH token is suppressed within the window.
+    const freshReplacement = new OutboundQueue(messenger, GROUP_JID);
+    expect(canSendToGroup(GROUP_JID, CFG, freshReplacement.getSenderToken())).toBe(false);
+
+    // FIX: a replacement that inherits the prior token is NOT suppressed.
+    const inheritingReplacement = new OutboundQueue(messenger, GROUP_JID, oldToken);
+    expect(inheritingReplacement.getSenderToken()).toBe(oldToken);
+    expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
   });
 });
 
