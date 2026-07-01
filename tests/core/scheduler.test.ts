@@ -749,6 +749,51 @@ describe('scheduler.ts uncovered-branch coverage', () => {
     expect(row.error).toContain('Invalid recurrence after send:');
   });
 
+  it('fails a retry-exhausted recurring row when the next retry slot cannot be computed', async () => {
+    const failConn: Partial<ConnectionManager> = {
+      sendRaw: vi.fn().mockRejectedValue(new Error('send still failing')),
+      sendMedia: vi.fn().mockRejectedValue(new Error('send still failing')),
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const result = db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550800006@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'bad retry cron' }),
+        now - 120,
+        'pending',
+        2,
+        '99 99 99 99 99',
+        now - 60,
+        0,
+      );
+    const id = Number(result.lastInsertRowid);
+
+    const scheduler = new MessageScheduler(db, failConn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(failConn.sendRaw).toHaveBeenCalledTimes(1);
+    const row = db.raw
+      .prepare('SELECT status, retry_count, error, send_started_at, next_run_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as {
+        status: string;
+        retry_count: number;
+        error: string | null;
+        send_started_at: number | null;
+        next_run_at: number;
+      };
+    expect(row.status).toBe('failed');
+    expect(row.retry_count).toBe(3);
+    expect(row.send_started_at).toBeNull();
+    expect(row.next_run_at).toBe(now - 60);
+    expect(row.error).toBe('Recurring failed (cannot compute next slot): send still failing');
+  });
+
   // Cover line 194: legacy fallback that deserialises a Buffer encoded in JSON
   // as { type: 'Buffer', data: number[] } when there is no media_blob.
   it('exercises the legacy { type: "Buffer", data: [] } media fallback (no media_blob) and marks the row sent', async () => {
