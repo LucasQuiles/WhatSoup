@@ -505,6 +505,72 @@ describe('messages', () => {
     expect(ftsResults.length).toBeGreaterThan(0);
   });
 
+  // --- QR-063: markMessageEdited (WhatsApp message-edit consumer) ---
+
+  it('markMessageEdited updates content + content_text and stamps edited_at', () => {
+    const msg = makeMsg({ messageId: 'edit-1', content: 'original text', contentText: 'original text' });
+    storeMessageIfNew(db, msg);
+
+    const before = db.raw
+      .prepare('SELECT edited_at FROM messages WHERE message_id = ?')
+      .get('edit-1') as { edited_at: string | null };
+    expect(before.edited_at).toBeNull();
+
+    const changed = db.markMessageEdited('edit-1', 'corrected text');
+    expect(changed).toBe(1);
+
+    const row = db.raw
+      .prepare('SELECT content, content_text, edited_at FROM messages WHERE message_id = ?')
+      .get('edit-1') as { content: string; content_text: string; edited_at: string | null };
+    expect(row.content).toBe('corrected text');
+    expect(row.content_text).toBe('corrected text');
+    expect(row.edited_at).not.toBeNull();
+  });
+
+  it('markMessageEdited re-indexes FTS: new text searchable, old text not (MIGRATION_13)', () => {
+    const msg = makeMsg({ messageId: 'edit-fts', content: 'zebrastripe original', contentText: 'zebrastripe original' });
+    storeMessageIfNew(db, msg);
+
+    // old text is searchable before the edit
+    const pre = db.raw
+      .prepare("SELECT rowid FROM messages_fts WHERE content MATCH 'zebrastripe'")
+      .all() as Array<{ rowid: number }>;
+    expect(pre.length).toBeGreaterThan(0);
+
+    db.markMessageEdited('edit-fts', 'giraffespot corrected');
+
+    const oldHits = db.raw
+      .prepare("SELECT rowid FROM messages_fts WHERE content MATCH 'zebrastripe'")
+      .all() as Array<{ rowid: number }>;
+    const newHits = db.raw
+      .prepare("SELECT rowid FROM messages_fts WHERE content MATCH 'giraffespot'")
+      .all() as Array<{ rowid: number }>;
+    expect(oldHits.length).toBe(0);
+    expect(newHits.length).toBeGreaterThan(0);
+  });
+
+  it('markMessageEdited does NOT edit a soft-deleted (revoked) message', () => {
+    // content-only seed (no content_text) so the shared FTS index is untouched by
+    // the soft-delete → the assertion isolates markMessageEdited's deleted_at guard.
+    const msg = makeMsg({ messageId: 'edit-revoked', content: 'revoked body' });
+    storeMessageIfNew(db, msg);
+    db.markMessagesDeleted(['edit-revoked']);
+
+    const changed = db.markMessageEdited('edit-revoked', 'attacker edit');
+    expect(changed).toBe(0);
+
+    const row = db.raw
+      .prepare('SELECT content, edited_at, deleted_at FROM messages WHERE message_id = ?')
+      .get('edit-revoked') as { content: string; edited_at: string | null; deleted_at: string | null };
+    expect(row.content).toBe('revoked body');
+    expect(row.edited_at).toBeNull();
+    expect(row.deleted_at).not.toBeNull();
+  });
+
+  it('markMessageEdited is a no-op (0 rows) for an unknown message_id', () => {
+    expect(db.markMessageEdited('does-not-exist', 'nope')).toBe(0);
+  });
+
 });
 
 // === Additional edge-case coverage (cheap-fleet drafted, wave-3) ===
