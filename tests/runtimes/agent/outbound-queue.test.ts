@@ -140,7 +140,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Final answer for the user');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', expect.any(String));
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(
       'status-log@g.us',
       expect.stringContaining('Final answer'),
@@ -261,7 +261,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Ping');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', expect.any(String));
   });
 
   it('converts markdown checkboxes to WhatsApp box characters', async () => {
@@ -944,7 +944,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Hello retargeted');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted');
+    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', expect.any(String));
     expect(messenger.sendMessage).not.toHaveBeenCalledWith('original@s.whatsapp.net', expect.anything());
   });
 
@@ -1791,7 +1791,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Subsequent text');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', expect.any(String));
   });
 
   // ─── durability: markMaybeSent after retry exhaustion ────────────────────
@@ -1934,6 +1934,33 @@ describe('OutboundQueue', () => {
     expect(mockLog.warn).toHaveBeenCalled();
     const timeoutLogs = mockLog.warn.mock.calls.filter(([arg]) => arg.timeout === true);
     expect(timeoutLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── QR-028: stable message id reused across timeout retries (no dup) ──────
+
+  it('reuses ONE stable messageId across all retry attempts so a slow-but-delivered send is server-deduped', async () => {
+    const ids: Array<string | undefined> = [];
+    let callCount = 0;
+    const idMessenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, _text: string, messageId?: string) => {
+        ids.push(messageId);
+        callCount += 1;
+        if (callCount <= 1) return new Promise<never>(() => {}); // first attempt times out
+        return { waMessageId: messageId ?? null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(idMessenger, CHAT_JID);
+    queue.enqueueText('idempotency test');
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 1); // first attempt times out
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 2_000); // retry succeeds
+    await queue.flush();
+
+    expect(ids.length).toBeGreaterThanOrEqual(2);
+    // Every attempt carried a non-empty id, and ALL attempts shared the SAME id.
+    expect(ids[0]).toMatch(/^[0-9A-F]{8,}$/);
+    expect(new Set(ids.filter((x) => x !== undefined)).size).toBe(1);
   });
 
   // ─── enqueuePoll ──────────────────────────────────────────────────────────

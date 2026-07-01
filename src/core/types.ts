@@ -22,7 +22,13 @@ export interface SubmissionReceipt {
 export type TypingState = boolean | 'composing' | 'recording' | 'paused';
 
 export interface Messenger {
-  sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt>;
+  /**
+   * @param messageId Optional stable, client-supplied message id (QR-028). When
+   *   reused across retries of one logical send, the transport server dedupes a
+   *   slow-but-delivered message instead of delivering it twice. Optional so
+   *   existing callers/mocks/transports that omit it are unaffected.
+   */
+  sendMessage(chatJid: string, text: string, messageId?: string): Promise<SubmissionReceipt>;
   /** Send composing/paused/recording presence update. Fire-and-forget; failures are silently ignored. */
   setTyping?(chatJid: string, typing: TypingState): Promise<void>;
   sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
