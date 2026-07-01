@@ -570,9 +570,6 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   );
 }
 
-function fallbackRecoveryRequiresModelUsability(reason: string | null | undefined): boolean {
-  return reason === 'usage-limit' || reason === 'rate-limit';
-}
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
   // Routed through the central classifier (SSOT). Only fallback-arming kinds map to
@@ -6434,36 +6431,13 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Probe whether the primary provider can serve again. Key-service primaries
-   * normally use a synchronous key-presence check; quota fallbacks and binary
-   * primaries run a real model-usability probe (timeout-bounded, never blocks
-   * the event loop) and recover only on a `usable` verdict.
-   *
-   * A binary primary must NOT be judged by `<binary> auth status`: an
-   * expired-but-present OAuth credential makes claude-cli report
-   * `loggedIn:true` while live inference returns 401 Invalid authentication
-   * credentials. auth-status checks credential *presence*, not *validity*, so
-   * it falsely reports recovery and flaps the fallback window onto a dead
-   * primary. The usability probe spawns one minimal inference turn that
-   * genuinely exercises auth. Never rejects.
+   * Probe whether the primary provider can serve again. Recovery requires a
+   * real model-usability success, not credential presence: a revoked API key or
+   * expired OAuth token can still be present in the key store while live turns
+   * continue returning auth failures. The probe is timeout-bounded and never
+   * rejects.
    */
   private async probePrimaryProviderRecovered(): Promise<boolean> {
-    const requiresUsabilityProbe = fallbackRecoveryRequiresModelUsability(this.fallbackWindow.armReason);
-    const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
-    if (service && !requiresUsabilityProbe) {
-      return lookupCredential(service) !== null;
-    }
-    if (!service) {
-      let binary: string | null;
-      try {
-        binary = getProviderBinary(this.agentProvider);
-      } catch {
-        // getProviderBinary throws on an unknown provider; honor the never-rejects
-        // contract the revert-timer relies on by treating that as not-recovered.
-        return false;
-      }
-      if (!binary) return false;
-    }
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
       createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
