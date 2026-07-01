@@ -9945,6 +9945,11 @@ describe('AgentRuntime', () => {
         voterJid: string;
         selectedOptions: string[];
       }) => void;
+      handlePollVoteFailed: (data: {
+        pollMessageId: string;
+        chatJid: string;
+        reason: string;
+      }) => void;
     };
 
     const groupJid = 'test-group@g.us';
@@ -10075,6 +10080,42 @@ describe('AgentRuntime', () => {
       expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
       // send_poll source does NOT use sendTurn — assert it stays untouched
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('E2Eb2 — send_poll source: vote failure rejects the awaiter without AskUser text fallback', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      const pollMessageId = 'POLL_SENDPOLL_DECRYPT_FAIL';
+      const mapKey = `send_poll:${pollMessageId}`;
+      const rejectedErrors: Error[] = [];
+      const awaitReject = (err: Error): void => { rejectedErrors.push(err); };
+      const pending = seedAdminOnlyPending(state, mapKey, 'send_poll', pollMessageId);
+      pending.awaitReject = awaitReject;
+      state.chatQueues.set(mapKey, mockQueue);
+
+      mockQueue.setPollPending.mockClear();
+      mockSession.sendTurn.mockClear();
+      sentMessages.length = 0;
+
+      state.handlePollVoteFailed({
+        pollMessageId,
+        chatJid: groupJid,
+        reason: 'decrypt_failed',
+      });
+
+      expect(rejectedErrors.map((err) => err.message)).toEqual(['Poll expiry: [Poll vote decryption failed]']);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
+      expect(mockQueue.setPollPending).toHaveBeenCalledWith(false);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      expect(sentMessages.some((message) => message.text.includes("couldn't read your poll vote"))).toBe(false);
+      expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ mapKey, reason: 'expiry', source: 'send_poll' }),
+        'poll settled',
+      );
     });
 
     it('E2Ec — multiple non-admin votes are recorded with isAdmin:false but the poll stays open until an admin vote or timeout', async () => {
