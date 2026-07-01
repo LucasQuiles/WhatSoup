@@ -8450,6 +8450,103 @@ describe('AgentRuntime', () => {
       return mockSession.sendTurn.mock.calls.map((call) => String((call as unknown as [unknown])[0]));
     }
 
+    it('degrades admin-only AskUserQuestion polls to first-vote-wins when group admin metadata is unavailable', async () => {
+      const groupJid = 'test-group@g.us';
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_ADMIN_DEGRADE', hasSecret: true });
+      const connection = messenger as unknown as Messenger & { getSocket: ReturnType<typeof vi.fn> };
+      connection.getSocket = vi.fn(() => null);
+      const configWithPoll = mockConfig as typeof mockConfig & {
+        pollResolution?: { defaultStrategy?: 'first-vote-wins' | 'majority-after-timeout' | 'admin-only' | 'admin-wins' };
+      };
+      const previousPollResolution = configWithPoll.pollResolution;
+      configWithPoll.pollResolution = {
+        ...(previousPollResolution ?? {}),
+        defaultStrategy: 'admin-only',
+      };
+
+      try {
+        const db = makeDb();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const groupQueue = makeQueueMock(groupJid);
+        const state = runtime as unknown as {
+          pendingPolls: PerChatCleanupRuntimeState['pendingPolls'];
+          chatSessions: Map<string, typeof mockSession>;
+          chatQueues: Map<string, IOutboundQueue>;
+          handleEventWithContext: (
+            event: AgentEvent,
+            queue: IOutboundQueue,
+            session: typeof mockSession,
+            conversationKey?: string,
+            inboundSeq?: number,
+            mapKey?: string,
+            toolScopeKey?: string,
+          ) => void;
+          handlePollVoteReceived(data: {
+            pollMessageId: string;
+            chatJid: string;
+            voterJid: string;
+            selectedOptions: string[];
+          }): void;
+        };
+        state.chatSessions.set(groupJid, mockSession);
+        state.chatQueues.set(groupJid, groupQueue);
+
+        mockSession.sendTurn.mockClear();
+        state.handleEventWithContext(
+          {
+            type: 'tool_use',
+            toolName: 'AskUserQuestion',
+            toolId: 'tool-admin-degrade',
+            toolInput: {
+              questions: [{
+                question: 'Approve deploy?',
+                header: 'Deploy',
+                options: [
+                  { label: 'Yes', description: 'Ship it' },
+                  { label: 'No', description: 'Hold' },
+                ],
+                multiSelect: false,
+              }],
+            },
+          },
+          groupQueue,
+          mockSession,
+          undefined,
+          undefined,
+          groupJid,
+          groupJid,
+        );
+
+        await vi.waitFor(() => expect(pollSends).toHaveLength(1));
+        expect(connection.getSocket).toHaveBeenCalledOnce();
+        expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ chatJid: groupJid, resolvedStrategy: 'admin-only' }),
+          'admin metadata unavailable — degrading to first-vote-wins',
+        );
+
+        const pending = state.pendingPolls.questions.get(groupJid);
+        expect(pending?.resolution).toBe('first-vote-wins');
+        expect(pending?.adminJids).toBeNull();
+
+        state.handlePollVoteReceived({
+          pollMessageId: 'POLL_ADMIN_DEGRADE',
+          chatJid: groupJid,
+          voterJid: '15550002222@s.whatsapp.net',
+          selectedOptions: ['No'],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('No'));
+        });
+      } finally {
+        if (previousPollResolution === undefined) {
+          delete configWithPoll.pollResolution;
+        } else {
+          configWithPoll.pollResolution = previousPollResolution;
+        }
+      }
+    });
+
     it('sends poll with no follow-up when all descriptions fit in poll options', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
       const db = makeDb();
