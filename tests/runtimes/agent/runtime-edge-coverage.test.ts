@@ -314,6 +314,8 @@ type RuntimeView = {
   session: unknown;
   currentTurnChatJid: string | null;
   activeChatJid: string | null;
+  currentInboundSeq?: number;
+  singleTurnHadToolActivity: boolean;
   workspaceResources: Map<string, {
     workspacePath: string;
     socketPath?: string;
@@ -342,7 +344,7 @@ type RuntimeView = {
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
   handleEventPerChat: ReturnType<typeof vi.fn>;
-  handleEvent: ReturnType<typeof vi.fn>;
+  handleEvent(event: AgentEvent): void;
   handlePerChatCrash: ReturnType<typeof vi.fn>;
   handleCrashNotify: ReturnType<typeof vi.fn>;
   handleResumeFailed: ReturnType<typeof vi.fn>;
@@ -415,7 +417,17 @@ type RuntimeView = {
   handleEventWithContext(
     event: AgentEvent,
     queue: IOutboundQueue,
-    session: { tickWatchdog: ReturnType<typeof vi.fn> } | null,
+    session: {
+      clearTurnWatchdog: ReturnType<typeof vi.fn>;
+      getDbRowId: ReturnType<typeof vi.fn>;
+      shutdown: ReturnType<typeof vi.fn>;
+      tickWatchdog: ReturnType<typeof vi.fn>;
+    } | null,
+    conversationKey?: string,
+    inboundSeq?: number,
+    mapKey?: string,
+    toolScopeKey?: string,
+    isSystemResult?: boolean,
   ): void;
   kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void;
   recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void;
@@ -532,6 +544,16 @@ function installPollPersistenceStub(runtime: AgentRuntime) {
   };
   view(runtime).pollPersistence = persistence;
   return persistence;
+}
+
+function installDurabilityStub(runtime: AgentRuntime) {
+  const durability = {
+    completeTurn: vi.fn(),
+    upsertSessionCheckpoint: vi.fn(),
+    completeInbound: vi.fn(),
+  };
+  (runtime as unknown as { durability: typeof durability }).durability = durability;
+  return durability;
 }
 
 describe('AgentRuntime edge coverage', () => {
@@ -752,6 +774,208 @@ describe('AgentRuntime edge coverage', () => {
         }),
         item.logMessage,
       );
+    }
+  });
+
+  it('per-chat terminal provider results suppress non-arming failures through the direct result handler', () => {
+    const cases: Array<{
+      reason: 'policy-block' | 'context-overflow';
+      text: string;
+      expectNotice: boolean;
+      logger: 'warn' | 'error';
+      message: string;
+    }> = [
+      {
+        reason: 'policy-block',
+        text: 'This request violates our policy and is blocked by policy.',
+        expectNotice: false,
+        logger: 'error',
+        message: 'suppressed provider policy-block message from result — session will be killed',
+      },
+      {
+        reason: 'context-overflow',
+        text: 'Error: prompt is too long for the context window.',
+        expectNotice: true,
+        logger: 'warn',
+        message: 'prompt too long — killing session',
+      },
+    ];
+
+    for (const item of cases) {
+      const runtime = makeRuntime({ sessionScope: 'per_chat' });
+      const state = view(runtime);
+      const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
+      const session = makeSession();
+      const durability = installDurabilityStub(runtime);
+      const mapKey = `${item.reason}-map`;
+
+      mockRuntimeLogger.warn.mockClear();
+      mockRuntimeLogger.error.mockClear();
+      state.perChatTurnContentType.set(mapKey, 'text');
+      state.perChatTurnText.set(mapKey, 'provider text');
+      state.perChatAssistantItemText.set(mapKey, new Map([['item-edge', 'partial']]));
+
+      state.handleEventWithContext(
+        { type: 'result', text: item.text, isError: true },
+        queue,
+        session,
+        `${item.reason}-conversation`,
+        41,
+        mapKey,
+        mapKey,
+      );
+
+      expect(session.clearTurnWatchdog).toHaveBeenCalledTimes(1);
+      expect(queue.endTurn).toHaveBeenCalledTimes(1);
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      if (item.expectNotice) {
+        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'));
+      } else {
+        expect(queue.enqueueText).not.toHaveBeenCalled();
+      }
+      expect(mockRuntimeLogger[item.logger]).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatJid: queue.targetChatJid,
+          textPreview: item.text,
+        }),
+        item.message,
+      );
+      expect(durability.upsertSessionCheckpoint).toHaveBeenCalledWith(
+        `${item.reason}-conversation`,
+        expect.objectContaining({ activeTurnId: null, lastInboundSeq: 41 }),
+      );
+      expect(durability.completeInbound).toHaveBeenCalledWith(41, 'response_sent');
+      expect(queue.flush).toHaveBeenCalledTimes(1);
+      expect(state.perChatTurnContentType.has(mapKey)).toBe(false);
+      expect(state.perChatTurnText.has(mapKey)).toBe(false);
+      expect(state.perChatAssistantItemText.has(mapKey)).toBe(false);
+      const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
+      expect(turnCapability.lastTurnErrorClass).toBe(item.reason);
+    }
+  });
+
+  it('per-chat terminal provider results arm fallback variants through the direct result handler', () => {
+    const cases: Array<{
+      reason: 'auth-required' | 'rate-limit' | 'server-error' | 'model-unavailable';
+      text: string;
+      message: string;
+    }> = [
+      {
+        reason: 'auth-required',
+        text: 'Authentication required. Sign in to continue.',
+        message: 'suppressed provider auth-required message from result — session will be shut down',
+      },
+      {
+        reason: 'rate-limit',
+        text: 'API Error 429: rate_limit_error',
+        message: 'terminal provider rate-limit result observed',
+      },
+      {
+        reason: 'server-error',
+        text: 'API Error 503: Service temporarily unavailable. overloaded_error',
+        message: 'terminal provider server-error result observed',
+      },
+      {
+        reason: 'model-unavailable',
+        text: 'The requested model does not exist or you do not have access.',
+        message: 'suppressed provider model-unavailable message from result — session will be shut down',
+      },
+    ];
+
+    for (const item of cases) {
+      const runtime = makeRuntime({ sessionScope: 'per_chat' });
+      const state = view(runtime);
+      const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
+      const session = makeSession();
+      const durability = installDurabilityStub(runtime);
+
+      mockRuntimeLogger.warn.mockClear();
+      mockEmitAlert.mockClear();
+
+      state.handleEventWithContext(
+        { type: 'result', text: item.text, isError: true },
+        queue,
+        session,
+        `${item.reason}-conversation`,
+        42,
+        item.reason,
+        item.reason,
+      );
+
+      expect(runtime.getFallbackState().fallbackReason).toBe(item.reason);
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup'));
+      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'test',
+        'provider_fallback_activated',
+        'Provider fallback window activated',
+        expect.stringContaining(`reason=${item.reason}`),
+      );
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatJid: queue.targetChatJid,
+          textPreview: item.text,
+        }),
+        item.message,
+      );
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(durability.completeInbound).toHaveBeenCalledWith(42, 'response_sent');
+      expect(queue.flush).toHaveBeenCalledTimes(1);
+      const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
+      expect(turnCapability.lastTurnErrorClass).toBe(item.reason);
+    }
+  });
+
+  it('shared terminal provider results use the same non-arming suppression cleanup', () => {
+    const cases: Array<{
+      reason: 'policy-block' | 'context-overflow';
+      text: string;
+      expectNotice: boolean;
+    }> = [
+      {
+        reason: 'policy-block',
+        text: 'This response is blocked by policy.',
+        expectNotice: false,
+      },
+      {
+        reason: 'context-overflow',
+        text: 'maximum context length exceeded for this turn',
+        expectNotice: true,
+      },
+    ];
+
+    for (const item of cases) {
+      const runtime = makeRuntime({ shared: true });
+      const state = view(runtime);
+      const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
+      const session = makeSession();
+      const durability = installDurabilityStub(runtime);
+
+      state.session = session;
+      state.activeChatJid = queue.targetChatJid;
+      state.currentTurnChatJid = queue.targetChatJid;
+      state.currentInboundSeq = 84;
+      state.singleTurnHadToolActivity = true;
+      state.outboundQueues.set(queue.targetChatJid, queue);
+
+      state.handleEvent({ type: 'result', text: item.text, isError: true });
+
+      expect(session.clearTurnWatchdog).toHaveBeenCalledTimes(1);
+      expect(queue.endTurn).toHaveBeenCalledTimes(1);
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      if (item.expectNotice) {
+        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'));
+      } else {
+        expect(queue.enqueueText).not.toHaveBeenCalled();
+      }
+      expect(durability.completeInbound).toHaveBeenCalledWith(84, 'response_sent');
+      expect(state.currentInboundSeq).toBeUndefined();
+      expect(state.singleTurnHadToolActivity).toBe(false);
+      expect(queue.flush).toHaveBeenCalledTimes(1);
+      const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
+      expect(turnCapability.lastTurnErrorClass).toBe(item.reason);
     }
   });
 
