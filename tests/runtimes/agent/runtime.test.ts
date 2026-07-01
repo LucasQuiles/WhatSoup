@@ -2932,6 +2932,126 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).not.toHaveBeenCalled();
   });
 
+  it('handleAgentCommand rejects compact precondition failures before sending system turns', async () => {
+    const activeStatus = { active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() };
+    const inactiveStatus = { active: false, pid: null, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() };
+    const groupJid = 'command-preconditions@g.us';
+
+    await expect(new AgentRuntime(makeDb(), makeMessenger().messenger).handleAgentCommand({
+      command: 'restart' as 'compact',
+    })).rejects.toMatchObject({ code: 'unsupported_command', statusCode: 400 });
+
+    const missingChatRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+    await missingChatRuntime.start();
+    await expect(missingChatRuntime.handleAgentCommand({
+      command: 'compact',
+    })).rejects.toMatchObject({ code: 'chat_jid_required', statusCode: 400 });
+
+    const missingSessionRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+    await missingSessionRuntime.start();
+    await expect(missingSessionRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: groupJid,
+    })).rejects.toMatchObject({ code: 'session_not_found', statusCode: 404 });
+
+    const inactivePerChatRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+    await inactivePerChatRuntime.start();
+    (inactivePerChatRuntime as unknown as { chatSessions: Map<string, typeof mockSession> }).chatSessions.set(groupJid, mockSession);
+    mockSession.getStatus.mockReturnValue(inactiveStatus);
+    await expect(inactivePerChatRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: groupJid,
+    })).rejects.toMatchObject({ code: 'session_inactive', statusCode: 409 });
+
+    const noSessionRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await expect(noSessionRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: '15550100004@s.whatsapp.net',
+    })).rejects.toMatchObject({ code: 'session_not_found', statusCode: 404 });
+
+    mockSession.getStatus.mockReturnValue(inactiveStatus);
+    const inactiveSingleRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await inactiveSingleRuntime.start();
+    (inactiveSingleRuntime as unknown as { session: typeof mockSession }).session = mockSession;
+    await expect(inactiveSingleRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: '15550100005@s.whatsapp.net',
+    })).rejects.toMatchObject({ code: 'session_inactive', statusCode: 409 });
+
+    mockSession.getStatus.mockReturnValue(activeStatus);
+    const missingQueueRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await missingQueueRuntime.start();
+    (missingQueueRuntime as unknown as { queue: typeof mockQueue | null; session: typeof mockSession }).session = mockSession;
+    (missingQueueRuntime as unknown as { queue: typeof mockQueue | null }).queue = null;
+    await expect(missingQueueRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: '15550100006@s.whatsapp.net',
+    })).rejects.toMatchObject({ code: 'session_queue_not_found', statusCode: 409 });
+
+    const busySingleRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    await busySingleRuntime.start();
+    (busySingleRuntime as unknown as { currentInboundSeq: number; session: typeof mockSession }).session = mockSession;
+    (busySingleRuntime as unknown as { currentInboundSeq: number }).currentInboundSeq = 44;
+    await expect(busySingleRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: '15550100007@s.whatsapp.net',
+    })).rejects.toMatchObject({ code: 'turn_in_progress', statusCode: 409 });
+
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it('handleAgentCommand clears pending compact bookkeeping when sendTurn fails', async () => {
+    const activeStatus = { active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() };
+    const groupJid = 'command-send-failure@g.us';
+    const chatJid = '15550100008@s.whatsapp.net';
+
+    mockSession.getStatus.mockReturnValue(activeStatus);
+    const perChatRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+    const perChatState = perChatRuntime as unknown as {
+      autoCompact: AutoCompactView;
+      chatSessions: Map<string, typeof mockSession>;
+      pendingSystemResults: { counts: Map<string, number> };
+    };
+    await perChatRuntime.start();
+    perChatState.chatSessions.set(groupJid, mockSession);
+    mockSession.sendTurn.mockRejectedValueOnce(new Error('per-chat compact send failed'));
+
+    await expect(perChatRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid: groupJid,
+      silent: true,
+    })).rejects.toThrow('per-chat compact send failed');
+
+    expect(perChatState.pendingSystemResults.counts.get(groupJid) ?? 0).toBe(0);
+    expect(perChatState.autoCompact.silentCompactScopes.has(groupJid)).toBe(false);
+
+    mockSession.sendTurn.mockReset();
+    mockSession.sendTurn.mockRejectedValueOnce(new Error('single compact send failed'));
+    mockSession.getStatus.mockReturnValue(activeStatus);
+    const singleRuntime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    const singleState = singleRuntime as unknown as {
+      autoCompact: AutoCompactView;
+      currentTurnChatJid: string | null;
+      pendingSystemResults: { counts: Map<string, number> };
+      queue: typeof mockQueue | null;
+      session: typeof mockSession;
+    };
+    await singleRuntime.start();
+    singleState.session = mockSession;
+    singleState.queue = mockQueue;
+
+    await expect(singleRuntime.handleAgentCommand({
+      command: 'compact',
+      chatJid,
+      silent: true,
+    })).rejects.toThrow('single compact send failed');
+
+    expect(singleState.pendingSystemResults.counts.get('__global__') ?? 0).toBe(0);
+    expect(singleState.autoCompact.silentCompactScopes.has('__global__')).toBe(false);
+    expect(singleState.currentTurnChatJid).toBeNull();
+    expect(mockSession.sendTurn).toHaveBeenLastCalledWith('/compact');
+  });
+
   it('per_chat manual /compact marks a system result so its turn does not arm the gate', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
