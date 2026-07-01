@@ -141,7 +141,15 @@ export class WhatSoupSocketServer {
             continue;
           }
 
-          void this.handleRequest(req, connSession).then((response) => {
+          // QR-042: snapshot the session per request. connSession.actorJid /
+          // deliveryJid / conversationKey are mutated IN PLACE by updateActorJid /
+          // updateConversationKey at each turn dispatch; with fire-and-forget dispatch
+          // sharing the one connSession, a next-turn mutation could race an in-flight
+          // admin-gated tool reading actorJid (it could observe the wrong turn's actor).
+          // A shallow per-request copy pins those fields at dispatch time; the live
+          // abortSignal is preserved by reference so client-disconnect still aborts.
+          const requestSession: SessionContext = { ...connSession };
+          void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               try {
                 socket.write(JSON.stringify(response) + '\n');
