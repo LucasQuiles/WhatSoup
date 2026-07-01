@@ -251,6 +251,24 @@ describe('WhatSoupSocketServer', () => {
     expect(response.result).toHaveProperty('capabilities');
   });
 
+  it('QR-059: applies a bounded concurrent-connection cap on start (defends against a connection flood)', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    // Before start there is no underlying server → cap reports 0.
+    expect(server.maxConnections).toBe(0);
+
+    server.start();
+    await waitForSocket(socketPath);
+
+    // After start a bounded positive cap is applied (node drops connections beyond it),
+    // instead of the default unbounded acceptance the unfixed server used.
+    expect(server.maxConnections).toBeGreaterThan(0);
+    expect(server.maxConnections).toBeLessThanOrEqual(1024);
+
+    // A normal single request still succeeds well under the cap.
+    const response = await sendJsonRpc(socketPath, { jsonrpc: '2.0', id: 7, method: 'initialize', params: {} }) as { id: number };
+    expect(response.id).toBe(7);
+  });
+
   it('treats an explicit id:null as a request (not a notification) and echoes null', async () => {
     server = new WhatSoupSocketServer(socketPath, registry, session);
     server.start();
