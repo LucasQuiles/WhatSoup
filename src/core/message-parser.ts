@@ -17,16 +17,31 @@ import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 /**
  * Unwrap Baileys container types to reach the real message payload.
  * Handles ephemeral, view-once (v1 + v2), document-with-caption, and edited
- * message wrappers recursively.
+ * message wrappers.
+ *
+ * QR-039: iterate with a hard depth cap rather than recurse. The wrappers are
+ * attacker-influenced (the inbound message proto), and recursion used one stack
+ * frame per nesting layer — a crafted message with thousands of nested wrappers
+ * (e.g. ephemeralMessage ▸ ephemeralMessage ▸ …) overflowed the call stack and
+ * crashed parseIncomingMessage (DoS). Real messages nest only a handful deep;
+ * MAX_UNWRAP_DEPTH is far above any legitimate chain. At the cap we stop and
+ * return the still-wrapped node — downstream parsing then finds no known content
+ * and the adversarial message is ignored, never crashed.
  */
+const MAX_UNWRAP_DEPTH = 32;
+
 export function unwrapMessage(message: any): any {
-  if (!message) return message;
-  if (message.ephemeralMessage?.message)            return unwrapMessage(message.ephemeralMessage.message);
-  if (message.viewOnceMessage?.message)             return unwrapMessage(message.viewOnceMessage.message);
-  if (message.viewOnceMessageV2?.message)           return unwrapMessage(message.viewOnceMessageV2.message);
-  if (message.documentWithCaptionMessage?.message)  return unwrapMessage(message.documentWithCaptionMessage.message);
-  if (message.editedMessage?.message)               return unwrapMessage(message.editedMessage.message);
-  return message;
+  let current = message;
+  for (let depth = 0; depth < MAX_UNWRAP_DEPTH; depth++) {
+    if (!current) return current;
+    if (current.ephemeralMessage?.message)           { current = current.ephemeralMessage.message; continue; }
+    if (current.viewOnceMessage?.message)            { current = current.viewOnceMessage.message; continue; }
+    if (current.viewOnceMessageV2?.message)          { current = current.viewOnceMessageV2.message; continue; }
+    if (current.documentWithCaptionMessage?.message) { current = current.documentWithCaptionMessage.message; continue; }
+    if (current.editedMessage?.message)              { current = current.editedMessage.message; continue; }
+    return current; // no further known wrapper — fully unwrapped
+  }
+  return current; // depth cap reached — stop unwrapping an abnormally deep chain
 }
 
 /**
