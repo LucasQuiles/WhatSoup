@@ -255,7 +255,10 @@ export function activityFeed(db: DatabaseSync, f: ActivityFeedFilter = {}): Acti
      WHERE o.forgotten = 0
        AND NOT EXISTS (
          SELECT 1 FROM entity_observations s
+         -- QR-040: scope the supersede to the SAME entity (mirror getProfile) so
+         -- a cross-entity observation cannot hide this one in the activity feed.
          WHERE s.supersedes_observation_id = o.id AND s.forgotten = 0
+           AND s.entity_id = o.entity_id
        )
        AND o.created_at >= ?
        AND (? = '' OR b.owner_jid = ?)
