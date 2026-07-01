@@ -17,6 +17,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
@@ -325,10 +326,6 @@ function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
   const entryCount = Object.keys(value as Record<string, unknown>).length;
   if (entryCount > 80) out['<truncated_keys>'] = entryCount - 80;
   return out;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function extractStreamErrorConflictType(lastDisconnect: unknown): string | null | undefined {

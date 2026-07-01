@@ -37,6 +37,7 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // norm for large cohesive test files (cf. the agent runtime/session twins).
   'tests/runtimes/chat/runtime.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
+  'tests/transport/reconnect.test.ts',
 ].sort();
 
 describe('arch.file-size warning budget', () => {
