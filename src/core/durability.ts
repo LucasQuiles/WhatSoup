@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
+import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { config } from '../config.ts';
 
@@ -936,7 +937,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
 ): Promise<void> {
   let opId: number | undefined;
   if (durability) {
@@ -953,7 +954,12 @@ export async function sendTracked(
     durability.markSending(opId);
   }
   try {
-    const receipt = await messenger.sendMessage(chatJid, text);
+    // QR-086: forward an optional infra caller token to the guard so a
+    // health-server admin /send to a cold target is not floored (spec §4.2-B).
+    // Keep the common path a 2-arg call (no trailing undefined).
+    const receipt = opts.caller
+      ? await messenger.sendMessage(chatJid, text, { caller: opts.caller })
+      : await messenger.sendMessage(chatJid, text);
     if (opId !== undefined && durability) {
       durability.markSubmitted(opId, receipt.waMessageId);
     }

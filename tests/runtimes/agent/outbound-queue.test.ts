@@ -13,7 +13,7 @@ import {
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
@@ -140,7 +140,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Final answer for the user');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(
       'status-log@g.us',
       expect.stringContaining('Final answer'),
@@ -261,7 +261,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Ping');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', { messageId: expect.any(String) });
   });
 
   it('converts markdown checkboxes to WhatsApp box characters', async () => {
@@ -944,7 +944,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Hello retargeted');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith('original@s.whatsapp.net', expect.anything());
   });
 
@@ -1791,7 +1791,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Subsequent text');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', { messageId: expect.any(String) });
   });
 
   // ─── durability: markMaybeSent after retry exhaustion ────────────────────
@@ -1942,11 +1942,11 @@ describe('OutboundQueue', () => {
     const ids: Array<string | undefined> = [];
     let callCount = 0;
     const idMessenger: Messenger = {
-      sendMessage: vi.fn(async (_jid: string, _text: string, messageId?: string) => {
-        ids.push(messageId);
+      sendMessage: vi.fn(async (_jid: string, _text: string, opts?: SendOptions) => {
+        ids.push(opts?.messageId);
         callCount += 1;
         if (callCount <= 1) return new Promise<never>(() => {}); // first attempt times out
-        return { waMessageId: messageId ?? null };
+        return { waMessageId: opts?.messageId ?? null };
       }),
       sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
