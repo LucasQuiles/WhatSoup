@@ -74,6 +74,14 @@ export class WhatSoupSocketServer {
       this.activeSockets.set(clientId, socket);
 
       log.info({ clientId, socketPath: this.socketPath, connections: this.connectionSessions.size }, 'client connected');
+      // QR-053: decode the stream as UTF-8 so Node's internal StringDecoder buffers
+      // an incomplete multibyte sequence across a kernel read boundary. Without this,
+      // `chunk.toString()` decoded each ~64KB read independently and a multibyte char
+      // (emoji / non-Latin) split across the boundary was silently turned into U+FFFD
+      // — JSON.parse still succeeded, so a mangled tool arg / message body shipped with
+      // no error. With setEncoding, each 'data' chunk is already a string assembled
+      // across boundaries; the chunk.toString() below is then a no-op on the string.
+      socket.setEncoding('utf8');
       let buf = '';
 
       socket.on('close', () => {

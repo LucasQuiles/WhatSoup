@@ -130,6 +130,8 @@ function waitForClientClose(client: Socket, timeoutMs = 500): Promise<void> {
 class SyntheticSocket extends EventEmitter {
   destroy = vi.fn();
   write = vi.fn();
+  // Mirror net.Socket.setEncoding (returns this) — the bridge sets utf8 on accept (QR-053).
+  setEncoding = vi.fn(() => this);
 }
 
 // ─── Test state ───────────────────────────────────────────────────────────────
