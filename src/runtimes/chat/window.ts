@@ -1,8 +1,7 @@
 import type { Database } from '../../core/database.ts';
 import type { ChatMessage } from './providers/types.ts';
 import { getRecentMessages } from '../../core/messages.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
-import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -21,7 +20,7 @@ const log = createChildLogger('conversation');
  * Human messages → role 'user', prefixed with "[SenderName]: ".
  */
 export function loadConversationWindow(db: Database, chatJid: string): ChatMessage[] {
-  const conversationKey = toConversationKey(chatJid);
+  const conversationKey = canonicalConversationKey(chatJid, db);
   const initial = getRecentMessages(db, conversationKey, config.conversationWindow);
 
   let messages = initial;

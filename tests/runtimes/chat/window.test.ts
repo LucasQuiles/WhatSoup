@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import { resolvePhoneFromJid } from '../../../src/core/access-list.ts';
+import { upsertLidMapping } from '../../../src/core/lid-resolver.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { config } from '../../../src/config.ts';
 
@@ -434,6 +436,42 @@ describe('loadConversationWindow', () => {
     expect(result).toHaveLength(1);
     expect(result[0].role).toBe('assistant');
     expect(result[0].content).toBe('part one\npart two');
+  });
+
+  // ---- QR-050: mapped @lid DM history must read under the ingest store key ----
+
+  it('QR-050: loads recent history for a mapped @lid DM stored under its resolved-phone key', () => {
+    const lidJid = '12345@lid';
+    // Establish the lid->phone mapping (Baileys L2). After this,
+    // resolvePhoneFromJid('12345@lid') resolves to the phone, while
+    // toConversationKey('12345@lid') stays the raw LID number '12345'.
+    upsertLidMapping(db, '12345', '15551234567@s.whatsapp.net');
+
+    // src/core/ingest.ts keys a non-group @lid DM under resolvePhoneFromJid(chatJid).
+    // Mirror that store key here instead of toConversationKey.
+    const ingestKey = resolvePhoneFromJid(lidJid, db);
+    // Guard: the store key and the bare-LID read key genuinely diverge, so a
+    // pass here cannot be an accident of the two keys coinciding.
+    expect(ingestKey).not.toBe(toConversationKey(lidJid));
+
+    storeMessageIfNew(db, {
+      chatJid: lidJid,
+      senderJid: lidJid,
+      senderName: 'Mapped Contact',
+      messageId: nextId(),
+      content: 'hello from a mapped lid dm',
+      isFromMe: false,
+      timestamp: BASE_TS,
+      conversationKey: ingestKey,
+    });
+
+    // The chat bot loads its per-turn window from the RAW @lid chatJid.
+    // RED on main: window keys by toConversationKey('12345@lid')='12345' -> []
+    // GREEN after fix: canonicalConversationKey resolves to the phone -> found.
+    const result = loadConversationWindow(db, lidJid);
+    expect(result).toHaveLength(1);
+    expect(result[0].role).toBe('user');
+    expect(result[0].content).toBe('[Mapped Contact]: hello from a mapped lid dm');
   });
 
   it('window boundary: exactly 50 messages returns all 50', () => {
