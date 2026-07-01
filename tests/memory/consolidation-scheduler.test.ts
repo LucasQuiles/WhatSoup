@@ -76,6 +76,71 @@ describe('MemoryConsolidationScheduler', () => {
     expect(pinecone.search).toHaveBeenCalledTimes(1);
   });
 
+  it('returns from stop after the timeout when an active run does not drain', async () => {
+    pinecone.search.mockReturnValue(new Promise<[]>(() => {}));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+
+    scheduler.start();
+
+    let stopResolved = false;
+    const stopPromise = scheduler.stop(25).then(() => {
+      stopResolved = true;
+    });
+    await Promise.resolve();
+
+    expect(stopResolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(25);
+    await stopPromise;
+    expect(stopResolved).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a manual run when a previous manual run is still active', async () => {
+    let resolveSearch: ((results: []) => void) | undefined;
+    pinecone.search.mockReturnValue(new Promise<[]>((resolve) => {
+      resolveSearch = resolve;
+    }));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+
+    const firstRun = scheduler.runOnce();
+    await Promise.resolve();
+    await scheduler.runOnce();
+
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+    resolveSearch?.([]);
+    await firstRun;
+  });
+
+  it('keeps periodic scheduling alive after an unexpected scheduled run failure', async () => {
+    pinecone.search
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce([]);
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+
+    scheduler.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pinecone.search).toHaveBeenCalledTimes(2);
+
+    await scheduler.stop();
+  });
+
   it('keeps tracking the active run when an interval tick is skipped', async () => {
     let resolveSearch: ((results: []) => void) | undefined;
     pinecone.search.mockReturnValue(new Promise<[]>((resolve) => {

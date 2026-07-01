@@ -127,6 +127,57 @@ describe('runConsolidation', () => {
     expect(mockProvider.generate).not.toHaveBeenCalled();
   });
 
+  it('skips unscoped memories without invoking the provider', async () => {
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'missing-chat',
+        score: 0.9,
+        record: {
+          id: 'missing-chat',
+          text: 'Likes espresso',
+          claim: 'Likes espresso',
+          evidence: 'mentioned once',
+          createdAt: new Date().toISOString(),
+          confidence: 0.8,
+          senderJid: 'sender-1@s.whatsapp.net',
+        },
+      },
+      {
+        id: 'missing-sender',
+        score: 0.8,
+        record: {
+          id: 'missing-sender',
+          text: 'Lives in London',
+          claim: 'Lives in London',
+          evidence: 'mentioned once',
+          createdAt: new Date().toISOString(),
+          confidence: 0.7,
+          chatJid: 'chat-1@g.us',
+        },
+      },
+    ]);
+    const mockProvider = { name: 'test', generate: vi.fn() };
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toEqual({
+      promoted: 0,
+      discarded: 0,
+      clustersProcessed: 0,
+      errors: 0,
+    });
+    expect(mockProvider.generate).not.toHaveBeenCalled();
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+    expect(mockCronLogger.info).toHaveBeenCalledWith(
+      { recordCount: 2, unscopedSkipped: 2 },
+      'No scoped memories to consolidate',
+    );
+  });
+
   it('handles search failure gracefully', async () => {
     const mockPinecone = {
       search: vi.fn().mockRejectedValue(new Error('Pinecone down')),
@@ -142,6 +193,154 @@ describe('runConsolidation', () => {
 
     expect(result.errors).toBe(1);
     expect(result.promoted).toBe(0);
+  });
+
+  it('continues when a cluster yields only discarded memories', async () => {
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'transient',
+        score: 0.9,
+        record: {
+          id: 'transient',
+          text: 'Meeting at 3pm today',
+          claim: 'Meeting at 3pm today',
+          evidence: 'single time-bound mention',
+          createdAt: new Date().toISOString(),
+          confidence: 0.9,
+          chatJid: 'chat-1@g.us',
+          senderJid: 'sender-1@s.whatsapp.net',
+        },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [],
+      discarded: [{ recordId: 'transient', reason: 'time-bound' }],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toEqual({
+      promoted: 0,
+      discarded: 1,
+      clustersProcessed: 1,
+      errors: 0,
+    });
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+  });
+
+  it('normalizes missing optional claim and evidence fields before provider consolidation', async () => {
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'text-only',
+        score: 0.9,
+        record: {
+          id: 'text-only',
+          text: 'The user prefers early calls',
+          createdAt: new Date().toISOString(),
+          confidence: 0.8,
+          chatJid: 'chat-1@g.us',
+          senderJid: 'sender-1@s.whatsapp.net',
+        },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [],
+      discarded: [],
+    });
+
+    await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    const request = mockProvider.generate.mock.calls[0][0];
+    const clusterPayload = JSON.parse(request.messages[0].content);
+    expect(clusterPayload.records[0]).toMatchObject({
+      id: 'text-only',
+      claim: '',
+      text: 'The user prefers early calls',
+      confidence: 0.8,
+    });
+  });
+
+  it('continues after a durable upsert fails for one cluster', async () => {
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'coffee',
+        score: 0.9,
+        record: {
+          id: 'coffee',
+          text: 'Likes coffee',
+          claim: 'Likes coffee',
+          evidence: '',
+          createdAt: new Date().toISOString(),
+          confidence: 0.9,
+          chatJid: 'chat-a@g.us',
+          senderJid: 'sender-a@s.whatsapp.net',
+        },
+      },
+      {
+        id: 'tea',
+        score: 0.8,
+        record: {
+          id: 'tea',
+          text: 'Likes tea',
+          claim: 'Likes tea',
+          evidence: '',
+          createdAt: new Date().toISOString(),
+          confidence: 0.8,
+          chatJid: 'chat-b@g.us',
+          senderJid: 'sender-b@s.whatsapp.net',
+        },
+      },
+    ]);
+    mockPinecone.upsert
+      .mockRejectedValueOnce(new Error('write failed'))
+      .mockResolvedValueOnce(undefined);
+    const mockProvider = {
+      name: 'test-provider',
+      generate: vi.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify({
+            durableKnowledge: [{ claim: 'User likes coffee', promotionReason: 'consistent', confidence: 0.9, sourceRecordIds: ['coffee'] }],
+            discarded: [],
+          }),
+          inputTokens: 100,
+          outputTokens: 50,
+          model: 'test',
+          durationMs: 100,
+        })
+        .mockResolvedValueOnce({
+          content: JSON.stringify({
+            durableKnowledge: [{ claim: 'User likes tea', promotionReason: 'consistent', confidence: 0.9, sourceRecordIds: ['tea'] }],
+            discarded: [],
+          }),
+          inputTokens: 100,
+          outputTokens: 50,
+          model: 'test',
+          durationMs: 100,
+        }),
+    };
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result).toEqual({
+      promoted: 1,
+      discarded: 0,
+      clustersProcessed: 2,
+      errors: 1,
+    });
+    expect(mockProvider.generate).toHaveBeenCalledTimes(2);
+    expect(mockPinecone.upsert).toHaveBeenCalledTimes(2);
   });
 
   it('filters out memories older than lookbackDays client-side', async () => {
