@@ -371,7 +371,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
-import { renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
+import { providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 // View onto the extracted AutoCompactController's bookkeeping (private runtime.autoCompact).
@@ -3845,6 +3845,105 @@ describe('AgentRuntime', () => {
     expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+  });
+
+  it('auth-required result arms fallback and shuts down when replay is blocked by tool activity (single path)', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    (runtime as unknown as { singleTurnHadToolActivity: boolean }).singleTurnHadToolActivity = true;
+    const raw = 'Authentication required. Sign in to continue.';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(runtime.getFallbackState().fallbackReason).toBe('auth-required'));
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ textPreview: raw }),
+      'suppressed provider auth-required message from result — session will be shut down',
+    );
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'provider_fallback_activated',
+      'Provider fallback window activated',
+      expect.stringContaining('reason=auth-required'),
+    );
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'));
+    expect(mockSession.shutdown).toHaveBeenCalled();
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
+  });
+
+  it('server-error result without fallback sends the safe terminal notice and shuts down (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerUnknownTerminalNotice()));
+    expect(runtime.getFallbackState().fallbackReason).toBeNull();
+    expect(mockSession.shutdown).toHaveBeenCalled();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+  });
+
+  it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    (runtime as unknown as { singleTurnHadToolActivity: boolean }).singleTurnHadToolActivity = true;
+    const raw = "There's an issue with the selected model (some-test-model). It may not exist or you may not have access to it.";
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(runtime.getFallbackState().fallbackReason).toBe('model-unavailable'));
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ textPreview: raw }),
+      'suppressed provider model-unavailable message from result — session will be shut down',
+    );
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'provider_fallback_activated',
+      'Provider fallback window activated',
+      expect.stringContaining('reason=model-unavailable'),
+    );
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'));
+    expect(mockSession.shutdown).toHaveBeenCalled();
+    expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
   });
 
   it('assistant_text auto-switch notices are surfaced without arming fallback', async () => {
