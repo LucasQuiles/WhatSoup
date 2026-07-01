@@ -169,6 +169,19 @@ describe('proxyToInstance', () => {
     expect(parsed.error).toMatch(/proxy error/);
   });
 
+  it('uses a generic proxy error when the thrown value has no message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw {};
+    }));
+
+    const result = await proxyToInstance(port, '/health', 'GET', null, null);
+
+    expect(result).toEqual({
+      status: 502,
+      body: JSON.stringify({ error: 'proxy error: proxy error' }),
+    });
+  });
+
   it('correctly forwards path and method', async () => {
     const result = await proxyToInstance(port, '/access', 'POST', '{}', null);
     expect(result.status).toBe(200);

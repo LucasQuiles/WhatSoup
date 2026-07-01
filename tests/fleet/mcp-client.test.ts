@@ -188,6 +188,41 @@ describe('mcpCall', () => {
     expect(result.error).toContain('tool exploded');
   });
 
+  it('stringifies JSON-RPC errors that omit a message', async () => {
+    const socketPath = makeSocketPath();
+    const mock = await startMockServer(socketPath, {
+      onRequest: (msg) => {
+        if (msg.method === 'initialize') {
+          return {
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'whatsoup', version: '0.1.0' },
+            },
+          };
+        }
+        if (msg.method === 'tools/call') {
+          return {
+            jsonrpc: '2.0',
+            id: msg.id,
+            error: { code: -32603 },
+          };
+        }
+        return undefined;
+      },
+    });
+    mocks.push(mock);
+
+    const result = await mcpCall(socketPath, 'broken_tool', {});
+
+    expect(result).toEqual({
+      success: false,
+      error: JSON.stringify({ code: -32603 }),
+    });
+  });
+
   // --- timeout ---
 
   it('resolves with timeout error when server never responds', async () => {
