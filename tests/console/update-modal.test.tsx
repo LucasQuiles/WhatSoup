@@ -37,14 +37,16 @@ vi.mock('@tanstack/react-query', () => ({
 
 const mockApiRestart = vi.fn()
 const mockApiGetVersion = vi.fn()
+const mockIsProductionConsole = vi.fn(() => false)
+const mockGetApiTicket = vi.fn()
 
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     restart: (...args: unknown[]) => mockApiRestart(...args),
     getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
   },
-  isProductionConsole: () => false,
-  getApiTicket: vi.fn(),
+  isProductionConsole: () => mockIsProductionConsole(),
+  getApiTicket: (audience: string) => mockGetApiTicket(audience),
 }))
 
 // ---------------------------------------------------------------------------
@@ -65,6 +67,9 @@ afterEach(() => {
   mockInvalidateQueries.mockReset()
   mockApiRestart.mockReset()
   mockApiGetVersion.mockReset()
+  mockIsProductionConsole.mockReset()
+  mockIsProductionConsole.mockReturnValue(false)
+  mockGetApiTicket.mockReset()
 })
 
 function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
@@ -342,6 +347,34 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     expect(Object.keys(headers)).not.toContain('Authorization')
   })
 
+  it('mints an api-audience ticket and sends it as Authorization in production mode', async () => {
+    mockIsProductionConsole.mockReturnValue(true)
+    mockGetApiTicket.mockResolvedValue('ticket-123')
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, body: makeHangingStream() }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(mockGetApiTicket).toHaveBeenCalledWith('api')
+    const [, opts] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(opts.headers).toEqual({ Authorization: 'Bearer ticket-123' })
+  })
+
+  it('fails closed before fetch when production ticket minting fails', async () => {
+    mockIsProductionConsole.mockReturnValue(true)
+    mockGetApiTicket.mockRejectedValue(new Error('session expired'))
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => expect(screen.getByText('Update failed: unable to authenticate')).toBeDefined())
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('shows progress step message when SSE emits a progress event', async () => {
     const chunk = 'event: progress\ndata: {"step":"pull","status":"running","message":"fetching..."}\n\n'
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([chunk]) })))
@@ -359,6 +392,74 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('Preserving failed update state')).toBeDefined())
     expect(screen.getByText('saved recovery patch')).toBeDefined()
+  })
+
+  it('renders skipped SSE steps as non-error progress rows', async () => {
+    const chunk = 'event: progress\ndata: {"step":"console-install","status":"skip","message":"already current"}\n\n'
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([chunk]) })))
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => expect(screen.getByText('Installing console dependencies')).toBeDefined())
+    expect(screen.getByText('already current')).toBeDefined()
+  })
+
+  it('enters fleet-restart polling when the update request fails without a response', async () => {
+    let pollCallback: (() => Promise<void> | void) | undefined
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === 'function') {
+        pollCallback = handler as () => Promise<void> | void
+      }
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('connection dropped'))))
+    mockApiGetVersion.mockResolvedValue({
+      sha: 'newsha999',
+      remoteSha: 'newsha999',
+      updateAvailable: false,
+      checkedAt: '',
+    })
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
+    await act(async () => { await pollCallback?.() })
+    await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
+  })
+
+  it('enters fleet-restart polling when the SSE reader drops before a terminal event', async () => {
+    let pollCallback: (() => Promise<void> | void) | undefined
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === 'function') {
+        pollCallback = handler as () => Promise<void> | void
+      }
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn(() => Promise.reject(new Error('stream lost'))),
+        }),
+      },
+    })))
+    mockApiGetVersion.mockResolvedValue({
+      sha: 'newsha999',
+      remoteSha: 'newsha999',
+      updateAvailable: false,
+      checkedAt: '',
+    })
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
+    await act(async () => { await pollCallback?.() })
+    await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
   })
 
   it('Escape during updating phase calls onClose (abort cleanup — C-B3W3-8)', async () => {
@@ -506,8 +607,11 @@ describe('UpdateModal — restart-instances phase', () => {
    * The production poll waits 2s; capture and invoke the interval callback
    * directly so these tests verify the transition without real-time sleeps.
    */
-  async function renderAndAdvanceToRestartInstances(extraProps: Partial<Parameters<typeof defaultProps>[0]> = {}) {
+  async function renderAndWaitForFleetRestart(extraProps: Partial<Parameters<typeof defaultProps>[0]> = {}) {
     let pollCallback: (() => Promise<void> | void) | undefined
+    let fleetTimeoutCallback: (() => void) | undefined
+    let autoCloseCallback: (() => void) | undefined
+    const realSetTimeout = globalThis.setTimeout
     vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
       if (typeof handler === 'function') {
         pollCallback = handler as () => Promise<void> | void
@@ -515,6 +619,17 @@ describe('UpdateModal — restart-instances phase', () => {
       return 1 as unknown as ReturnType<typeof setInterval>
     })
     vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 60_000 && typeof handler === 'function') {
+        fleetTimeoutCallback = handler as () => void
+        return 2 as unknown as ReturnType<typeof setTimeout>
+      }
+      if (timeout === 2200 && typeof handler === 'function') {
+        autoCloseCallback = handler as () => void
+        return 3 as unknown as ReturnType<typeof setTimeout>
+      }
+      return realSetTimeout(handler, timeout, ...args) as unknown as ReturnType<typeof setTimeout>
+    })
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([]) })))
     mockApiGetVersion.mockResolvedValue({
       sha: 'newsha999',
@@ -526,12 +641,22 @@ describe('UpdateModal — restart-instances phase', () => {
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
+    return {
+      runPoll: async () => { await pollCallback?.() },
+      runFleetTimeout: () => { fleetTimeoutCallback?.() },
+      runAutoClose: () => { autoCloseCallback?.() },
+    }
+  }
+
+  async function renderAndAdvanceToRestartInstances(extraProps: Partial<Parameters<typeof defaultProps>[0]> = {}) {
+    const controls = await renderAndWaitForFleetRestart(extraProps)
     await act(async () => {
-      await pollCallback?.()
+      await controls.runPoll()
     })
     await waitFor(
       () => expect(screen.getByText('Restart instances with update?')).toBeDefined(),
     )
+    return controls
   }
 
   it('shows "Update Complete" title when in restart-instances phase', async () => {
@@ -605,6 +730,79 @@ describe('UpdateModal — restart-instances phase', () => {
   it('calls invalidateQueries when transitioning from restarting-fleet to restart-instances', async () => {
     await renderAndAdvanceToRestartInstances()
     expect(mockInvalidateQueries).toHaveBeenCalled()
+  })
+
+  it('waits through a transient version failure and advances after the fleet was seen down', async () => {
+    const restartChunk = 'event: progress\ndata: {"step":"restart","status":"running"}\n\n'
+    let pollCallback: (() => Promise<void> | void) | undefined
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === 'function') {
+        pollCallback = handler as () => Promise<void> | void
+      }
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([restartChunk]) })))
+    mockApiGetVersion
+      .mockRejectedValueOnce(new Error('fleet down'))
+      .mockResolvedValueOnce({
+        sha: 'abc1234',
+        remoteSha: 'abc1234',
+        updateAvailable: false,
+        checkedAt: '',
+      })
+
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
+
+    await act(async () => { await pollCallback?.() })
+    expect(screen.getByText('Waiting for fleet server...')).toBeDefined()
+    expect(mockInvalidateQueries).not.toHaveBeenCalled()
+
+    await act(async () => { await pollCallback?.() })
+    await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
+    expect(mockInvalidateQueries).toHaveBeenCalled()
+  })
+
+  it('falls back to restart-instance controls when fleet restart polling times out', async () => {
+    const controls = await renderAndWaitForFleetRestart()
+
+    await act(async () => {
+      controls.runFleetTimeout()
+    })
+
+    await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
+    expect(mockInvalidateQueries).toHaveBeenCalled()
+  })
+
+  it('keeps the modal open and marks the instance errored when restart fails', async () => {
+    mockApiRestart.mockRejectedValueOnce(new Error('supervisor denied restart'))
+    const onClose = vi.fn()
+    await renderAndAdvanceToRestartInstances({ onClose })
+
+    fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
+
+    await waitFor(() => expect(mockApiRestart).toHaveBeenCalledWith('primary-line'))
+    expect(screen.queryByText('All instances restarted')).toBeNull()
+    expect(screen.getByRole('button', { name: /Restart Selected/i })).toBeDefined()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('shows completion and closes after the successful restart grace period', async () => {
+    mockApiRestart.mockResolvedValueOnce({ status: 'ok', instance: 'primary-line' })
+    const onClose = vi.fn()
+    const controls = await renderAndAdvanceToRestartInstances({ onClose })
+
+    fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
+
+    await waitFor(() => expect(screen.getByText('All instances restarted')).toBeDefined())
+    expect(onClose).not.toHaveBeenCalled()
+
+    await act(async () => {
+      controls.runAutoClose()
+    })
+    expect(onClose).toHaveBeenCalledOnce()
   })
 })
 
