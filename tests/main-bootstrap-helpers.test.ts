@@ -79,6 +79,11 @@ type HealthServerDepsForTest = {
   getEnrichmentStats: () => unknown;
 };
 
+type CapturedTimer = {
+  ms?: number;
+  callback: () => unknown;
+};
+
 class FakeConnection extends EventEmitter {
   botJid: string | null = 'bot@s.whatsapp.net';
   botLid: string | null = 'bot@lid';
@@ -126,24 +131,42 @@ function installProcessOnCapture() {
 
 async function importMainWithMocks(options: {
   instanceConfig?: Record<string, unknown> | null;
+  rawInstanceConfig?: string;
   pineconeState?: 'ready' | 'missing_index';
   accessMode?: 'self_only' | 'allowlist';
   adminPhones?: string[];
+  controlPeers?: string[];
   existingPaths?: string[];
   messageCount?: number;
+  acquireProcessLockError?: Error;
+  reclaimedPreviousBoot?: boolean;
   isProcessLockErrorReturn?: boolean;
   lockErrorReason?: 'active' | 'stale';
   releaseProcessLockReturn?: boolean;
   runtimeShutdownThrows?: boolean;
+  runtimeShutdownDeferred?: boolean;
+  runtimeStartThrows?: boolean;
   dbCloseThrows?: boolean;
   importFromLegacyDbThrows?: boolean;
+  seedAutoRespondGroupsReturn?: number;
   pendingStartupMessage?: { chatJid: string; text: string } | null;
   persistIntroSentFlagThrows?: boolean;
+  execFileSyncThrows?: boolean;
+  drainPendingOutboundRejectsOnStartup?: boolean;
+  selfRestartMarker?: {
+    chatJid?: string;
+    reason: string;
+    code: string;
+    timestamp: string;
+  } | null;
+  selfRestartMarkerThrows?: boolean;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
 
-  if (options.instanceConfig === null || options.instanceConfig === undefined) {
+  if (options.rawInstanceConfig !== undefined) {
+    process.env.INSTANCE_CONFIG = options.rawInstanceConfig;
+  } else if (options.instanceConfig === null || options.instanceConfig === undefined) {
     delete process.env.INSTANCE_CONFIG;
   } else {
     process.env.INSTANCE_CONFIG = JSON.stringify(options.instanceConfig);
@@ -154,6 +177,28 @@ async function importMainWithMocks(options: {
 
   const existingPaths = new Set(options.existingPaths ?? []);
   const processOn = installProcessOnCapture();
+  const capturedTimeouts: CapturedTimer[] = [];
+  const capturedIntervals: CapturedTimer[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalSetInterval = globalThis.setInterval;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (typeof handler === 'function') {
+      capturedTimeouts.push({
+        ms: timeout,
+        callback: () => handler(...args),
+      });
+    }
+    return (originalSetTimeout as typeof setTimeout)(handler, timeout, ...args);
+  }) as typeof setTimeout);
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (typeof handler === 'function') {
+      capturedIntervals.push({
+        ms: timeout,
+        callback: () => handler(...args),
+      });
+    }
+    return (originalSetInterval as typeof setInterval)(handler, timeout, ...args);
+  }) as typeof setInterval);
   const logger = {
     info: vi.fn(),
     warn: vi.fn(),
@@ -177,8 +222,17 @@ async function importMainWithMocks(options: {
   };
   const connection = new FakeConnection();
   const chatRuntime = runtimeStub();
+  if (options.runtimeStartThrows) {
+    chatRuntime.start = vi.fn(async () => { throw new Error('runtime start failed'); });
+  }
   if (options.runtimeShutdownThrows) {
     chatRuntime.shutdown = vi.fn(async () => { throw new Error('shutdown boom'); });
+  }
+  let resolveRuntimeShutdown: (() => void) | null = null;
+  if (options.runtimeShutdownDeferred) {
+    chatRuntime.shutdown = vi.fn(() => new Promise<void>((resolve) => {
+      resolveRuntimeShutdown = resolve;
+    }));
   }
   const passiveRuntime = runtimeStub();
   const agentInstances: Array<ReturnType<typeof runtimeStub> & { popStartupMessage: ReturnType<typeof vi.fn> }> = [];
@@ -215,7 +269,7 @@ async function importMainWithMocks(options: {
     authDir: '/tmp/ws-helpers-auth',
     memory: { consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false }, pinecone: { allowedIndexes: [] }, fileWatch: { allowedRoots: [] } },
     advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
-    controlPeers: new Set<string>(),
+    controlPeers: new Set<string>(options.controlPeers ?? []),
     configRoot: '/tmp/ws-helpers-config-root',
     adminReplayMax: 5,
     retentionDays: 30,
@@ -246,30 +300,43 @@ async function importMainWithMocks(options: {
 
   // Lock behaviour
   const isProcessLockErrorReturn = options.isProcessLockErrorReturn ?? false;
-  const acquireProcessLock = isProcessLockErrorReturn
+  const acquireProcessLock = options.acquireProcessLockError
+    ? vi.fn(() => { throw options.acquireProcessLockError; })
+    : isProcessLockErrorReturn
     ? vi.fn(() => { throw Object.assign(new Error('lock error'), {
         name: 'ProcessLockError',
         reason: options.lockErrorReason ?? 'active',
         existingPid: 1234,
         lockPath: '/tmp/ws-helpers.lock',
       }); })
-    : vi.fn(() => ({ path: '/tmp/ws-helpers.lock' }));
+    : vi.fn(() => ({ path: '/tmp/ws-helpers.lock', reclaimedPreviousBoot: options.reclaimedPreviousBoot ?? false }));
   const isProcessLockError = vi.fn(() => isProcessLockErrorReturn);
   const releaseProcessLock = vi.fn(() => options.releaseProcessLockReturn ?? true);
+  const consumeIntentionalRestartMarker = options.selfRestartMarkerThrows
+    ? vi.fn(() => { throw new Error('marker unreadable'); })
+    : vi.fn(() => options.selfRestartMarker ?? null);
 
   const mocks = {
     logger, db, connection, chatRuntime, passiveRuntime, agentInstances, healthServer,
     memoryScheduler, mediaRetentionTimer, processTmpRetentionTimer, databaseRetentionTimer,
     messageScheduler, triggerPoller, durability, config, Database, DurabilityEngine,
     ChatRuntime, PassiveRuntime, AgentRuntime,
+    capturedTimeouts, capturedIntervals,
+    resolveRuntimeShutdown: () => {
+      if (!resolveRuntimeShutdown) throw new Error('runtime shutdown resolver was not captured');
+      resolveRuntimeShutdown();
+    },
     storeDecryptionFailure: vi.fn(),
     cleanupOldRateLimits: vi.fn(() => 0),
+    cleanupOldAttempts: vi.fn(() => 0),
     deleteOldMessages: vi.fn(() => 0),
     getMessagesBySender: vi.fn(() => []),
     getMessageCount: vi.fn(() => options.messageCount ?? 1),
     getUnprocessedCount: vi.fn(() => 0),
     processHistoryBatch: vi.fn(() => ({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 })),
-    execFileSync: vi.fn(),
+    execFileSync: options.execFileSyncThrows
+      ? vi.fn(() => { throw new Error('ffmpeg missing'); })
+      : vi.fn(),
     existsSync: vi.fn((path: string) => existingPaths.has(path)),
     createConnection: vi.fn(() => connection),
     resolveLatestPluginDir: vi.fn((dir: string) => dir),
@@ -294,6 +361,9 @@ async function importMainWithMocks(options: {
     selectReplayableDms: vi.fn(() => ({ toReplay: [], groupSkipped: 0 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
+    drainPendingOutbound: options.drainPendingOutboundRejectsOnStartup
+      ? vi.fn(async () => { throw new Error('startup drain failed'); })
+      : vi.fn(async () => undefined),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => { recover(); }),
     seedChatAliases: vi.fn(() => 0),
     createProfileRegistry: vi.fn(() => ({})),
@@ -313,13 +383,13 @@ async function importMainWithMocks(options: {
     lookupAccess: vi.fn((): { status: string } | null => null),
     updateAccess: vi.fn(),
     insertAllowed: vi.fn(),
-    seedAutoRespondGroups: vi.fn(() => 0),
+    seedAutoRespondGroups: vi.fn(() => options.seedAutoRespondGroupsReturn ?? 0),
     resolvePhoneFromJid: vi.fn(() => '15551230000'),
     hydrateLidMappings: vi.fn(() => 0),
     upsertLidMapping: vi.fn(),
     mineMessageKey: vi.fn(() => null),
     mineGroupParticipants: vi.fn(() => 0),
-    reconcileLidMappings: vi.fn(() => ({ hydrated: 0, unresolvedLids: [] })),
+    reconcileLidMappings: vi.fn((): { hydrated: number; unresolvedLids: string[] } => ({ hydrated: 0, unresolvedLids: [] })),
     setLidAuthDir: vi.fn(),
     isAdminPhone: vi.fn(() => true),
     handleGroupsUpsert: vi.fn(),
@@ -335,6 +405,11 @@ async function importMainWithMocks(options: {
     backfillMetrics: vi.fn(),
     collectHourlyMetrics: vi.fn(),
     startModelCurrencyMonitor: vi.fn(),
+    consumeIntentionalRestartMarker,
+    emitAlertChecked: vi.fn(),
+    createServiceManager: vi.fn(() => ({ restart: vi.fn() })),
+    createPineconeWatchSearch: vi.fn(() => null),
+    SqliteIdentityStore: vi.fn(function () {}),
     acquireProcessLock,
     isProcessLockError,
     releaseProcessLock,
@@ -349,7 +424,10 @@ async function importMainWithMocks(options: {
     flushLogger: mocks.flushLogger,
   }));
   vi.doMock('../src/core/database.ts', () => ({ Database, storeDecryptionFailure: mocks.storeDecryptionFailure }));
-  vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({ cleanupOldRateLimits: mocks.cleanupOldRateLimits }));
+  vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({
+    cleanupOldRateLimits: mocks.cleanupOldRateLimits,
+    cleanupOldAttempts: mocks.cleanupOldAttempts,
+  }));
   vi.doMock('../src/core/messages.ts', () => ({
     deleteOldMessages: mocks.deleteOldMessages,
     getMessagesBySender: mocks.getMessagesBySender,
@@ -384,11 +462,20 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/conversation-key.ts', () => ({ toConversationKey: mocks.toConversationKey }));
   vi.doMock('../src/core/jid-constants.ts', () => ({ toPersonalJid: mocks.toPersonalJid, toLidJid: mocks.toLidJid }));
   vi.doMock('../src/core/admin.ts', () => ({ selectReplayableDms: mocks.selectReplayableDms, rememberReplayedId: mocks.rememberReplayedId }));
-  vi.doMock('../src/core/durability.ts', () => ({ DurabilityEngine, sendTracked: mocks.sendTracked }));
+  vi.doMock('../src/core/durability.ts', () => ({
+    DurabilityEngine,
+    sendTracked: mocks.sendTracked,
+    drainPendingOutbound: mocks.drainPendingOutbound,
+  }));
+  vi.doMock('../src/runtimes/agent/self-restart.ts', () => ({
+    consumeIntentionalRestartMarker: mocks.consumeIntentionalRestartMarker,
+  }));
+  vi.doMock('../src/lib/emit-alert.ts', () => ({ emitAlertChecked: mocks.emitAlertChecked }));
   vi.doMock('../src/core/post-connect-recovery.ts', () => ({ waitForHistorySyncThenRecover: mocks.waitForHistorySyncThenRecover }));
   vi.doMock('../src/core/chats-resolver.ts', () => ({ seedChatAliases: mocks.seedChatAliases }));
   vi.doMock('../src/core/profiles.ts', () => ({ createProfileRegistry: mocks.createProfileRegistry }));
   vi.doMock('../src/core/outbound-sends.ts', () => ({ createOutboundSendsWriter: mocks.createOutboundSendsWriter }));
+  vi.doMock('../src/core/outbound-identity/store.ts', () => ({ SqliteIdentityStore: mocks.SqliteIdentityStore }));
   vi.doMock('../src/core/contacts-sync.ts', () => ({ handleContactsUpsert: mocks.handleContactsUpsert, handleContactsUpdate: mocks.handleContactsUpdate }));
   vi.doMock('../src/core/chat-sync.ts', () => ({
     handleReaction: mocks.handleReaction, handleReceipt: mocks.handleReceipt,
@@ -422,6 +509,7 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/intro-sent-config.ts', () => ({ persistIntroSentFlag: mocks.persistIntroSentFlag }));
   vi.doMock('../src/core/scheduler.ts', () => ({ MessageScheduler: mocks.MessageScheduler }));
   vi.doMock('../src/core/substrate/poller.ts', () => ({ TriggerPoller: mocks.TriggerPoller }));
+  vi.doMock('../src/mcp/tools/knowledge.ts', () => ({ createPineconeWatchSearch: mocks.createPineconeWatchSearch }));
   vi.doMock('../src/core/metrics-collector.ts', () => ({ backfillMetrics: mocks.backfillMetrics, collectHourlyMetrics: mocks.collectHourlyMetrics }));
   vi.doMock('../src/lib/model-advisor.ts', () => ({ startModelCurrencyMonitor: mocks.startModelCurrencyMonitor }));
   vi.doMock('../src/lib/process-lock.ts', () => ({
@@ -430,9 +518,12 @@ async function importMainWithMocks(options: {
     releaseProcessLock: mocks.releaseProcessLock,
   }));
   vi.doMock('../src/main-shutdown-policy.ts', () => ({ shutdownExitCode: mocks.shutdownExitCode }));
+  vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
   await import('../src/main.ts');
-  await vi.waitFor(() => expect(connection.connect).toHaveBeenCalledOnce());
+  if (!options.runtimeStartThrows) {
+    await vi.waitFor(() => expect(connection.connect).toHaveBeenCalledOnce());
+  }
 
   return { ...mocks, processOn, getHealthDeps };
 }
@@ -459,6 +550,11 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     vi.restoreAllMocks();
     vi.resetModules();
   });
+
+  const flushMicrotasks = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
 
   // ── A. resolveTilde ────────────────────────────────────────────────────────
 
@@ -491,6 +587,24 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   // ── B. acquireLock error paths ─────────────────────────────────────────────
 
   describe('acquireLock() error handling', () => {
+    it('logs when a stale previous-boot lock is reclaimed', async () => {
+      const h = await importMainWithMocks({ reclaimedPreviousBoot: true });
+
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        { path: '/tmp/ws-helpers.lock' },
+        'reclaimed a stale lock left by a previous boot',
+      );
+    });
+
+    it('rethrows non-process-lock acquire failures', async () => {
+      const err = new Error('permission denied');
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      await expect(importMainWithMocks({ acquireProcessLockError: err })).rejects.toThrow('permission denied');
+
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
     it('logs fatal + exits when reason is "active" (another instance running)', async () => {
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 
@@ -562,6 +676,21 @@ describe('main.ts — uncovered helpers and signal paths', () => {
 
       expect(h.chatRuntime.shutdown).toHaveBeenCalledOnce();
       expect(exitSpy).toHaveBeenCalled();
+    });
+
+    it('forces exit when graceful shutdown exceeds its timeout', async () => {
+      const h = await importMainWithMocks({ runtimeShutdownDeferred: true });
+      const sigterm = h.processOn.handlers.get('SIGTERM')!;
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      const shutdownPromise = (sigterm[0] as () => Promise<void>)();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(h.logger.error).toHaveBeenCalledWith('shutdown timed out, forcing exit');
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      h.resolveRuntimeShutdown();
+      await shutdownPromise;
     });
 
     it('shutdown() is idempotent — second call returns immediately without re-running teardown', async () => {
@@ -664,6 +793,18 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         'uncaught exception',
       );
     });
+
+    it('forces exit if uncaughtException shutdown remains past the emergency timer', async () => {
+      const h = await importMainWithMocks();
+      const uncaught = h.processOn.handlers.get('uncaughtException')!;
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      (uncaught[0] as (err: Error) => void)(new Error('boom'));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(h.logger.error).toHaveBeenCalledWith('shutdown hung after uncaughtException — forcing exit');
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
   });
 
   // ── D3. unhandledRejection handler ────────────────────────────────────────
@@ -681,6 +822,18 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         expect.objectContaining({ reason: 'unhandled rejection reason' }),
         'unhandled rejection',
       );
+    });
+
+    it('forces exit if unhandledRejection shutdown remains past the emergency timer', async () => {
+      const h = await importMainWithMocks();
+      const handler = h.processOn.handlers.get('unhandledRejection')!;
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      (handler[0] as (reason: unknown) => void)('hung rejection');
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(h.logger.error).toHaveBeenCalledWith('shutdown hung after unhandledRejection — forcing exit');
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
     it('does not re-enter shutdown when shutdownInProgress=true', async () => {
@@ -867,6 +1020,21 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       // Still sent the intro
       expect(h.sendTracked).toHaveBeenCalled();
     });
+
+    it('logs warn when introduction delivery fails', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: { name: 'q', introSent: false },
+      });
+      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'failed to send introduction',
+      );
+    });
   });
 
   // ── G. Warm-start: no legacy DB found ─────────────────────────────────────
@@ -914,6 +1082,29 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     });
   });
 
+  // ── G1. Config-driven access seeding ──────────────────────────────────────
+
+  describe('configured auto-respond group seeding', () => {
+    it('logs when configured auto-respond groups are seeded', async () => {
+      const h = await importMainWithMocks({ seedAutoRespondGroupsReturn: 3 });
+
+      expect(h.logger.info).toHaveBeenCalledWith(
+        { count: 3 },
+        'seeded auto-respond groups',
+      );
+    });
+  });
+
+  // ── G2. INSTANCE_CONFIG parse failure ─────────────────────────────────────
+
+  describe('INSTANCE_CONFIG parsing', () => {
+    it('rejects invalid INSTANCE_CONFIG JSON', async () => {
+      await expect(importMainWithMocks({ rawInstanceConfig: '{not json' })).rejects.toThrow(
+        'INSTANCE_CONFIG is set but is not valid JSON',
+      );
+    });
+  });
+
   // ── H. Memory consolidation warning (pinecone not ready) ──────────────────
 
   describe('memory consolidation disabled warning', () => {
@@ -925,6 +1116,38 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         'memory consolidation enabled but not started',
       );
       expect(h.memoryScheduler.start).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── H2. Chat/ingest identity getters ──────────────────────────────────────
+
+  describe('runtime identity getter wiring', () => {
+    it('passes ChatRuntime live bot identity getters with an empty-string JID fallback', async () => {
+      const h = await importMainWithMocks();
+      const runtimeCall = h.ChatRuntime.mock.calls[0] as unknown[];
+      const runtimeOptions = runtimeCall[5] as {
+        getBotJid: () => string;
+        getBotLid: () => string | null;
+      };
+
+      h.connection.botJid = null;
+      h.connection.botLid = 'live-bot@lid';
+
+      expect(runtimeOptions.getBotJid()).toBe('');
+      expect(runtimeOptions.getBotLid()).toBe('live-bot@lid');
+    });
+
+    it('passes createIngestHandler live bot identity getters with the same fallback', async () => {
+      const h = await importMainWithMocks();
+      const ingestCall = h.createIngestHandler.mock.calls[0] as unknown[];
+      const getBotJid = ingestCall[3] as () => string;
+      const getBotLid = ingestCall[4] as () => string | null;
+
+      h.connection.botJid = null;
+      h.connection.botLid = 'ingest-bot@lid';
+
+      expect(getBotJid()).toBe('');
+      expect(getBotLid()).toBe('ingest-bot@lid');
     });
   });
 
@@ -990,6 +1213,122 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '*Agent back online* ✓',
         h.durability,
         { replayPolicy: 'safe' },
+      );
+    });
+
+    it('logs warn when default startup notification delivery fails', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        pendingStartupMessage: null,
+      });
+      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.any(Error),
+          chatJid: '15551230000@s.whatsapp.net',
+        }),
+        'failed to send startup notification',
+      );
+    });
+  });
+
+  // ── I2. Self-restart resume marker ────────────────────────────────────────
+
+  describe('agent self-restart resume marker', () => {
+    it('emits a completion alert and sends the dedicated back-online ping', async () => {
+      const h = await importMainWithMocks({
+        adminPhones: [],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        selfRestartMarker: {
+          chatJid: '15559002@s.whatsapp.net',
+          reason: 'reload config',
+          code: 'config_reload',
+          timestamp: new Date(Date.now() - 2_000).toISOString(),
+        },
+      });
+
+      expect(h.emitAlertChecked).toHaveBeenCalledWith(
+        'q',
+        'self_restart_completed',
+        'intentional restart complete (config_reload): reload config',
+        expect.stringMatching(/^downtime_ms=\d+$/),
+        'info',
+      );
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.sendTracked).toHaveBeenCalledWith(
+        h.connection,
+        '15559002@s.whatsapp.net',
+        expect.stringContaining('Back online'),
+        h.durability,
+        { replayPolicy: 'safe' },
+      );
+      expect(h.logger.info).toHaveBeenCalledWith(
+        { chatJid: '15559002@s.whatsapp.net' },
+        'sent self-restart back-online ping',
+      );
+    });
+
+    it('logs warn when the dedicated self-restart ping fails', async () => {
+      const h = await importMainWithMocks({
+        adminPhones: [],
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        selfRestartMarker: {
+          chatJid: '15559003@s.whatsapp.net',
+          reason: 'reload config',
+          code: 'config_reload',
+          timestamp: new Date(Date.now()).toISOString(),
+        },
+      });
+      h.sendTracked.mockRejectedValueOnce(new Error('send failed'));
+
+      h.capturedTimeouts.find((timer) => timer.ms === 3_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.any(Error),
+          chatJid: '15559003@s.whatsapp.net',
+        }),
+        'failed to send self-restart back-online ping',
+      );
+    });
+
+    it('logs warn and continues when marker consumption fails', async () => {
+      const h = await importMainWithMocks({
+        instanceConfig: {
+          name: 'q',
+          type: 'agent',
+          introSent: true,
+          agentOptions: { sessionScope: 'shared' },
+        },
+        selfRestartMarkerThrows: true,
+      });
+
+      expect(h.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'self-restart resume check failed; continuing startup',
       );
     });
   });
@@ -1114,6 +1453,175 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       // No new log for block (only DB update, no replay)
       const logCallsAfter = (h.logger.info as ReturnType<typeof vi.fn>).mock.calls.length;
       expect(logCallsAfter).toBe(logCallsBefore);
+    });
+  });
+
+  // ── Periodic timers and callback error isolation ──────────────────────────
+
+  describe('periodic startup and maintenance timers', () => {
+    it('logs when ffmpeg is unavailable at startup', async () => {
+      const h = await importMainWithMocks({ execFileSyncThrows: true });
+
+      expect(h.logger.warn).toHaveBeenCalledWith('ffmpeg not found — video processing will fail');
+    });
+
+    it('runs startup cleanup and logs deleted messages', async () => {
+      const h = await importMainWithMocks();
+      h.deleteOldMessages.mockReturnValueOnce(7);
+
+      h.capturedTimeouts.find((timer) => timer.ms === 60_000)!.callback();
+
+      expect(h.logger.info).toHaveBeenCalledWith(
+        { count: 7 },
+        'retention: deleted old messages',
+      );
+    });
+
+    it('logs startup cleanup failures', async () => {
+      const h = await importMainWithMocks();
+      h.deleteOldMessages.mockImplementationOnce(() => { throw new Error('cleanup failed'); });
+
+      h.capturedTimeouts.find((timer) => timer.ms === 60_000)!.callback();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'startup cleanup failed',
+      );
+    });
+
+    it('logs metrics backfill and collection failures', async () => {
+      const h = await importMainWithMocks();
+      h.backfillMetrics.mockImplementationOnce(() => { throw new Error('backfill failed'); });
+      h.collectHourlyMetrics.mockImplementationOnce(() => { throw new Error('metrics failed'); });
+
+      h.capturedTimeouts.find((timer) => timer.ms === 5_000)!.callback();
+      h.capturedIntervals.find((timer) => timer.ms === h.config.enrichmentIntervalMs)!.callback();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'metrics backfill failed',
+      );
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'metrics collection failed',
+      );
+    });
+
+    it('runs daily retention cleanup and logs each positive deletion count', async () => {
+      const h = await importMainWithMocks();
+      h.deleteOldMessages.mockReturnValueOnce(2);
+      h.cleanupOldRateLimits.mockReturnValueOnce(3);
+      h.cleanupOldAttempts.mockReturnValueOnce(4);
+
+      h.capturedIntervals.find((timer) => timer.ms === 24 * 60 * 60 * 1000)!.callback();
+
+      expect(h.logger.info).toHaveBeenCalledWith({ count: 2 }, 'retention: deleted old messages');
+      expect(h.logger.info).toHaveBeenCalledWith({ count: 3 }, 'cleaned up old rate limits');
+      expect(h.logger.info).toHaveBeenCalledWith({ count: 4 }, 'cleaned up old llm attempts');
+    });
+
+    it('logs daily retention cleanup failures', async () => {
+      const h = await importMainWithMocks();
+      h.cleanupOldAttempts.mockImplementationOnce(() => { throw new Error('attempt cleanup failed'); });
+
+      h.capturedIntervals.find((timer) => timer.ms === 24 * 60 * 60 * 1000)!.callback();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'retention cleanup failed',
+      );
+    });
+
+    it('isolates echo timeout sweep and drain failures', async () => {
+      const h = await importMainWithMocks();
+      h.durability.sweepStaleSubmitted.mockImplementationOnce(() => { throw new Error('sweep failed'); });
+      h.drainPendingOutbound.mockRejectedValueOnce(new Error('drain failed'));
+
+      h.capturedIntervals.find((timer) => timer.ms === 10_000)!.callback();
+      await flushMicrotasks();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'echo timeout sweep failed',
+      );
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'echo timeout drain failed',
+      );
+    });
+
+    it('logs post-connect drain failures without aborting startup', async () => {
+      const h = await importMainWithMocks({ drainPendingOutboundRejectsOnStartup: true });
+      await flushMicrotasks();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'drainPendingOutbound on post-connect recovery failed',
+      );
+    });
+
+    it('runs degradation checks only when q is a control peer and logs failures', async () => {
+      const h = await importMainWithMocks({ controlPeers: ['q'] });
+      h.checkDegradationSignals.mockImplementationOnce(() => { throw new Error('degraded'); });
+
+      for (const timer of h.capturedIntervals.filter((interval) => interval.ms === 60_000)) {
+        timer.callback();
+      }
+
+      expect(h.checkDegradationSignals).toHaveBeenCalledWith(h.db, h.connection, h.durability, null);
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'degradation signal check failed',
+      );
+    });
+
+    it('logs and invalidates the cache after a productive LID reconciliation sweep', async () => {
+      const h = await importMainWithMocks();
+      h.reconcileLidMappings.mockReturnValueOnce({
+        hydrated: 2,
+        unresolvedLids: ['user@lid'],
+      });
+
+      h.capturedIntervals.find((timer) => timer.ms === 30 * 60 * 1000)!.callback();
+
+      expect(h.logger.info).toHaveBeenCalledWith(
+        {
+          hydrated: 2,
+          unresolvedCount: 1,
+          unresolvedLids: ['user@lid'],
+        },
+        'L6: LID reconciliation sweep completed',
+      );
+      expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
+    });
+
+    it('logs LID reconciliation failures', async () => {
+      const h = await importMainWithMocks();
+      h.reconcileLidMappings.mockImplementationOnce(() => { throw new Error('reconcile failed'); });
+
+      h.capturedIntervals.find((timer) => timer.ms === 30 * 60 * 1000)!.callback();
+
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'L6: LID reconciliation failed',
+      );
+    });
+  });
+
+  // ── Startup failure catch path ─────────────────────────────────────────────
+
+  describe('startup failure handling', () => {
+    it('logs fatal and initiates startupError shutdown when runtime.start rejects', async () => {
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+      const h = await importMainWithMocks({ runtimeStartThrows: true });
+      await flushMicrotasks();
+
+      expect(h.logger.fatal).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'failed to start',
+      );
+      expect(h.shutdownExitCode).toHaveBeenCalledWith('startupError');
+      expect(exitSpy).toHaveBeenCalled();
     });
   });
 });
