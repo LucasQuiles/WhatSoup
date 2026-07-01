@@ -11,6 +11,7 @@ import {
   symlinkSync,
   utimesSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
@@ -84,6 +85,34 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(refreshed.last_fire_at).toBe(1_000_000_001);
   });
 
+  it('continues when recording a post-dispatch receipt fails', async () => {
+    const calls: Array<{ chatJid: string; text: string }> = [];
+    const messenger: Messenger = {
+      async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
+        calls.push({ chatJid, text });
+        db.raw.exec(`DROP TABLE trigger_runs`);
+        return { waMessageId: 'wa-after-drop' };
+      },
+      async sendMedia() { throw new Error('not used'); },
+    };
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('hit')`).run();
+    createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id, label FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await expect(poller.tickOnce()).resolves.toBe(1);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain('Watch fired');
+  });
+
   it('fire_when=rows_returned: does NOT fire on 0 rows', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
@@ -104,6 +133,27 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0].status).toBe('noop');
     expect(runs[0].output_summary).toContain('0 rows');
+  });
+
+  it('disables a non-scheduled trigger with no interval after a successful run', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: null, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const refreshed = db.raw.prepare(`SELECT next_fire_at, last_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number | null; last_fire_at: number };
+    expect(refreshed.next_fire_at).toBeNull();
+    expect(refreshed.last_fire_at).toBe(1_000_000_001);
   });
 
   it('fire_when=rowcount_changed: first run with 0 rows is noop, count increase fires, stable count noops', async () => {
@@ -800,6 +850,26 @@ describe('TriggerPoller — poll.pinecone', () => {
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ matchCount: 1, topScore: 0.41 });
   });
 
+  it('uses a singular Pinecone summary for exactly one firing match', async () => {
+    const { messenger, calls } = makeMessenger();
+    const search = vi.fn(async () => ({ matches: [{ score: 0.91 }] }));
+    const t = makePineconeTrigger({ index: 'mw-mind', namespace: 'ns_facts', query: 'q', threshold: 0.8 });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      pineconeAllowedIndexes: ['mw-mind'],
+      pineconeSearch: search,
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    const run = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(run.status).toBe('ok');
+    expect(run.output_summary).toContain('pinecone matched 1 result');
+    expect(run.output_summary).not.toContain('1 results');
+    expect(JSON.parse(run.output_json)).toMatchObject({ matchCount: 1, topScore: 0.91 });
+  });
+
   it('with no threshold, fires when results.length > 0 and noops on zero results', async () => {
     const { messenger } = makeMessenger();
     const search = vi.fn(async () => ({ matches: [{ score: 0.1 }] }));
@@ -979,6 +1049,26 @@ describe('TriggerPoller — poll.file', () => {
     expect(runs[0].status).toBe('noop');
   });
 
+  it('allows a root that is created after the poller is constructed', async () => {
+    const { messenger, calls } = makeMessenger();
+    const futureRoot = join(root, 'future-root');
+    const filePath = join(futureRoot, 'created-later.txt');
+    const t = makeFileTrigger({ path: filePath, watch: 'exists' });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [futureRoot],
+    });
+
+    mkdirSync(futureRoot);
+    writeFileSync(filePath, 'created after constructor');
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    const run = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_json: string };
+    expect(run.status).toBe('ok');
+    expect(JSON.parse(run.output_json)).toMatchObject({ exists: true });
+  });
+
   it('watch=mtime: fires when mtime changes, noop when unchanged', async () => {
     const { messenger } = makeMessenger();
     const filePath = join(root, 'm.txt');
@@ -1114,6 +1204,43 @@ describe('TriggerPoller — poll.file', () => {
     expect(runs[0].error_kind).toBe('path_not_allowed');
   });
 
+  it('SECURITY: an absent /dev target is rejected before it can act as an existence oracle', async () => {
+    const { messenger, calls } = makeMessenger();
+    const missingDevicePath = `/dev/whatsoup-missing-${randomBytes(8).toString('hex')}`;
+    const t = makeFileTrigger({ path: missingDevicePath, watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: ['/'],
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('path_not_allowed');
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'path_not_allowed' });
+  });
+
+  it('SECURITY: an absent path under a symlinked denied ancestor is rejected', async () => {
+    const { messenger, calls } = makeMessenger();
+    const deviceLink = join(root, 'device-link');
+    symlinkSync('/dev', deviceLink);
+    const t = makeFileTrigger({ path: join(deviceLink, `missing-${randomBytes(8).toString('hex')}`), watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: ['/'],
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('path_not_allowed');
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'path_not_allowed' });
+  });
+
   it('SECURITY: a non-regular file (directory) is rejected', async () => {
     const { messenger } = makeMessenger();
     const dirPath = join(root, 'subdir');
@@ -1232,6 +1359,30 @@ describe('TriggerPoller — poll.file', () => {
     const parsed = JSON.parse(run.output_json);
     expect(parsed).toMatchObject({ exists: true, hashChanged: true });
     expect(parsed.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('watch=content_hash records hash_error when a readable stat becomes an unreadable stream', async () => {
+    const { messenger, calls } = makeMessenger();
+    const filePath = join(root, 'unreadable.txt');
+    writeFileSync(filePath, 'secret');
+    chmodSync(filePath, 0);
+    const t = makeFileTrigger({ path: filePath, watch: 'content_hash' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [root],
+    });
+    try {
+      await poller.tickOnce();
+    } finally {
+      chmodSync(filePath, 0o600);
+    }
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('hash_error');
+    expect(JSON.parse(run.output_json)).toMatchObject({ exists: true });
   });
 });
 

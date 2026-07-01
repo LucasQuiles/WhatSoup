@@ -20,6 +20,10 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'src/transport/connection.ts',
   'tests/config.test.ts',
   'tests/core/health.test.ts',
+  // The substrate poller suite intentionally keeps the SQL/file/url/throttle
+  // edge cases beside the shared in-memory database scaffolding while this
+  // coverage stack closes fail-closed behavior gaps.
+  'tests/core/substrate/poller.test.ts',
   'tests/fleet/health-poller.test.ts',
   'tests/fleet/index.test.ts',
   'tests/fleet/routes/feed.test.ts',
