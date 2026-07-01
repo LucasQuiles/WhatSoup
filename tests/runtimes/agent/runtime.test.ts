@@ -440,6 +440,28 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
+function setMockMemoryConfig(): () => void {
+  const configWithMemory = mockConfig as typeof mockConfig & {
+    memory?: {
+      adminJid: string | null;
+      sweep: { reviewByDays: number };
+    };
+  };
+  const previous = configWithMemory.memory;
+  configWithMemory.memory = {
+    adminJid: null,
+    sweep: { reviewByDays: 7 },
+  };
+
+  return () => {
+    if (previous === undefined) {
+      delete configWithMemory.memory;
+    } else {
+      configWithMemory.memory = previous;
+    }
+  };
+}
+
 function fakeTimerHandle(label: string): ReturnType<typeof setTimeout> {
   return { label } as unknown as ReturnType<typeof setTimeout>;
 }
@@ -1566,6 +1588,90 @@ describe('AgentRuntime', () => {
       chatJid: 'test@s.whatsapp.net',
     });
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(31);
+  });
+
+  it('continues the agent turn when inline extraction hits a recoverable persistence error', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    try {
+      const db = makeDb();
+      const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
+      raw.exec.mockImplementation((sql: string) => {
+        if (sql === 'BEGIN') throw new Error('constraint failed');
+      });
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'line-a');
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({
+        content: 'remind me to check backup status',
+        senderJid: '15550100001@s.whatsapp.net',
+      }));
+
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        { err: expect.any(Error), messageId: 'msg-1' },
+        'inline extractor hook failed (continuing)',
+      );
+      expect(mockEmitAlert).not.toHaveBeenCalledWith(
+        'line-a',
+        'substrate-inline-hook',
+        expect.any(String),
+        expect.any(String),
+      );
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('remind me to check backup status');
+    } finally {
+      restoreMemory();
+    }
+  });
+
+  it('alerts and marks inbound failed when inline extraction hits an unrecoverable DB error', async () => {
+    const restoreMemory = setMockMemoryConfig();
+    try {
+      const db = makeDb();
+      const raw = db.raw as unknown as { exec: ReturnType<typeof vi.fn> };
+      const diskFull = Object.assign(new Error('SQLITE_FULL: database or disk is full'), {
+        code: 'SQLITE_FULL',
+      });
+      raw.exec.mockImplementation((sql: string) => {
+        if (sql === 'BEGIN') throw diskFull;
+      });
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'line-a');
+      const durability = {
+        markInboundFailed: vi.fn(),
+      };
+      const replyGuarantee = {
+        disarm: vi.fn(),
+      };
+      const state = runtime as unknown as {
+        durability: typeof durability;
+        replyGuarantee: typeof replyGuarantee;
+      };
+      state.durability = durability;
+      state.replyGuarantee = replyGuarantee;
+
+      await runtime.start();
+      await expect(runtime.handleMessage(makeMsg({
+        content: 'remind me to inspect disk pressure',
+        senderJid: '15550100001@s.whatsapp.net',
+        inboundSeq: 42,
+      }))).rejects.toThrow(/SQLITE_FULL/);
+
+      expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+        { err: diskFull, messageId: 'msg-1', code: 'SQLITE_FULL' },
+        expect.stringContaining('inline extractor hook hit unrecoverable DB error'),
+      );
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        'line-a',
+        'substrate-inline-hook',
+        expect.stringContaining('Unrecoverable DB error in inline extractor: SQLITE_FULL'),
+        expect.stringContaining('messageId=msg-1 chatJid=test@s.whatsapp.net code=SQLITE_FULL'),
+      );
+      expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
+      expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      restoreMemory();
+    }
   });
 
   it('handleMessage /new calls session.handleNew and notifies user', async () => {
