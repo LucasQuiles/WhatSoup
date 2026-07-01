@@ -42,6 +42,23 @@ describe('extractDocumentText — positive', () => {
     expect(mockGetText).toHaveBeenCalledTimes(1);
   });
 
+  // QR-058: getText() must be bounded to the first N pages — without this, a small
+  // many-page attacker PDF decodes every page before the 2000-char slice (DoS).
+  it('QR-058: bounds PDF parsing to the first N pages (page cap passed to getText)', async () => {
+    mockGetText.mockResolvedValue({ text: 'short body' });
+    const buffer = Buffer.from('%PDF-1.7 fake', 'utf8');
+
+    await extractDocumentText(buffer, 'application/pdf', 'huge.pdf');
+
+    // The fix passes an explicit first-N page range; the unbounded `getText()` call is the defect.
+    expect(mockGetText).toHaveBeenCalledWith(
+      expect.objectContaining({ first: expect.any(Number) }),
+    );
+    const firstArg = (mockGetText.mock.calls[0]?.[0] ?? {}) as { first?: number };
+    expect(firstArg.first).toBeGreaterThan(0);
+    expect(firstArg.first).toBeLessThanOrEqual(50);
+  });
+
   it('UTF-8 text/plain extracted correctly', async () => {
     const text = 'Hello, this is plain text content.';
     const buffer = Buffer.from(text, 'utf8');
@@ -92,6 +109,23 @@ describe('extractDocumentText — negative', () => {
       { err: parseError, mimeType: 'application/pdf', fileName: 'broken.pdf' },
       'Document text extraction failed',
     );
+  });
+
+  // QR-058: a pathological PDF whose getText() never settles (decompression bomb on the
+  // first page) must not hang the inline media handler — a wall-clock timeout returns the fallback.
+  it('QR-058: a hanging PDF parse is bounded by a timeout and returns the fallback', async () => {
+    vi.useFakeTimers();
+    try {
+      // never-resolving getText simulates an uncancellable in-flight pdfjs decode
+      mockGetText.mockReturnValue(new Promise(() => { /* never settles */ }));
+      const promise = extractDocumentText(Buffer.from('%PDF hang'), 'application/pdf', 'bomb.pdf');
+      // advance past any reasonable parse timeout (fix uses 10s)
+      await vi.advanceTimersByTimeAsync(30_000);
+      const result = await promise;
+      expect(result).toBe("[Document: bomb.pdf — couldn't extract text]");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('unsupported format returns label string', async () => {
