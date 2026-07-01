@@ -1,4 +1,4 @@
-const SECRET_LIKE_RE = /\b(?:Bearer\s+[A-Za-z0-9._-]{12,}|sk-[A-Za-z0-9._-]{12,}|[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)\s*[:=]\s*['"]?[A-Za-z0-9._/-]{8,})\b/;
+const SECRET_LIKE_RE = /\b(?:Bearer\s+[A-Za-z0-9._-]{12,}|sk-[A-Za-z0-9._-]{12,}|[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)\s*[:=]\s*['"]?[A-Za-z0-9._/-]{8,}|120363\d{8,}@g\.us|\d{8,}@s\.whatsapp\.net|[A-Fa-f0-9]{15,}@lid|\d{10,})\b/i;
 
 export function assertNoSecretLike(text: string, label: string): void {
   if (SECRET_LIKE_RE.test(text)) {
