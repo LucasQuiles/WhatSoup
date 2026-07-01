@@ -38,7 +38,7 @@ import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
-import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
+import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
@@ -269,8 +269,12 @@ function shortHashOrNull(value: string | null | undefined): string | null {
   return value ? value.slice(0, 20) : null;
 }
 
-function isSensitiveDiagnosticKey(key: string): boolean {
-  return /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey)/i.test(key);
+// QR-118: delegate to the shared SSOT (SENSITIVE_KEY_RE) rather than a hand-maintained
+// inline copy, which had drifted to a strict subset missing 11 Signal-protocol key names
+// (identityKey/ratchet/rootKey/chainKey/ephemeralKey/…). The redactor feeds the persisted
+// auth-bond context, so a missing key would leave that material unredacted at rest.
+export function isSensitiveDiagnosticKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key);
 }
 
 function redactDiagnosticString(value: string): string {
