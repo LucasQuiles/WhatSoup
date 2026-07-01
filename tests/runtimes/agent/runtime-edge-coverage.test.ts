@@ -312,6 +312,7 @@ type RuntimeView = {
   operationTracker: { shutdown: () => void } | null;
   queue: IOutboundQueue | null;
   session: unknown;
+  currentTurnChatJid: string | null;
   activeChatJid: string | null;
   workspaceResources: Map<string, {
     workspacePath: string;
@@ -392,7 +393,7 @@ type RuntimeView = {
     abortSignal?: AbortSignal,
   ): Promise<string>;
   coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: unknown): Promise<void>;
-  flushImageCoalesce: ReturnType<typeof vi.fn>;
+  flushImageCoalesce: (mapKey: string) => Promise<void>;
   normalizeAssistantTextForDelivery(
     event: Extract<AgentEvent, { type: 'assistant_text' }>,
     mapKey?: string,
@@ -693,6 +694,65 @@ describe('AgentRuntime edge coverage', () => {
       'Diagnostics for usage-limit on claude-cli',
       expect.stringContaining('health-snapshot:ok/confirmed'),
     );
+  });
+
+  it('handles arming provider-failure reason variants without replay state', () => {
+    const cases: Array<{
+      workflow: ResponseWorkflow;
+      reason: 'auth-required' | 'rate-limit' | 'model-unavailable';
+      logMessage: string;
+      providerText: string;
+    }> = [
+      {
+        workflow: RESPONSE_WORKFLOWS.provider_auth_required,
+        reason: 'auth-required',
+        logMessage: 'suppressed provider auth-required message from result — session will be shut down',
+        providerText: 'Authentication required. Sign in to continue.',
+      },
+      {
+        workflow: RESPONSE_WORKFLOWS.provider_rate_limit,
+        reason: 'rate-limit',
+        logMessage: 'terminal provider rate-limit result observed',
+        providerText: 'Rate limit exceeded for this model.',
+      },
+      {
+        workflow: RESPONSE_WORKFLOWS.provider_model_unavailable,
+        reason: 'model-unavailable',
+        logMessage: 'suppressed provider model-unavailable message from result — session will be shut down',
+        providerText: 'The requested model is unavailable.',
+      },
+    ];
+
+    for (const item of cases) {
+      const runtime = makeRuntime({ sessionScope: 'per_chat' });
+      const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
+      const session = makeSession();
+      const recordTurnFailure = vi.fn();
+      mockRuntimeLogger.warn.mockClear();
+
+      view(runtime).handleProviderFailureResult(item.workflow, {
+        queue,
+        session,
+        providerText: item.providerText,
+        turnHadToolWork: false,
+        logChatJid: queue.targetChatJid,
+        scheduleReplayMapKey: queue.targetChatJid,
+        cleanupArgs: { mapKey: queue.targetChatJid },
+        recordTurnFailure,
+      });
+
+      expect(recordTurnFailure).toHaveBeenCalledWith(item.reason);
+      expect(view(runtime).getFallbackState().fallbackReason).toBe(item.reason);
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup'));
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatJid: queue.targetChatJid,
+          textPreview: item.providerText,
+        }),
+        item.logMessage,
+      );
+    }
   });
 
   it('recreates per-chat fallback sessions with scoped callbacks and queue preservation', () => {
@@ -1275,6 +1335,41 @@ describe('AgentRuntime edge coverage', () => {
     expect(idleQueue.shutdown.mock.calls).toEqual([[]]);
   });
 
+  it('keeps active, busy, and recently touched shared queues during idle sweeps', async () => {
+    const runtime = makeRuntime({ shared: true });
+    const state = view(runtime);
+    const currentQueue = makeQueue('current-edge@s.whatsapp.net') as QueueMock & {
+      lastActivity: number;
+      hasPendingWork: ReturnType<typeof vi.fn>;
+    };
+    const busyQueue = makeQueue('busy-edge@s.whatsapp.net') as QueueMock & {
+      lastActivity: number;
+      hasPendingWork: ReturnType<typeof vi.fn>;
+    };
+    const freshQueue = makeQueue('fresh-edge@s.whatsapp.net') as QueueMock & {
+      hasPendingWork: ReturnType<typeof vi.fn>;
+    };
+    currentQueue.lastActivity = Date.now() - (61 * 60 * 1000);
+    currentQueue.hasPendingWork = vi.fn(() => false);
+    busyQueue.lastActivity = Date.now() - (61 * 60 * 1000);
+    busyQueue.hasPendingWork = vi.fn(() => true);
+    freshQueue.hasPendingWork = vi.fn(() => false);
+    state.currentTurnChatJid = currentQueue.targetChatJid;
+    state.outboundQueues.set(currentQueue.targetChatJid, currentQueue);
+    state.outboundQueues.set(busyQueue.targetChatJid, busyQueue);
+    state.outboundQueues.set(freshQueue.targetChatJid, freshQueue);
+
+    state.startQueueSweepTimer();
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+    expect(state.outboundQueues.has(currentQueue.targetChatJid)).toBe(true);
+    expect(state.outboundQueues.has(busyQueue.targetChatJid)).toBe(true);
+    expect(state.outboundQueues.has(freshQueue.targetChatJid)).toBe(true);
+    expect(currentQueue.shutdown).not.toHaveBeenCalled();
+    expect(busyQueue.shutdown).not.toHaveBeenCalled();
+    expect(freshQueue.shutdown).not.toHaveBeenCalled();
+  });
+
   it('fires image coalesce timers and logs direct-send failures', async () => {
     const messenger = makeMessenger();
     messenger.sendMessage
@@ -1318,6 +1413,119 @@ describe('AgentRuntime edge coverage', () => {
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
       'crash notice fallback send failed',
+    );
+  });
+
+  it('flushes image coalesce at the batch cap and cleans failed representative seq state', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const mapKey = 'image-batch-edge@s.whatsapp.net';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'image-batch-session',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    } as never);
+    session.sendTurn.mockRejectedValueOnce(new Error('coalesced send failed'));
+    const queue = makeQueue(mapKey);
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queue);
+
+    for (let i = 0; i < 20; i += 1) {
+      await state.coalesceImageTurn(
+        mapKey,
+        mapKey,
+        `[image:/tmp/edge-${i}.png]`,
+        {
+          chatJid: mapKey,
+          senderJid: 'sender-edge@s.whatsapp.net',
+          ...(i === 0 || i === 1 ? {} : { inboundSeq: i + 1 }),
+        },
+      );
+    }
+    await Promise.resolve();
+
+    expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
+    expect(session.sendTurn).toHaveBeenCalledWith(expect.stringContaining('[20 images received]'));
+    expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
+    expect(state.pendingTurnText.has(mapKey)).toBe(false);
+    expect(state.pendingTurnActorJid.has(mapKey)).toBe(false);
+    expect(state.perChatTurnContentType.has(mapKey)).toBe(false);
+    expect(state.perChatTurnText.has(mapKey)).toBe(false);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ mapKey, bufferedCount: 20, maxBatch: 20 }),
+      'image coalesce batch limit reached — flushing immediately',
+    );
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), mapKey, imageCount: 20 }),
+      'failed to send coalesced image turn',
+    );
+  });
+
+  it('flushes a single unsequenced coalesced image without inventing inbound seq state', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const mapKey = 'image-unsequenced-edge@s.whatsapp.net';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'image-unsequenced-session',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    } as never);
+    const queue = makeQueue(mapKey);
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queue);
+
+    await state.coalesceImageTurn(
+      mapKey,
+      mapKey,
+      '[image:/tmp/unsequenced.png]',
+      {
+        chatJid: mapKey,
+        senderJid: 'sender-edge@s.whatsapp.net',
+      },
+    );
+    await state.flushImageCoalesce(mapKey);
+
+    expect(session.sendTurn).toHaveBeenCalledWith('[image:/tmp/unsequenced.png]');
+    expect(queue.setInboundSeq).toHaveBeenCalledWith(undefined);
+    expect(state.perChatInboundSeqQueue.get(mapKey)).toEqual([]);
+    expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
+  });
+
+  it('aborts pending image coalesce flush while resume-failed recovery owns the chat', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const mapKey = 'image-resume-edge@s.whatsapp.net';
+    const session = makeSession();
+    const queue = makeQueue(mapKey);
+    state.chatSessions.set(mapKey, session);
+    state.chatQueues.set(mapKey, queue);
+
+    await state.coalesceImageTurn(
+      mapKey,
+      mapKey,
+      '[image:/tmp/resume-owned.png]',
+      {
+        chatJid: mapKey,
+        senderJid: 'sender-edge@s.whatsapp.net',
+        inboundSeq: 41,
+      },
+    );
+    state.resumeFailedHandling.add(mapKey);
+    await state.flushImageCoalesce(mapKey);
+
+    expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ mapKey }),
+      'image coalesce flush skipped during resume-failed recovery',
     );
   });
 
