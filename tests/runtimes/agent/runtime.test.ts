@@ -2593,6 +2593,40 @@ describe('AgentRuntime', () => {
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
 
+  it('marks media turns skipped when media prep returns empty content', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const durability = {
+      markInboundSkipped: vi.fn(),
+      markInboundFailed: vi.fn(),
+    };
+    mockPrepareContentForAgent.mockResolvedValueOnce('   ');
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    (runtime as unknown as { durability: typeof durability }).durability = durability;
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'img-empty-prep',
+      content: null,
+      contentType: 'image',
+      inboundSeq: 78,
+    }));
+
+    expect(mockPrepareContentForAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: 'img-empty-prep', contentType: 'image' }),
+      db,
+      'img-empty-prep',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      { messageId: 'img-empty-prep', contentType: 'image' },
+      'empty content after media processing — skipping',
+    );
+    expect(durability.markInboundSkipped).toHaveBeenCalledWith(78, 'empty_content');
+    expect(durability.markInboundFailed).not.toHaveBeenCalled();
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+  });
+
   it('image coalescing flushes a batch when the timer fires', async () => {
     vi.useFakeTimers();
     try {
