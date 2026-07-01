@@ -24,7 +24,7 @@ import type { Logger } from 'pino';
 import type { Database } from './database.ts';
 import { parseIncomingMessage } from './message-parser.ts';
 import { withTransaction } from './db-tx.ts';
-import { toConversationKey } from './conversation-key.ts';
+import { canonicalConversationKey } from './access-list.ts';
 import { normalizeUnixTimestampSeconds } from '../fleet/time-utils.ts';
 
 /** Raw Baileys WAMessage shape we rely on. Cast through unknown at the boundary. */
@@ -161,7 +161,10 @@ function processHistoryMessage(
     return 'skipped_no_key';
   }
 
-  const conversationKey = toConversationKey(chatJid);
+  // QR-037: key a LID DM by the resolved phone (canonicalConversationKey mirrors
+  // live ingest), so history rows share one thread with the phone-keyed live
+  // messages instead of splitting under the raw LID number.
+  const conversationKey = canonicalConversationKey(chatJid, db);
   const hasBody = !!waMsg.message;
 
   if (hasBody) {

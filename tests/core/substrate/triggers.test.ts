@@ -37,6 +37,33 @@ describe('triggers core', () => {
     expect(kinds).toContain('trigger_created');
   });
 
+  it('QR-046: dedupe_key makes createTrigger idempotent for a LIVE (kind, dedupe_key)', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'dedupe', ownerJid: 'mw', actor: 'user' });
+    const base = {
+      beadId: bead.id, kind: 'poll.email' as const, spec: { source: 'gmail' as const, sender: 'x@y' },
+      reportChatJid: 'c', dedupeKey: 'daily-x', actor: 'user',
+    };
+    const first = createTrigger(db.raw, base);
+    const second = createTrigger(db.raw, base);
+    // Re-creating with the same (kind, dedupe_key) returns the SAME trigger, not a duplicate.
+    expect(second.id).toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(1);
+
+    // Precision: a DIFFERENT dedupe_key creates a new trigger.
+    const other = createTrigger(db.raw, { ...base, dedupeKey: 'daily-y' });
+    expect(other.id).not.toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(2);
+
+    // Precision: a DIFFERENT kind with the SAME dedupe_key creates a new trigger (index is (kind, dedupe_key)).
+    createTrigger(db.raw, { ...base, kind: 'poll.url', spec: { url: 'https://x.example.com', hash_mode: 'text' } });
+    expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
+
+    // Precision: NO dedupe_key never dedupes.
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(4);
+  });
+
   it('watch TTL clamps to maxHours', () => {
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'user' });
     const now = Math.floor(Date.now() / 1000);
@@ -159,6 +186,18 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
     expect(isSafeSqliteSql("ATTACH DATABASE '/etc/passwd' AS x")).toBe(false);
     expect(isSafeSqliteSql('PRAGMA query_only = OFF')).toBe(false);
     expect(isSafeSqliteSql('SELECT 1; SELECT 2')).toBe(false); // multi-statement
+  });
+
+  it('QR-026: isSafeSqliteSql rejects recursive CTEs (unbounded-CPU vector under query_only)', () => {
+    // A count/aggregate over a recursive CTE returns ONE row → the poller row-cap can't
+    // bound it, and node:sqlite DatabaseSync has no statement-time interrupt → whole-process
+    // freeze. Reject at validation so it never executes.
+    expect(
+      isSafeSqliteSql('WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r WHERE x<1000000000) SELECT count(*) FROM r'),
+    ).toBe(false);
+    expect(isSafeSqliteSql('with recursive cnt(n) as (select 1 union all select n+1 from cnt) select n from cnt')).toBe(false);
+    // A NON-recursive CTE remains allowed — only the recursive keyword is the CPU vector.
+    expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages LIMIT 10) SELECT * FROM recent')).toBe(true);
   });
 
   it('validateTriggerSpec rejects a poll.sqlite spec with ATTACH', () => {

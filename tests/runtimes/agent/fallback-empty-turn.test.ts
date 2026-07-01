@@ -145,6 +145,7 @@ function makeFakeQueue() {
   return {
     targetChatJid: 'fake@s.whatsapp.net',
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueResultText: vi.fn(),
     enqueueStreamingText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -423,6 +424,7 @@ describe('fallback_empty_turn alert — per-chat dedup', () => {
     return {
       targetChatJid: chatJid,
       enqueueText: vi.fn(),
+      getSenderToken: () => 'mock-sender-token',
       enqueueResultText: vi.fn(),
       enqueueStreamingText: vi.fn(),
       enqueueToolUpdate: vi.fn(),

@@ -148,6 +148,20 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
           deny('Bash command references paths or patterns outside the sandbox');
         }
 
+        // Bare '..' parent-directory traversal. The '../' blockedString above
+        // only catches the SLASHED form; \`cd .. && cat relative\` walks up out
+        // of allowedPaths with no slash and slipped through (QR-045). Match '..'
+        // ONLY as a standalone path component — bounded on each side by start/
+        // end, whitespace, a quote, '(', or a path/command separator (/ & | ;
+        // = :). '..' flanked by word chars on both sides is NOT a traversal, so
+        // git rev ranges (HEAD..main), brace ranges ({1..10}) and double-dots
+        // inside a word (a..b) are left alone. Still advisory-grade like the
+        // rest of this denylist — the sound fix is the OS sandbox (see the
+        // residual-bypass note in docs/configuration.md #agentoptionssandbox).
+        if (/(^|[\\s=:\"'(\\/&|;])\\.\\.($|[\\s\"'\\/&|;])/.test(cmd)) {
+          deny('Bash command uses \"..\" parent-directory traversal outside the sandbox');
+        }
+
         // Tilde expansion escapes the sandbox (\${HOME}/..., ~user/...). The
         // absolute-path regex below never sees a leading '/', so tilde forms
         // slipped through entirely. Deny any '~' used as a path: start-of-token

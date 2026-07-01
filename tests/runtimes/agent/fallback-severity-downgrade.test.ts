@@ -147,7 +147,7 @@ type Activation = {
   primaryProvider: string;
   fallbackProvider: string;
   fallbackModel: string | undefined;
-  reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+  reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error';
   resetAt: Date | null;
   activeUntil: number;
   extended: boolean;
@@ -161,7 +161,7 @@ type FallbackView = {
   pendingTurnActorJid: Map<string, string | undefined>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): Activation | null;
   scheduleFallbackReplay(args: {
     activation: Activation;
@@ -212,7 +212,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     loadFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     });
     const runtime = makeRuntime();
     view(runtime).restorePersistedFallbackWindow();
@@ -229,7 +229,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     loadFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     });
     const runtime = makeRuntime();
     view(runtime).restorePersistedFallbackWindow();
@@ -245,7 +245,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
   // opened the window) keeps its critical default — downgrade must be surgical.
   it('provider_fallback_activated keeps critical — it is the fault that opened the window', () => {
     const runtime = makeRuntime();
-    view(runtime).activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit');
+    view(runtime).activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable');
 
     const activated = alertsFor('provider_fallback_activated');
     expect(activated).toHaveLength(1);
@@ -261,7 +261,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'continue the task please');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
     v.replayTurnOnFallback = vi.fn(async () => {});
@@ -285,7 +285,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'continue the task please');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
     v.replayTurnOnFallback = vi.fn(async () => {});
@@ -310,7 +310,7 @@ describe('GAP 2 — expected-fallback severity downgrade', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'continue the task please');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
     v.replayTurnOnFallback = vi.fn(async () => {
@@ -400,7 +400,7 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     // Arm the fallback window so the runtime is serving opencode-cli.
-    v.activateProviderFallback(null, 'usage-limit');
+    v.activateProviderFallback(null, 'model-unavailable');
     vi.mocked(emitAlert).mockClear(); // clear activation alert
 
     // code=0 → onCrash not called (session-layer guarantee) → no handlePerChatCrash
@@ -415,7 +415,7 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     // the agent_respawn_failed alert fires — that's the operator-actionable fault.
     const runtime = makeRuntime();
     const v = view(runtime);
-    v.activateProviderFallback(null, 'usage-limit');
+    v.activateProviderFallback(null, 'model-unavailable');
     vi.mocked(emitAlert).mockClear();
 
     // Drive handlePerChatCrash directly — mirrors what onCrash callback does.
@@ -443,7 +443,7 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     // contract (no onCrash for code=0) and verify the runtime alert output.
     const runtime = makeRuntime();
     const v = view(runtime);
-    v.activateProviderFallback(null, 'usage-limit');
+    v.activateProviderFallback(null, 'model-unavailable');
     vi.mocked(emitAlert).mockClear();
 
     // No onCrash call — mirrors code=0 spawn-per-turn behavior.

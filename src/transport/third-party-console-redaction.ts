@@ -38,7 +38,11 @@ export function redactThirdPartyConsoleString(value: string): string {
     .replace(/<Buffer(?:\s+[0-9a-f]{2})+>/gi, '<Buffer redacted>')
     .replace(jidPattern(), '<jid:redacted>')
     .replace(
-      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization|bearer)\b\s*[:=]\s*[^\s"',}]+/gi,
+      // QR-080: extend the free-text keyed-secret rule to compound-snake
+      // (AWS_SESSION_TOKEN) and camelCase-glued (sessionToken/bearerToken) keys,
+      // matching the QR-052/QR-079-hardened coverage. (Structured object KEYS are
+      // already covered by SENSITIVE_KEY_RE; this closes the free-text-string path.)
+      /\b((?:[A-Za-z0-9]+_)*(?:client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passphrase|authorization|bearer|session|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)))\b\s*[:=]\s*[^\s"',}]+/gi,
       '$1=<redacted>',
     );
 }

@@ -87,6 +87,12 @@ def positive_env_int(name: str, default: int) -> int:
 
 INCIDENT_COOLDOWN_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS", 3600)
 BOT_ERRORS_DELIVERY_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", 10)
+# A transient WhatsApp-transport blip (send socket briefly down, "temporarily
+# disconnected") rides its own, far longer retry budget so a momentary outage
+# never burns the permanent dead-letter cap and strands a deliverable alert.
+# Default 240 transient tries × 300s ≈ 20h of coverage before fail-safe dead-letter.
+BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS", 240)
+BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS", 300)
 DEAD_LETTER_META_ALERT_THROTTLE_SECONDS = 3600  # at most one meta-alert per hour
 CLOCK_SKEW_TOLERANCE_SECONDS = 60  # tolerate up to 60s clock skew on clear events
 INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
@@ -1598,6 +1604,12 @@ def validate_bot_errors_target() -> None:
 
 
 def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
+    # Test seam: force a delivery failure with a caller-supplied error string so
+    # subprocess tests can drive the transient-vs-permanent failure routing
+    # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
+    dry_fail = os.environ.get("BOT_ERRORS_DRY_SEND_FAIL")
+    if dry_fail:
+        raise RuntimeError(dry_fail)
     dry_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE")
     if dry_capture:
         capture_path = Path(dry_capture)
@@ -1807,6 +1819,28 @@ def next_backoff(attempts: int) -> int | None:
     if attempts == 2:
         return 300
     return 900
+
+
+# Transient WhatsApp-transport signatures: the dispatcher's own send path could
+# not reach a *connected* socket (WA briefly disconnected / reconnecting), as
+# opposed to a permanent/content failure (unknown chat, malformed payload, target
+# mismatch). Transient failures are deferred and redelivered on transport
+# recovery; everything else still dead-letters at the permanent cap.
+_TRANSIENT_TRANSPORT_SIGNATURES = (
+    "temporarily disconnected",
+    "try again in a moment",
+    "connection closed",
+    "connection lost",
+    "not connected",
+    "socket hang up",
+    "websocket is not open",
+    "stream errored out",
+)
+
+
+def is_transient_transport_failure(error: str) -> bool:
+    lower = (error or "").lower()
+    return any(sig in lower for sig in _TRANSIENT_TRANSPORT_SIGNATURES)
 
 
 def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
@@ -4199,6 +4233,38 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         event = mark_failure(event, str(exc))
         attempts = int(event.get("delivery", {}).get("attempts") or 0)
         delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+
+        # --- BE-G5: transient-transport carve-out ---
+        # A momentary WhatsApp disconnect ("temporarily disconnected") is not a
+        # permanent delivery failure. Track it on its own counter, roll back the
+        # permanent attempt this try would otherwise consume, and re-queue for
+        # redelivery when transport recovers — so a transport blip never burns the
+        # dead-letter cap on a deliverable alert. A genuinely stuck transport still
+        # dead-letters once the (far larger) transient budget is exhausted, so a
+        # real undeliverable alert still surfaces (fail-safe).
+        if is_transient_transport_failure(str(exc)) and isinstance(delivery, dict):
+            transient_attempts = int(delivery.get("transientAttempts") or 0) + 1
+            delivery["transientAttempts"] = transient_attempts
+            if transient_attempts < BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS:
+                # This try did not advance the permanent attempt budget.
+                delivery["attempts"] = max(attempts - 1, 0)
+                delivery["status"] = "queued"
+                delivery["nextAttemptAtEpoch"] = int(time.time()) + BOT_ERRORS_TRANSIENT_BACKOFF_SECONDS
+                atomic_write_json(claimed, event)
+                retry_path = safe_child_path(paths["outbox"], path.name)
+                os.replace(claimed, retry_path)
+                fsync_parent(retry_path)
+                append_dispatch_log(paths, {
+                    "type": "send_deferred_transient",
+                    "eventId": event.get("id"),
+                    "path": str(retry_path),
+                    "attempts": delivery["attempts"],
+                    "transientAttempts": transient_attempts,
+                    "error": str(exc),
+                })
+                return False, f"transient_transport_deferred; transientAttempts={transient_attempts}; {exc}"
+            # Transient budget exhausted → fall through to the permanent path
+            # (email fallback + dead-letter) as a fail-safe.
 
         # --- F5: email fallback (attempts >= 3) with unavailability tracking ---
         email_status = "not_attempted"

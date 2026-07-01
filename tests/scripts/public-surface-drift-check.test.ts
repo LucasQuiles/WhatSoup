@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +86,19 @@ describe('public surface drift check', () => {
 
   it('passes for the live repository registry', () => {
     expect(findPublicSurfaceDrift({ cwd: repoRoot })).toEqual([]);
+  });
+
+  it('exposes the disposable canary artifact validator as an operator-facing npm proof surface', () => {
+    const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const registry = readFileSync(path.join(repoRoot, 'docs/public-surface.md'), 'utf8');
+
+    expect(pkg.scripts?.['canary:artifact-proof']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/disposable-client-canary-artifact.ts',
+    );
+    expect(registry).toContain('`cli:npm.canary-artifact-proof`');
+    expect(registry).toContain('`npm run canary:artifact-proof`');
   });
 
   it('flags a missing source path with row context', () => {

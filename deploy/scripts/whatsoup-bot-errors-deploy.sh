@@ -19,16 +19,16 @@ ROOT="${2:?missing <root>}"
 
 # F-id : path-relative-to-root : expected current-main sha256
 FILES=(
-  "deploy/scripts/bot-errors-dispatcher.py:84763cd9f4e860aeb778c87bef5579441088425e80abadaafcda091505a72043"
+  "deploy/scripts/bot-errors-dispatcher.py:989db625c96e14aa30a953e87c7eb43289b2e1d5c4c117a6d985907732d95c05"
   "deploy/scripts/bot-errors-health-check.py:b07fbec272c8dc2112677b09eb1b7fd0677bbda41f937a2f9bfef809bd5c5a73"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py:54005e76acf3876772e53dd38e6d000df4c46938de210c683760697197d77bc4"
   "deploy/scripts/bot-errors-q-loop.py:de61c690343d334b508d2852bb5dca4558f2f26796bf355af3d582a1c6bba50a"
-  "src/lib/bot-errors-outbox.ts:b866bf12d5c9b4bb350f494d88588ebe3c2bcfba2cd25c95093f104e3db75f25"
+  "src/lib/bot-errors-outbox.ts:f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc"
   "deploy/scripts/bot-errors-collector.py:8d83e03b11ecedcb511caf27742a15d53b7a5ca70a9af4db6e3d2f25f2e8ea33"
   "deploy/scripts/bot-errors-emit.py:bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad"
   "deploy/scripts/bot-errors-runner.py:f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030"
   "deploy/scripts/lib/__init__.py:438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
-  "deploy/scripts/lib/bot_errors_redaction.py:a09825da92814c3f9afaa475c915c120c4db274384f2c82352792d25e901ad62"
+  "deploy/scripts/lib/bot_errors_redaction.py:274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301"
   "deploy/scripts/lib/bot_errors_daily_health.py:45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
 )
 

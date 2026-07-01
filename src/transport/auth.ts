@@ -21,6 +21,7 @@ import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { classifyPairNumber, maskPairingCode, pairingEmissionLine, pairingGate } from './pairing.ts';
 
 // ---------------------------------------------------------------------------
 // Lock check
@@ -51,6 +52,7 @@ const timeoutHandle = setTimeout(() => {
 }, TIMEOUT_MS);
 
 let restartRequiredTimestamps: number[] = [];
+let pairingRequested = false;
 
 function recordRestartRequired(statusCode: number | undefined): number {
   if (statusCode !== DisconnectReason.restartRequired) return 0;
@@ -89,7 +91,7 @@ async function startSocket(): Promise<void> {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER).reason === 'unset') {
       // Emit raw QR for fleet SSE consumers (stdout = structured JSON only)
       process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
       // Terminal QR for interactive use — redirect to stderr so stdout stays clean
@@ -151,10 +153,45 @@ async function startSocket(): Promise<void> {
       await startSocket();
     }
   });
+
+  // Pairing-code mode — inert unless WHATSOUP_PAIR_NUMBER is set (QR mode is
+  // unaffected). Deferred + single-fire so repeated connection updates never
+  // request multiple codes; skipped when creds are already registered.
+  const pgate = pairingGate({
+    rawNumber: process.env.WHATSOUP_PAIR_NUMBER,
+    registered: Boolean(state.creds.registered),
+    alreadyRequested: pairingRequested,
+  });
+  if (pgate.request) {
+    pairingRequested = true;
+    setTimeout(async () => {
+      try {
+        const cls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
+        if (!cls.ok) return;
+        const code = await sock.requestPairingCode(cls.number);
+        // Real code: stdout automation channel only (consumed by the relink orchestrator).
+        process.stdout.write(pairingEmissionLine(code) + '\n');
+        // Logs/human: masked only — never the full code, never the phone number.
+        console.error(
+          `Pairing code ready (masked ${maskPairingCode(code)}). Enter it on the primary phone: ` +
+          `Linked devices > Link a device > Link with phone number.`,
+        );
+      } catch (err) {
+        console.error('requestPairingCode failed:', redactAuthCliText(errorMessage(err)));
+        pairingRequested = false;
+      }
+    }, 2_500);
+  }
 }
 
 async function main(): Promise<void> {
+  const pairCls = classifyPairNumber(process.env.WHATSOUP_PAIR_NUMBER);
+  if (pairCls.reason === 'invalid') {
+    console.error('FATAL: WHATSOUP_PAIR_NUMBER is set but not a valid number (expected 8-15 digits).');
+    process.exit(1);
+  }
   console.error('Starting WhatsApp authentication...');
+  console.error(`Auth mode: ${pairCls.ok ? 'pairing-code' : 'QR'}`);
   console.error(`Auth directory: ${redactAuthCliText(config.authDir)}`);
   await startSocket();
 }

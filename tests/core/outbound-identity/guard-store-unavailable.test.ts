@@ -18,7 +18,7 @@ function throwingStore(throwsTimes: number): IdentityStore {
   let calls = 0;
   return {
     resolveLid: () => null,
-    isKnownGroup: () => true,
+    isApprovedGroup: () => true,
     isWarm: () => {
       calls += 1;
       if (calls <= throwsTimes) throw new Error('SQLITE_BUSY: database is locked');

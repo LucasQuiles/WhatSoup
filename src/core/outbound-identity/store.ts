@@ -39,8 +39,14 @@ export class SqliteIdentityStore implements IdentityStore {
     return inbound !== undefined;
   }
 
-  isKnownGroup(groupJid: string): boolean {
-    const row = this.raw.prepare('SELECT 1 FROM groups WHERE jid = ? LIMIT 1').get(groupJid);
+  isApprovedGroup(groupJid: string): boolean {
+    // QR-038: operator approval, NOT membership. A bare `groups` row is auto-created on
+    // join (handleGroupsUpsert on 'groups.upsert'), so membership alone is too weak an
+    // egress bar — require an access_list group entry explicitly 'allowed' (parity with the
+    // auto-respond gate), so the anti-exfil floor for groups matches the warm-only DM bar.
+    const row = this.raw.prepare(
+      "SELECT 1 FROM access_list WHERE subject_type = 'group' AND subject_id = ? AND status = 'allowed' LIMIT 1",
+    ).get(groupJid);
     return row !== undefined;
   }
 }

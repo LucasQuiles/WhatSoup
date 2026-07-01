@@ -5,6 +5,15 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(),
 }));
 
+// Mock the logger so the QR-104 observability warn can be asserted. Hoisted so
+// the vi.mock factory (which is hoisted above imports) can reference it.
+const { mockLog } = vi.hoisted(() => ({
+  mockLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+vi.mock('../../../../src/logger.ts', () => ({
+  createChildLogger: () => mockLog,
+}));
+
 import { resolveApiKey } from '../../../../src/runtimes/agent/providers/api-key-resolver.ts';
 import { lookupCredential } from '../../../../src/lib/keyring.ts';
 
@@ -130,6 +139,64 @@ describe('resolveApiKey', () => {
 
       expect(result).toBe('env-key');
       expect(mockedLookup).not.toHaveBeenCalled();
+    });
+  });
+
+  // QR-104: the configured-service → env fallback must be OBSERVABLE, so a
+  // silent wrong-account (account-isolation break) is detectable to operators.
+  describe('observability (QR-104)', () => {
+    it('warns when a configured service misses and the env fallback is used', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue(null);
+
+      const result = resolveApiKey({
+        service: 'missing-service',
+        envVar: 'ANTHROPIC_API_KEY',
+      });
+
+      // Behavior is unchanged (still returns the env key)…
+      expect(result).toBe('env-key');
+      // …but the fallback is now logged with the service + envVar for triage.
+      expect(mockLog.warn).toHaveBeenCalledTimes(1);
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        { service: 'missing-service', envVar: 'ANTHROPIC_API_KEY' },
+        expect.stringContaining('keyring lookup missed'),
+      );
+    });
+
+    it('does NOT warn when the keyring hit resolves the key (no fallback)', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue('keyring-key');
+
+      const result = resolveApiKey({
+        service: 'good-service',
+        envVar: 'ANTHROPIC_API_KEY',
+      });
+
+      expect(result).toBe('keyring-key');
+      expect(mockLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('does NOT warn when the service misses AND the env is also empty (visible missing-key, not silent)', () => {
+      // No ANTHROPIC_API_KEY set → fallback yields '' → surfaced downstream, no warn.
+      mockedLookup.mockReturnValue(null);
+
+      const result = resolveApiKey({
+        service: 'missing-service',
+        envVar: 'ANTHROPIC_API_KEY',
+      });
+
+      expect(result).toBe('');
+      expect(mockLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('does NOT warn when no service is configured (env is the intended source)', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+
+      const result = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
+
+      expect(result).toBe('env-key');
+      expect(mockLog.warn).not.toHaveBeenCalled();
     });
   });
 });

@@ -1249,4 +1249,78 @@ describe('bot-errors-dispatcher', () => {
     expect(readdirSync(join(tmpRoot, 'quarantine'))).toHaveLength(0);
     expect(readdirSync(join(tmpRoot, 'sent'))).toHaveLength(0);
   });
+
+  // BE-G5: a transient WhatsApp-transport disconnect (the dispatcher's own send
+  // socket briefly down) must not be conflated with a permanent/content failure.
+  // It rides its own retry budget and redelivers when transport recovers, instead
+  // of burning the 10-attempt permanent cap and dead-lettering a deliverable alert.
+  it('defers a transient WhatsApp-disconnect delivery failure instead of dead-lettering it at the attempt cap', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const outbox = join(tmpRoot, 'outbox');
+    const deadLetter = join(tmpRoot, 'dead-letter');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    // attempts: 9 → the next attempt reaches the permanent cap (10). A permanent
+    // failure here dead-letters; a transient transport blip must not.
+    writeEvent(tmpRoot, 'critical', {
+      id: 'transient-disconnect-test',
+      summary: 'transient disconnect must stay deliverable',
+      delivery: { attempts: 9, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: 'WhatsApp is temporarily disconnected. Try again in a moment.',
+      },
+      encoding: 'utf8',
+    });
+
+    const deadFiles = existsSync(deadLetter) ? readdirSync(deadLetter).filter((f) => f.endsWith('.json')) : [];
+    expect(deadFiles).toHaveLength(0);
+    const queuedFiles = readdirSync(outbox).filter((f) => f.endsWith('.json'));
+    expect(queuedFiles).toHaveLength(1);
+    const queued = JSON.parse(readFileSync(join(outbox, queuedFiles[0]!), 'utf8')) as {
+      delivery: { attempts: number; status: string; transientAttempts?: number };
+    };
+    // The transient try is tracked on its own counter and does NOT advance the
+    // permanent attempt budget that drives email fallback + dead-letter.
+    expect(queued.delivery.transientAttempts).toBeGreaterThanOrEqual(1);
+    expect(queued.delivery.attempts).toBeLessThan(10);
+    expect(queued.delivery.status).toBe('queued');
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "send_deferred_transient"');
+  });
+
+  // BE-G5 fail-safe: a genuinely-undeliverable (permanent/content) failure must
+  // STILL dead-letter at the cap so a real undeliverable alert surfaces — the
+  // transient carve-out must not over-suppress.
+  it('still dead-letters a permanent delivery failure once the attempt cap is exhausted', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const deadLetter = join(tmpRoot, 'dead-letter');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'permanent-failure-test',
+      summary: 'permanent failure must dead-letter',
+      delivery: { attempts: 9, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    });
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_FAIL: 'send_message returned error: chat not found',
+      },
+      encoding: 'utf8',
+    });
+
+    const deadFiles = existsSync(deadLetter) ? readdirSync(deadLetter).filter((f) => f.endsWith('.json')) : [];
+    expect(deadFiles).toHaveLength(1);
+    // The dead-lettered record is the permanent-failure event itself (a fresh
+    // dead-letter meta-alert is separately queued to the outbox — expected).
+    const deadRecord = JSON.parse(readFileSync(join(deadLetter, deadFiles[0]!), 'utf8')) as { event: { id: string } };
+    expect(deadRecord.event.id).toBe('permanent-failure-test');
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "dead_lettered"');
+  });
 });
