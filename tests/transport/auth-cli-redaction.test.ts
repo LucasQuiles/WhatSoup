@@ -83,3 +83,28 @@ describe('auth CLI redaction', () => {
     expect(elapsedMs).toBeLessThan(1000);
   });
 });
+
+describe('auth CLI redaction — compound/camelCase secret keys (QR-080)', () => {
+  // Fixture VALUES carry an `example` marker so the repo-hygiene secret-assignment
+  // guard treats them as obvious non-secrets; still 8+ char single tokens so the
+  // redactor's value match fires.
+  const LEAKED_BEFORE: Array<[string, string]> = [
+    ['AWS multi-underscore', 'AWS_SESSION_TOKEN=exampleAwsSessionTokenValue01'],
+    ['camelCase session', 'sessionToken=exampleSessionTokenValue02'],
+    ['camelCase bearer', 'bearerToken=exampleBearerTokenValue03'],
+    ['aws secret access key', 'aws_secret_access_key=exampleAwsSecretAccessKey04'],
+  ];
+  it.each(LEAKED_BEFORE)('redacts compound/camelCase secret in failure text: %s', (_l, input) => {
+    const out = redactAuthCliText(`Auth failed: ${input}`);
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain(input.split('=')[1]);
+  });
+  it('still redacts the original keys (no regression)', () => {
+    expect(redactAuthCliText('token=exampleBareTokenValue05')).toContain('[REDACTED]');
+    expect(redactAuthCliText('client_secret=exampleClientSecretValue06')).toContain('[REDACTED]');
+  });
+  it.each(['retry_count=12345678', 'patch=v2', 'a session_id field'])(
+    'does not over-redact benign text: %s',
+    (input) => { expect(redactAuthCliText(input)).toBe(input); },
+  );
+});

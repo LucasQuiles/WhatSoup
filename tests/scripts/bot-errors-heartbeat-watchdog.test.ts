@@ -414,6 +414,38 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.evidence).toContain('reason=crash');
   });
 
+  it('warns when q-loop heartbeat is fresh but awaiting-Q behavior is stale', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const qLoopState = join(tmpRoot, 'q-loop-state.json');
+    writePrivateJson(qLoopState, {
+      updated_at: 1895,
+      phase: 'monitoring',
+      awaiting_q_since: 100,
+      last_q_message_at: 0,
+    });
+
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_Q_LOOP_STATE: qLoopState,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'q_loop',
+      BOT_ERRORS_DRY_NOW: '1900',
+      BOT_ERRORS_MAX_Q_LOOP_AGE: '60',
+      BOT_ERRORS_MAX_AWAITING_Q_AGE: '1200',
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.severity).toBe('warning');
+    expect(events[0]!.alertSource).toBe('q_loop:awaiting_q');
+    expect(events[0]!.summary).toBe('BOT ERRORS heartbeat watchdog stale: q_loop:awaiting_q');
+    expect(events[0]!.evidence).toContain('q-loop awaiting Q stale');
+    expect(events[0]!.evidence).toContain('age_seconds=1800');
+    expect(events[0]!.evidence).toContain('phase=monitoring');
+    expect(events[0]!.evidence).not.toContain('@g.us');
+    expect(events[0]!.evidence).not.toContain('@s.whatsapp.net');
+    expect(events[0]!.evidence).not.toContain('@lid');
+  });
+
   it('emits when daily health cadence is missing or stale', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
 

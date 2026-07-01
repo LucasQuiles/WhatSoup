@@ -448,6 +448,30 @@ def test_expand_specs_returns_unique_paths_with_required_fields():
     assert {s.risk for s in specs} <= {"high", "medium", "low"}, {s.risk for s in specs}
 
 
+def test_expand_specs_tracks_maclab_launchd_prefix_not_retired_host_prefix():
+    with tempfile.TemporaryDirectory(prefix="config-surface-doctor-") as tmp_dir:
+        home = Path(tmp_dir)
+        launch_agents = home / "Library" / "LaunchAgents"
+        launch_agents.mkdir(parents=True)
+        maclab_label = "com.maclab.sched.whatsoup-qregistry-loop.plist"
+        retired_label = "com." + "mq" + "mac.sched.whatsoup-qregistry-loop.plist"
+        (launch_agents / maclab_label).write_text(PLIST_OK, encoding="utf-8")
+        (launch_agents / retired_label).write_text(PLIST_OK, encoding="utf-8")
+
+        orig_home = probe.HOME
+        probe.HOME = home
+        try:
+            launchd_paths = {
+                spec.path.name for spec in probe.expand_specs()
+                if spec.harness == "launchd" and spec.surface == "scheduled_service"
+            }
+        finally:
+            probe.HOME = orig_home
+
+    assert maclab_label in launchd_paths, launchd_paths
+    assert retired_label not in launchd_paths, launchd_paths
+
+
 # ---------------------------------------------------------------------------
 # main(): report shape, both flags, include-missing behavior
 # ---------------------------------------------------------------------------

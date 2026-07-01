@@ -5,6 +5,17 @@
  * oriented, but flush the decoder and remaining buffer at EOF so the final
  * frame is not lost.
  */
+/**
+ * QR-064: hard cap on the retained partial-line buffer. A compromised or
+ * malfunctioning provider can stream one unterminated `data:` line (no `\n`),
+ * which would otherwise grow `buffer` without bound → parent-process OOM.
+ * Mirrors the subprocess-stdout cap in session.ts (1 MiB). A line legitimately
+ * larger than this never occurs under the SSE event contract; exceeding it is
+ * abusive, so we abort the stream — the throw propagates to the managed-loop
+ * caller's crash/degrade path (session.ts) rather than buffering unbounded.
+ */
+const MAX_SSE_BUF = 1024 * 1024;
+
 export async function* readSseDataLines(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<string> {
@@ -16,6 +27,15 @@ export async function* readSseDataLines(
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = flush ? '' : lines.pop() ?? '';
+
+    // Abort an unbounded no-newline line before it exhausts memory. Checked on
+    // the RETAINED partial line (`buffer`) so many small newline-terminated
+    // frames — which never retain more than the last partial — are unaffected.
+    if (buffer.length > MAX_SSE_BUF) {
+      throw new Error(
+        `SSE data line exceeded ${MAX_SSE_BUF} bytes without a newline — aborting unbounded buffer`,
+      );
+    }
 
     for (const rawLine of lines) {
       const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;

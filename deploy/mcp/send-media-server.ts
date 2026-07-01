@@ -127,6 +127,9 @@ function sendToBridge(
     const client = createConnection(socketPath, () => {
       client.write(JSON.stringify(request) + '\n');
     });
+    // QR-053: UTF-8-decode the line-delimited JSON-RPC response so a multibyte
+    // char split across a read boundary is not silently corrupted to U+FFFD.
+    client.setEncoding('utf8');
 
     let buf = '';
     client.on('data', (chunk) => {

@@ -48,3 +48,30 @@ export function extractRawMime(rawMessage: unknown, contentType: string): string
   }
   return msgNode?.mimetype as string | undefined;
 }
+
+/**
+ * QR-057: Extract the SERVER-DECLARED byte size (`fileLength`) from a raw Baileys message,
+ * so an oversized media can be rejected BEFORE downloadMediaMessage buffers the whole blob
+ * into memory. Baileys carries fileLength as a Long (long.js), a number, or a numeric string;
+ * coerce robustly. Returns undefined when absent/unparseable (caller then falls back to the
+ * existing post-download byte cap). NOTE: this is the attacker-DECLARED size — it stops honest
+ * large media (and a naive over-declarer) but a sender who understates fileLength is still
+ * bounded only by the 30s download timeout + WhatsApp's server-side upload ceiling.
+ */
+export function extractRawFileLength(rawMessage: unknown, contentType: string): number | undefined {
+  if (!rawMessage) return undefined;
+  const raw = rawMessage as any;
+  const key = RAW_MSG_KEY[contentType];
+  if (!key) return undefined;
+  let msgNode = raw?.message?.[key];
+  if (contentType === 'document' && !msgNode) {
+    msgNode = raw?.message?.documentWithCaptionMessage?.message?.documentMessage;
+  }
+  const fileLength: unknown = msgNode?.fileLength;
+  if (fileLength == null) return undefined;
+  const n =
+    typeof fileLength === 'object' && typeof (fileLength as { toNumber?: unknown }).toNumber === 'function'
+      ? (fileLength as { toNumber: () => number }).toNumber()
+      : Number(fileLength);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}

@@ -32,16 +32,13 @@ export interface PrimaryModelProbeAdapterDeps {
   fetch?: typeof fetch;
 }
 
-interface ModelsListResponse {
-  data?: Array<{ id?: unknown }>;
-}
-
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
 export function createPrimaryModelProbeAdapters(
   providerConfig?: Record<string, unknown>,
@@ -161,28 +158,83 @@ async function probeApiModelAccess(
   const fetchImpl = deps.fetch ?? globalThis.fetch;
   if (!fetchImpl) return { status: 'provider_unavailable' };
 
-  const url = `${baseUrlFor(provider, providerConfig)}/models${provider === 'anthropic-api' ? '?limit=100' : ''}`;
   try {
-    const response = await fetchImpl(url, {
-      headers: apiHeaders(provider, apiKey),
+    const response = await fetchImpl(apiGenerationUrl(provider, providerConfig), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...apiHeaders(provider, apiKey),
+      },
+      body: JSON.stringify(apiGenerationProbeBody(provider, model, providerConfig)),
       signal: AbortSignal.timeout(API_PROBE_TIMEOUT_MS),
     });
-    if (response.status === 401 || response.status === 403) return { status: 'credential_failed' };
-    if (response.status === 404) return { status: 'not_found' };
-    if (response.status === 408 || response.status === 504) return { status: 'timeout' };
-    if (!response.ok) return { status: 'provider_unavailable' };
-
-    const body = await response.json().catch(() => null) as ModelsListResponse | null;
-    const ids = (body?.data ?? [])
-      .map((entry) => entry.id)
-      .filter((id): id is string => typeof id === 'string');
-    return ids.includes(model) ? { status: 'found' } : { status: 'not_found' };
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      return mapApiGenerationFailure(response.status, errText);
+    }
+    return { status: 'found' };
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
     return name === 'AbortError' || name === 'TimeoutError'
       ? { status: 'timeout' }
       : { status: 'provider_unavailable' };
   }
+}
+
+function apiGenerationUrl(
+  provider: 'openai-api' | 'anthropic-api',
+  providerConfig: Record<string, unknown> | undefined,
+): string {
+  const baseUrl = baseUrlFor(provider, providerConfig);
+  return provider === 'openai-api'
+    ? `${baseUrl}/chat/completions`
+    : `${baseUrl}/messages`;
+}
+
+function apiGenerationProbeBody(
+  provider: 'openai-api' | 'anthropic-api',
+  model: string,
+  providerConfig: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (provider === 'openai-api') {
+    return {
+      model,
+      messages: [{ role: 'user', content: API_MODEL_PROBE_PROMPT }],
+      max_tokens: 1,
+      stream: false,
+    };
+  }
+  return {
+    model,
+    max_tokens: 1,
+    messages: [{ role: 'user', content: API_MODEL_PROBE_PROMPT }],
+    stream: false,
+  };
+}
+
+function mapApiGenerationFailure(status: number, errText: string): ApiModelAccessProbeResult {
+  if (status === 408 || status === 504) return { status: 'timeout' };
+  const kind = classifyProviderFailure(errText);
+  switch (kind) {
+    case 'auth-required':
+      return { status: 'credential_failed' };
+    case 'model-unavailable':
+      return { status: 'not_found' };
+    case 'usage-limit':
+    case 'rate-limit':
+    case 'server-error':
+    case 'transient-network':
+      return { status: 'provider_unavailable' };
+    case 'context-overflow':
+    case 'policy-block':
+      return { status: 'unknown', reason: kind };
+    case null:
+      break;
+  }
+  if (status === 401 || status === 403) return { status: 'credential_failed' };
+  if (status === 404) return { status: 'not_found' };
+  if (status === 429 || status >= 500) return { status: 'provider_unavailable' };
+  return { status: 'provider_unavailable' };
 }
 
 function resolveProviderApiKey(

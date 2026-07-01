@@ -216,11 +216,11 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'provider_unavailable' });
   });
 
-  it('uses the default API-key resolver and OpenAI endpoint when no resolver is injected', async () => {
+  it('uses the default API-key resolver and OpenAI generation endpoint when no resolver is injected', async () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-secret';
     const fetchImpl = vi.fn(async () => new Response(
-      JSON.stringify({ data: [{ id: 'api-live-model' }] }),
+      JSON.stringify({ choices: [{ message: { content: 'OK' } }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
@@ -237,16 +237,26 @@ describe('createPrimaryModelProbeAdapters', () => {
     }
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/models',
+      'https://api.openai.com/v1/chat/completions',
       expect.objectContaining({
-        headers: { Authorization: 'Bearer sk-test-secret' },
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer sk-test-secret',
+        },
+        body: JSON.stringify({
+          model: 'api-live-model',
+          messages: [{ role: 'user', content: 'Reply with OK only.' }],
+          max_tokens: 1,
+          stream: false,
+        }),
       }),
     );
   });
 
-  it('uses account-authenticated OpenAI model listings without leaking the key into the result', async () => {
+  it('uses account-authenticated OpenAI generation without leaking the key into the result', async () => {
     const fetchImpl = vi.fn(async () => new Response(
-      JSON.stringify({ data: [{ id: 'api-live-model' }] }),
+      JSON.stringify({ choices: [{ message: { content: 'OK' } }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ));
     const adapters = createPrimaryModelProbeAdapters(
@@ -262,16 +272,59 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'found' });
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      'https://openai.example/v1/models',
+      'https://openai.example/v1/chat/completions',
       expect.objectContaining({
+        method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer sk-test-secret' }),
+        body: expect.stringContaining('"model":"api-live-model"'),
       }),
     );
   });
 
-  it('uses Anthropic model listings with default endpoint and provider headers', async () => {
+  it('uses a generation request for OpenAI recovery so listed-but-quota-limited models are not usable', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      const href = String(url);
+      if (href.endsWith('/models')) {
+        return new Response(
+          JSON.stringify({ data: [{ id: 'api-live-model' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: { message: 'insufficient_quota: account quota exceeded' } }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(init).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer sk-test-secret',
+      }),
+    });
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      model: 'api-live-model',
+      messages: [{ role: 'user', content: 'Reply with OK only.' }],
+      max_tokens: 1,
+      stream: false,
+    });
+  });
+
+  it('uses Anthropic generation with default endpoint and provider headers', async () => {
     const fetchImpl = vi.fn(async () => new Response(
-      JSON.stringify({ data: [{ id: 'claude-live-model' }] }),
+      JSON.stringify({ content: [{ type: 'text', text: 'OK' }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ));
     const resolveApiKey = vi.fn(() => 'anthropic-test-secret');
@@ -289,12 +342,20 @@ describe('createPrimaryModelProbeAdapters', () => {
       envVar: 'ANTHROPIC_API_KEY',
     });
     expect(fetchImpl).toHaveBeenCalledWith(
-      'https://api.anthropic.com/v1/models?limit=100',
+      'https://api.anthropic.com/v1/messages',
       expect.objectContaining({
+        method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'x-api-key': 'anthropic-test-secret',
           'anthropic-version': '2023-06-01',
         },
+        body: JSON.stringify({
+          model: 'claude-live-model',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'Reply with OK only.' }],
+          stream: false,
+        }),
       }),
     );
   });
@@ -319,7 +380,8 @@ describe('createPrimaryModelProbeAdapters', () => {
     [408, { status: 'timeout' }],
     [500, { status: 'provider_unavailable' }],
     [504, { status: 'timeout' }],
-  ] as const)('maps API model-list HTTP %s to provider status', async (status, expected) => {
+    [429, { status: 'provider_unavailable' }],
+  ] as const)('maps API generation HTTP %s to provider status', async (status, expected) => {
     const fetchImpl = vi.fn(async () => new Response('', { status }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       fetch: fetchImpl as unknown as typeof fetch,
@@ -331,10 +393,10 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual(expected);
   });
 
-  it('maps authenticated model-list misses to not_found', async () => {
+  it('maps authenticated model errors to not_found', async () => {
     const fetchImpl = vi.fn(async () => new Response(
-      JSON.stringify({ data: [{ id: 'api-other-model' }] }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
+      JSON.stringify({ error: { message: 'model_not_found: missing model' } }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
     ));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       fetch: fetchImpl as unknown as typeof fetch,
@@ -346,7 +408,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'not_found' });
   });
 
-  it('maps unreadable model-list JSON to not_found rather than throwing', async () => {
+  it('does not parse successful generation bodies while checking usability', async () => {
     const fetchImpl = vi.fn(async () => new Response('{not-json', {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -358,7 +420,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     await expect(
       adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
-    ).resolves.toEqual({ status: 'not_found' });
+    ).resolves.toEqual({ status: 'found' });
   });
 
   it('maps non-Error fetch throws to provider_unavailable', async () => {

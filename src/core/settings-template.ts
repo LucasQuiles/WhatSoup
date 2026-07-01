@@ -57,10 +57,17 @@ export const REQUIRED_DENY: readonly string[] = Object.freeze([
   'mcp__claude_ai_Gmail__label_thread',
   'mcp__claude_ai_Gmail__unlabel_message',
   'mcp__claude_ai_Gmail__unlabel_thread',
+  'mcp__claude_ai_Gmail__apply_sensitive_message_label',
+  'mcp__claude_ai_Gmail__apply_sensitive_thread_label',
   'mcp__claude_ai_Google_Calendar__create_event',
   'mcp__claude_ai_Google_Calendar__update_event',
   'mcp__claude_ai_Google_Calendar__delete_event',
   'mcp__claude_ai_Google_Calendar__respond_to_event',
+  // QR-029: Google Drive write tools — the connector is allowed (mcp__claude_ai_*),
+  // so without an explicit deny these created/copied files in the user's Drive,
+  // breaking the "Google Workspace read-only" floor (read tools stay allowed).
+  'mcp__claude_ai_Google_Drive__create_file',
+  'mcp__claude_ai_Google_Drive__copy_file',
 
   // Microsoft 365 mutation tools.
   'mcp__plugin_microsoft_365_microsoft_365__add-attachment',

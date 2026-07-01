@@ -22,6 +22,20 @@ vi.mock('node:dns', async (importOriginal) => {
 });
 
 describe('ssrf-fetch — host/IP classification', () => {
+  it('QR-032: isPrivateHost blocks NAT64-wrapped private/metadata addresses (hex form)', () => {
+    // 64:ff9b::/96 (RFC 6052) embeds an IPv4 in the last 32 bits. The dotted form
+    // is already caught; the HEX form previously PASSED the guard (SSRF).
+    expect(isPrivateHost('64:ff9b::a9fe:a9fe')).toBe(true);   // == 169.254.169.254 (cloud metadata)
+    expect(isPrivateHost('64:ff9b::7f00:1')).toBe(true);      // == 127.0.0.1 (loopback)
+    expect(isPrivateHost('64:ff9b:0:0:0:0:a9fe:a9fe')).toBe(true); // uncompressed form
+    expect(isPrivateHost('[64:ff9b::a9fe:a9fe]')).toBe(true); // bracketed URL-host form
+    expect(isPrivateHost('64:ff9b::169.254.169.254')).toBe(true); // dotted (already blocked, regression-lock)
+    // Precision: a normal GLOBAL IPv6 whose last 32 bits look like a private IPv4
+    // must NOT be misclassified as that IPv4.
+    expect(isPrivateHost('2001:db8::a9fe:a9fe')).toBe(false);
+    expect(isPrivateHost('64:ff9c::a9fe:a9fe')).toBe(false);  // adjacent prefix, NOT NAT64
+  });
+
   it('isPrivateHost blocks loopback, RFC1918, and link-local literals', () => {
     expect(isPrivateHost('localhost')).toBe(true);
     expect(isPrivateHost('127.0.0.1')).toBe(true);

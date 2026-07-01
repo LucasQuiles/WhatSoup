@@ -16,7 +16,7 @@ import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { IncomingMessage } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
-import { extractRawMime } from '../../core/media-mime.ts';
+import { extractRawMime, extractRawFileLength } from '../../core/media-mime.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -102,14 +102,16 @@ export async function prepareContentForAgent(msg: IncomingMessage, db?: Database
     return content || `[${contentType} message received]`;
   }
 
-  // For documents, try to extract the real MIME type from the raw WhatsApp message
-  let downloadMime = typeInfo.mime;
-  if (contentType === 'document') {
-    downloadMime = extractRawMime(msg.rawMessage, 'document') ?? typeInfo.mime;
-  }
+  // QR-061: extract the real MIME from the raw WhatsApp message for ANY downloadable media
+  // type (image/audio/video/document), mirroring the chat runtime (processor.ts, #1074).
+  // extractRawMime returns undefined for types it does not cover (e.g. sticker) → falls back
+  // to the mimeMap default. Previously only documents used the real MIME, so an M4A/WebM voice
+  // note was pinned to the hardcoded 'audio/ogg' and uploaded to OpenAI Whisper mislabeled,
+  // degrading transcription (result.mimeType flows from this into transcribeAudio).
+  const downloadMime = extractRawMime(msg.rawMessage, contentType) ?? typeInfo.mime;
 
   // Download the file
-  const result = await downloadMedia(downloadFn, downloadMime);
+  const result = await downloadMedia(downloadFn, downloadMime, extractRawFileLength(msg.rawMessage, contentType));
   if (!result) {
     return `[${contentType} — download failed]${content ? '\n' + content : ''}`;
   }
