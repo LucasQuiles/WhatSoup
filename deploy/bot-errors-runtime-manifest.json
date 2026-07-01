@@ -219,6 +219,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/render-watchdog.py",
+      "sha256": "be0fb4a07bd7a1962a115924e430a749771ae718dd5a5dc76856eb48054ba290",
+      "mustContain": [
+        "PLACEHOLDER_TOKENS",
+        "EXIT_UNSUBSTITUTED",
+        "EXIT_BAD_PORT",
+        "def cmd_render",
+        "def cmd_verify",
+        "find_placeholders"
+      ]
+    },
+    {
       "path": "deploy/scripts/bot-errors-selfcheck.py",
       "sha256": "540151d8557e62fcdfd78524e47ad4617f378c4d368c567beb6b787cc8f4fb16",
       "mustContain": [
