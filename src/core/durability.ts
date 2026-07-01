@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
+import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { config } from '../config.ts';
 
@@ -67,6 +68,14 @@ export interface ActiveSessionCheckpointRow {
   session_status: string;
 }
 
+export type ContinuityCandidateReason =
+  | 'crash_reclaim_no_terminal_outbound'
+  | 'runtime_fault_no_terminal_outbound';
+
+export type ContinuityCandidateSource =
+  | 'pre_connect_recovery'
+  | 'runtime_fault_disarm';
+
 export interface RecoveryStats {
   inboundReplayed: number;
   outboundReconciled: number;
@@ -124,6 +133,7 @@ type DurabilityStatements = {
   markTurnDone: PreparedStatement;
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
+  markContinuityCandidate: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
@@ -152,6 +162,7 @@ type DurabilityStatements = {
   markToolReplayed: PreparedStatement;
   markRecoveredToolQuarantined: PreparedStatement;
   getProcessingInboundEvents: PreparedStatement;
+  getTurnDoneInboundEvents: PreparedStatement;
   getTerminalOutboundForInbound: PreparedStatement;
   getStaleSubmitted: PreparedStatement;
   getMessageByWaMessageId: PreparedStatement;
@@ -183,6 +194,13 @@ export class DurabilityEngine {
       ),
       markInboundFailed: prepare(
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error' WHERE seq = ?`,
+      ),
+      markContinuityCandidate: prepare(
+        `UPDATE inbound_events
+         SET continuity_candidate_reason = ?,
+             continuity_candidate_source = ?,
+             continuity_candidate_marked_at = COALESCE(continuity_candidate_marked_at, datetime('now'))
+         WHERE seq = ? AND continuity_candidate_reason IS NULL`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -283,6 +301,11 @@ export class DurabilityEngine {
       getProcessingInboundEvents: prepare(
         `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
       ),
+      // QR-035: events stranded at 'turn_done' (turn completed but
+      // markInboundComplete didn't run before a crash) — recovery finalizes them.
+      getTurnDoneInboundEvents: prepare(
+        `SELECT seq FROM inbound_events WHERE processing_status = 'turn_done'`,
+      ),
       getTerminalOutboundForInbound: prepare(
         `SELECT id FROM outbound_ops
          WHERE source_inbound_seq = ? AND is_terminal = 1
@@ -366,6 +389,24 @@ export class DurabilityEngine {
 
   markInboundFailed(seq: number): void {
     this.statements.markInboundFailed.run(seq);
+  }
+
+  markContinuityCandidate(
+    seq: number,
+    reason: ContinuityCandidateReason,
+    source: ContinuityCandidateSource,
+  ): boolean {
+    return this.statements.markContinuityCandidate.run(reason, source, seq).changes === 1;
+  }
+
+  markContinuityCandidateIfNoTerminalOutbound(
+    seq: number,
+    reason: ContinuityCandidateReason,
+    source: ContinuityCandidateSource,
+  ): boolean {
+    const terminalOp = this.statements.getTerminalOutboundForInbound.get(seq) as { id: number } | undefined;
+    if (terminalOp) return false;
+    return this.markContinuityCandidate(seq, reason, source);
   }
 
   markInboundSkipped(seq: number, reason: string): void {
@@ -667,6 +708,7 @@ export class DurabilityEngine {
         const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
 
         if (!terminalOp) {
+          this.markContinuityCandidate(ev.seq, 'crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
           this.markInboundFailed(ev.seq);
           log.info(
             { inboundSeq: ev.seq },
@@ -681,6 +723,28 @@ export class DurabilityEngine {
       }
     } catch (err) {
       log.warn({ err }, 'preConnectRecovery: error handling processing inbound events');
+    }
+
+    // Step 4b (QR-035): finalize inbound events stranded at `turn_done`. The turn
+    // completed (markTurnDone ran) but markInboundComplete didn't before the crash,
+    // so the row is terminal-by-intent — mark it `complete` (NOT `failed`). The
+    // reply's outbound op is reconciled independently by the outbound steps. Without
+    // this the row never reaches a terminal status and retention never reclaims it.
+    try {
+      const turnDoneEvents = this.statements.getTurnDoneInboundEvents.all() as Array<{ seq: number }>;
+      for (const ev of turnDoneEvents) {
+        // Only the genuine strand: a turn_done with NO terminal outbound op (a
+        // no-reply turn). One WITH a terminal op is deliberately left for
+        // postConnect, which reconciles the op (echo/replay) and marks the inbound
+        // complete only after delivery is confirmed — finalizing it here would
+        // prematurely complete it before its reply is verified.
+        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
+        if (terminalOp) continue;
+        this.markInboundComplete(ev.seq, 'recovered_turn_done');
+        log.info({ inboundSeq: ev.seq }, 'preConnectRecovery: stranded turn_done inbound (no terminal op) finalized to complete');
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error reconciling turn_done inbound events');
     }
 
     log.info(stats, 'preConnectRecovery: complete');
@@ -908,7 +972,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
 ): Promise<void> {
   let opId: number | undefined;
   if (durability) {
@@ -925,7 +989,12 @@ export async function sendTracked(
     durability.markSending(opId);
   }
   try {
-    const receipt = await messenger.sendMessage(chatJid, text);
+    // QR-086: forward an optional infra caller token to the guard so a
+    // health-server admin /send to a cold target is not floored (spec §4.2-B).
+    // Keep the common path a 2-arg call (no trailing undefined).
+    const receipt = opts.caller
+      ? await messenger.sendMessage(chatJid, text, { caller: opts.caller })
+      : await messenger.sendMessage(chatJid, text);
     if (opId !== undefined && durability) {
       durability.markSubmitted(opId, receipt.waMessageId);
     }

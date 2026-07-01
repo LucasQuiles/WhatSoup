@@ -3,7 +3,6 @@ import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts
 import { parseEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
 import { parseGeminiAcpEvent } from '../../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
-import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
 import {
   createOpenCodeParser,
 } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
@@ -84,7 +83,6 @@ const parsers: ParserCase[] = [
   { name: 'parseEvent (claude-cli)', parse: (line) => parseEvent(line) },
   { name: 'parseCodexEvent', parse: (line) => parseCodexEvent(line) },
   { name: 'parseGeminiAcpEvent', parse: (line) => parseGeminiAcpEvent(line) },
-  { name: 'parseGeminiEvent', parse: (line) => parseGeminiEvent(line) },
   {
     name: 'createOpenCodeParser().parse',
     parse: (line) => createOpenCodeParser().parse(line),
@@ -147,18 +145,6 @@ const providerSpecificInputs: Record<string, { line: string; expectedType: Agent
       expectedType: 'assistant_text',
     },
   ],
-  parseGeminiEvent: [
-    { line: JSON.stringify({ type: 'init', session_id: 'gemini-1' }), expectedType: 'init' },
-    {
-      line: JSON.stringify({
-        type: 'message',
-        role: 'assistant',
-        delta: true,
-        text: 'gemini reply',
-      }),
-      expectedType: 'assistant_text',
-    },
-  ],
   'createOpenCodeParser().parse': [
     { line: JSON.stringify({ type: 'step_start', sessionID: 'oc-2' }), expectedType: 'init' },
     { line: JSON.stringify({ type: 'text', part: { text: 'instance one' } }), expectedType: 'assistant_text' },
@@ -212,7 +198,6 @@ describe('parser interface conformance', () => {
       'parseEvent (claude-cli)',
       'parseCodexEvent',
       'parseGeminiAcpEvent',
-      'parseGeminiEvent',
       'createOpenCodeParser().parse',
     ]);
   });

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import { SessionManager, MAX_STDOUT_LINE_BYTES } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -466,7 +466,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
 
     await sm.spawnSession();
 
@@ -483,7 +483,22 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
+  });
+
+  it('getStatus().turnInFlight tracks the turn watchdog (armed during a turn)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    expect(sm.getStatus().turnInFlight).toBe(false); // no turn yet → watchdog not armed
+
+    sm.tickWatchdog();                               // provider progress arms the watchdog (turn in flight)
+    expect(sm.getStatus().turnInFlight).toBe(true);
+
+    sm.clearTurnWatchdog();                          // turn end clears the watchdog
+    expect(sm.getStatus().turnInFlight).toBe(false);
   });
 
   it('init event updates sessionId via updateSessionId', async () => {
@@ -570,6 +585,7 @@ describe('SessionManager', () => {
       startedAt: null,
       messageCount: 0,
       lastMessageAt: null,
+      turnInFlight: false,
     });
   });
 
@@ -598,6 +614,7 @@ describe('SessionManager', () => {
       startedAt: expect.any(String),
       messageCount: 0,
       lastMessageAt: null,
+      turnInFlight: false,
     });
   });
 
@@ -3971,6 +3988,43 @@ describe('session.ts uncovered-branch coverage', () => {
     const child = (sm as unknown as { child: MockChild }).child;
     // Partial line, no newline — should not emit any events and not throw.
     expect(() => child.stdout.emit('data', Buffer.from('partial-no-newline'))).not.toThrow();
+  });
+
+  // --- QR-064: a provider streaming a large NO-NEWLINE blob must not grow the
+  //     retained stdout buffer unbounded (parent OOM). The buffer is capped at
+  //     MAX_STDOUT_LINE_BYTES; a runaway partial line is dropped, and a later
+  //     valid newline-terminated line still parses.
+  it('QR-064: caps the retained stdout buffer on a large no-newline stream (no unbounded growth)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (e) => events.push(e) });
+    await sm.spawnSession();
+    const child = (sm as unknown as { child: MockChild }).child;
+    const state = sm as unknown as { stdoutBufferStr?: string };
+
+    // Stream cap + 4 MiB of 'A' with NO newline, in 1 MiB chunks.
+    const overBy = 4 * 1024 * 1024;
+    const totalNoNewline = MAX_STDOUT_LINE_BYTES + overBy;
+    const chunk = Buffer.alloc(1024 * 1024, 0x41);
+    let streamed = 0;
+    while (streamed < totalNoNewline) {
+      child.stdout.emit('data', chunk);
+      streamed += chunk.length;
+    }
+
+    // Retained buffer must be bounded — NOT the full streamed size.
+    expect(state.stdoutBufferStr!.length).toBeLessThanOrEqual(MAX_STDOUT_LINE_BYTES);
+    expect(state.stdoutBufferStr!.length).toBeLessThan(totalNoNewline);
+    // No event was produced by the runaway (no newline ever completed a line).
+    expect(events.some((e) => e.type === 'init')).toBe(false);
+
+    // Recovery: after the runaway is dropped, a clean valid line still parses.
+    const line = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'after-runaway' });
+    child.stdout.emit('data', Buffer.from('\n' + line + '\n'));
+    await vi.waitFor(() => {
+      expect(events.some((e) => e.type === 'init' && e.sessionId === 'after-runaway')).toBe(true);
+    });
   });
 
   // --- notifyUnexpectedExit rate-limit (lines 1392-1399): a second crash

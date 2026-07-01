@@ -1511,4 +1511,35 @@ describe('ingest.ts uncovered-branch coverage', () => {
     expect(journalSpy).toHaveBeenCalledWith(msg.messageId, '15550000009', lidJid, expect.any(String));
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
+
+  // QR-056 (WhatsApp senderName) + QR-074 (Twilio content): lone surrogates in
+  // inbound text reach the spawned-CLI provider sink unsanitized → server-side
+  // JSON parsers reject them → turn-level DoS. Sanitize uniformly at the shared
+  // ingest chokepoint so the in-memory msg dispatched to the runtime is clean
+  // regardless of ingress. (node:sqlite already sanitizes the STORED copy, so
+  // the dispatched in-memory object is the load-bearing assertion.)
+  it('QR-056/QR-074: strips lone surrogates from content + senderName before dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeIncomingMessage({
+      senderJid: '15550000098@s.whatsapp.net',
+      content: 'hi\uD800there',      // lone HIGH surrogate (e.g. crafted UCS-2 SMS body)
+      senderName: 'Al\uDC00ice',     // lone LOW surrogate (e.g. crafted WhatsApp pushName)
+      contentText: 'ctx\uD834text',  // lone high surrogate in contentText
+    });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    const dispatched = vi.mocked(runtime.handleMessage).mock.calls[0]![0] as IncomingMessage;
+    // No lone-surrogate code unit survives (input has no valid pairs).
+    expect(dispatched.content).not.toMatch(/[\uD800-\uDFFF]/);
+    expect(dispatched.senderName).not.toMatch(/[\uD800-\uDFFF]/);
+    expect(dispatched.contentText).not.toMatch(/[\uD800-\uDFFF]/);
+    // Surrounding text preserved.
+    expect(dispatched.content).toContain('there');
+    expect(dispatched.senderName).toContain('ice');
+  });
 });

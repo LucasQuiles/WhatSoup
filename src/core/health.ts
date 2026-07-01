@@ -527,7 +527,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
 
         sendPipeline.executeSend(parsed, async (prepared) => {
-          await sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe' });
+          // QR-086: the admin /send is an authenticated infra action — tag it as
+          // a system caller ('health') so the outbound-identity guard's spec
+          // §4.2-step-B exemption applies and a deliberate admin send to a cold
+          // target is not floored under enforce mode.
+          await sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe', caller: 'health' });
           return {};
         })
           .then(() => {

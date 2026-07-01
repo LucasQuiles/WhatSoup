@@ -39,3 +39,11 @@
 {"id": "parity-keyed-phone-underscore-plus", "class": "regress:phone-keyed-underscore", "input": "phone_+12025550181", "expected": "phone_[REDACTED PHONE]", "rationale": "L3-001: underscore separator with leading + — redacts in both runtimes."}
 {"id": "parity-context-phone-underscore", "class": "regress:phone-context-underscore", "input": "sent for_+12025550181 now", "expected": "sent for_[REDACTED PHONE] now", "rationale": "L3-001: TS CONTEXT_PHONE_LIKE separator must accept `_` (Python SSOT uses [\\s_-]+)."}
 {"id": "parity-bearer-lowercase", "class": "regress:bearer-case", "input": "request bearer sk-abc123def456GHI", "expected": "request bearer [REDACTED]", "rationale": "L3-002: TS BEARER_VALUE must be case-insensitive like Python (re.IGNORECASE); lowercase bearer token must redact."}
+{"id": "qr052-aws-session-token-compound", "class": "make:keyed-secret", "input": "AWS_SESSION_TOKEN=FwoGZXIvYXdzEPaaaBBBccc", "expected": "AWS_SESSION_TOKEN=[REDACTED]"}
+{"id": "qr052-aws-secret-access-key-compound", "class": "make:keyed-secret", "input": "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI0987654321", "expected": "AWS_SECRET_ACCESS_KEY=[REDACTED]"}
+{"id": "qr052-camel-session-token", "class": "make:keyed-secret", "input": "sessionToken=opaqueblob123456", "expected": "sessionToken=[REDACTED]"}
+{"id": "qr052-camel-bearer-token", "class": "make:keyed-secret", "input": "bearerToken=opaqueblob123456", "expected": "bearerToken=[REDACTED]"}
+{"id": "qr052-camel-id-token", "class": "make:keyed-secret", "input": "idToken: opaqueblob123456", "expected": "idToken: [REDACTED]"}
+{"id": "qr052-precision-event-count", "class": "make:benign-keep", "input": "event_count=5", "expected": "event_count=5"}
+{"id": "qr052-precision-message-id", "class": "make:benign-keep", "input": "message_id=wamid.ABCDEF", "expected": "message_id=wamid.ABCDEF"}
+{"id": "qr052-precision-session-id", "class": "make:benign-keep", "input": "session_id=sess_abc123def", "expected": "session_id=sess_abc123def"}

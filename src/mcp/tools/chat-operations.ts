@@ -9,6 +9,9 @@ import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { config } from '../../config.ts';
+import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
+import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 
 const log = createChildLogger('chat-operations');
 
@@ -112,21 +115,9 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
       return { success: true, jid: chatJid, messageId: message_id };
     },
   },
-  {
-    name: 'set_disappearing_messages',
-    description: 'Enable or disable disappearing messages for a chat. Duration in seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d.',
-    schema: z.object({
-      jid: z.string(),
-      duration: z.number().describe('Seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d'),
-    }),
-    replayPolicy: 'safe',
-    call: async ({ jid, duration }, sock) => {
-      const value = duration === 0 ? false : duration;
-      await sock.sendMessage(jid, { disappearingMessagesInChat: value } as any);
-      log.info({ jid, duration }, 'disappearing messages set');
-      return { success: true, jid, duration };
-    },
-  },
+  // QR-067: set_disappearing_messages moved to a db-aware guarded factory
+  // (makeSetDisappearingMessages) — it sent to a caller-supplied jid via
+  // sock.sendMessage directly, bypassing the outbound identity guard.
   {
     name: 'send_event_message',
     description: 'Send a calendar event message to a WhatsApp chat.',
@@ -244,6 +235,37 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
 // W2-10: get_reactions (read-only query)
 // ---------------------------------------------------------------------------
 
+const SetDisappearingMessagesSchema = z.object({
+  jid: z.string(),
+  duration: z.number().describe('Seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d'),
+});
+
+/**
+ * QR-067: set_disappearing_messages sends to a caller-supplied jid, so it floors
+ * the egress through the outbound identity guard first (db-aware factory, mirrors
+ * relay_message). db omitted → null store → no block (prior behavior).
+ */
+function makeSetDisappearingMessages(getSock: () => ExtendedBaileysSocket | null, db?: Database): ToolDeclaration {
+  return {
+    name: 'set_disappearing_messages',
+    description: 'Enable or disable disappearing messages for a chat. Duration in seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d.',
+    schema: SetDisappearingMessagesSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid, duration } = SetDisappearingMessagesSchema.parse(params);
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
+      applyOutboundIdentityGuard(jid, { caller: 'mcp', mode: config.outboundIdentityMode }, db ? new SqliteIdentityStore(db.raw) : null);
+      const value = duration === 0 ? false : duration;
+      await sock.sendMessage(jid, { disappearingMessagesInChat: value } as Parameters<ExtendedBaileysSocket['sendMessage']>[1]);
+      log.info({ jid, duration }, 'disappearing messages set');
+      return { success: true, jid, duration };
+    },
+  };
+}
+
 const GetReactionsSchema = z.object({
   message_id: z.string(),
 });
@@ -308,6 +330,7 @@ export function registerChatOperationTools(
   register: (tool: ToolDeclaration) => void,
 ): void {
   registerSockTools(getSock, chatOperationSockConfigs, register);
+  register(makeSetDisappearingMessages(getSock, db)); // QR-067: guarded caller-jid egress
   register(makeGetReactions(db));
   register(makeGetMessageReceipts(db));
 }

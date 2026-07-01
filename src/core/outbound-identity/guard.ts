@@ -3,7 +3,7 @@
 // Decision order (spec §4.2): B system caller → A group → LID resolve → C cold floor → E allow.
 // Step D (expect: verified-alias) is a later, separate effort and intentionally absent here.
 
-import { bareNumber, isLidJid, isGroupJid } from '../jid-constants.ts';
+import { bareNumber, isLidJid, isGroupJid, normalizeLid } from '../jid-constants.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { Decision, GuardCode, GuardOpts, IdentityStore } from './types.ts';
 
@@ -29,18 +29,25 @@ export function assertOutboundIdentity(
     return { verdict: 'allow' };
   }
 
-  // A. Group classification — known group allowed, unknown group floored.
+  // A. Group classification — operator-APPROVED group allowed, otherwise floored.
+  // Bare membership is not approval (QR-038): a `groups` row is auto-created when the
+  // bot is added to any group, so the egress bar must be an access_list 'allowed' group
+  // entry (parity with the auto-respond gate) — otherwise an attacker who adds the bot to
+  // a group could induce egress to it, defeating the anti-exfil cold floor.
   if (isGroupJid(chatJid)) {
-    if (store.isKnownGroup(chatJid)) {
+    if (store.isApprovedGroup(chatJid)) {
       return { verdict: 'allow' };
     }
-    return applyMode('UNKNOWN_GROUP', `unknown group ${chatJid}`, opts.mode);
+    return applyMode('UNKNOWN_GROUP', `unapproved group ${chatJid}`, opts.mode);
   }
 
   // Identity resolution → phone JID.
   let phoneJid = chatJid;
   if (isLidJid(chatJid)) {
-    const resolved = store.resolveLid(bareNumber(chatJid));
+    // QR-025: normalize the :device suffix — the store matches lid_mappings on the
+    // normalized LID, so a device-suffixed LID (<lid>:8@lid) would otherwise miss and be
+    // floored AMBIGUOUS (fail-closed) for a known, warm contact.
+    const resolved = store.resolveLid(normalizeLid(bareNumber(chatJid)));
     if (resolved === null) {
       return applyMode('AMBIGUOUS', `unresolvable LID ${chatJid}`, opts.mode);
     }

@@ -61,6 +61,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   // method that isn't reflected here — the mock cannot silently diverge.
   const mockQueue = {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -494,6 +495,37 @@ async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMessage): 
   await (runtime as unknown as { turnQueue: { idle: () => Promise<void> } }).turnQueue.idle();
 }
 
+function attachRuntimeFaultMarkerSpies(runtime: AgentRuntime): {
+  durability: {
+    completeInbound: ReturnType<typeof vi.fn>;
+    markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn>;
+    markInboundFailed: ReturnType<typeof vi.fn>;
+    upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+  };
+  replyGuarantee: {
+    arm: ReturnType<typeof vi.fn>;
+    disarm: ReturnType<typeof vi.fn>;
+    isArmed: ReturnType<typeof vi.fn>;
+    shutdown: ReturnType<typeof vi.fn>;
+  };
+} {
+  const durability = {
+    completeInbound: vi.fn(),
+    markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
+    markInboundFailed: vi.fn(),
+    upsertSessionCheckpoint: vi.fn(),
+  };
+  const replyGuarantee = {
+    arm: vi.fn(),
+    disarm: vi.fn(),
+    isArmed: vi.fn(() => true),
+    shutdown: vi.fn(),
+  };
+  (runtime as unknown as { durability: unknown }).durability = durability;
+  (runtime as unknown as { replyGuarantee: unknown }).replyGuarantee = replyGuarantee;
+  return { durability, replyGuarantee };
+}
+
 function mockActiveAgentSession(rowId = 42): void {
   mockSession.getStatus.mockReturnValue({
     active: true,
@@ -538,6 +570,7 @@ async function emitSuccessfulCompactResult(inputTokens = 0): Promise<void> {
 function makeQueueMock(targetChatJid: string): IOutboundQueue {
   return {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -1655,12 +1688,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
 
-    const durability = {
-      completeInbound: vi.fn(),
-      markInboundFailed: vi.fn(),
-      upsertSessionCheckpoint: vi.fn(),
-    };
-    (runtime as unknown as { durability: unknown }).durability = durability;
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
 
     await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 77 }));
 
@@ -1693,6 +1721,8 @@ describe('AgentRuntime', () => {
     }).handleCrashNotify('Agent session ended (exited with code 1). Send any message to start a new session.', 'test@s.whatsapp.net');
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
+    expect((durability as { markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn> }).markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(77, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
     expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77);
     expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
     expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.get('test@s.whatsapp.net')).toBe('hello');
@@ -1702,6 +1732,29 @@ describe('AgentRuntime', () => {
     expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
     expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('single-session crash callback marks runtime-fault continuity candidate before failing inbound', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 88 }));
+    expect(capturedOnCrashRef.current).toBeTypeOf('function');
+
+    capturedOnCrashRef.current!({
+      exitCode: 1,
+      signal: null,
+      sessionId: 'opencode-cli-456',
+      dbRowId: 43,
+    });
+
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(88, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(88);
+    expect((runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq).toBeUndefined();
   });
 
   it('tracks pending auto-respawn timers per crash and removes them after firing', async () => {
@@ -2941,10 +2994,14 @@ describe('AgentRuntime', () => {
     mockSession.sendTurn.mockRejectedValue(new Error('some other error'));
 
     const runtime = new AgentRuntime(db, messenger);
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
     await runtime.start();
 
     // handleMessage must not reject — error is swallowed by the chain's .catch(() => {})
-    await expect(sendAndDrain(runtime, makeMsg({ content: 'hello' }))).resolves.toBeUndefined();
+    await expect(sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 89 }))).resolves.toBeUndefined();
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(89, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(89);
   });
 
   // ─── Event routing ─────────────────────────────────────────────────────────
@@ -4380,6 +4437,30 @@ describe('AgentRuntime', () => {
 
     expect(runtimeState.outboundQueues.has('recreated@s.whatsapp.net')).toBe(true);
     expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'recreated@s.whatsapp.net');
+  });
+
+  it('shared createOutboundQueue inherits the prior queue token for the same chat (QR-069)', async () => {
+    const { OutboundQueue: MockOutboundQueueCtor } = await import('../../../src/runtimes/agent/outbound-queue.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const runtimeState = runtime as unknown as {
+      createOutboundQueue: (chatJid: string, reason: string) => unknown;
+      outboundQueues: Map<string, IOutboundQueue>;
+    };
+
+    // Seed a prior queue for the chat exposing a known echo-guard token. A
+    // replacement built by createOutboundQueue must INHERIT it (3-arg ctor),
+    // so the predecessor's still-active group cooldown does not flood-suppress
+    // the replacement's first reply.
+    const priorToken = 'inherited-token-qr069';
+    runtimeState.outboundQueues.set('inherit@s.whatsapp.net', {
+      getSenderToken: () => priorToken,
+    } as unknown as IOutboundQueue);
+
+    runtimeState.createOutboundQueue('inherit@s.whatsapp.net', 'test replacement');
+
+    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'inherit@s.whatsapp.net', priorToken);
   });
 
   it('shared queue sweep timer is started with the runtime and cleared on shutdown', async () => {
@@ -8379,6 +8460,14 @@ describe('AgentRuntime', () => {
         voterJid: string;
         selectedOptions: string[];
       }) => void;
+      registerSendPollAwaiter: (
+        pollId: string,
+        chatJid: string,
+        options: string[],
+        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
+        timeoutMs: number,
+      ) => Promise<string>;
+      deletePendingPollQuestions: (mapKey: string) => void;
     };
 
     const groupJid = 'test-group@g.us';
@@ -8547,6 +8636,80 @@ describe('AgentRuntime', () => {
       expect(pending.answersCollected[0]).toBeUndefined();
       expect(state.pendingPolls.questions.has(groupJid)).toBe(true);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('QR-036 — admin-only group poll does NOT downgrade to first-vote-wins when group metadata is unavailable (fail-closed)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState & {
+        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
+        fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
+      };
+      await runtime.start();
+
+      // Transient group-metadata fetch failure → null admin set.
+      const spy = vi.spyOn(state, 'fetchGroupAdminJids').mockResolvedValue(null);
+
+      const pollId = 'POLL_QR036';
+      const mapKey = `send_poll:${pollId}`;
+      // Fire-and-forget the awaiter (its promise resolves only on a qualifying vote / timeout).
+      void state.registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000);
+
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
+      await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
+
+      const pending = state.pendingPolls.questions.get(mapKey);
+      expect(pending).toBeDefined();
+      // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
+      // this was downgraded to 'first-vote-wins', letting any member resolve).
+      expect(pending!.resolution).toBe('admin-only');
+      expect(pending!.adminJids ?? null).toBeNull();
+
+      // A non-admin vote must NOT resolve the gated decision.
+      state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
+      expect(pending!.answersCollected[0]).toBeUndefined();
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('QR-051 — send_poll admin-only stays fail-closed when group admin metadata is unavailable', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      const pollMessageId = 'POLL_ADMIN_METADATA_UNAVAILABLE';
+      const mapKey = `send_poll:${pollMessageId}`;
+      let settled: string | null = null;
+      const awaiter = state
+        .registerSendPollAwaiter(pollMessageId, groupJid, ['Delete the database', 'Cancel'], 'admin-only', 60_000)
+        .then((answer) => { settled = answer; })
+        .catch((err: Error) => { settled = `rejected:${err.message}`; });
+
+      await vi.waitFor(() => {
+        expect(state.pendingPolls.questions.get(mapKey)?.resolution).toBe('admin-only');
+      });
+
+      const pending = state.pendingPolls.questions.get(mapKey);
+      expect(pending?.adminJids).toBeNull();
+
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: nonAdminA,
+        selectedOptions: ['Delete the database'],
+      });
+
+      await Promise.resolve();
+      expect(settled).toBeNull();
+      expect(pending?.answersCollected[0]).toBeUndefined();
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+
+      state.deletePendingPollQuestions(mapKey);
+      await vi.waitFor(() => expect(settled).toMatch(/^rejected:Poll abandoned/));
+      await awaiter;
     });
   });
 

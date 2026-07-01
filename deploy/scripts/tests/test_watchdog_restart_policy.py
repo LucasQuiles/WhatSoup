@@ -208,5 +208,74 @@ class TestRecoveringConnectionNoRestart:
         assert _run_decision(body) != 0
 
 
+class TestTerminalAuthFailureNoRestart:
+    """P1W-2: a terminal auth failure — server-side logout / device_removed,
+    pairing required, or unrestorable local corruption — cannot be fixed by a
+    restart. Kicking a logged-out bot only replays the cold-start burst against a
+    dead bond (the mini8/ml-bot restart-loop risk). These states must NOT
+    restart; the bot's own one-shot ``whatsapp_device_bond_lost`` alert already
+    pages for human relink, so the watchdog stays silent (no duplicate page).
+
+    The terminal classes mirror ``authFailureIsUnhealthy`` in src/core/health.ts
+    (pairing_required / serverside_logout_irreversible / local_corruption_unrestorable),
+    surfaced on the health body at ``whatsapp.connection.auth_failure_class``.
+    """
+
+    def _logged_out(self, auth_failure_class: str) -> dict:
+        return {
+            "status": "unhealthy",
+            "whatsapp": {
+                "connected": False,
+                "connection": {
+                    "state": "close",
+                    "auth_failure_class": auth_failure_class,
+                    "last_status_code": 401,
+                },
+            },
+        }
+
+    def test_serverside_logout_irreversible_no_restart(self):
+        assert _run_decision(self._logged_out("serverside_logout_irreversible")) == 0
+
+    def test_pairing_required_no_restart(self):
+        assert _run_decision(self._logged_out("pairing_required")) == 0
+
+    def test_local_corruption_unrestorable_no_restart(self):
+        assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 0
+
+    def test_non_terminal_auth_failure_still_restarts_on_liveness(self):
+        # Guard against over-suppression: a non-terminal class ('none') with a
+        # hard-down connection must STILL restart — the terminal branch must not
+        # swallow ordinary liveness failures.
+        body = {
+            "status": "unhealthy",
+            "whatsapp": {
+                "connected": False,
+                "connection": {"state": "close", "auth_failure_class": "none"},
+            },
+        }
+        assert _run_decision(body) != 0
+
+    def test_missing_auth_failure_class_still_restarts_on_liveness(self):
+        # Older/partial health bodies without the field behave exactly as before.
+        body = {
+            "status": "unhealthy",
+            "whatsapp": {"connected": False, "connection": {"state": "close"}},
+        }
+        assert _run_decision(body) != 0
+
+    def test_non_terminal_restorable_corruption_still_restarts(self):
+        # local_corruption_restorable is NOT terminal (a restart can recover from
+        # backup). It must fall through to liveness and restart — guards against a
+        # copy-paste error adding it to TERMINAL_AUTH_FAILURES.
+        body = {
+            "status": "unhealthy",
+            "whatsapp": {"connected": False,
+                         "connection": {"state": "close",
+                                        "auth_failure_class": "local_corruption_restorable"}},
+        }
+        assert _run_decision(body) != 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

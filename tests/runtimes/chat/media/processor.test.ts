@@ -45,6 +45,7 @@ vi.mock('../../../../src/runtimes/chat/media/documents.ts', () => ({
 // Mock media-mime
 vi.mock('../../../../src/core/media-mime.ts', () => ({
   extractRawMime: vi.fn(() => undefined),
+  extractRawFileLength: vi.fn(() => undefined),
 }));
 
 import { processMedia } from '../../../../src/runtimes/chat/media/processor.ts';
@@ -203,7 +204,7 @@ describe('processMedia — disk persistence', () => {
         makeDownloadFn(buf),
       );
 
-      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'image/png');
+      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'image/png', undefined);
       expect(result).toEqual({
         content: 'image caption',
         images: [{ mimeType: 'image/png', base64: buf.toString('base64') }],
@@ -287,7 +288,7 @@ describe('processMedia — disk persistence', () => {
 
       const result = await processMedia(makeMsg({ contentType: 'audio', rawMessage: { message: {} } }), makeDownloadFn(buf));
 
-      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'audio/mpeg');
+      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'audio/mpeg', undefined);
       expect(transcribeAudio).toHaveBeenCalledWith(buf, 'audio/mpeg');
       expect(result).toEqual({ content: '[voice message — transcription failed]', images: [] });
     });
@@ -333,7 +334,7 @@ describe('processMedia — disk persistence', () => {
 
       const result = await processMedia(makeMsg({ contentType: 'video', content: 'clip caption' }), makeDownloadFn(buf));
 
-      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'video/quicktime');
+      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'video/quicktime', undefined);
       expect(result).toEqual({
         content: 'clip caption\n[Video frames at: 0:00, 0:10]',
         images: [
@@ -414,7 +415,7 @@ describe('processMedia — disk persistence', () => {
         'doc-bad',
       );
 
-      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/vnd.custom');
+      expect(downloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/vnd.custom', undefined);
       expect(writeTempFile).toHaveBeenCalledWith(buf, 'bad');
       expect(result).toEqual({ content: '[document: archive.tar.?bad — could not extract text]', images: [] });
     });

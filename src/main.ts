@@ -397,6 +397,18 @@ connectionManager.on('chatCleared', (jid: string) => {
   }
 });
 
+connectionManager.on('messageDeleted', (messageIds: string[]) => {
+  try {
+    const count = db.markMessagesDeleted(messageIds);
+    log.info(
+      { count, requested: messageIds.length },
+      'messageDeleted: soft-deleted revoked messages',
+    );
+  } catch (err) {
+    log.error({ err, messageIds }, 'messageDeleted: failed to soft-delete revoked messages');
+  }
+});
+
 connectionManager.on('contactsUpsert', (contacts) => {
   try {
     handleContactsUpsert(db, contacts);

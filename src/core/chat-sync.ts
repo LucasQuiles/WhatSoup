@@ -1,5 +1,5 @@
 import { createChildLogger } from '../logger.ts';
-import { toConversationKey } from './conversation-key.ts';
+import { canonicalConversationKey } from './access-list.ts';
 import type { Database } from './database.ts';
 
 const log = createChildLogger('chat-sync');
@@ -74,6 +74,10 @@ export function handleChatsUpsert(db: Database, chats: BaileysChat[]): void {
     INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived, is_pinned, mute_until, ephemeral_duration, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(jid) DO UPDATE SET
+      -- QR-043: repair a stale conversation_key (e.g. a row first inserted under
+      -- the raw LID number before the LID->phone mapping was learned) so chat
+      -- lookups by the canonical phone key resolve after the mapping arrives.
+      conversation_key = excluded.conversation_key,
       name = COALESCE(excluded.name, name),
       unread_count = COALESCE(excluded.unread_count, unread_count),
       is_archived = COALESCE(excluded.is_archived, is_archived),
@@ -86,7 +90,9 @@ export function handleChatsUpsert(db: Database, chats: BaileysChat[]): void {
   let skipped = 0;
   for (const c of chats) {
     try {
-      const conversationKey = toConversationKey(c.id);
+      // QR-043: key a LID DM by the resolved phone (canonicalConversationKey
+      // mirrors live ingest) so chat lookups by the phone key hit.
+      const conversationKey = canonicalConversationKey(c.id, db);
       const muteUntil = c.muteEndTime ? new Date(c.muteEndTime * 1000).toISOString() : null;
       stmt.run(
         c.id,

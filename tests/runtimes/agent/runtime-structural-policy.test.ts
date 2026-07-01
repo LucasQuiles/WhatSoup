@@ -83,6 +83,19 @@ describe('AgentRuntime structural policy', () => {
     expect(source).toContain('clearInterval(this.queueSweepTimer);');
   });
 
+  it('QR-049: the @lid->canonical rekey block migrates operationTrackers (no leaked timer / lost stall-state)', async () => {
+    const source = await readRuntimeSource();
+    // The "All co-keyed maps must be migrated atomically" rekey block moves every
+    // per-chat map from the LID key to the canonical JID. operationTrackers holds a
+    // setInterval progress timer + slow/stall setTimeouts cleared only by shutdown()
+    // keyed on the canonical mapKey, so omitting it leaks the timer and loses the
+    // chat's in-flight progress/stall-detection state on canonicalization. Pin the
+    // migration so it cannot regress. (`this.operationTrackers.set(canonical` appears
+    // ONLY in this rekey path.)
+    expect(source).toContain('this.operationTrackers.delete(lidKey);');
+    expect(source).toContain('this.operationTrackers.set(canonical,');
+  });
+
   it('sandboxPerChat workspace sweep timer is unrefd and cleared structurally', async () => {
     const source = await readFile(
       new URL('../../../src/runtimes/agent/workspace-sweeper.ts', import.meta.url),

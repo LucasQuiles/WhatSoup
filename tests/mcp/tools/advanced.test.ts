@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { config } from '../../../src/config.ts';
 import { registerAdvancedTools } from '../../../src/mcp/tools/advanced.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
@@ -181,6 +182,54 @@ describe('advanced tools', () => {
       const result = await registry.call('share_phone_number', {}, globalSession());
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/Invalid parameters/);
+    });
+  });
+
+  // QR-067: the caller-supplied-jid egress tools must run through the outbound
+  // identity guard (anti-exfil floor). Before the fix they were sock-only configs
+  // that called sock.sendMessage(jid) directly with NO guard.
+  describe('QR-067 — caller-jid egress tools are floored by the outbound identity guard', () => {
+    // The mocked config object is readonly at the type level; cast for per-test overrides.
+    const mutableConfig = config as unknown as { outboundIdentityMode: string };
+    function freshDb(): Database {
+      const d = new Database(':memory:');
+      d.open();
+      return d;
+    }
+
+    for (const tool of ['share_phone_number', 'request_phone_number', 'send_product_message'] as const) {
+      it(`${tool}: a COLD target is BLOCKED in enforce mode (guard wired)`, async () => {
+        const db = freshDb(); // empty warm set → every target is cold
+        const reg = new ToolRegistry();
+        registerAdvancedTools(() => mockSock, (t) => reg.register(t), db); // db-aware registration
+        mutableConfig.outboundIdentityMode = 'enforce';
+        try {
+          const params = tool === 'send_product_message'
+            ? { jid: '15559990000@s.whatsapp.net', product: { productId: 'p1', title: 'x', priceAmount1000: 1, currencyCode: 'USD' } }
+            : { jid: '15559990000@s.whatsapp.net' };
+          const result = await reg.call(tool, params, globalSession());
+          expect(result.isError).toBe(true);
+          expect(result.content[0].text).toMatch(/blocked send|COLD_TARGET|identity/i);
+          // The send is floored — sock.sendMessage was never reached.
+          expect(mockSock.sendMessage).not.toHaveBeenCalled();
+        } finally {
+          mutableConfig.outboundIdentityMode = 'log-only';
+          db.close();
+        }
+      });
+    }
+
+    it('share_phone_number is scope:global — a chat-scoped session cannot call it', async () => {
+      const db = freshDb();
+      const reg = new ToolRegistry();
+      registerAdvancedTools(() => mockSock, (t) => reg.register(t), db);
+      try {
+        const result = await reg.call('share_phone_number', { jid: '15559990000@s.whatsapp.net' }, chatSession('conv-1'));
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/global|not available|scope/i);
+      } finally {
+        db.close();
+      }
     });
   });
 

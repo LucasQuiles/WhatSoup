@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerChatOperationTools } from '../../../src/mcp/tools/chat-operations.ts';
+import { config } from '../../../src/config.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 
@@ -509,6 +510,29 @@ describe('chat-operations tools', () => {
       expect(result.content[0].text).toContain('Message receipts');
       expect(result.content[0].text).toContain('missing-msg-id');
       expect(result.content[0].text).toContain('not found');
+    });
+  });
+
+  // QR-067: set_disappearing_messages sends to a caller-supplied jid; it must
+  // run through the outbound identity guard. registry is registered WITH db
+  // (beforeEach), and makeDb() is empty so every target is cold.
+  describe('QR-067 — set_disappearing_messages is floored by the outbound identity guard', () => {
+    const mutableConfig = config as unknown as { outboundIdentityMode: string };
+
+    it('blocks a COLD target in enforce mode (guard wired)', async () => {
+      mutableConfig.outboundIdentityMode = 'enforce';
+      try {
+        const result = await registry.call(
+          'set_disappearing_messages',
+          { jid: '15559990000@s.whatsapp.net', duration: 86400 },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/blocked send|COLD_TARGET|identity/i);
+        expect((mockSock as unknown as { sendMessage: ReturnType<typeof vi.fn> }).sendMessage).not.toHaveBeenCalled();
+      } finally {
+        mutableConfig.outboundIdentityMode = 'log-only';
+      }
     });
   });
 });

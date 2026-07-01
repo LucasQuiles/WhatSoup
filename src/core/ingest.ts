@@ -8,6 +8,7 @@ import type { IncomingMessage, Messenger } from './types.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { storeMessageIfNew } from './messages.ts';
+import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
@@ -140,6 +141,19 @@ export function createIngestHandler(
     void (async () => {
       let slotAcquired = false;
       try {
+        // QR-056 / QR-074: strip lone surrogates from inbound text at the shared
+        // ingestion chokepoint. Lone surrogates (a crafted WhatsApp pushName /
+        // senderName per QR-056, or a crafted UCS-2 SMS body / Twilio content per
+        // QR-074) otherwise reach the spawned-CLI provider sink unsanitized, where
+        // server-side JSON parsers (Python/Rust) reject them → turn-level DoS.
+        // Sanitizing here covers every ingress (the WhatsApp message-parser already
+        // strips content but not senderName; the Twilio bridge strips neither) and
+        // cleans the in-memory msg before BOTH storage and runtime dispatch.
+        // stripLoneSurrogates fast-paths strings with no surrogates (no realloc).
+        if (msg.content !== null) msg.content = stripLoneSurrogates(msg.content);
+        if (msg.senderName !== null) msg.senderName = stripLoneSurrogates(msg.senderName);
+        if (msg.contentText !== null) msg.contentText = stripLoneSurrogates(msg.contentText);
+
         // --- Backpressure gate (SP1) ---
         const proceed = await acquireSlot(msg);
         if (!proceed) return;
