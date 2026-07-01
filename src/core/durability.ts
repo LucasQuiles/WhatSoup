@@ -152,6 +152,7 @@ type DurabilityStatements = {
   markToolReplayed: PreparedStatement;
   markRecoveredToolQuarantined: PreparedStatement;
   getProcessingInboundEvents: PreparedStatement;
+  getTurnDoneInboundEvents: PreparedStatement;
   getTerminalOutboundForInbound: PreparedStatement;
   getStaleSubmitted: PreparedStatement;
   getMessageByWaMessageId: PreparedStatement;
@@ -282,6 +283,11 @@ export class DurabilityEngine {
       ),
       getProcessingInboundEvents: prepare(
         `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
+      ),
+      // QR-035: events stranded at 'turn_done' (turn completed but
+      // markInboundComplete didn't run before a crash) — recovery finalizes them.
+      getTurnDoneInboundEvents: prepare(
+        `SELECT seq FROM inbound_events WHERE processing_status = 'turn_done'`,
       ),
       getTerminalOutboundForInbound: prepare(
         `SELECT id FROM outbound_ops
@@ -681,6 +687,28 @@ export class DurabilityEngine {
       }
     } catch (err) {
       log.warn({ err }, 'preConnectRecovery: error handling processing inbound events');
+    }
+
+    // Step 4b (QR-035): finalize inbound events stranded at `turn_done`. The turn
+    // completed (markTurnDone ran) but markInboundComplete didn't before the crash,
+    // so the row is terminal-by-intent — mark it `complete` (NOT `failed`). The
+    // reply's outbound op is reconciled independently by the outbound steps. Without
+    // this the row never reaches a terminal status and retention never reclaims it.
+    try {
+      const turnDoneEvents = this.statements.getTurnDoneInboundEvents.all() as Array<{ seq: number }>;
+      for (const ev of turnDoneEvents) {
+        // Only the genuine strand: a turn_done with NO terminal outbound op (a
+        // no-reply turn). One WITH a terminal op is deliberately left for
+        // postConnect, which reconciles the op (echo/replay) and marks the inbound
+        // complete only after delivery is confirmed — finalizing it here would
+        // prematurely complete it before its reply is verified.
+        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
+        if (terminalOp) continue;
+        this.markInboundComplete(ev.seq, 'recovered_turn_done');
+        log.info({ inboundSeq: ev.seq }, 'preConnectRecovery: stranded turn_done inbound (no terminal op) finalized to complete');
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error reconciling turn_done inbound events');
     }
 
     log.info(stats, 'preConnectRecovery: complete');
