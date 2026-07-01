@@ -3436,7 +3436,7 @@ export class AgentRuntime implements Runtime {
       }
 
       // admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-      if (pending.resolution === 'admin-wins') {
+      if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
         for (const [qIndex, votes] of pending.votesByQuestion) {
           if (pending.answersCollected[qIndex] === undefined) {
             const winner = evaluateResolutionOnTimeout(votes);
@@ -3476,7 +3476,7 @@ export class AgentRuntime implements Runtime {
     }
 
     // AskUser admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
-    if (pending.resolution === 'admin-wins') {
+    if (pending.resolution === 'admin-wins' && pending.adminJids !== null) {
       for (const [qIndex, votes] of pending.votesByQuestion) {
         if (pending.answersCollected[qIndex] === undefined) {
           const winner = evaluateResolutionOnTimeout(votes);

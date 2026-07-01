@@ -8405,6 +8405,14 @@ describe('AgentRuntime', () => {
         voterJid: string;
         selectedOptions: string[];
       }) => void;
+      registerSendPollAwaiter: (
+        pollId: string,
+        chatJid: string,
+        options: string[],
+        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
+        timeoutMs: number,
+      ) => Promise<string>;
+      deletePendingPollQuestions: (mapKey: string) => void;
     };
 
     const groupJid = 'test-group@g.us';
@@ -8608,6 +8616,45 @@ describe('AgentRuntime', () => {
       expect(pending!.answersCollected[0]).toBeUndefined();
       expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('QR-051 — send_poll admin-only stays fail-closed when group admin metadata is unavailable', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      const pollMessageId = 'POLL_ADMIN_METADATA_UNAVAILABLE';
+      const mapKey = `send_poll:${pollMessageId}`;
+      let settled: string | null = null;
+      const awaiter = state
+        .registerSendPollAwaiter(pollMessageId, groupJid, ['Delete the database', 'Cancel'], 'admin-only', 60_000)
+        .then((answer) => { settled = answer; })
+        .catch((err: Error) => { settled = `rejected:${err.message}`; });
+
+      await vi.waitFor(() => {
+        expect(state.pendingPolls.questions.get(mapKey)?.resolution).toBe('admin-only');
+      });
+
+      const pending = state.pendingPolls.questions.get(mapKey);
+      expect(pending?.adminJids).toBeNull();
+
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: nonAdminA,
+        selectedOptions: ['Delete the database'],
+      });
+
+      await Promise.resolve();
+      expect(settled).toBeNull();
+      expect(pending?.answersCollected[0]).toBeUndefined();
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+
+      state.deletePendingPollQuestions(mapKey);
+      await vi.waitFor(() => expect(settled).toMatch(/^rejected:Poll abandoned/));
+      await awaiter;
     });
   });
 
