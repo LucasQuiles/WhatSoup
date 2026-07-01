@@ -42,9 +42,11 @@ vi.mock('framer-motion', async () => {
   }
 })
 
-// react-router-dom: useSearchParams returns empty params; setSearchParams is a no-op.
+// react-router-dom: mutable search params so deep-link behavior can be exercised.
+let mockSearchParams = new URLSearchParams()
+const setSearchParamsMock = vi.fn()
 vi.mock('react-router-dom', () => ({
-  useSearchParams: () => [new URLSearchParams(), vi.fn()],
+  useSearchParams: () => [mockSearchParams, setSearchParamsMock],
 }))
 
 // use-fleet hooks: mutable state so individual tests can override.
@@ -77,12 +79,21 @@ vi.mock('../../console/src/hooks/use-transport-status', () => ({
 
 // use-virtual-messages: surface all messages as virtual items (jsdom has no scroll).
 vi.mock('../../console/src/hooks/use-virtual-messages', () => ({
-  useVirtualMessages: ({ messages }: { messages: Array<{ pk: number }> }) => ({
-    getVirtualItems: () =>
-      messages.map((_, i) => ({ index: i, key: i, start: i * 80, size: 80 })),
-    getTotalSize: () => messages.length * 80,
-    measureElement: () => {},
-  }),
+  useVirtualMessages: ({
+    messages,
+    getScrollElement,
+  }: {
+    messages: Array<{ pk: number }>
+    getScrollElement: () => Element | null
+  }) => {
+    getScrollElement()
+    return {
+      getVirtualItems: () =>
+        messages.map((_, i) => ({ index: i, key: i, start: i * 80, size: 80 })),
+      getTotalSize: () => messages.length * 80,
+      measureElement: () => {},
+    }
+  },
 }))
 
 // use-sticky-scroll: static stub — no scroll state in jsdom.
@@ -107,19 +118,20 @@ vi.mock('../../console/src/lib/api', () => ({
   },
 }))
 
-// toast context: stub — layout tests do not assert on toasts.
+// toast context: stable spy object so workflow tests can assert user feedback.
+const toastMock = {
+  toast: vi.fn(),
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  dismiss: vi.fn(),
+  clear: vi.fn(),
+}
 vi.mock('../../console/src/hooks/toast-context', () => ({
   ToastContext: {
     Provider: ({ children }: { children?: ReactNode }) => children,
   },
-  useToast: () => ({
-    toast: vi.fn(),
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    dismiss: vi.fn(),
-    clear: vi.fn(),
-  }),
+  useToast: () => toastMock,
 }))
 
 // ---------------------------------------------------------------------------
@@ -129,6 +141,11 @@ import Inbox from '../../console/src/pages/Inbox'
 import { api } from '../../console/src/lib/api'
 
 const searchMessagesMock = api.searchMessages as unknown as ReturnType<typeof vi.fn>
+const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
+const getMessagesMock = api.getMessages as unknown as ReturnType<typeof vi.fn>
+const markReadMock = api.markRead as unknown as ReturnType<typeof vi.fn>
+const accessDecisionMock = api.accessDecision as unknown as ReturnType<typeof vi.fn>
+const saveContactMock = api.saveContact as unknown as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -146,6 +163,30 @@ function makeChat(
     unreadCount: 0,
     isGroup: false,
     ...overrides,
+  }
+}
+
+function makeMessage(
+  pk: number,
+  content: string,
+  overrides: Partial<{
+    conversationKey: string
+    senderName: string
+    senderJid: string
+    timestamp: string
+    fromMe: boolean
+    type: string
+  }> = {},
+) {
+  return {
+    pk,
+    conversationKey: overrides.conversationKey ?? 'conv-a',
+    senderName: overrides.senderName ?? (overrides.fromMe ? 'You' : 'Fixture Sender'),
+    senderJid: overrides.senderJid ?? '',
+    content,
+    timestamp: overrides.timestamp ?? '2026-04-05T12:00:00.000Z',
+    fromMe: overrides.fromMe ?? false,
+    type: overrides.type ?? 'text',
   }
 }
 
@@ -172,10 +213,23 @@ beforeEach(() => {
   mockMessages = []
   mockTyping = []
   mockChatsError = false
+  mockSearchParams = new URLSearchParams()
+  setSearchParamsMock.mockReset()
   transportState.status = 'connected'
   transportState.isDisconnected = false
   searchMessagesMock.mockReset()
   searchMessagesMock.mockResolvedValue({ results: [], total: 0 })
+  sendMessageMock.mockReset()
+  sendMessageMock.mockResolvedValue(undefined)
+  getMessagesMock.mockReset()
+  getMessagesMock.mockResolvedValue([])
+  markReadMock.mockReset()
+  markReadMock.mockResolvedValue(undefined)
+  accessDecisionMock.mockReset()
+  accessDecisionMock.mockResolvedValue(undefined)
+  saveContactMock.mockReset()
+  saveContactMock.mockResolvedValue(undefined)
+  for (const spy of Object.values(toastMock)) spy.mockReset()
 })
 
 afterEach(() => cleanup())
@@ -298,6 +352,61 @@ describe('Inbox — listbox renders chats from the hook', () => {
     expect(opt.getAttribute('data-conv-key')).toBe('conv-x')
     expect(opt.textContent).toContain('Fixture Contact')
   })
+
+  it('marks only active-line typing chats with the typing indicator', () => {
+    mockChats = [
+      makeChat('conv-a', { name: 'Typing Contact' }),
+      makeChat('conv-b', { name: 'Quiet Contact' }),
+    ]
+    mockTyping = [
+      { instance: 'test-line', jid: 'conv-a' },
+      { instance: 'other-line', jid: 'conv-b' },
+    ]
+    renderInbox()
+
+    expect(screen.getByText('typing')).toBeDefined()
+    expect(screen.getByRole('option', { name: 'Open conversation with Typing Contact' }).textContent).toContain('typing')
+    expect(screen.getByRole('option', { name: 'Open conversation with Quiet Contact' }).textContent).not.toContain('typing')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Selection and deep-link workflows
+// ---------------------------------------------------------------------------
+
+describe('Inbox — conversation selection workflows', () => {
+  it('deep link selects the requested line and chat once, then clears the URL params', async () => {
+    mockLines = [
+      { name: 'fallback-line', mode: 'passive', status: 'ok' },
+      { name: 'deep-line', mode: 'agent', status: 'ok' },
+    ]
+    mockChats = [makeChat('deep-chat', { name: 'Deep Link Contact', unreadCount: 2 })]
+    mockSearchParams = new URLSearchParams('line=deep-line&chat=deep-chat')
+
+    const { container } = renderInbox()
+
+    await waitFor(() => {
+      expect(screen.getByText('deep-line · direct')).toBeDefined()
+    })
+    expect(screen.getByText('2 unread')).toBeDefined()
+    expect(setSearchParamsMock).toHaveBeenCalledWith({}, { replace: true })
+    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('thread')
+  })
+
+  it('mobile back affordance returns the master-detail layout to the conversation list', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    const { container } = renderInbox()
+
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('thread')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to conversations' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Select a conversation')).toBeDefined()
+    })
+    expect(container.firstElementChild?.getAttribute('data-mobile-detail')).toBe('list')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -365,6 +474,9 @@ describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
 
     renderInbox()
     fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    await waitFor(() => {
+      expect(screen.getByText('test-line · direct')).toBeDefined()
+    })
     fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
       target: { value: 'needle' },
     })
@@ -379,6 +491,274 @@ describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
     await waitFor(() => {
       expect(searchMessagesMock).toHaveBeenCalledTimes(2)
     })
+  })
+
+  it('renders virtualized search results and clears the active search state', async () => {
+    searchMessagesMock.mockResolvedValue({
+      total: 1,
+      results: [makeMessage(41, 'Needle result', { conversationKey: 'conv-a' })],
+    })
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
+      target: { value: 'needle' },
+    })
+
+    await waitFor(() => {
+      expect(searchMessagesMock).toHaveBeenCalledWith('test-line', 'needle', 'conv-a')
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Needle')).toBeDefined()
+    })
+    expect(screen.getByText('Needle').tagName).toBe('MARK')
+    expect(screen.getByText('1 result')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }))
+
+    expect(screen.queryByText('Needle')).toBeNull()
+    expect(screen.queryByText('1 result')).toBeNull()
+  })
+
+  it('renders the empty search state after a completed search with no matches', async () => {
+    searchMessagesMock.mockResolvedValue({ total: 0, results: [] })
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    await waitFor(() => {
+      expect(screen.getByText('test-line · direct')).toBeDefined()
+    })
+    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
+      target: { value: 'missing' },
+    })
+
+    await waitFor(() => {
+      expect(searchMessagesMock).toHaveBeenCalledWith('test-line', 'missing', 'conv-a')
+    })
+    await waitFor(() => {
+      expect(screen.getByText('No matches')).toBeDefined()
+    })
+    expect(screen.getByText('Try a different search term.')).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Message timeline workflows
+// ---------------------------------------------------------------------------
+
+describe('Inbox — message timeline workflows', () => {
+  it('loads older messages from the oldest loaded pk and hides the control when none remain', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    mockMessages = [
+      makeMessage(20, 'Newest message'),
+      makeMessage(10, 'Oldest loaded message'),
+    ]
+    getMessagesMock.mockResolvedValue([])
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+
+    await waitFor(() => {
+      expect(getMessagesMock).toHaveBeenCalledWith('test-line', 'conv-a', 10)
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Load older messages' })).toBeNull()
+    })
+  })
+
+  it('keeps the load-more control when older messages are returned', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    mockMessages = [
+      makeMessage(20, 'Newest message'),
+      makeMessage(10, 'Oldest loaded message'),
+    ]
+    getMessagesMock.mockResolvedValue([makeMessage(5, 'Older returned message')])
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+
+    await waitFor(() => {
+      expect(getMessagesMock).toHaveBeenCalledWith('test-line', 'conv-a', 10)
+    })
+    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeDefined()
+  })
+
+  it('reports older-message load failures without dropping the load-more control', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    mockMessages = [makeMessage(10, 'Loaded message')]
+    getMessagesMock.mockRejectedValue(new Error('history unavailable'))
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith('Failed to load older messages: history unavailable')
+    })
+    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeDefined()
+  })
+
+  it('sends trimmed text on Enter and restores the composer after a failed send', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    sendMessageMock.mockRejectedValue(new Error('transport down'))
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+
+    const composer = screen.getByLabelText('Type a message') as HTMLTextAreaElement
+    fireEvent.change(composer, { target: { value: '  hello from inbox  ' } })
+    fireEvent.keyDown(composer, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(sendMessageMock).toHaveBeenCalledWith('test-line', 'conv-a', 'hello from inbox')
+    })
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith('Send failed: transport down')
+    })
+    expect(composer.value).toBe('')
+  })
+
+  it('sends trimmed text successfully and invalidates the selected message query', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+
+    const composer = screen.getByLabelText('Type a message') as HTMLTextAreaElement
+    fireEvent.change(composer, { target: { value: '  hello success  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => {
+      expect(sendMessageMock).toHaveBeenCalledWith('test-line', 'conv-a', 'hello success')
+    })
+    expect(toastMock.error).not.toHaveBeenCalled()
+    expect(composer.value).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Contact action workflows
+// ---------------------------------------------------------------------------
+
+describe('Inbox — contact action workflows', () => {
+  it('marks an unread chat as read and reports success', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Unread Contact', unreadCount: 3 })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Unread Contact, 3 unread' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Read' }))
+
+    await waitFor(() => {
+      expect(markReadMock).toHaveBeenCalledWith('test-line', 'conv-a')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('Marked as read')
+  })
+
+  it('reports mark-read failures and keeps action controls enabled afterward', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Unread Contact', unreadCount: 3 })]
+    markReadMock.mockRejectedValue('mark-read offline')
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Unread Contact, 3 unread' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mark Read' }))
+
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith('Failed to mark read: mark-read offline')
+    })
+    expect(screen.getByRole('button', { name: 'Allow Contact' }).hasAttribute('disabled')).toBe(false)
+  })
+
+  it('uses group access subjects for group allow and block actions', async () => {
+    mockChats = [makeChat('group-1@g.us', { name: 'Study Group', isGroup: true })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Study Group' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow Contact' }))
+
+    await waitFor(() => {
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'group', 'group-1@g.us', 'allow')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('Allowed Study Group')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Contact' }))
+
+    await waitFor(() => {
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'group', 'group-1@g.us', 'block')
+    })
+    expect(toastMock.info).toHaveBeenCalledWith('Blocked Study Group')
+    expect(screen.queryByRole('button', { name: 'Save Contact' })).toBeNull()
+  })
+
+  it('reports direct allow and block failures with the production error text', async () => {
+    mockChats = [makeChat('conv-a', { name: 'Direct Contact' })]
+    accessDecisionMock
+      .mockRejectedValueOnce(new Error('allow denied'))
+      .mockRejectedValueOnce('block denied')
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Direct Contact' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow Contact' }))
+
+    await waitFor(() => {
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'allow')
+    })
+    expect(toastMock.error).toHaveBeenCalledWith('Failed to allow: allow denied')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Contact' }))
+
+    await waitFor(() => {
+      expect(accessDecisionMock).toHaveBeenCalledWith('test-line', 'number', 'conv-a', 'block')
+    })
+    expect(toastMock.error).toHaveBeenCalledWith('Failed to block: block denied')
+  })
+
+  it('saves a direct chat as a contact with normalized JID and split name', async () => {
+    mockChats = [makeChat('15551234567', { name: 'Raw Number' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Raw Number' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Contact' }))
+
+    fireEvent.change(screen.getByLabelText('Contact name'), {
+      target: { value: ' Ada Lovelace ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(saveContactMock).toHaveBeenCalledWith('test-line', {
+        jid: '15551234567@s.whatsapp.net',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('Saved contact: Ada Lovelace')
+  })
+
+  it('preserves an existing JID when saving a contact and reports save failures', async () => {
+    mockChats = [makeChat('15551234567@s.whatsapp.net', { name: 'Known Number' })]
+    saveContactMock.mockRejectedValue(new Error('address book locked'))
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Known Number' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Contact' }))
+    fireEvent.change(screen.getByLabelText('Contact name'), {
+      target: { value: 'Prince' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(saveContactMock).toHaveBeenCalledWith('test-line', {
+        jid: '15551234567@s.whatsapp.net',
+        firstName: 'Prince',
+        lastName: undefined,
+      })
+    })
+    expect(toastMock.error).toHaveBeenCalledWith('Failed to save: address book locked')
   })
 })
 
