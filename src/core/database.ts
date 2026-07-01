@@ -1282,6 +1282,24 @@ export class Database {
     return Number(result.changes);
   }
 
+  /**
+   * Soft-delete specific messages by WhatsApp message id (revoke /
+   * "delete for everyone"). Sets deleted_at on each currently-live match; the
+   * messages_fts_soft_delete trigger drops them from FTS automatically, so the
+   * revoked content can no longer be recalled. Returns the number of rows newly
+   * soft-deleted (already-deleted ids are not re-counted). An empty id list is a
+   * no-op.
+   */
+  markMessagesDeleted(messageIds: string[]): number {
+    if (messageIds.length === 0) return 0;
+    const placeholders = messageIds.map(() => '?').join(',');
+    const result = this.db.prepare(
+      `UPDATE messages SET deleted_at = datetime('now')
+       WHERE message_id IN (${placeholders}) AND deleted_at IS NULL`,
+    ).run(...messageIds);
+    return Number(result.changes);
+  }
+
   /** Expose the underlying DatabaseSync for query modules. */
   get raw(): DatabaseSync {
     return this.db;
