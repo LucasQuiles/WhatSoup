@@ -9021,6 +9021,62 @@ describe('AgentRuntime', () => {
       expect(injected).toContain('Q: Pick a runtime');
     });
 
+    it('drops an out-of-range poll vote mapping without injecting an answer', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_ANSWER', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-corrupt-poll-index',
+        toolInput: {
+          questions: [{
+            question: 'Pick a runtime',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+
+      const state = runtime as unknown as {
+        pendingPolls: {
+          questions: Map<string, {
+            answersCollected: Record<number, string>;
+            pollMessageIdToQuestionIndex: Map<string, number>;
+          }>;
+        };
+      };
+      const pending = state.pendingPolls.questions.get('5678@s.whatsapp.net');
+      expect(pending).toBeDefined();
+      pending!.pollMessageIdToQuestionIndex.set('POLL_ANSWER', 99);
+      mockSession.sendTurn.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_ANSWER',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Go'],
+      });
+
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ index: 99 }),
+        'poll vote for out-of-range question index',
+      );
+      expect(pending!.pollMessageIdToQuestionIndex.has('POLL_ANSWER')).toBe(false);
+      expect(pending!.answersCollected).toEqual({});
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
     it('collects multi-question poll votes by poll message id before injecting answers', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger([
         { waMessageId: 'POLL_Q1', hasSecret: true },
