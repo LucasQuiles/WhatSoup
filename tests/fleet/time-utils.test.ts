@@ -22,6 +22,13 @@ describe('fleet time-utils', () => {
     expect(normalizeUnixTimestampSeconds(BigInt(1_777_824_570_676))).toBe(1_777_824_570);
   });
 
+  it('uses the caller fallback for absent or non-finite unix timestamp values', () => {
+    expect(normalizeUnixTimestampSeconds(undefined, 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds('', 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds('not-a-number', 123)).toBe(123);
+    expect(normalizeUnixTimestampSeconds(Number.POSITIVE_INFINITY, 123)).toBe(123);
+  });
+
   it('normalizes sqlite datetime strings and unix numbers', () => {
     expect(normalizeTimestamp('2026-04-05 12:34:56')).toBe('2026-04-05T12:34:56.000Z');
     expect(normalizeTimestamp(1_744_000_000)).toBe('2025-04-07T04:26:40.000Z');
@@ -37,6 +44,7 @@ describe('fleet time-utils', () => {
     expect(normalizeTimestamp(null)).toBeNull();
     expect(normalizeTimestamp('')).toBeNull();
     expect(normalizeTimestamp('not-a-timestampTstill-invalid')).toBeNull();
+    expect(normalizeTimestamp('not-a-timestamp')).toBeNull();
     expect(normalizeTimestamp({})).toBeNull();
   });
 

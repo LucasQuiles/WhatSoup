@@ -40,7 +40,9 @@ describe('ticket store — issue/redeem', () => {
     const s = freshStore();
     const key = 'a'.repeat(64);
     const { ticket } = s.issue(key);
+    expect(s.redeemedCount).toBe(0);
     expect(s.redeem(ticket, [key])).toBe(true);
+    expect(s.redeemedCount).toBe(1);
     expect(s.redeem(ticket, [key])).toBe(false);
   });
 });

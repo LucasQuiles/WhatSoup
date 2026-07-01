@@ -32,6 +32,7 @@ describe('alert throttle store', () => {
 
   afterEach(() => {
     vi.doUnmock('node:os');
+    vi.doUnmock('node:fs');
     vi.resetModules();
     rmSync(homeDir, { recursive: true, force: true });
   });
@@ -67,6 +68,37 @@ describe('alert throttle store', () => {
       loadError: {
         file: throttleFile(),
         error: 'throttle file root is not an object',
+      },
+    });
+  });
+
+  it('filters stale and non-string throttle entries while preserving fresh entries', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(throttleFile(), JSON.stringify({
+      fresh: '2026-05-20T11:59:00.000Z',
+      stale: '2026-05-20T11:00:00.000Z',
+      numeric: Date.parse('2026-05-20T11:59:00.000Z'),
+      invalid: 'not-a-date',
+    }));
+    const { loadAlertThrottleDetailed } = await importStore();
+
+    expect(loadAlertThrottleDetailed(Date.parse('2026-05-20T12:00:00.000Z'))).toEqual({
+      entries: new Map([
+        ['fresh', '2026-05-20T11:59:00.000Z'],
+      ]),
+      loadError: null,
+    });
+  });
+
+  it('returns a coded loadError when the throttle file cannot be read as a file', async () => {
+    mkdirSync(throttleFile(), { recursive: true });
+    const { loadAlertThrottleDetailed } = await importStore();
+
+    expect(loadAlertThrottleDetailed()).toMatchObject({
+      entries: new Map(),
+      loadError: {
+        file: throttleFile(),
+        code: 'EISDIR',
       },
     });
   });
@@ -115,5 +147,54 @@ describe('alert throttle store', () => {
 
     expect(existsSync(throttleFile())).toBe(true);
     expect(readdirSync(configDir()).filter((entry) => entry.includes('.tmp'))).toEqual([]);
+  });
+
+  it('does not create a throttle file for stale alert timestamps', async () => {
+    const now = Date.parse('2026-05-20T12:00:00.000Z');
+    const { recordAlertThrottle } = await importStore();
+
+    recordAlertThrottle('line-a', '2026-05-20T11:00:00.000Z', now);
+
+    expect(existsSync(configDir())).toBe(false);
+  });
+
+  it('removes the temp file when the atomic rename fails', async () => {
+    vi.doMock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        renameSync: vi.fn(() => {
+          throw Object.assign(new Error('rename failed'), { code: 'EXDEV' });
+        }),
+      };
+    });
+    const now = Date.parse('2026-05-20T12:00:00.000Z');
+    const { recordAlertThrottle } = await importStore();
+
+    expect(() => recordAlertThrottle('line-a', '2026-05-20T12:00:00.000Z', now)).toThrow('rename failed');
+
+    expect(existsSync(throttleFile())).toBe(false);
+    expect(readdirSync(configDir()).filter((entry) => entry.includes('.tmp'))).toEqual([]);
+  });
+
+  it('preserves the original write failure when temp cleanup also fails', async () => {
+    vi.doMock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        renameSync: vi.fn(() => {
+          throw new Error('rename failed');
+        }),
+        unlinkSync: vi.fn(() => {
+          throw new Error('unlink failed');
+        }),
+      };
+    });
+    const now = Date.parse('2026-05-20T12:00:00.000Z');
+    const { recordAlertThrottle } = await importStore();
+
+    expect(() => recordAlertThrottle('line-a', '2026-05-20T12:00:00.000Z', now)).toThrow('rename failed');
+
+    expect(readdirSync(configDir()).filter((entry) => entry.includes('.tmp'))).toHaveLength(1);
   });
 });
