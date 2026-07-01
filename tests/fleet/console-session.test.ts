@@ -4,7 +4,7 @@
  * HttpOnly cookie whose opaque id maps to an in-memory session (restart
  * relocks the console by design).
  */
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 import {
   createConsoleSessionStore,
@@ -17,6 +17,10 @@ import {
   isSecureRequestTransport,
   isLoopbackRequest,
 } from '../../src/fleet/console-session.ts';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('createConsoleSessionStore', () => {
   it('issues opaque ids that validate until TTL expiry', () => {
@@ -32,8 +36,39 @@ describe('createConsoleSessionStore', () => {
     expect(store.validate(sessionId)).toBe(false);
   });
 
+  it('sweeps expired sessions before reporting live size', () => {
+    let nowMs = 1_000_000;
+    const store = createConsoleSessionStore({ now: () => nowMs, ttlMs: 10 });
+
+    store.issue();
+    expect(store.size()).toBe(1);
+
+    nowMs += 11;
+    expect(store.size()).toBe(0);
+  });
+
+  it('uses default clock and ttl options when none are supplied', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const store = createConsoleSessionStore();
+
+    const { sessionId, expiresIn } = store.issue();
+
+    expect(expiresIn).toBe(Math.floor(CONSOLE_SESSION_TTL_MS / 1000));
+    expect(store.validate(sessionId)).toBe(true);
+  });
+
+  it('does not loop forever when maxSessions is zero', () => {
+    const store = createConsoleSessionStore({ now: () => 0, maxSessions: 0 });
+
+    const { sessionId } = store.issue();
+
+    expect(store.validate(sessionId)).toBe(true);
+    expect(store.size()).toBe(1);
+  });
+
   it('rejects unknown and revoked ids', () => {
     const store = createConsoleSessionStore({ now: () => 0 });
+    expect(store.validate('not-hex')).toBe(false);
     expect(store.validate('f'.repeat(64))).toBe(false);
 
     const { sessionId } = store.issue();
@@ -80,6 +115,7 @@ describe('session cookie helpers', () => {
   it('parses the session id out of a Cookie header', () => {
     const id = 'b'.repeat(64);
     expect(parseSessionCookie(`${CONSOLE_SESSION_COOKIE}=${id}`)).toBe(id);
+    expect(parseSessionCookie(`flag; ${CONSOLE_SESSION_COOKIE}=${id}`)).toBe(id);
     expect(parseSessionCookie(`other=x; ${CONSOLE_SESSION_COOKIE}=${id}; more=y`)).toBe(id);
     expect(parseSessionCookie('other=x')).toBeNull();
     expect(parseSessionCookie(undefined)).toBeNull();
