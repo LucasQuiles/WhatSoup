@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { unlinkSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import {
   Database,
   storeDecryptionFailure,
@@ -1235,6 +1235,87 @@ describe('database.ts uncovered-branch coverage', () => {
     cleanup(path);
   });
 
+  it('migration 26 rewrites legacy outbound_sends rows and permits the rgp caller', () => {
+    const path = tmpFile();
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE outbound_sends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        line TEXT NOT NULL,
+        caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health')),
+        chat_jid TEXT NOT NULL,
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias')),
+        alias TEXT,
+        profile TEXT,
+        text_hash TEXT NOT NULL,
+        text_length INTEGER NOT NULL,
+        link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL),
+        status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed')),
+        error TEXT,
+        transport_message_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+      );
+      INSERT INTO outbound_sends (
+        line, caller, chat_jid, target_kind, alias, profile, text_hash, text_length,
+        link_preview_mode, status, error, transport_message_id, created_at, completed_at
+      )
+      VALUES (
+        'personal', 'mcp', '15550100011@s.whatsapp.net', 'chatJid', NULL, 'default',
+        'hash-before-rgp', 12, 'auto', 'sent', NULL, 'transport-1',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z'
+      );
+    `);
+    const insertVersion = raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+    for (let version = 1; version <= 25; version += 1) {
+      insertVersion.run(version);
+    }
+    raw.close();
+
+    const db = new Database(path);
+    expect(() => db.open()).not.toThrow();
+
+    const preserved = db.raw
+      .prepare(`
+        SELECT caller, chat_jid, text_hash, transport_message_id
+        FROM outbound_sends
+        WHERE chat_jid = '15550100011@s.whatsapp.net'
+      `)
+      .get() as { caller: string; chat_jid: string; text_hash: string; transport_message_id: string } | undefined;
+    expect(preserved).toEqual({
+      caller: 'mcp',
+      chat_jid: '15550100011@s.whatsapp.net',
+      text_hash: 'hash-before-rgp',
+      transport_message_id: 'transport-1',
+    });
+
+    expect(() => {
+      db.raw.prepare(`
+        INSERT INTO outbound_sends (
+          line, caller, chat_jid, target_kind, text_hash, text_length, status
+        )
+        VALUES ('personal', 'rgp', '15550100012@s.whatsapp.net', 'chatJid', 'hash-rgp', 7, 'intent')
+      `).run();
+    }).not.toThrow();
+
+    const migratedSql = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
+      .get() as { sql: string } | undefined;
+    expect(migratedSql?.sql).toContain("'rgp'");
+
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 26')
+      .get() as { version: number } | undefined;
+    expect(version?.version).toBe(26);
+
+    db.close();
+    cleanup(path);
+  });
+
   it('late migrations skip already-upgraded outbound_sends and schedule marker columns', () => {
     const path = tmpFile();
     const db = new Database(path);
@@ -1407,6 +1488,45 @@ describe('database.ts uncovered-branch coverage', () => {
     db.raw.close();
 
     expect(() => db.open()).toThrow(/Failed to set database pragmas/);
+  });
+
+  it('constructor wraps parent directory creation failures', () => {
+    const parentFile = tmpFile();
+    writeFileSync(parentFile, 'not a directory');
+
+    try {
+      expect(() => new Database(join(parentFile, 'child.db'))).toThrow(/Cannot create DB directory/);
+    } finally {
+      cleanup(parentFile);
+    }
+  });
+
+  it('constructor wraps sqlite open failures after directory setup succeeds', () => {
+    const directoryPath = mkdtempSync(join(tmpdir(), 'whatsoup-db-file-'));
+
+    try {
+      expect(() => new Database(directoryPath)).toThrow(/Cannot open database at/);
+    } finally {
+      rmSync(directoryPath, { recursive: true, force: true });
+    }
+  });
+
+  it('open wraps schema_migrations DDL failures', () => {
+    const path = tmpFile();
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE blocker (id INTEGER);
+      CREATE INDEX schema_migrations ON blocker(id);
+    `);
+    raw.close();
+
+    const db = new Database(path);
+    try {
+      expect(() => db.open()).toThrow(/Failed to create schema_migrations table/);
+    } finally {
+      db.raw.close();
+      cleanup(path);
+    }
   });
 
   it('runPendingMigrations rolls back and wraps non-idempotent migration failures', () => {
