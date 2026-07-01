@@ -143,6 +143,24 @@ export function createTrigger(db: DatabaseSync, args: CreateTriggerArgs): Trigge
   const { validated, now, terminalAt, nextFireAt } = prepareTrigger(args);
   db.exec('BEGIN');
   try {
+    // QR-046: dedupe_key is an idempotency key. It is stored + indexed
+    // (idx_triggers_dedupe ON (kind, dedupe_key)) and exposed on create_watch, but
+    // was never queried — so re-creating a watch with the same (kind, dedupe_key)
+    // inserted a DUPLICATE trigger (double fires + 2x the bounded poll cost). If a
+    // LIVE (active/paused) trigger already exists for this (kind, dedupe_key), return
+    // it instead of inserting. Terminal rows (expired/cancelled/failed) do NOT dedupe,
+    // so a watch can be legitimately re-armed after it has ended.
+    if (args.dedupeKey) {
+      const existing = db.prepare(
+        `SELECT * FROM bead_triggers
+         WHERE kind = ? AND dedupe_key = ? AND status IN ('active','paused')
+         ORDER BY id LIMIT 1`,
+      ).get(args.kind, args.dedupeKey) as unknown as TriggerRow | undefined;
+      if (existing) {
+        db.exec('COMMIT');
+        return existing;
+      }
+    }
     const info = db.prepare(
       `INSERT INTO bead_triggers (
          bead_id, kind, spec_json, spec_version, status, interval_seconds,

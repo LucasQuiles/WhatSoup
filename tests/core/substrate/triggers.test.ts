@@ -37,6 +37,33 @@ describe('triggers core', () => {
     expect(kinds).toContain('trigger_created');
   });
 
+  it('QR-046: dedupe_key makes createTrigger idempotent for a LIVE (kind, dedupe_key)', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'dedupe', ownerJid: 'mw', actor: 'user' });
+    const base = {
+      beadId: bead.id, kind: 'poll.email' as const, spec: { source: 'gmail' as const, sender: 'x@y' },
+      reportChatJid: 'c', dedupeKey: 'daily-x', actor: 'user',
+    };
+    const first = createTrigger(db.raw, base);
+    const second = createTrigger(db.raw, base);
+    // Re-creating with the same (kind, dedupe_key) returns the SAME trigger, not a duplicate.
+    expect(second.id).toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(1);
+
+    // Precision: a DIFFERENT dedupe_key creates a new trigger.
+    const other = createTrigger(db.raw, { ...base, dedupeKey: 'daily-y' });
+    expect(other.id).not.toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(2);
+
+    // Precision: a DIFFERENT kind with the SAME dedupe_key creates a new trigger (index is (kind, dedupe_key)).
+    createTrigger(db.raw, { ...base, kind: 'poll.url', spec: { url: 'https://x.example.com', hash_mode: 'text' } });
+    expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
+
+    // Precision: NO dedupe_key never dedupes.
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(4);
+  });
+
   it('watch TTL clamps to maxHours', () => {
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'user' });
     const now = Math.floor(Date.now() / 1000);
