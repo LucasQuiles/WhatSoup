@@ -21,7 +21,9 @@ export function handleContactsUpsert(db: Database, contacts: BaileysContact[]): 
   `);
 
   for (const c of contacts) {
-    // Use toConversationKey to correctly strip LID device suffixes (e.g. 123:5@s.whatsapp.net → 123)
+    // canonical_phone must be a BARE phone for the outbound warm-check. toConversationKey
+    // strips the :device suffix for both personal and LID JIDs (QR-027), e.g.
+    // '15550100001:5@s.whatsapp.net' -> '15550100001' and '123:5@lid' -> '123'.
     let phone: string;
     try {
       phone = toConversationKey(c.id);
