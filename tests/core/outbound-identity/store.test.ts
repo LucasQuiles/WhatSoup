@@ -65,13 +65,28 @@ describe('SqliteIdentityStore.isWarm', () => {
   });
 });
 
-describe('SqliteIdentityStore.isKnownGroup', () => {
-  it('is true when a groups row exists', () => {
+describe('SqliteIdentityStore.isApprovedGroup (QR-038)', () => {
+  it('is FALSE for a bare groups membership — membership is not approval', () => {
+    // A `groups` row is auto-created when the bot joins/discovers a group; that alone
+    // must NOT authorize egress, else an attacker who adds the bot to a group gets a
+    // path through the anti-exfil cold floor.
     db.raw.prepare('INSERT INTO groups (jid) VALUES (?)').run('111111100000000001@g.us');
-    expect(store.isKnownGroup('111111100000000001@g.us')).toBe(true);
+    expect(store.isApprovedGroup('111111100000000001@g.us')).toBe(false);
   });
 
-  it('is false for an unknown group jid', () => {
-    expect(store.isKnownGroup('111111100000009999@g.us')).toBe(false);
+  it("is TRUE only when the group is access_list 'allowed' (parity with auto-respond)", () => {
+    db.raw.prepare("INSERT INTO access_list (subject_type, subject_id, status) VALUES ('group', ?, 'allowed')").run('111111100000000001@g.us');
+    expect(store.isApprovedGroup('111111100000000001@g.us')).toBe(true);
+  });
+
+  it("is FALSE for a 'blocked' or 'pending' group entry", () => {
+    db.raw.prepare("INSERT INTO access_list (subject_type, subject_id, status) VALUES ('group', ?, 'blocked')").run('111111100000002222@g.us');
+    expect(store.isApprovedGroup('111111100000002222@g.us')).toBe(false);
+    db.raw.prepare("INSERT INTO access_list (subject_type, subject_id, status) VALUES ('group', ?, 'pending')").run('111111100000003333@g.us');
+    expect(store.isApprovedGroup('111111100000003333@g.us')).toBe(false);
+  });
+
+  it('is FALSE for an unknown group jid', () => {
+    expect(store.isApprovedGroup('111111100000009999@g.us')).toBe(false);
   });
 });
