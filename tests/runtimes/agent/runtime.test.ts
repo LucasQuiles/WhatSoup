@@ -577,6 +577,16 @@ type PerChatCleanupRuntimeState = {
   imageCoalesce: ImageCoalescerView;
 };
 
+type PerChatSendTurnRuntimeState = PerChatCleanupRuntimeState & {
+  chatSessions: Map<string, unknown>;
+  durability: { markInboundFailed: ReturnType<typeof vi.fn> } | null;
+  ensureSessionAndQueue: ReturnType<typeof vi.fn>;
+  ensureSessionAndQueueSync: ReturnType<typeof vi.fn>;
+  pendingTurnActorJid: Map<string, string | undefined>;
+  replyGuarantee: { disarm: ReturnType<typeof vi.fn> };
+  sendTurnPerChat: (chatJid: string, text: string, mapKey: string, actorJid?: string) => Promise<void>;
+};
+
 function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeState {
   return runtime as unknown as PerChatCleanupRuntimeState;
 }
@@ -2545,6 +2555,69 @@ describe('AgentRuntime', () => {
       expect(state.perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('per_chat startup failure clears pending turn state, marks inbound failed, and notifies the chat', async () => {
+    const cases = [
+      {
+        label: 'standard per-chat',
+        options: { sessionScope: 'per_chat' as const },
+        installStartupStub(state: PerChatSendTurnRuntimeState): ReturnType<typeof vi.fn> {
+          const ensureSessionAndQueueSync = vi.fn();
+          state.ensureSessionAndQueueSync = ensureSessionAndQueueSync;
+          return ensureSessionAndQueueSync;
+        },
+        expectedArgs: ['startup-fail@s.whatsapp.net', 'startup-fail', 'actor@s.whatsapp.net'],
+      },
+      {
+        label: 'sandbox per-chat',
+        options: { sessionScope: 'per_chat' as const, sandboxPerChat: true as const },
+        installStartupStub(state: PerChatSendTurnRuntimeState): ReturnType<typeof vi.fn> {
+          const ensureSessionAndQueue = vi.fn(async () => {});
+          state.ensureSessionAndQueue = ensureSessionAndQueue;
+          return ensureSessionAndQueue;
+        },
+        expectedArgs: ['startup-fail@s.whatsapp.net', 'actor@s.whatsapp.net'],
+      },
+    ];
+
+    for (const testCase of cases) {
+      mockSession.sendTurn.mockClear();
+      mockRuntimeLogger.error.mockClear();
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', testCase.options);
+      const state = runtime as unknown as PerChatSendTurnRuntimeState;
+      const durability = { markInboundFailed: vi.fn() };
+      const replyGuarantee = { disarm: vi.fn() };
+      const startupStub = testCase.installStartupStub(state);
+      state.durability = durability;
+      state.replyGuarantee = replyGuarantee;
+      state.perChatInboundSeqQueue.set('startup-fail', [321]);
+
+      await state.sendTurnPerChat(
+        'startup-fail@s.whatsapp.net',
+        `message for ${testCase.label}`,
+        'startup-fail',
+        'actor@s.whatsapp.net',
+      );
+
+      expect(startupStub, testCase.label).toHaveBeenCalledWith(...testCase.expectedArgs);
+      expect(state.chatSessions.has('startup-fail'), testCase.label).toBe(false);
+      expect(state.pendingTurnText.has('startup-fail'), testCase.label).toBe(false);
+      expect(state.pendingTurnActorJid.has('startup-fail'), testCase.label).toBe(false);
+      expect(replyGuarantee.disarm, testCase.label).toHaveBeenCalledWith(321);
+      expect(durability.markInboundFailed, testCase.label).toHaveBeenCalledWith(321);
+      expect(mockSession.sendTurn, testCase.label).not.toHaveBeenCalled();
+      expect(sentMessages, testCase.label).toContainEqual({
+        jid: 'startup-fail@s.whatsapp.net',
+        text: 'Something went wrong starting a session. Try sending your message again.',
+      });
+      expect(mockRuntimeLogger.error, testCase.label).toHaveBeenCalledWith(
+        { chatJid: 'startup-fail@s.whatsapp.net', mapKey: 'startup-fail' },
+        'failed to create session for chat — message dropped',
+      );
     }
   });
 
