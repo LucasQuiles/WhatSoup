@@ -3506,7 +3506,9 @@ export class AgentRuntime implements Runtime {
       this.capDedupeMap(this.groupMetadataCache, AgentRuntime.GROUP_METADATA_CACHE_MAX);
       return adminJids;
     } catch (err) {
-      log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
+      // QR-036: returns null → callers KEEP the admin gate (fail-closed), they no
+      // longer downgrade an admin-gated GROUP poll to first-vote-wins on this error.
+      log.warn({ err, chatJid }, 'failed to fetch group metadata — admin-gated polls keep the gate (fail-closed)');
       return null;
     }
   }
@@ -3585,8 +3587,13 @@ export class AgentRuntime implements Runtime {
           if (this.pendingPolls.questions.get(mapKey) === pending) {
             pending.adminJids = admins;
             if (admins === null) {
-              log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
-              pending.resolution = 'first-vote-wins';
+              // QR-036: fail CLOSED, not open. Keep the admin-only/admin-wins
+              // strategy with adminJids=null so NO member vote qualifies as admin
+              // (a non-admin can no longer hijack the gated decision when group
+              // metadata is transiently unavailable). Liveness is bounded by the
+              // existing soft-expiry timeout fallback (admin-wins → non-admin
+              // majority-after-timeout, admin-only → operator text-fallback).
+              log.warn({ mapKey, resolution }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
             }
           }
         });
@@ -3633,8 +3640,11 @@ export class AgentRuntime implements Runtime {
     if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
       adminJids = await this.fetchGroupAdminJids(chatJid);
       if (adminJids === null) {
-        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — degrading to first-vote-wins');
-        resolvedStrategy = 'first-vote-wins';
+        // QR-036: fail CLOSED. Keep the admin-only/admin-wins strategy with
+        // adminJids=null so no member vote qualifies as admin (no non-admin can
+        // resolve the gated decision on transient metadata failure); liveness via
+        // the soft-expiry timeout fallback.
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
       }
     }
 
