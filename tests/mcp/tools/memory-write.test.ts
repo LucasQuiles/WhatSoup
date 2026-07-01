@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { isToolErrorPayload } from '../../../src/mcp/types.ts';
-import type { MemoryRecord } from '../../../src/runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, type MemoryRecord } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
 function setup(opts: { botJid?: string; upsert?: (r: MemoryRecord[]) => Promise<void> } = {}) {
   const tools: ToolDeclaration[] = [];
@@ -82,6 +82,45 @@ describe('memory_write tool', () => {
     expect(id1.startsWith('user_fact_')).toBe(true);
   });
 
+  it('stores optional provenance fields with the session conversation and explicit confidence', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      {
+        chatJid: 'caller-supplied@g.us',
+        text: 'Phil corrected the shipping address',
+        memory_type: 'correction',
+        confidence: 0.42,
+        claim: 'The shipping address changed',
+        evidence: 'Phil said "use the office address"',
+        warrant: 'Latest explicit correction wins',
+        contradicts: 'Use home address',
+      },
+      chatSession({
+        conversationKey: 'canonical-chat@g.us',
+        deliveryJid: 'raw-delivery@g.us',
+        actorJid: 'phil@s.whatsapp.net',
+      }),
+    );
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    expect(records).toHaveLength(1);
+    const r = records[0];
+    expect(r).toMatchObject({
+      chatJid: 'canonical-chat@g.us',
+      senderJid: 'phil@s.whatsapp.net',
+      text: 'Phil corrected the shipping address',
+      memoryType: 'correction',
+      confidence: 0.42,
+      claim: 'The shipping address changed',
+      evidence: 'Phil said "use the office address"',
+      warrant: 'Latest explicit correction wins',
+      contradicts: 'Use home address',
+    });
+    expect(r.id.startsWith('correction_')).toBe(true);
+    expect(res).toMatchObject({ id: r.id, status: 'written', memory_type: 'correction' });
+  });
+
   it('errors without a conversation context', async () => {
     const { tool, upsert } = setup();
     const res = await tool.handler(
@@ -99,6 +138,54 @@ describe('memory_write tool', () => {
       chatSession(),
     );
     expect(isToolErrorPayload(res)).toBe(true);
+  });
+
+  it('surfaces a non-Error upsert failure as a tool error message', async () => {
+    const { tool, upsert } = setup({
+      upsert: async () => {
+        throw 'PINECONE_STRING_FAILURE';
+      },
+    });
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact' },
+      chatSession(),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(res).toMatchObject({ error: 'memory_write failed: PINECONE_STRING_FAILURE' });
+  });
+
+  it('uses the default Pinecone writer factory when no test writer is injected', async () => {
+    const tools: ToolDeclaration[] = [];
+    const upsertSpy = vi.spyOn(PineconeMemory.prototype, 'upsert').mockResolvedValue(undefined);
+    const originalApiKey = process.env.PINECONE_API_KEY;
+    process.env.PINECONE_API_KEY = 'test-pinecone-key';
+    try {
+      registerMemoryWriteTools(() => undefined, (t) => tools.push(t));
+      const tool = tools.find((t) => t.name === 'memory_write')!;
+
+      const res = await tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'default writer path', memory_type: 'user_fact' },
+        chatSession(),
+      );
+
+      expect(upsertSpy).toHaveBeenCalledTimes(1);
+      const [records] = upsertSpy.mock.calls[0] as [MemoryRecord[]];
+      expect(records[0]).toMatchObject({
+        chatJid: '12345@s.whatsapp.net',
+        senderJid: 'phil@s.whatsapp.net',
+        text: 'default writer path',
+        memoryType: 'user_fact',
+      });
+      expect(res).toMatchObject({ status: 'written', memory_type: 'user_fact' });
+    } finally {
+      upsertSpy.mockRestore();
+      if (originalApiKey === undefined) {
+        delete process.env.PINECONE_API_KEY;
+      } else {
+        process.env.PINECONE_API_KEY = originalApiKey;
+      }
+    }
   });
 
   it('REJECTS a global session even with a caller-supplied chatJid (no cross-conversation write)', async () => {
