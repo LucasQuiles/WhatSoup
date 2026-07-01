@@ -495,6 +495,37 @@ async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMessage): 
   await (runtime as unknown as { turnQueue: { idle: () => Promise<void> } }).turnQueue.idle();
 }
 
+function attachRuntimeFaultMarkerSpies(runtime: AgentRuntime): {
+  durability: {
+    completeInbound: ReturnType<typeof vi.fn>;
+    markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn>;
+    markInboundFailed: ReturnType<typeof vi.fn>;
+    upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+  };
+  replyGuarantee: {
+    arm: ReturnType<typeof vi.fn>;
+    disarm: ReturnType<typeof vi.fn>;
+    isArmed: ReturnType<typeof vi.fn>;
+    shutdown: ReturnType<typeof vi.fn>;
+  };
+} {
+  const durability = {
+    completeInbound: vi.fn(),
+    markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
+    markInboundFailed: vi.fn(),
+    upsertSessionCheckpoint: vi.fn(),
+  };
+  const replyGuarantee = {
+    arm: vi.fn(),
+    disarm: vi.fn(),
+    isArmed: vi.fn(() => true),
+    shutdown: vi.fn(),
+  };
+  (runtime as unknown as { durability: unknown }).durability = durability;
+  (runtime as unknown as { replyGuarantee: unknown }).replyGuarantee = replyGuarantee;
+  return { durability, replyGuarantee };
+}
+
 function mockActiveAgentSession(rowId = 42): void {
   mockSession.getStatus.mockReturnValue({
     active: true,
@@ -1657,12 +1688,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
 
-    const durability = {
-      completeInbound: vi.fn(),
-      markInboundFailed: vi.fn(),
-      upsertSessionCheckpoint: vi.fn(),
-    };
-    (runtime as unknown as { durability: unknown }).durability = durability;
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
 
     await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 77 }));
 
@@ -1695,6 +1721,8 @@ describe('AgentRuntime', () => {
     }).handleCrashNotify('Agent session ended (exited with code 1). Send any message to start a new session.', 'test@s.whatsapp.net');
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
+    expect((durability as { markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn> }).markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(77, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
     expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77);
     expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
     expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.get('test@s.whatsapp.net')).toBe('hello');
@@ -1704,6 +1732,29 @@ describe('AgentRuntime', () => {
     expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
     expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('single-session crash callback marks runtime-fault continuity candidate before failing inbound', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 88 }));
+    expect(capturedOnCrashRef.current).toBeTypeOf('function');
+
+    capturedOnCrashRef.current!({
+      exitCode: 1,
+      signal: null,
+      sessionId: 'opencode-cli-456',
+      dbRowId: 43,
+    });
+
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(88, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(88);
+    expect((runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq).toBeUndefined();
   });
 
   it('tracks pending auto-respawn timers per crash and removes them after firing', async () => {
@@ -2943,10 +2994,14 @@ describe('AgentRuntime', () => {
     mockSession.sendTurn.mockRejectedValue(new Error('some other error'));
 
     const runtime = new AgentRuntime(db, messenger);
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
     await runtime.start();
 
     // handleMessage must not reject — error is swallowed by the chain's .catch(() => {})
-    await expect(sendAndDrain(runtime, makeMsg({ content: 'hello' }))).resolves.toBeUndefined();
+    await expect(sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 89 }))).resolves.toBeUndefined();
+    expect(durability.markContinuityCandidateIfNoTerminalOutbound)
+      .toHaveBeenCalledWith(89, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(89);
   });
 
   // ─── Event routing ─────────────────────────────────────────────────────────

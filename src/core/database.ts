@@ -731,6 +731,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [31, runMigration31],
   [32, runMigration32],
   [33, runMigration33],
+  [34, runMigration34],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -838,6 +839,44 @@ CREATE INDEX IF NOT EXISTS idx_auth_loss_signal_instance_classifier
 
 function runMigration33(db: DatabaseSync): void {
   db.exec(MIGRATION_33_AUTH_LOSS_SIGNAL);
+}
+
+function runMigration34(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inbound_events'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db
+    .prepare("PRAGMA table_info('inbound_events')")
+    .all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has('continuity_candidate_reason')) {
+    db.exec(`
+      ALTER TABLE inbound_events
+      ADD COLUMN continuity_candidate_reason TEXT
+      CHECK (
+        continuity_candidate_reason IS NULL OR
+        continuity_candidate_reason IN ('crash_reclaim_no_terminal_outbound', 'runtime_fault_no_terminal_outbound')
+      )
+    `);
+  }
+
+  if (!names.has('continuity_candidate_source')) {
+    db.exec(`
+      ALTER TABLE inbound_events
+      ADD COLUMN continuity_candidate_source TEXT
+      CHECK (
+        continuity_candidate_source IS NULL OR
+        continuity_candidate_source IN ('pre_connect_recovery', 'runtime_fault_disarm')
+      )
+    `);
+  }
+
+  if (!names.has('continuity_candidate_marked_at')) {
+    db.exec('ALTER TABLE inbound_events ADD COLUMN continuity_candidate_marked_at TEXT');
+  }
 }
 
 function runMigration27(db: DatabaseSync): void {
