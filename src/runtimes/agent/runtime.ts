@@ -1636,9 +1636,34 @@ export class AgentRuntime implements Runtime {
     });
   }
 
+  /**
+   * Find the echo-guard token of any existing queue still targeting this chat,
+   * across all three stores + the canonical key (QR-069). A replacement queue
+   * inherits it so the predecessor's still-active group cooldown does not
+   * silently flood-suppress the replacement's first (often terminal) reply.
+   */
+  private priorSenderTokenForChat(chatJid: string): string | undefined {
+    const canonical = canonicalizeChatJid(chatJid, this.db);
+    const prior =
+      this.outboundQueues.get(chatJid) ??
+      this.outboundQueues.get(canonical) ??
+      this.chatQueues.get(chatJid) ??
+      this.chatQueues.get(canonical) ??
+      this.queue ??
+      undefined;
+    return prior?.getSenderToken();
+  }
+
   /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
   private createOutboundQueue(chatJid: string, reason: string): OutboundQueue {
-    const q = new OutboundQueue(this.messenger, chatJid);
+    // QR-069: inherit a prior queue's echo-guard token when one exists. Pass the
+    // 3rd arg only when defined so a genuinely-new queue keeps the 2-arg
+    // construction contract (no trailing `undefined`) — mirrors the QR-028
+    // conditional-call precedent for optional positional params.
+    const priorToken = this.priorSenderTokenForChat(chatJid);
+    const q = priorToken !== undefined
+      ? new OutboundQueue(this.messenger, chatJid, priorToken)
+      : new OutboundQueue(this.messenger, chatJid);
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);

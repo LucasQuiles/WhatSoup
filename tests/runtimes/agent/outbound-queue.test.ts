@@ -17,7 +17,8 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
-import { recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
+import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
+import type { EchoGuardConfig } from '../../../src/core/echo-guard.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
 const mockLog = vi.hoisted(() => ({
@@ -2506,6 +2507,38 @@ describe('OutboundQueue', () => {
       // Drain the streamTimer so the leak guard passes
       await queue.flush();
     });
+  });
+});
+
+describe('OutboundQueue — echo-guard token inheritance across replacement (QR-069)', () => {
+  const GROUP_JID = 'qr069-test-group@g.us';
+  const CFG: EchoGuardConfig = { enabled: true, groupCooldownMs: 60_000 };
+
+  beforeEach(() => __resetForTests());
+
+  it('exposes a stable per-instance token; a fresh queue gets a random non-empty token', () => {
+    const { messenger } = makeMessenger();
+    const q = new OutboundQueue(messenger, GROUP_JID);
+    expect(q.getSenderToken()).toMatch(/.+/);
+    const q2 = new OutboundQueue(messenger, GROUP_JID);
+    expect(q2.getSenderToken()).not.toBe(q.getSenderToken());
+  });
+
+  it('a replacement queue that INHERITS the prior token is exempt from the predecessor cooldown', () => {
+    const { messenger } = makeMessenger();
+    // Predecessor queue sends to the group, arming the cross-session cooldown.
+    const oldQueue = new OutboundQueue(messenger, GROUP_JID);
+    const oldToken = oldQueue.getSenderToken();
+    recordGroupOutbound(GROUP_JID, oldToken);
+
+    // BUG (QR-069): a replacement with a FRESH token is suppressed within the window.
+    const freshReplacement = new OutboundQueue(messenger, GROUP_JID);
+    expect(canSendToGroup(GROUP_JID, CFG, freshReplacement.getSenderToken())).toBe(false);
+
+    // FIX: a replacement that inherits the prior token is NOT suppressed.
+    const inheritingReplacement = new OutboundQueue(messenger, GROUP_JID, oldToken);
+    expect(inheritingReplacement.getSenderToken()).toBe(oldToken);
+    expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
   });
 });
 
