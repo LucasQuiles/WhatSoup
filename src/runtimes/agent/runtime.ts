@@ -3108,13 +3108,20 @@ export class AgentRuntime implements Runtime {
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            this.pendingSystemResults.mark(mapKey);
+            // QR-095: mark under the SAME scope the single/shared result handler
+            // consumes (GLOBAL_TOOL_SCOPE_KEY). mapKey is undefined for single/
+            // shared callers (sendTurnNonShared), so mark(mapKey) would be a no-op
+            // and the injected system turn's result would be mis-classified as a
+            // USER turn (phantom '[Recent chat context]' reply leaks to the user +
+            // wrong post-turn gate). In per_chat mapKey is defined so this is a
+            // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
+            this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
           // Context-injection send failed — no result will arrive for its mark.
-          this.pendingSystemResults.unmark(mapKey);
+          this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
         }
       }
     }
@@ -7658,13 +7665,18 @@ export class AgentRuntime implements Runtime {
             const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
-              this.pendingSystemResults.mark(mapKey);
+              // QR-095: same fix as the sendTurnToSession injection — in single/
+              // shared mode mapKey is undefined here, so mark under GLOBAL to match
+              // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise
+              // the '[CONTEXT RECOVERY]' system turn's result leaks to the user.
+              // No-op in per_chat (mapKey defined, consumed per-chat).
+              this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
             // Context-recovery send failed — no result will arrive for its mark.
-            this.pendingSystemResults.unmark(mapKey);
+            this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
           }
 
           // Replay the pending turn that was lost during the failed resume

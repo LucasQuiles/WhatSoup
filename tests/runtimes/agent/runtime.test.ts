@@ -3730,6 +3730,43 @@ describe('AgentRuntime', () => {
     expect(state.pendingSystemResults.counts.get(chatJid) ?? 0).toBe(0);
   });
 
+  // QR-095: in single/shared mode the context-injection system turn must be
+  // marked under GLOBAL_TOOL_SCOPE_KEY (the key the single/shared result handler
+  // consumes), NOT under an undefined mapKey (which is a no-op → the injected
+  // '[Recent chat context]' turn's result would be mis-classified as a USER turn
+  // and leak to the user).
+  it('single/shared: context-injection system turn is marked under the global scope (QR-095)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single/shared (no sessionScope)
+    const chatJid = '15550005555@s.whatsapp.net';
+    const state = runtime as unknown as {
+      pendingSystemResults: { mark: (k: string) => void };
+    };
+
+    vi.mocked(getRecentMessages).mockReturnValue([
+      {
+        pk: 1, chatJid, conversationKey: 'k', senderJid: 'sender@s.whatsapp.net',
+        senderName: 'Alice', messageId: 'm1', content: 'earlier message', contentType: 'text',
+        isFromMe: false, timestamp: 1_700_000_000, quotedMessageId: null,
+        enrichmentProcessedAt: null, enrichmentRetries: 0, createdAt: new Date().toISOString(),
+        mediaPath: null, contentText: null,
+      },
+    ]);
+    // Inactive session → sendTurnToSession respawns and injects context.
+    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+
+    await runtime.start();
+    const markSpy = vi.spyOn(state.pendingSystemResults, 'mark');
+    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+
+    const markedKeys = markSpy.mock.calls.map((c) => c[0]);
+    // RED pre-fix: the injection marked `undefined` (a no-op → phantom leak).
+    expect(markedKeys).not.toContain(undefined);
+    // GREEN post-fix: marked under the global scope the single/shared handler consumes.
+    expect(markedKeys).toContain('__global__');
+  });
+
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
