@@ -1187,6 +1187,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 32 | Adds `scheduled_messages.send_started_at` so scheduler crash recovery can distinguish pre-send claims from uncertain in-flight sends and fail closed instead of blindly replaying accepted messages (`runMigration32`) |
 | 33 | Adds `auth_loss_signal` with active-signal and classifier indexes so auth-loss evidence can be recorded once, resolved after stable authenticated-open dwell, and counted across later recurrences (`runMigration33`) |
 | 34 | Adds nullable `inbound_events` continuity-candidate marker columns (`continuity_candidate_reason`, `continuity_candidate_source`, `continuity_candidate_marked_at`) so restart recovery and runtime fault/disarm branches can tag no-terminal-outbound inbounds before any queue/consumer exists (`runMigration34`) |
+| 35 | Rebuilds `messages_fts_delete` and `messages_fts_update` triggers with an `OLD.deleted_at IS NULL` guard on the FTS `'delete'` command, so a hard-delete or content_text update of a since-soft-deleted row no longer double-deletes the FTS entry (which threw `database disk image is malformed`, crashing retention pruning and transcription updates) — QR-115 (`runMigration35`) |
 
 
 ---
