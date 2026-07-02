@@ -67,16 +67,17 @@ function buildOutboundMediaFromPath(
   filename: string,
   mimetype: string,
   caption: string | undefined,
+  allowedRoot: string,
 ): OutboundMedia {
   switch (mediaType) {
     case 'image':
-      return { type: 'image', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
+      return { type: 'image', stream: createMediaReadStream(resolvedPath, allowedRoot, log), mimetype, caption };
     case 'audio':
-      return { type: 'audio', stream: createMediaReadStream(resolvedPath, log), mimetype };
+      return { type: 'audio', stream: createMediaReadStream(resolvedPath, allowedRoot, log), mimetype };
     case 'video':
-      return { type: 'video', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
+      return { type: 'video', stream: createMediaReadStream(resolvedPath, allowedRoot, log), mimetype, caption };
     default:
-      return { type: 'document', stream: createMediaReadStream(resolvedPath, log), filename, mimetype, caption };
+      return { type: 'document', stream: createMediaReadStream(resolvedPath, allowedRoot, log), filename, mimetype, caption };
   }
 }
 
@@ -114,6 +115,10 @@ export function startMediaBridge(
 
   const server = createServer((socket) => {
     activeSockets.add(socket);
+    // QR-053: UTF-8-decode the line-delimited JSON-RPC stream so a multibyte char
+    // split across a read boundary isn't silently corrupted to U+FFFD (the bytes here
+    // are file PATHS in JSON, not raw media — the media flows via the filesystem).
+    socket.setEncoding('utf8');
     let buf = '';
 
     socket.on('close', () => {
@@ -272,7 +277,7 @@ async function handleRequest(
       : resolvedPath.split('/').pop() ?? 'file';
 
   for (let attempt = 0; ; attempt += 1) {
-    const media = buildOutboundMediaFromPath(mediaType, resolvedPath, filename, mimetype, caption);
+    const media = buildOutboundMediaFromPath(mediaType, resolvedPath, filename, mimetype, caption, allowedRoot);
     try {
       await messenger.sendMedia(chatJid, media);
       log.info({ chatJid, mediaType, ext }, 'media sent');

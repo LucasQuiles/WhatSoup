@@ -7,6 +7,7 @@ import {
   handleChatsUpdate,
   handleChatsDelete,
 } from '../../src/core/chat-sync.ts';
+import { upsertLidMapping } from '../../src/core/lid-resolver.ts';
 
 function makeDb(): Database {
   const db = new Database(':memory:');
@@ -197,6 +198,40 @@ describe('chat-sync', () => {
         .get('111@s.whatsapp.net') as any;
       expect(row.name).toBe('Alice');
       expect(row.conversation_key).toBe('111');
+    });
+
+    it('keys a MAPPED LID DM by the resolved phone, matching live ingest (QR-043)', () => {
+      const LID = '31478083756155';
+      const PHONE = '15551230007';
+      upsertLidMapping(db, LID, `${PHONE}@s.whatsapp.net`);
+
+      handleChatsUpsert(db, [{ id: `${LID}@lid`, name: 'Mapped' }]);
+
+      const row = db.raw
+        .prepare('SELECT conversation_key FROM chats WHERE jid = ?')
+        .get(`${LID}@lid`) as any;
+      // Bug was: conversation_key === LID number, splitting it from the
+      // phone-keyed live messages. Fix: resolved phone.
+      expect(row.conversation_key).toBe(PHONE);
+      expect(row.conversation_key).not.toBe(LID);
+    });
+
+    it('repairs a stale conversation_key on re-upsert once the LID mapping is learned (QR-043 ON CONFLICT)', () => {
+      const LID = '31478083756155';
+      const PHONE = '15551230007';
+
+      // First sync BEFORE the mapping exists → keyed under the raw LID number.
+      handleChatsUpsert(db, [{ id: `${LID}@lid`, name: 'BeforeMap' }]);
+      let row = db.raw.prepare('SELECT conversation_key FROM chats WHERE jid = ?').get(`${LID}@lid`) as any;
+      expect(row.conversation_key).toBe(LID);
+
+      // Mapping is learned, then a re-sync arrives. ON CONFLICT must repair the key.
+      upsertLidMapping(db, LID, `${PHONE}@s.whatsapp.net`);
+      handleChatsUpsert(db, [{ id: `${LID}@lid`, name: 'AfterMap' }]);
+
+      row = db.raw.prepare('SELECT conversation_key, name FROM chats WHERE jid = ?').get(`${LID}@lid`) as any;
+      expect(row.conversation_key).toBe(PHONE);
+      expect(row.name).toBe('AfterMap');
     });
 
     it('persists a chat with no name as null (c.name nullish arm)', () => {

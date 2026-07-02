@@ -56,6 +56,16 @@ const log = createChildLogger('substrate.trigger-poller');
 
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_BATCH_SIZE = 50;
+/**
+ * Hard cap on rows a single poll.sqlite execution may materialize (QR-026).
+ * `query_only` bounds writes but not CPU/heap; a read-only recursive CTE passes
+ * `isSafeSqliteSql` and would otherwise let `.all()` materialize unboundedly,
+ * OOM-crashing / freezing the synchronous DatabaseSync (whole-process DoS). We
+ * iterate and fail past this cap. NOTE: node:sqlite exposes no interrupt/step
+ * limit and DatabaseSync blocks the event loop, so a CPU-spin yielding FEW rows
+ * is NOT bounded by this — full containment needs out-of-process execution.
+ */
+export const MAX_SQLITE_ROWS = 10_000;
 /** Cooldown applied when a kind is not yet implemented — avoids tight loops. */
 const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 /** Cooldown applied after a transient failure so the poller does not spin. */
@@ -536,6 +546,7 @@ export class TriggerPoller {
       };
     }
     let rows: Record<string, unknown>[];
+    let capExceeded = false;
     try {
       // Operator-stored SQL runs against the live bot.db. Bound the blast
       // radius of a compromised or confused-deputy spec by flipping the
@@ -546,7 +557,15 @@ export class TriggerPoller {
       try {
         const stmt = this.db.prepare(spec.sql);
         const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
-        rows = stmt.all(...bindArgs) as unknown as Record<string, unknown>[];
+        // QR-026: iterate with a hard row cap instead of `.all()`. A runaway
+        // recursive CTE is bounded at MAX_SQLITE_ROWS pulls (breaking the
+        // iterator stops the query) rather than materializing unboundedly and
+        // OOM-crashing the process.
+        rows = [];
+        for (const row of stmt.iterate(...bindArgs)) {
+          if (rows.length >= MAX_SQLITE_ROWS) { capExceeded = true; break; }
+          rows.push(row as Record<string, unknown>);
+        }
       } finally {
         this.db.exec('PRAGMA query_only = OFF');
       }
@@ -560,6 +579,20 @@ export class TriggerPoller {
         errorMessage: errorMessage(err),
       };
     }
+    if (capExceeded) {
+      // The query produced more than MAX_SQLITE_ROWS rows — almost certainly an
+      // unbounded/recursive or misconfigured spec. Fail (the circuit breaker will
+      // pause it after repeated failures) rather than acting on a truncated set.
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: `SQL exceeded the ${MAX_SQLITE_ROWS}-row cap — rejected`,
+        outputJson: { rowCap: MAX_SQLITE_ROWS, sql: spec.sql },
+        errorKind: 'row_cap_exceeded',
+        errorMessage: `poll.sqlite result exceeded ${MAX_SQLITE_ROWS} rows — query rejected to bound DoS risk (unbounded/recursive query?)`,
+      };
+    }
+
     const rowCount = rows.length;
 
     if (spec.fire_when === 'rows_returned') {
@@ -1067,8 +1100,10 @@ export class TriggerPoller {
 
     if (t.kind === 'schedule.cron') {
       try {
-        const parsed = JSON.parse(t.spec_json) as { expr: string };
-        nextFireAt = nextCronRun(parsed.expr, now);
+        // QR-092: honor the persisted tz on reschedule (parity with computeNextFireAt
+        // and the scheduled_messages path); default to UTC when absent.
+        const parsed = JSON.parse(t.spec_json) as { expr: string; tz?: string };
+        nextFireAt = nextCronRun(parsed.expr, now, parsed.tz ?? 'UTC');
       } catch (err) {
         log.error({ err, triggerId: t.id }, 'cron next-fire computation failed');
         nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;

@@ -1933,6 +1933,7 @@ describe('POST /send — Authorization header check', () => {
     expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
       '15550100002@s.whatsapp.net',
       'hello alias',
+      { caller: 'health' }, // QR-086: admin /send tags itself a system caller
     );
   });
 
@@ -1953,6 +1954,7 @@ describe('POST /send — Authorization header check', () => {
     expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
       '15550100001@s.whatsapp.net',
       '[SAT] hello #satellite',
+      { caller: 'health' }, // QR-086: admin /send tags itself a system caller
     );
   });
 

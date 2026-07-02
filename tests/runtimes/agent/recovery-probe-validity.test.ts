@@ -125,7 +125,13 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-type RecoveryView = { probePrimaryProviderRecovered(): Promise<boolean> };
+type RecoveryView = {
+  probePrimaryProviderRecovered(): Promise<boolean>;
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error' | 'empty-output' | 'probe-unusable',
+  ): unknown;
+};
 
 function makeRuntime(provider: string): AgentRuntime {
   const config = mockConfigRef();
@@ -199,32 +205,109 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     expect(probePrimaryModelUsabilityMock).toHaveBeenCalledWith({ provider: 'claude-cli', model: null }, expect.anything());
   });
 
-  it('binary primary: NOT recovered when no binary resolves', async () => {
+  it('binary primary: does NOT consult the binary resolver — recovery follows the usability probe', async () => {
+    // QR-048: binary presence is never a recovery signal. The resolver is not
+    // consulted; a non-usable probe is NOT recovered even if a binary resolves.
     getProviderBinaryMock.mockReturnValue(null);
-    probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
+    probePrimaryModelUsabilityMock.mockResolvedValue(usability('credential-unavailable'));
     const v = view(makeRuntime('claude-cli'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
-    expect(probePrimaryModelUsabilityMock).not.toHaveBeenCalled();
+    expect(getProviderBinaryMock).not.toHaveBeenCalled();
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
-  it('binary primary: never rejects when the binary resolver throws (honors the contract)', async () => {
+  it('binary primary: never rejects — the never-throws contract rests on the probe, not the binary resolver', async () => {
+    // QR-048: the resolver is no longer on the recovery path, so a throwing
+    // resolver can not break the never-rejects contract; recovery follows the probe.
     getProviderBinaryMock.mockImplementation(() => { throw new Error('unknown provider'); });
     probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
     const v = view(makeRuntime('claude-cli'));
-    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
-    expect(probePrimaryModelUsabilityMock).not.toHaveBeenCalled();
+    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
+    expect(getProviderBinaryMock).not.toHaveBeenCalled();
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
-  it('keyed primary: recovered when the credential is present', async () => {
+  it('keyed primary: recovered ONLY when the usability probe is usable, not from credential presence', async () => {
+    // QR-048: a present key is never sufficient — the probe always runs and its
+    // result is the recovery signal.
     lookupCredentialMock.mockReturnValue('sk-present');
+    probePrimaryModelUsabilityMock.mockResolvedValue({
+      status: 'usable',
+      provider: 'anthropic-api',
+      model: 'claude-opus-4-8[1m]',
+    });
     const v = view(makeRuntime('anthropic-api'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
-    expect(probePrimaryModelUsabilityMock).not.toHaveBeenCalled();
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 
-  it('keyed primary: NOT recovered when the credential is absent', async () => {
-    lookupCredentialMock.mockReturnValue(null);
+  it('keyed primary: present key but non-usable probe is NOT recovered (presence never shortcuts)', async () => {
+    // QR-048: guards the expired-key flap — key present, probe says credential
+    // unavailable, recovery must be false.
+    lookupCredentialMock.mockReturnValue('sk-present');
+    probePrimaryModelUsabilityMock.mockResolvedValue({
+      status: 'credential-unavailable',
+      provider: 'anthropic-api',
+      model: 'claude-opus-4-8[1m]',
+    });
     const v = view(makeRuntime('anthropic-api'));
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['usage-limit', 'rate-limit'] as const)(
+    'keyed primary: %s fallback requires model usability, not credential presence',
+    async (reason) => {
+      lookupCredentialMock.mockReturnValue('sk-present');
+      probePrimaryModelUsabilityMock.mockResolvedValue({
+        status: 'credential-unavailable',
+        provider: 'anthropic-api',
+        model: 'claude-opus-4-8[1m]',
+      });
+      const v = view(makeRuntime('anthropic-api'));
+
+      v.activateProviderFallback(null, reason);
+      lookupCredentialMock.mockClear();
+      probePrimaryModelUsabilityMock.mockClear();
+
+      await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
+      expect(lookupCredentialMock).not.toHaveBeenCalled();
+      expect(probePrimaryModelUsabilityMock).toHaveBeenCalledWith(
+        { provider: 'anthropic-api', model: 'claude-opus-4-8[1m]' },
+        expect.anything(),
+      );
+    },
+  );
+
+  it('keyed primary: quota fallback recovers when model usability is confirmed', async () => {
+    lookupCredentialMock.mockReturnValue('sk-present');
+    probePrimaryModelUsabilityMock.mockResolvedValue({
+      status: 'usable',
+      provider: 'anthropic-api',
+      model: 'claude-opus-4-8[1m]',
+    });
+    const v = view(makeRuntime('anthropic-api'));
+
+    v.activateProviderFallback(null, 'usage-limit');
+    lookupCredentialMock.mockClear();
+    probePrimaryModelUsabilityMock.mockClear();
+
+    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keyed primary: NOT recovered when the usability probe is non-usable (even absent credential runs the probe)', async () => {
+    // QR-048: credential absence no longer short-circuits — the probe always
+    // runs and its non-usable result is what makes recovery false.
+    lookupCredentialMock.mockReturnValue(null);
+    probePrimaryModelUsabilityMock.mockResolvedValue({
+      status: 'credential-unavailable',
+      provider: 'anthropic-api',
+      model: 'claude-opus-4-8[1m]',
+    });
+    const v = view(makeRuntime('anthropic-api'));
+    await expect(v.probePrimaryProviderRecovered()).resolves.toBe(false);
+    expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
   });
 });

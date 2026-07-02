@@ -167,4 +167,44 @@ describe('MemoryConsolidationScheduler', () => {
     await stopPromise;
     expect(stopResolved).toBe(true);
   });
+
+  it('warns and still resolves stop() when the active run never drains before timeout', async () => {
+    // UNHAPPY: a hung consolidation run must not block stop() forever — after the timeout
+    // stop() resolves (logging that the run is still draining).
+    pinecone.search.mockReturnValue(new Promise<[]>(() => { /* never resolves */ }));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+    scheduler.start();
+
+    let stopResolved = false;
+    const stopPromise = scheduler.stop(5_000).then(() => { stopResolved = true; });
+    await Promise.resolve();
+    expect(stopResolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await stopPromise;
+    expect(stopResolved).toBe(true);
+  });
+
+  it('skips runOnce when a previous run is still active', async () => {
+    // UNHAPPY: overlapping runs must not double-execute; a second runOnce is skipped.
+    pinecone.search.mockReturnValue(new Promise<[]>(() => { /* hang the first run */ }));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+    scheduler.start();
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+
+    await scheduler.runOnce();
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+
+    const stopPromise = scheduler.stop(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await stopPromise;
+  });
 });

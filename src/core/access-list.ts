@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, normalizeLid, smsJidToPhone } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, isLidJid, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -179,4 +179,22 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
 
   // Personal JID or other — delegate to extractLocal
   return extractLocal(jid);
+}
+
+/**
+ * Canonicalize a raw chat JID to the `conversation_key` that message INGEST
+ * stores under, so recent-history reads match what was written.
+ *
+ * This MUST mirror the store-side keying in `src/core/ingest.ts`:
+ *   `(!isGroup && isLidJid(chatJid)) ? resolvePhoneFromJid(chatJid, db) : toConversationKey(chatJid)`
+ * `isLidJid` already excludes group JIDs (they are `@g.us`, never `@lid`), so
+ * the `!isGroup` guard is subsumed here. For a MAPPED `@lid` DM, ingest keys the
+ * row under the resolved PHONE while `toConversationKey('<lid>@lid')` stays the
+ * raw LID number — so reading recent history with a bare `toConversationKey`
+ * queries the wrong key and returns nothing (QR-050). Use this at every
+ * `getRecentMessages` / `getMessagesSince` read site whose key is derived from a
+ * raw `msg.key.remoteJid`.
+ */
+export function canonicalConversationKey(jid: string, db: Database): string {
+  return isLidJid(jid) ? resolvePhoneFromJid(jid, db) : toConversationKey(jid);
 }

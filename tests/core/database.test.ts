@@ -199,6 +199,92 @@ describe('Database schema', () => {
     expect(triggers[0].sql).toContain('content_text');
   });
 
+  // ── QR-115: FTS `'delete'` must be guarded against a since-soft-deleted row ──
+  //
+  // The `messages_fts_soft_delete` trigger removes a row from FTS when
+  // `deleted_at` is set. Without an `OLD.deleted_at IS NULL` guard on the
+  // AFTER DELETE / AFTER UPDATE OF content_text triggers, they fire a second
+  // `'delete'` against the (already-gone) FTS row, and SQLite throws
+  // "database disk image is malformed" at the DML statement. Two live callers
+  // hit this pre-fix: retention pruning (deleteOldMessages, main.ts:710/731)
+  // and transcription updates (updateTranscription — mcp/tools/media.ts:467,
+  // runtimes/agent/media-prep.ts:146). MIGRATION_35 adds the guard.
+
+  it('QR-115: MIGRATION_35 guards messages_fts_delete on OLD.deleted_at IS NULL', () => {
+    const trg = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_delete'")
+      .get() as { sql: string } | undefined;
+    expect(trg?.sql).toBeDefined();
+    // Full guard: OLD.content_text IS NOT NULL AND OLD.deleted_at IS NULL
+    expect(trg!.sql).toMatch(/OLD\.content_text\s+IS\s+NOT\s+NULL/i);
+    expect(trg!.sql).toMatch(/OLD\.deleted_at\s+IS\s+NULL/i);
+  });
+
+  it('QR-115: MIGRATION_35 guards messages_fts_update delete-half on OLD.deleted_at IS NULL', () => {
+    const trg = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_update'")
+      .get() as { sql: string } | undefined;
+    expect(trg?.sql).toBeDefined();
+    // The delete-half WHERE clause must include OLD.deleted_at IS NULL, and
+    // the insert-half must still gate on NEW.deleted_at IS NULL (unchanged).
+    expect(trg!.sql).toMatch(/OLD\.deleted_at\s+IS\s+NULL/i);
+    expect(trg!.sql).toMatch(/NEW\.deleted_at\s+IS\s+NULL/i);
+  });
+
+  it('QR-115 Manifestation A: soft-delete → hard-delete no longer corrupts FTS', () => {
+    // Insert a live message that gets into FTS.
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_text, timestamp, is_from_me)
+      VALUES ('c@s.whatsapp.net', 'c', 'c@s.whatsapp.net', 'mA', 'hello world', 1, 0)
+    `).run();
+    // Sanity: row is FTS-searchable.
+    const before = db.raw.prepare(`SELECT COUNT(*) c FROM messages_fts WHERE messages_fts MATCH 'hello'`).get() as { c: number };
+    expect(before.c).toBe(1);
+
+    // Soft-delete → messages_fts_soft_delete removes from FTS.
+    db.raw.prepare(`UPDATE messages SET deleted_at = '2026-07-01T00:00:00Z' WHERE message_id = 'mA'`).run();
+    const afterSoft = db.raw.prepare(`SELECT COUNT(*) c FROM messages_fts WHERE messages_fts MATCH 'hello'`).get() as { c: number };
+    expect(afterSoft.c).toBe(0);
+
+    // Hard-delete: pre-fix this threw "database disk image is malformed"
+    // because messages_fts_delete re-issued 'delete' for the already-gone row.
+    expect(() => {
+      db.raw.prepare(`DELETE FROM messages WHERE message_id = 'mA'`).run();
+    }).not.toThrow();
+  });
+
+  it('QR-115 Manifestation B: soft-delete → updateTranscription no longer corrupts FTS', () => {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_text, timestamp, is_from_me, content_type)
+      VALUES ('c@s.whatsapp.net', 'c', 'c@s.whatsapp.net', 'mB', 'audio placeholder', 2, 0, 'audio')
+    `).run();
+    db.raw.prepare(`UPDATE messages SET deleted_at = '2026-07-01T00:00:00Z' WHERE message_id = 'mB'`).run();
+    // Pre-fix this threw "database disk image is malformed" because
+    // messages_fts_update fired an unguarded 'delete' for the OLD (already gone) row.
+    expect(() => {
+      db.raw.prepare(`UPDATE messages SET content_text = 'transcribed lyrics' WHERE message_id = 'mB'`).run();
+    }).not.toThrow();
+  });
+
+  it('QR-115: live-row hard-delete and content_text update still update FTS correctly (fix does not regress the happy path)', () => {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_text, timestamp, is_from_me)
+      VALUES ('c@s.whatsapp.net', 'c', 'c@s.whatsapp.net', 'mLive1', 'quick brown fox', 3, 0)
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_text, timestamp, is_from_me)
+      VALUES ('c@s.whatsapp.net', 'c', 'c@s.whatsapp.net', 'mLive2', 'lazy dog', 4, 0)
+    `).run();
+    // Update content_text on a live row: OLD row must be removed from FTS,
+    // NEW content indexed.
+    db.raw.prepare(`UPDATE messages SET content_text = 'quick red fox' WHERE message_id = 'mLive1'`).run();
+    expect((db.raw.prepare(`SELECT COUNT(*) c FROM messages_fts WHERE messages_fts MATCH 'brown'`).get() as { c: number }).c).toBe(0);
+    expect((db.raw.prepare(`SELECT COUNT(*) c FROM messages_fts WHERE messages_fts MATCH 'red'`).get() as { c: number }).c).toBe(1);
+    // Hard-delete a live row: FTS row must be removed.
+    db.raw.prepare(`DELETE FROM messages WHERE message_id = 'mLive2'`).run();
+    expect((db.raw.prepare(`SELECT COUNT(*) c FROM messages_fts WHERE messages_fts MATCH 'lazy'`).get() as { c: number }).c).toBe(0);
+  });
+
   it('scheduled_messages table exists with correct columns (MIGRATION_14)', () => {
     const row = db.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_messages'")
@@ -1660,5 +1746,96 @@ describe('database.ts uncovered-branch coverage', () => {
     expect(row).toEqual({ message_id: 'msg-real', resolved: 0 });
 
     db.close();
+  });
+});
+
+// ─── markMessagesDeleted (QR-063 revoke wiring) ──────────────────────────────
+
+describe('markMessagesDeleted (revoke / delete-for-everyone)', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function insertMsg(messageId: string, content = `body ${messageId}`): void {
+    db.raw
+      .prepare(
+        `INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content, content_text, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550100001@s.whatsapp.net',
+        '15550100001',
+        '15550100001@s.whatsapp.net',
+        messageId,
+        content,
+        content,
+        1700000000,
+      );
+  }
+
+  function deletedAt(messageId: string): string | null {
+    return (
+      db.raw
+        .prepare('SELECT deleted_at FROM messages WHERE message_id = ?')
+        .get(messageId) as { deleted_at: string | null } | undefined
+    )?.deleted_at ?? null;
+  }
+
+  it('soft-deletes the targeted message ids and reports the count', () => {
+    insertMsg('m1');
+    insertMsg('m2');
+    insertMsg('m3');
+
+    const n = db.markMessagesDeleted(['m1', 'm3']);
+
+    expect(n).toBe(2);
+    expect(deletedAt('m1')).not.toBeNull();
+    expect(deletedAt('m3')).not.toBeNull();
+  });
+
+  it('leaves non-targeted siblings live', () => {
+    insertMsg('keep');
+    insertMsg('revoke');
+
+    db.markMessagesDeleted(['revoke']);
+
+    expect(deletedAt('keep')).toBeNull();
+    expect(deletedAt('revoke')).not.toBeNull();
+  });
+
+  it('is idempotent — already-deleted rows are not re-counted', () => {
+    insertMsg('m1');
+    expect(db.markMessagesDeleted(['m1'])).toBe(1);
+    // Second revoke for the same id changes nothing (AND deleted_at IS NULL).
+    expect(db.markMessagesDeleted(['m1'])).toBe(0);
+  });
+
+  it('treats an empty id list as a no-op (no SQL, count 0)', () => {
+    insertMsg('m1');
+    expect(db.markMessagesDeleted([])).toBe(0);
+    expect(deletedAt('m1')).toBeNull();
+  });
+
+  it('removes the revoked content from FTS so it cannot be recalled', () => {
+    insertMsg('m1', 'xyzrevoked secret content');
+    const before = db.raw
+      .prepare('SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?')
+      .all('xyzrevoked') as Array<{ rowid: number }>;
+    expect(before.length).toBe(1);
+
+    db.markMessagesDeleted(['m1']);
+
+    const after = db.raw
+      .prepare('SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?')
+      .all('xyzrevoked') as Array<{ rowid: number }>;
+    expect(after.length).toBe(0);
   });
 });

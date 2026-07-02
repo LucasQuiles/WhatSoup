@@ -826,4 +826,44 @@ describe('EnrichmentPoller', () => {
     expect(processedPks).toContain(202);
     expect(processedPks).toContain(203);
   });
+
+  // ── Unhappy ───────────────────────────────────────────────────────────────
+
+  it('does NOT mark a chat segment processed when queue accounting mismatches', async () => {
+    // UNHAPPY: enqueue reporting a hard failure (or fewer landed than expected) must leave
+    // the segment's source messages eligible for retry — not promoted to processed.
+    const msg = makeStoredMsg({ pk: 7, chatJid: 'chat-x@g.us' });
+    vi.mocked(getUnprocessedMessages).mockReturnValue([msg]);
+    const extractedFact = {
+      text: 'x',
+      chatJid: 'chat-x@g.us',
+      senderJid: '15551230000@s.whatsapp.net',
+      senderName: 'U',
+      memoryType: 'user_fact' as const,
+      confidence: 0.9,
+      supersedesText: '',
+      sourceMessagePks: [7],
+    };
+    vi.mocked(extractFacts).mockResolvedValue([extractedFact]);
+    vi.mocked(validateFacts).mockResolvedValue([{ ...extractedFact, adjustedConfidence: 0.9 }]);
+    // 1 fact expected, but enqueue reports a hard failure -> accounting mismatch.
+    vi.mocked(enqueueFacts).mockReturnValue({ attempted: 1, inserted: 0, duplicates: 0, failed: 1 });
+
+    const { poller } = makePoller();
+    await triggerOneCycle(poller);
+
+    // pk 7 must NOT be promoted; the processed set excludes the mismatched segment.
+    expect(markMessagesProcessed).toHaveBeenCalledWith(expect.anything(), []);
+  });
+
+  it('start() schedules once and is guarded against a double start', () => {
+    vi.useFakeTimers();
+    const { poller } = makePoller();
+    const scheduleSpy = vi.spyOn(poller as unknown as { scheduleNext(): void }, 'scheduleNext');
+    poller.start();
+    poller.start();
+    expect(scheduleSpy).toHaveBeenCalledTimes(1);
+    poller.stop();
+    vi.useRealTimers();
+  });
 });

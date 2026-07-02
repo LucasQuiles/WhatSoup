@@ -26,7 +26,7 @@ describe('prepared statement caching', () => {
     const prepareSpy = vi.spyOn(db.raw, 'prepare');
     const engine = new DurabilityEngine(db);
 
-    expect(prepareSpy).toHaveBeenCalledTimes(44);
+    expect(prepareSpy).toHaveBeenCalledTimes(46);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

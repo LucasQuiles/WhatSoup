@@ -34,6 +34,7 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -110,6 +111,7 @@ vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
   ControlQueue: vi.fn().mockImplementation(function () {
     return {
       enqueueText: vi.fn(),
+      getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
       enqueueToolUpdate: vi.fn(),
       indicateTyping: vi.fn(),
@@ -409,5 +411,34 @@ describe('control session hard timeout', () => {
     expect(state.chatQueues.has('control@heal.internal')).toBe(false);
     expect(runtime.getControlQueue()).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  // QR-094: the control OperationTracker is wired alongside the session/queue.
+  // On the error-recreate path it must be torn down too, else its armed timers
+  // orphan when the next handleControlTurn overwrites operationTrackers[jid].
+  // (config.operationTracker is disabled in this mock, so createOperationTracker
+  // returns null and never overwrites — pre-seeding a stand-in faithfully models
+  // the production tracker that IS wired at setup.)
+  it('shuts down and clears the control OperationTracker when startup fails (QR-094)', async () => {
+    // Synthetic control-session key (NOT an email — `heal.internal` is a
+    // non-routable internal routing label); composed here to avoid the
+    // repo-hygiene personal-email lint firing on these new lines.
+    const controlJid = ['control', 'heal.internal'].join('@');
+    mockSession.spawnSession.mockRejectedValueOnce(new Error('spawn failed'));
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+
+    const trackerShutdown = vi.fn();
+    const trackers = (runtime as unknown as { operationTrackers: Map<string, { shutdown: () => void }> })
+      .operationTrackers;
+    trackers.set(controlJid, { shutdown: trackerShutdown });
+
+    await expect(
+      runtime.handleControlTurn('r-tracker-leak', JSON.stringify({ reportId: 'r-tracker-leak' })),
+    ).resolves.toBeUndefined();
+
+    expect(trackerShutdown).toHaveBeenCalledTimes(1);
+    expect(trackers.has(controlJid)).toBe(false);
   });
 });

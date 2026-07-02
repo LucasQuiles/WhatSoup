@@ -16,6 +16,7 @@ import { registerChatManagementTools } from '../../src/mcp/tools/chat-management
 import { registerSearchTools } from '../../src/mcp/tools/search.ts';
 import { registerMessagingTools, type MessagingDeps } from '../../src/mcp/tools/messaging.ts';
 import { registerGroupTools } from '../../src/mcp/tools/groups.ts';
+import { registerSchedulingTools } from '../../src/mcp/tools/scheduling.ts';
 import type { SessionContext } from '../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../src/transport/connection.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
@@ -96,6 +97,7 @@ function makeRegistry(db: Database, mockSock: WhatsAppSocket, mockConn: Connecti
     db: db.raw,
   };
   registerMessagingTools(registry, messagingDeps);
+  registerSchedulingTools(registry, { db });
 
   return registry;
 }
@@ -455,5 +457,53 @@ describe('two concurrent chat-scoped sessions', () => {
     expect(bobScopeViolation.isError).toBe(true);
     expect(aliceScopeViolation.content[0].text).toContain('not available in a chat-scoped session');
     expect(bobScopeViolation.content[0].text).toContain('not available in a chat-scoped session');
+  });
+
+  // QR-075: the caller-supplied scheduling MUTATORS (cancel_scheduled, etc.)
+  // confine a chat-scoped session to its own conversation via assertSessionAccess.
+  // This locks in that a per-chat sandbox agent cannot tamper with ANOTHER
+  // conversation's scheduled sends (no regression test existed for this path).
+  function seedScheduled(db: Database, chatJid: string): number {
+    const r = db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, timezone, next_run_at, status, media_blob)
+         VALUES (?, ?, 'text', ?, ?, NULL, NULL, ?, 'pending', NULL)`,
+      )
+      .run(chatJid, null, JSON.stringify({ type: 'text', text: 'hi' }), 9_999_999_999, 9_999_999_999);
+    return Number(r.lastInsertRowid);
+  }
+
+  it("cancel_scheduled rejects a chat-scoped session cancelling ANOTHER conversation's scheduled message (QR-075)", async () => {
+    const bobScheduledId = seedScheduled(db, BOB_JID);
+
+    // Alice's sandbox session tries to cancel Bob's scheduled message
+    const result = await registry.call(
+      'cancel_scheduled',
+      { id: bobScheduledId },
+      chatSession(ALICE_KEY, ALICE_JID),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/different conversation|access denied/i);
+
+    // And Bob's scheduled message is untouched (still pending).
+    const row = db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = ?').get(bobScheduledId) as { status: string };
+    expect(row.status).toBe('pending');
+  });
+
+  it('cancel_scheduled allows a chat-scoped session to cancel its OWN conversation message (positive control)', async () => {
+    const aliceScheduledId = seedScheduled(db, ALICE_JID);
+
+    const result = await registry.call(
+      'cancel_scheduled',
+      { id: aliceScheduledId },
+      chatSession(ALICE_KEY, ALICE_JID),
+    );
+
+    expect(result.isError).toBeFalsy();
+    // Behavior: the own-conversation message was actually cancelled.
+    const row = db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = ?').get(aliceScheduledId) as { status: string };
+    expect(row.status).toBe('cancelled');
   });
 });

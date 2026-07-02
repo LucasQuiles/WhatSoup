@@ -106,6 +106,23 @@ describe('DurabilityEngine', () => {
       expect(inRow.processing_status).toBe('complete');
     });
 
+    it('QR-102: markTerminal completes the linked inbound when the op was ALREADY echoed (echo-before-terminal)', () => {
+      const seq = engine.journalInbound('msg-qr102', 'key-1', 'jid-1', 'agent');
+      // Real ordering: markLastTerminal runs AFTER the reply is sent+echoed, so the op
+      // is echoed while still non-terminal. markEchoed's completion (is_terminal at echo
+      // time) is therefore missed — markTerminal must finalize the inbound.
+      const id = engine.createOutboundOp({ conversationKey: 'key-1', chatJid: 'jid-1', opType: 'text', payload: '{}', replayPolicy: 'unsafe', sourceInboundSeq: seq, isTerminal: false });
+      engine.markSending(id);
+      engine.markSubmitted(id, 'WA_MSG_QR102');
+      engine.markEchoed(id); // is_terminal=0 at echo time → markEchoed skips completion
+      const midRow = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(midRow.processing_status).not.toBe('complete'); // not finalized yet
+
+      engine.markTerminal(id); // QR-102 fix: op is already 'echoed' → complete the inbound now
+      const inRow2 = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(inRow2.processing_status).toBe('complete');
+    });
+
     it('markMaybeSent transitions sending → maybe_sent', () => {
       const id = engine.createOutboundOp({ conversationKey: 'k', chatJid: 'j', opType: 'text', payload: '{}', replayPolicy: 'unsafe' });
       engine.markSending(id);
@@ -380,6 +397,17 @@ describe('DurabilityEngine', () => {
       };
       await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', undefined, { replayPolicy: 'safe' });
       expect(mockMessenger.sendMessage).toHaveBeenCalledWith('jid@s.whatsapp.net', 'hello');
+    });
+
+    it('forwards an infra caller token to messenger.sendMessage (QR-086)', async () => {
+      const mockMessenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', undefined, { replayPolicy: 'unsafe', caller: 'health' });
+      // The health-server admin /send tags itself as a system caller so the
+      // guard's spec §4.2-B exemption is reachable.
+      expect(mockMessenger.sendMessage).toHaveBeenCalledWith('jid@s.whatsapp.net', 'hello', { caller: 'health' });
     });
   });
 });

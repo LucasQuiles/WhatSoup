@@ -83,6 +83,40 @@ describe('evaluateProviderParity', () => {
     expect(exitCodeForProviderParityReport(report)).toBe(0);
   });
 
+  it('classifies present-only credentials, skipped probes, and the bare-provider fallback form', () => {
+    // Exercises credentialState='present' (no native parts), probeState='skipped',
+    // and fallbackEntries() deriving the chain from `fallback.provider` when chain is empty.
+    const report = evaluateProviderParity({
+      generatedAtUtc: '2026-06-23T10:24:24Z',
+      targetMain: 'abc',
+      expected: [expected()],
+      statuses: {
+        'mini3/agent': status({
+          primary: { provider: 'claude-cli', model: null, keyPresent: true },
+          fallback: {
+            provider: 'openai-api',
+            model: 'gpt-4',
+            keyPresent: true,
+            active: false,
+            activeUntil: null,
+            effectiveProvider: null,
+            recoveryProbeRequired: false,
+            activeEntry: null,
+            chain: [],
+          },
+        }),
+      },
+      probes: [
+        { host: 'mini3', instance: 'agent', provider: 'openai-api', state: 'skipped', evidenceRef: 'ev' },
+      ],
+    });
+
+    const row = report.rows[0];
+    expect(row.credentialState).toBe('present');
+    expect(row.probeState).toBe('skipped');
+    expect(row.fallbackProviders).toEqual(['openai-api']);
+  });
+
   it('fails closed for unknown providers, same-provider-only CLI fallback, missing credentials, and failed probes', () => {
     const report = evaluateProviderParity({
       generatedAtUtc: '2026-06-23T10:24:24Z',

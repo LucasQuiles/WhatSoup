@@ -23,15 +23,21 @@ BEARER_VALUE_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECA
 # leading `Bearer `/`Basic ` scheme so the whole token is masked.
 KEYED_SECRET_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
-    # BEAD-055: an optional `<alnum>_` segment lets a leading-`_` compound key
-    # (e.g. `user_access_token=`, `my_client_secret=`) anchor on its known-secret
-    # tail. The prefix class excludes `_`, so without this the leading run kept the
-    # tail from matching and the value LEAKED. Benign tails (`event_count`,
-    # `message_id`, `user_id`, `retry_count`) stay untouched — their tails are not
-    # secret-key substrings. The `*` is over `[A-Za-z0-9]` (no `_`), so it is a
-    # single linear alnum run terminated by one `_`: no catastrophic backtracking.
-    r"([\"']?(?:[A-Za-z0-9]*_)?(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|access[_-]?token|"
+    # BEAD-055 + QR-052: anchor a known-secret tail even when the key carries a
+    # compound prefix. Two prefix shapes are handled:
+    #   (a) multi-underscore compounds — `(?:[A-Za-z0-9]+_)*` consumes ANY number of
+    #       `<alnum>_` segments (BEAD-055 allowed only ONE, so `AWS_SESSION_TOKEN=`
+    #       and `AWS_SECRET_ACCESS_KEY=` LEAKED). Each segment ends in a literal `_`,
+    #       so the split is deterministic: no catastrophic backtracking.
+    #   (b) camelCase-glued keys — the `[A-Za-z0-9]{1,40}(?:token|secret|password|
+    #       passphrase|api[_-]?key)` branch catches `sessionToken=`/`bearerToken=`/
+    #       `idToken=` where the secret word is a glued suffix. The `{1,40}` bound caps
+    #       prefix backtracking (ReDoS-safe).
+    # Benign tails (`event_count`, `message_id`, `session_id`, `user_id`,
+    # `retry_count`) stay untouched — their tails are not secret-key words.
+    r"([\"']?(?:[A-Za-z0-9]+_)*(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|secret[_-]?access[_-]?key|access[_-]?token|"
     r"refresh[_-]?token|auth[_-]?token|cookie|password|passphrase|secret|session|token|"
+    r"[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|"
     r"pat)[\"']?\s*[:=]\s*[\"']?)"
     r"((?:(?:Bearer|Basic)\s+)?[^\s\\,\"';}]+)([\"']?)",
     re.IGNORECASE,

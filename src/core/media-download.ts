@@ -42,7 +42,22 @@ export interface MediaDownload {
 export async function downloadMedia(
   downloadFn: () => Promise<Buffer>,
   mimeType: string,
+  declaredSizeBytes?: number,
 ): Promise<MediaDownload | null> {
+  // QR-057: reject BEFORE buffering when the server-declared fileLength already exceeds the
+  // cap. The post-download check below (buffer.length) is a fail-safe that fires only after
+  // downloadMediaMessage has fully buffered the blob into memory (no streaming abort); this
+  // pre-check avoids that allocation for honest large media. Same media is rejected either
+  // way — no behavioural change, just earlier. An understated fileLength still falls through
+  // to the post-download cap (bounded by the 30s timeout + WhatsApp's upload ceiling).
+  if (declaredSizeBytes !== undefined && declaredSizeBytes > MAX_SIZE_BYTES) {
+    log.warn(
+      { mimeType, declaredSizeBytes, maxBytes: MAX_SIZE_BYTES },
+      'Media download rejected pre-fetch — declared fileLength exceeds 25MB limit',
+    );
+    return null;
+  }
+
   const startMs = Date.now();
   let handle: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -69,6 +84,21 @@ export async function downloadMedia(
         { declared: mimeType, detected: detectedMime, sizeBytes: buffer.length },
         'Media MIME mismatch — declared type differs from magic bytes',
       );
+    }
+
+    // QR-097: type-confusion reject. If the bytes are a RECOGNIZED non-image
+    // (e.g. application/pdf, audio/ogg) but the declared MIME is image/*, this is
+    // malformed or hostile — feeding those bytes to the image resizer would hand
+    // a PDF/other payload to a libvips loader under an image pretext. Drop it
+    // before decode. Zero legitimate-traffic impact: a real image's magic bytes
+    // are png/jpeg/gif/webp (detected as image/*) or unrecognized (null, left to
+    // the resizer as before) — never a known non-image type.
+    if (detectedMime !== null && !detectedMime.startsWith('image/') && mimeType.startsWith('image/')) {
+      log.warn(
+        { declared: mimeType, detected: detectedMime, sizeBytes: buffer.length },
+        'Media type-confusion rejected — declared image/* but bytes are a recognized non-image',
+      );
+      return null;
     }
 
     log.info({ mimeType, sizeBytes: buffer.length, durationMs }, 'Media downloaded');

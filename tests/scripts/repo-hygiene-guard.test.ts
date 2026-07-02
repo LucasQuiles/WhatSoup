@@ -362,6 +362,31 @@ Co-Authored-By: Person <person@example.com>
     expect(issues.map((issue) => issue.code)).toEqual(['whatsapp-group-jid']);
   });
 
+  it('allows the mw-bot agent label only in the mwlab health profile and fleet manifest (issue #1422)', () => {
+    const allowedInProfile = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/mwlab.json',
+        line: 21,
+        text: '      "service": "com.whatsoup.mw-bot",',
+      },
+      {
+        filePath: 'deploy/bot-errors-expected-fleet.json',
+        line: 32,
+        text: '          "service": "com.whatsoup.mw-bot",',
+      },
+    ]);
+    expect(allowedInProfile).toEqual([]);
+
+    const flaggedElsewhere = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/mini1.json',
+        line: 1,
+        text: '      "service": "com.whatsoup.mw-bot",',
+      },
+    ]);
+    expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['private-instance-label']);
+  });
+
   it('allows bare release env var names without hiding private labels', () => {
     const envOnlyIssues = scanContentLines([
       {

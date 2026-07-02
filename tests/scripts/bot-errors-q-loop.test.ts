@@ -132,4 +132,144 @@ print(state["phase"])
 `);
     expect(result).toBe('monitoring');
   });
+
+  it('reports collaboration target coverage without exposing raw group ids', () => {
+    const result = python(`${importModulePrelude()}
+import json
+bot_errors_target = ("1" * 8) + "@g.us"
+intended_target = ("2" * 8) + "@g.us"
+m.BOT_ERRORS_JID = bot_errors_target
+print(json.dumps(m.q_loop_target_coverage(intended_target), sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      bot_errors_target_kind: string;
+      bot_errors_target_present: boolean;
+      coverage: string;
+      intended_target_kind: string;
+      intended_target_present: boolean;
+      targets_equal: boolean;
+    };
+
+    expect(diagnostic).toEqual({
+      bot_errors_target_kind: 'group',
+      bot_errors_target_present: true,
+      coverage: 'routing_mismatch',
+      intended_target_kind: 'group',
+      intended_target_present: true,
+      route_bridge_present: false,
+      targets_equal: false,
+    });
+    expect(result).not.toContain('@g.us');
+    expect(result).not.toContain('11111111');
+    expect(result).not.toContain('22222222');
+  });
+
+  it('reports intended target as bridged only when an explicit bridge covers it', () => {
+    const result = python(`${importModulePrelude()}
+import json
+bot_errors_target = ("1" * 8) + "@g.us"
+intended_target = ("2" * 8) + "@g.us"
+unrelated_target = ("3" * 8) + "@g.us"
+m.BOT_ERRORS_JID = bot_errors_target
+print(json.dumps({
+  "covered": m.q_loop_target_coverage(intended_target, bridged_targets=[intended_target]),
+  "uncovered": m.q_loop_target_coverage(intended_target, bridged_targets=[unrelated_target]),
+}, sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      covered: {
+        coverage: string;
+        route_bridge_present: boolean;
+        targets_equal: boolean;
+      };
+      uncovered: {
+        coverage: string;
+        route_bridge_present: boolean;
+        targets_equal: boolean;
+      };
+    };
+
+    expect(diagnostic.covered).toMatchObject({
+      coverage: 'bridged',
+      route_bridge_present: true,
+      targets_equal: false,
+    });
+    expect(diagnostic.uncovered).toMatchObject({
+      coverage: 'routing_mismatch',
+      route_bridge_present: false,
+      targets_equal: false,
+    });
+    expect(result).not.toContain('@g.us');
+    expect(result).not.toContain('11111111');
+    expect(result).not.toContain('22222222');
+    expect(result).not.toContain('33333333');
+  });
+
+  it('persists collaboration target coverage during a runtime loop iteration', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+import argparse
+import contextlib
+import io
+import json
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+m.BOT_ERRORS_JID = ("1" * 8) + "@g.us"
+m.BOT_ERRORS_EXPECTED_JID = m.BOT_ERRORS_JID
+m.bootstrap_cursor_pk = lambda db: (0, 0)
+m.read_messages = lambda db, after_pk: []
+with contextlib.redirect_stdout(io.StringIO()):
+    m.run_once(argparse.Namespace(db="unused.sqlite", socket="", no_send=True))
+state = json.loads(m.STATE_FILE.read_text())
+event_log = m.EVENT_LOG.read_text()
+print(json.dumps({
+  "state": state.get("target_coverage"),
+  "event_log_has_suffix": "@g.us" in event_log,
+  "state_has_suffix": "@g.us" in json.dumps(state),
+}, sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      event_log_has_suffix: boolean;
+      state: { coverage: string; targets_equal: boolean } | null;
+      state_has_suffix: boolean;
+    };
+
+    expect(diagnostic.state).toMatchObject({
+      coverage: 'covered',
+      targets_equal: true,
+    });
+    expect(diagnostic.event_log_has_suffix).toBe(false);
+    expect(diagnostic.state_has_suffix).toBe(false);
+  });
+
+  it('diagnoses stale awaiting-Q behavior even when heartbeat phase is monitoring', () => {
+    const result = python(`${importModulePrelude()}
+import json
+state = m.default_state()
+state["phase"] = "monitoring"
+state["awaiting_q_since"] = 1000
+state["last_q_message_at"] = 0
+print(json.dumps(m.q_response_wait_diagnostic(state, current=1000 + (25 * 60)), sort_keys=True))
+`);
+    const diagnostic = JSON.parse(result) as {
+      awaiting_q: boolean;
+      awaiting_q_age_seconds: number;
+      last_q_message_age_seconds: number | null;
+      phase: string;
+      status: string;
+    };
+
+    expect(diagnostic).toEqual({
+      awaiting_q: true,
+      awaiting_q_age_seconds: 1500,
+      last_q_message_age_seconds: null,
+      phase: 'monitoring',
+      status: 'stale_awaiting_q',
+    });
+  });
 });

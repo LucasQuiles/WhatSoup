@@ -193,9 +193,9 @@ export function classifyInfraStatusClaim(text: string): boolean {
  * the BOT ERRORS outbox, which redacts again — defense in depth.)
  */
 function sanitizeOpsEvidence(text: string): string {
-  let out = sanitizeProviderPreviewText(text);
+  let out = text.replace(jidPattern(), '[redacted-jid]');
+  out = sanitizeProviderPreviewText(out);
   out = out.replace(HOME_PATH_USER, '$1[redacted-user]');
-  out = out.replace(jidPattern(), '[redacted-jid]');
   out = maskPhoneLike(out);
   return out;
 }

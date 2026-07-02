@@ -65,6 +65,41 @@ describe('downloadMedia — positive', () => {
   });
 });
 
+// QR-097: type-confusion — declared image/* but the magic bytes are a recognized
+// non-image (pdf/ogg). The media must be dropped BEFORE the image resizer (never
+// hand a PDF/other payload to libvips under an image pretext).
+describe('downloadMedia — QR-097 image/non-image type-confusion', () => {
+  it('rejects declared image/png whose bytes are actually a PDF, without decoding', async () => {
+    const pdfBytes = Buffer.concat([Buffer.from([0x25, 0x50, 0x44, 0x46]), Buffer.alloc(64, 0)]); // %PDF...
+    const downloadFn = vi.fn().mockResolvedValue(pdfBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).toBeNull();
+    expect(mockResizeImageIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('still processes a genuine PNG declared image/png (regression)', async () => {
+    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(64, 0)]);
+    const downloadFn = vi.fn().mockResolvedValue(pngBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the unrecognized-signature path (null detect) — declared image still resized', async () => {
+    const unknownBytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const downloadFn = vi.fn().mockResolvedValue(unknownBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledOnce();
+  });
+});
+
 describe('downloadMedia — negative', () => {
   it('returns null when download function rejects (simulates timeout)', async () => {
     const downloadFn = vi.fn().mockRejectedValue(new Error('Download timed out after 30s'));
@@ -101,6 +136,39 @@ describe('downloadMedia — negative', () => {
 
     expect(result).not.toBeNull();
     expect(result!.buffer.length).toBe(25 * MB);
+  });
+});
+
+describe('downloadMedia — QR-057 pre-fetch fileLength guard', () => {
+  it('rejects BEFORE invoking the download function when declared fileLength exceeds the cap', async () => {
+    const downloadFn = vi.fn().mockResolvedValue(Buffer.alloc(1024));
+
+    const result = await downloadMedia(downloadFn, 'video/mp4', 100 * MB);
+
+    expect(result).toStrictEqual(null);
+    // The whole point: the blob is never buffered into memory.
+    expect(downloadFn).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when declared fileLength is under the cap', async () => {
+    const fakeBuffer = Buffer.alloc(2048, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+
+    const result = await downloadMedia(downloadFn, 'audio/ogg', 1 * MB);
+
+    expect(result).not.toBeNull();
+    expect(result!.buffer).toBe(fakeBuffer);
+    expect(downloadFn).toHaveBeenCalledOnce();
+  });
+
+  it('proceeds (back-compat) when declared fileLength is omitted', async () => {
+    const fakeBuffer = Buffer.alloc(512, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+
+    const result = await downloadMedia(downloadFn, 'image/jpeg');
+
+    expect(result).not.toBeNull();
+    expect(downloadFn).toHaveBeenCalledOnce();
   });
 });
 

@@ -114,6 +114,26 @@ export function captureObservation(db: DatabaseSync, args: CaptureObservationArg
       groupJid: args.entityRef.groupJid ?? null,
     });
   }
+  // QR-040 (defense in depth, write side): a caller-supplied
+  // supersedesObservationId may only target an observation belonging to the
+  // SAME entity. Without this, a caller (e.g. the admin-gated capture_observation
+  // MCP tool, or a confused-deputy agent) could capture an observation under
+  // entity Y that supersedes — and thus hides — an observation belonging to a
+  // DIFFERENT entity Z, poisoning Z's profile. Reject a missing or cross-entity
+  // target rather than silently writing a cross-entity superseder.
+  if (args.supersedesObservationId !== undefined && args.supersedesObservationId !== null) {
+    const target = db.prepare(
+      `SELECT entity_id FROM entity_observations WHERE id = ?`
+    ).get(args.supersedesObservationId) as { entity_id: number } | undefined;
+    if (!target) {
+      throw new Error(`captureObservation: supersedesObservationId ${args.supersedesObservationId} not found`);
+    }
+    if (target.entity_id !== entity.id) {
+      throw new Error(
+        `captureObservation: supersedesObservationId ${args.supersedesObservationId} belongs to entity ${target.entity_id}, not the captured entity ${entity.id} (cross-entity supersede rejected)`,
+      );
+    }
+  }
   const now = nowUnixSec();
   const info = db.prepare(
     `INSERT INTO entity_observations (
@@ -201,7 +221,11 @@ export function getProfile(db: DatabaseSync, ref: EntityRef): GetProfileResult |
        AND o.forgotten = 0
        AND NOT EXISTS (
          SELECT 1 FROM entity_observations s
+         -- QR-040: scope the supersede to the SAME entity so an observation
+         -- captured under a DIFFERENT entity cannot hide this one (cross-entity
+         -- memory poisoning). A superseder is only valid within its own entity.
          WHERE s.supersedes_observation_id = o.id AND s.forgotten = 0
+           AND s.entity_id = o.entity_id
        )
      ORDER BY o.created_at DESC`
   ).all(...allIds) as unknown as ObservationRow[];

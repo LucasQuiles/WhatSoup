@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -318,6 +318,12 @@ describe('agent-sandbox.sh — Bash path restriction (R1-B)', () => {
       ['command substitution $()', 'cat $(printf %s /Users/testuser)/secrets'],
       ['command substitution backtick', 'cat `echo /etc`/passwd'],
       ['directory traversal', 'cat ../../../etc/passwd'],
+      // QR-045: bare `..` (no trailing slash) is the most obvious traversal and
+      // slipped past the '../' substring block — `cd .. && cat relative` walked
+      // up out of allowedPaths and the hook ALLOWED it. These lock the gap shut.
+      ['bare dotdot cd then relative read', 'cd .. && cat secret.txt'],
+      ['bare dotdot list parent', 'ls ..'],
+      ['dotdot path component no trailing slash', 'cat foo/..'],
       ['system config /etc', 'cat /etc/passwd'],
       ['ssh keys', 'cat .ssh/id_rsa'],
       ['absolute path outside sandbox', 'cat /var/log/system.log'],
@@ -342,6 +348,13 @@ describe('agent-sandbox.sh — Bash path restriction (R1-B)', () => {
       ['mkdir + cd inside sandbox', (d) => `mkdir -p ${d}/sub && cd ${d}/sub`],
       ['system binary path', () => 'cat /usr/bin/env'],
       ['redirect to /dev/null', () => 'echo hi > /dev/null'],
+      // QR-045 false-positive controls: a non-traversal `..` (git rev range,
+      // brace-expansion range, double-dot inside a word) must keep working — the
+      // bare-`..` block matches `..` only as a standalone path component, not
+      // `..` flanked by word chars on both sides.
+      ['git rev range HEAD..main', () => 'git log HEAD..main --oneline'],
+      ['brace expansion range', () => 'echo {1..10}'],
+      ['double-dot inside a filename', (d) => `cat ${d}/a..b.txt`],
     ];
     for (const [label, build] of allowCases) {
       it(`allows: ${label}`, () => {
@@ -370,6 +383,46 @@ describe('agent-sandbox.sh — Bash path restriction (R1-B)', () => {
       dir,
     );
     // pathRestricted is falsy → no path scan applies; tilde is allowed.
+    expect(result.decision).toBe('allow');
+  });
+});
+
+
+// -----------------------------------------------------------------------------
+// Phase-0 honest-scope contract (QR-008 / #1607)
+// The sandbox hook is a best-effort denylist, NOT an OS-hard boundary, and it
+// applies ZERO network-egress confinement. These assertions lock that honesty
+// in place so no future change can silently strip the caveat and imply a real
+// sandbox. When OS-hard egress confinement lands (design-gated), the behavioral
+// marker below intentionally flips and forces #1607 to be re-evaluated.
+// -----------------------------------------------------------------------------
+describe('agent-sandbox.sh \u2014 honest-scope contract (QR-008/#1607)', () => {
+  const DOCS_PATH = resolve(new URL('.', import.meta.url).pathname, '../../docs/configuration.md');
+
+  it('hook documents its best-effort / not-a-real-sandbox scope', () => {
+    const src = readFileSync(HOOK_PATH, 'utf8');
+    expect(src).toMatch(/best-effort denylist/i);
+    expect(src).toMatch(/NOT a real sandbox/i);
+    expect(src).toMatch(/OS-level boundary/i);
+  });
+
+  it('docs explicitly state network egress is NOT confined (QR-008 gap)', () => {
+    const docs = readFileSync(DOCS_PATH, 'utf8');
+    expect(docs).toMatch(/network egress is not confined/i);
+    expect(docs).toMatch(/QR-008|#1607/);
+  });
+
+  it('applies NO network-egress restriction: an outbound network command is allowed (documents the unbounded-egress gap)', () => {
+    const dir = makeTmpDir();
+    // Path-restricted policy + a command with NO filesystem-path tokens that
+    // nonetheless performs network egress. The hook ALLOWS it because it has no
+    // egress control \u2014 proving QR-008. (The command is never executed; only the
+    // hook's allow/deny decision is asserted.)
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedMcpTools: [], bash: { enabled: true, pathRestricted: true } },
+      { tool_name: 'Bash', tool_input: { command: 'curl example.com' } },
+      dir,
+    );
     expect(result.decision).toBe('allow');
   });
 });

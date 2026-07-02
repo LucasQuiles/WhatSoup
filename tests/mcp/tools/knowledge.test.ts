@@ -160,7 +160,7 @@ vi.mock('../../../src/logger.ts', () => ({
   }),
 }));
 
-import { createPineconeWatchSearch, registerKnowledgeTools } from '../../../src/mcp/tools/knowledge.ts';
+import { registerKnowledgeTools, createPineconeWatchSearch } from '../../../src/mcp/tools/knowledge.ts';
 
 beforeEach(() => {
   PineconeMock.mockClear();
@@ -1180,5 +1180,58 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     expect(result).toEqual({
       error: 'Namespace "ns_b" is not allowed for index "index-a".',
     });
+  });
+});
+
+describe('createPineconeWatchSearch', () => {
+  it('returns null for an empty allowlist', () => {
+    expect(createPineconeWatchSearch([])).toBeNull();
+  });
+
+  it('returns null when the Pinecone API key is unset', () => {
+    // UNHAPPY: no key -> poll.pinecone watches disabled.
+    delete process.env.TEST_PINECONE_API_KEY;
+    expect(createPineconeWatchSearch(['vector-index'])).toBeNull();
+  });
+
+  it('returns null when no allowlisted index is a known profile', () => {
+    // UNHAPPY: an unknown index name is filtered out, leaving nothing valid.
+    expect(createPineconeWatchSearch(['nonexistent-index'])).toBeNull();
+  });
+
+  it('search() throws when a vector index has no embedUrl', async () => {
+    // UNHAPPY: vector mode requires an embed service URL.
+    (configStub.memory.pinecone.knowledgeProfiles['vector-index'] as { embedUrl?: string }).embedUrl = undefined;
+    const ws = createPineconeWatchSearch(['vector-index']);
+    expect(ws).not.toBeNull();
+    await expect(
+      ws!.search({ index: 'vector-index', namespace: 'ns_v', query: 'q', topK: 5 }),
+    ).rejects.toThrow(/missing embedUrl/);
+  });
+
+  it('search() throws when the embed service returns a non-OK status', async () => {
+    // UNHAPPY: embed HTTP failure must surface, not silently return empty.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+    const ws = createPineconeWatchSearch(['vector-index']);
+    await expect(
+      ws!.search({ index: 'vector-index', namespace: 'ns_v', query: 'q', topK: 5 }),
+    ).rejects.toThrow(/embed service HTTP 503/);
+  });
+
+  it('search() throws when the embed service returns no vectors', async () => {
+    // UNHAPPY: a malformed embed response (empty vectors) must throw.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ vectors: [] }) }));
+    const ws = createPineconeWatchSearch(['vector-index']);
+    await expect(
+      ws!.search({ index: 'vector-index', namespace: 'ns_v', query: 'q', topK: 5 }),
+    ).rejects.toThrow(/no vectors/);
+  });
+
+  it('search() returns scored matches on the happy vector path, skipping non-numeric scores', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ vectors: [[0.1, 0.2, 0.3]] }) }));
+    namespaceQueryMock.mockResolvedValue({ matches: [{ score: 0.91 }, { score: 0.82 }, { id: 'no-score' }] });
+    const ws = createPineconeWatchSearch(['vector-index']);
+    const result = await ws!.search({ index: 'vector-index', namespace: 'ns_v', query: 'q', topK: 5 });
+    expect(result.matches.map((m) => m.score)).toEqual([0.91, 0.82]);
   });
 });

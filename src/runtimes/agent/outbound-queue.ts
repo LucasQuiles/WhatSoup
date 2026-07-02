@@ -8,6 +8,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
+import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
@@ -53,6 +54,14 @@ const FRIENDLY_CATEGORY_META: Record<ToolCategory, { label: string; emoji: strin
 };
 
 const MAX_MESSAGE_LENGTH = 4000;
+// QR-126: hard cap on how many chunks a single reply may fan out into. Without it,
+// splitMessage emits ceil(len / MAX_MESSAGE_LENGTH) messages, so a prompt-injected
+// max-length agent reply becomes single-turn message amplification — group spam plus a
+// WhatsApp anti-spam / bot-ban availability risk (a crafted reply reaches ~64 chunks).
+// At the cap the bot delivers MAX_CHUNKS-1 full content chunks (~44 KB) followed by a
+// visible truncation notice; the tail is dropped rather than flooding the chat.
+export const MAX_CHUNKS = 12;
+const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
 export const TOOL_BATCH_DELAY_MS = 5000;
@@ -139,6 +148,14 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
     chunks.push(remaining);
   }
 
+  // QR-126: bound the fan-out. repairChunkFormatting (the sole downstream transform in
+  // both send paths) only rewrites existing chunks in place — it never adds chunks — so
+  // capping here bounds the number of WhatsApp messages actually sent. Keep the first
+  // MAX_CHUNKS-1 content chunks and replace the tail with a single visible notice.
+  if (chunks.length > MAX_CHUNKS) {
+    return [...chunks.slice(0, MAX_CHUNKS - 1), CHUNK_TRUNCATION_NOTICE];
+  }
+
   return chunks;
 }
 
@@ -181,6 +198,11 @@ export interface IOutboundQueue {
   abortTurn(): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
+  /** Opaque echo-guard token. Exposed so a replacement queue can INHERIT the
+   *  prior queue's token (QR-069) — without this, a queue replaced within the
+   *  group cooldown window gets a fresh random token and its legitimate reply is
+   *  silently flood-suppressed. */
+  getSenderToken(): string;
   /** Retarget all subsequent sends to a different JID variant. */
   updateDeliveryJid(jid: string): void;
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
@@ -273,11 +295,20 @@ export class OutboundQueue implements IOutboundQueue {
    */
   private readonly senderToken: string;
 
-  constructor(messenger: Messenger, chatJid: string) {
+  constructor(messenger: Messenger, chatJid: string, senderToken?: string) {
     this.messenger = messenger;
     this.chatJid = chatJid;
     this.cachedConversationKey = toConversationKey(chatJid);
-    this.senderToken = crypto.randomUUID();
+    // QR-069: a replacement queue (provider fallback/respawn, /new, resume) for
+    // the same chat INHERITS the prior queue's token so its first reply is NOT
+    // flood-suppressed by the predecessor's still-active group cooldown. Falls
+    // back to a fresh token for a genuinely new queue.
+    this.senderToken = senderToken ?? crypto.randomUUID();
+  }
+
+  /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
+  getSenderToken(): string {
+    return this.senderToken;
   }
 
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -394,7 +425,13 @@ export class OutboundQueue implements IOutboundQueue {
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
     this.turnHasVisibleText = true;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
+    // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
+    // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
+    // mirrors the chat runtime's unconditional redactInternalArtifacts on the
+    // response. Applied to the assembled text BEFORE splitMessage so a secret is
+    // never split across chunks (boundary-safe).
+    const safe = redactInternalArtifacts(text).text;
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
     }
@@ -426,7 +463,11 @@ export class OutboundQueue implements IOutboundQueue {
     const text = this.streamBufferParts.join('');
     this.streamBufferParts = [];
     if (!text || text.trim() === '') return;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
+    // QR-114: redact operator-local internal artifacts on the assembled buffer
+    // before splitMessage (boundary-safe), same as enqueueText — the streamed
+    // reply path otherwise reaches the user with zero redaction.
+    const safe = redactInternalArtifacts(text).text;
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
     }
@@ -896,6 +937,13 @@ export class OutboundQueue implements IOutboundQueue {
       this.durability.markSending(opId);
     }
 
+    // QR-028: one stable WhatsApp-shaped message id for this logical send,
+    // REUSED across every retry attempt. A send that times out (SEND_TIMEOUT_MS)
+    // may already be on the wire; retrying with the SAME id lets the server
+    // dedupe it instead of delivering the reply twice. 32 uppercase-hex chars
+    // (a dashless UUID) is a valid, unique key.id.
+    const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
+
     let lastErr: unknown;
     for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
       try {
@@ -903,7 +951,7 @@ export class OutboundQueue implements IOutboundQueue {
         let receipt;
         try {
           receipt = await Promise.race([
-            this.messenger.sendMessage(this.chatJid, text),
+            this.messenger.sendMessage(this.chatJid, text, { messageId: stableMessageId }),
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
                 () => reject(new Error('SEND_TIMEOUT')),

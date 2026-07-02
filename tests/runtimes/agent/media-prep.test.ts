@@ -292,6 +292,40 @@ describe('media-prep', () => {
     expect(mockUpdateTranscription).not.toHaveBeenCalled();
   });
 
+  it('QR-061: uses extracted raw MIME for audio (M4A voice note not pinned to audio/ogg)', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('m4a-bytes'), mimeType: 'audio/mp4' });
+    mockWriteTempFile.mockReturnValue('/tmp/voice.m4a');
+    const msg = makeMsg({
+      contentType: 'audio',
+      content: null,
+      rawMessage: { message: { audioMessage: { mimetype: 'audio/mp4' } } },
+    });
+    await prepareContentForAgent(msg);
+    // Defect (unfixed): audio was pinned to the hardcoded 'audio/ogg' (extractRawMime ran for
+    // documents only) → OpenAI Whisper got a mislabeled file. Fix derives the real MIME.
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'audio/mp4', undefined);
+  });
+
+  it('QR-061: uses extracted raw MIME for video (WebM not pinned to video/mp4)', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('webm-bytes'), mimeType: 'video/webm' });
+    mockWriteTempFile.mockReturnValue('/tmp/video.webm');
+    const msg = makeMsg({
+      contentType: 'video',
+      content: null,
+      rawMessage: { message: { videoMessage: { mimetype: 'video/webm' } } },
+    });
+    await prepareContentForAgent(msg);
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'video/webm', undefined);
+  });
+
+  it('QR-061: audio with no declared mimetype still falls back to audio/ogg (no over-trigger)', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('ogg-bytes'), mimeType: 'audio/ogg' });
+    mockWriteTempFile.mockReturnValue('/tmp/voice.ogg');
+    const msg = makeMsg({ contentType: 'audio', content: null, rawMessage: { key: 'raw-msg' } });
+    await prepareContentForAgent(msg);
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'audio/ogg', undefined);
+  });
+
   it('falls through to descriptive text when rawMessage is absent on audio (no downloadFn)', async () => {
     const msg = makeMsg({ contentType: 'audio', rawMessage: undefined, content: 'fallback-caption' });
     const result = await prepareContentForAgent(msg);
@@ -384,7 +418,8 @@ describe('media-prep', () => {
       rawMessage: { message: { documentMessage: { mimetype: 'application/pdf' } } },
     });
     await prepareContentForAgent(msg);
-    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/pdf');
+    // QR-057: downloadMedia now also receives the declared fileLength (undefined — none in this stub).
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/pdf', undefined);
   });
 
   it('falls back to octet-stream MIME for document when rawMessage has no mimetype', async () => {
@@ -396,7 +431,7 @@ describe('media-prep', () => {
       rawMessage: { message: { documentMessage: {} } },
     });
     await prepareContentForAgent(msg);
-    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/octet-stream');
+    expect(mockDownloadMedia).toHaveBeenCalledWith(expect.any(Function), 'application/octet-stream', undefined);
   });
 
   // ── prepareContentForAgent: descriptive-only types ──────────────────────

@@ -270,6 +270,12 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
           'skip-if-exists',
         );
         if (result.written) count++;
+        // QR-034: migrate any access_list orphan keyed under the raw LID number
+        // to the resolved phone — runs whether or not the mapping was newly
+        // written (the orphan row can exist even when the lid_mapping already
+        // does), so a sender blocked/approved before L1 hydration learned their
+        // mapping is no longer stranded under the LID key (blocklist evasion).
+        migrateAccessListOrphan(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
       }
     } catch {
       // Malformed file — skip
@@ -293,6 +299,56 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
  * "cannot start a transaction within a transaction". If you need to batch
  * multiple upserts, use importLidMappings() or call the prepared statements directly.
  */
+/**
+ * Migrate an orphaned access_list entry from a raw-LID-number subject_id to the
+ * resolved phone number. An access_list row is "orphaned" when a sender was
+ * blocked/approved before their LID→phone mapping was known, so the row was
+ * keyed under the LID-number; once the mapping resolves, the block/allow must
+ * follow the identity to the phone key (else shouldRespond — which keys on the
+ * resolved phone — misses it → blocklist evasion / lost approval).
+ *
+ * TRANSACTION-NEUTRAL (QR-034): contains NO BEGIN/COMMIT, only plain
+ * SELECT/UPDATE/DELETE, so it is safe to call BOTH inside an open transaction
+ * (upsertLidMapping's BEGIN, or a caller's txn for the L1.5 resolveLid path —
+ * a nested BEGIN would raise "cannot start a transaction within a transaction")
+ * AND standalone (L1 hydration). The caller owns the transaction boundary.
+ */
+export function migrateAccessListOrphan(db: Database, lid: string, phoneJid: string): void {
+  const phone = bareNumber(phoneJid);
+  if (!phone || phone === lid) return;
+
+  const orphan = db.raw.prepare(
+    "SELECT status FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
+  ).get(lid) as { status: string } | undefined;
+  if (!orphan) return;
+
+  const existing = db.raw.prepare(
+    "SELECT status FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
+  ).get(phone) as { status: string } | undefined;
+
+  if (!existing) {
+    db.raw.prepare(
+      "UPDATE access_list SET subject_id = ? WHERE subject_type = 'phone' AND subject_id = ?",
+    ).run(phone, lid);
+  } else {
+    // A row already exists under the phone key. The phone-keyed decision wins,
+    // EXCEPT that a block may never be silently erased by the merge (QR-106):
+    // access-policy keys the blocklist on the resolved phone, so dropping a
+    // blocked orphan in favour of a non-blocked phone row is blocklist evasion.
+    // Deny-wins (fail-closed): if the orphan is blocked and the surviving phone
+    // row is not, the block follows the identity to the phone key before the
+    // orphan is dropped. (A blocked existing row already fails safe.)
+    if (orphan.status === 'blocked' && existing.status !== 'blocked') {
+      db.raw.prepare(
+        "UPDATE access_list SET status = 'blocked' WHERE subject_type = 'phone' AND subject_id = ?",
+      ).run(phone);
+    }
+    db.raw.prepare(
+      "DELETE FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
+    ).run(lid);
+  }
+}
+
 export function upsertLidMapping(
   db: Database,
   lid: string,
@@ -308,32 +364,7 @@ export function upsertLidMapping(
     // L3 (message mining) and L4 (group metadata) callers pass their own
     // source label for accurate audit provenance.
     writeLidMapping(db.raw, lid, phoneJid, source, 'overwrite');
-
-    // Migrate orphaned access_list entries: if the LID number was stored as a
-    // phone entry (because resolution wasn't available when the sender was
-    // approved), update it to the real phone number.
-    const phone = bareNumber(phoneJid);
-    if (phone && phone !== lid) {
-      const orphan = db.raw.prepare(
-        "SELECT status FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
-      ).get(lid) as { status: string } | undefined;
-
-      if (orphan) {
-        const existing = db.raw.prepare(
-          "SELECT status FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
-        ).get(phone) as { status: string } | undefined;
-
-        if (!existing) {
-          db.raw.prepare(
-            "UPDATE access_list SET subject_id = ? WHERE subject_type = 'phone' AND subject_id = ?",
-          ).run(phone, lid);
-        } else {
-          db.raw.prepare(
-            "DELETE FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
-          ).run(lid);
-        }
-      }
-    }
+    migrateAccessListOrphan(db, lid, phoneJid);
     db.raw.exec('COMMIT');
   } catch (err) {
     db.raw.exec('ROLLBACK');
@@ -633,10 +664,12 @@ export function setLidAuthDir(authDir: string): void {
  * Transaction safety: uses a single-statement INSERT...ON CONFLICT rather
  * than upsertLidMapping(), because resolveLid is called from within open
  * transactions (e.g. blocklist-sync.ts:28). A nested BEGIN would raise
- * "cannot start a transaction within a transaction". The access_list
- * orphan-migration logic in upsertLidMapping is intentionally skipped here;
- * if the mapping is genuinely new to the system, L2/L3/L6 will still
- * exercise the orphan migration through their own non-hot-path upserts.
+ * "cannot start a transaction within a transaction". QR-034: the access_list
+ * orphan-migration now ALSO runs here via the transaction-neutral
+ * migrateAccessListOrphan() (no BEGIN/COMMIT, safe inside the caller's txn) —
+ * previously it was skipped, so a sender blocked/approved before their LID
+ * mapping was learned could silently regain access once L1.5 resolved the
+ * mapping on the hot path (blocklist evasion).
  */
 function lookupLidFromDisk(db: Database, lid: string): string | null {
   if (!_lidAuthDir) return null;
@@ -664,6 +697,9 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
   // pre-existing single-statement INSERT...ON CONFLICT DO UPDATE semantics.
   try {
     writeLidMapping(db.raw, lid, `${phone}@${DOMAIN_PERSONAL}`, 'L1.5', 'overwrite');
+    // QR-034: migrate any access_list orphan to the resolved phone. Transaction-
+    // neutral, so safe inside the caller's open transaction (no nested BEGIN).
+    migrateAccessListOrphan(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
     log.info({ lid, phone }, 'L1.5 disk fallback resolved LID from reverse file');
   } catch (err) {
     log.warn({ err, lid, phone }, 'L1.5 disk fallback upsert failed');

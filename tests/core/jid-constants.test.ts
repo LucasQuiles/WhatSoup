@@ -30,6 +30,7 @@ import {
   fromSmsJid,
   smsJidToPhone,
   isSmsJid,
+  isWhatsAppAuthenticatedJid,
 } from '../../src/core/jid-constants.ts';
 
 describe('domain constants', () => {
@@ -105,6 +106,25 @@ describe('isPnJid', () => {
     expect(isPnJid(null)).toBe(false);
     expect(isPnJid(undefined)).toBe(false);
     expect(isPnJid('')).toBe(false);
+  });
+});
+
+describe('isWhatsAppAuthenticatedJid (QR-143)', () => {
+  it('returns true for WhatsApp-authenticated transports (personal + LID)', () => {
+    expect(isWhatsAppAuthenticatedJid('15551234567@s.whatsapp.net')).toBe(true);
+    expect(isWhatsAppAuthenticatedJid('1111111234567@lid')).toBe(true);
+  });
+
+  it('returns false for a spoofable SMS transport (QR-143 admin-spoof guard)', () => {
+    expect(isWhatsAppAuthenticatedJid('15551234567@sms')).toBe(false);
+    expect(isWhatsAppAuthenticatedJid('+15551234567@sms')).toBe(false);
+  });
+
+  it('returns false for group JIDs and null/undefined/empty', () => {
+    expect(isWhatsAppAuthenticatedJid('group@g.us')).toBe(false);
+    expect(isWhatsAppAuthenticatedJid(null)).toBe(false);
+    expect(isWhatsAppAuthenticatedJid(undefined)).toBe(false);
+    expect(isWhatsAppAuthenticatedJid('')).toBe(false);
   });
 });
 

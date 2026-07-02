@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerGroupTools } from '../../../src/mcp/tools/groups.ts';
+import { config } from '../../../src/config.ts';
+import { Database } from '../../../src/core/database.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 
@@ -628,6 +630,34 @@ describe('group tools', () => {
       );
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
+    });
+  });
+
+  // QR-067: send_group_invite is scope:'chat'/injected (confined to deliveryJid
+  // for chat-scoped), but on the GLOBAL path chatJid is caller-supplied — so it
+  // must run through the outbound identity guard to floor a cold target.
+  describe('QR-067 — send_group_invite is floored by the outbound identity guard (global path)', () => {
+    const mutableConfig = config as unknown as { outboundIdentityMode: string };
+
+    it('blocks a COLD caller-supplied chatJid in enforce mode (guard wired)', async () => {
+      const db = new Database(':memory:');
+      db.open();
+      const reg = new ToolRegistry();
+      registerGroupTools(() => mockSock, (t) => reg.register(t), db); // db-aware
+      mutableConfig.outboundIdentityMode = 'enforce';
+      try {
+        const result = await reg.call(
+          'send_group_invite',
+          { chatJid: '15559990000@s.whatsapp.net', groupJid: 'g1@g.us', inviteCode: 'abc', inviteExpiration: 0, groupName: 'G' },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/blocked send|COLD_TARGET|identity/i);
+        expect((mockSock as unknown as { sendMessage: ReturnType<typeof vi.fn> }).sendMessage).not.toHaveBeenCalled();
+      } finally {
+        mutableConfig.outboundIdentityMode = 'log-only';
+        db.close();
+      }
     });
   });
 });

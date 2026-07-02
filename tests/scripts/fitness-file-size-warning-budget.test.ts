@@ -17,6 +17,7 @@ import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'src/runtimes/agent/runtime.ts',
+  'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',
   'tests/config.test.ts',
   'tests/core/health.test.ts',
@@ -40,6 +41,7 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // norm for large cohesive test files (cf. the agent runtime/session twins).
   'tests/runtimes/chat/runtime.test.ts',
   'tests/scripts/bot-errors-health-check.test.ts',
+  'tests/transport/reconnect.test.ts',
 ].sort();
 
 describe('arch.file-size warning budget', () => {

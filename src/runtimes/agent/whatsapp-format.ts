@@ -11,6 +11,16 @@
 // ── Ordered transform passes ────────────────────────────────────────────────
 
 /**
+ * QR-083: the markdown bracket transforms (`[text](url)`, `[text]`) use `[^\]]+`,
+ * which on a long bracket-heavy run with no closing `]` is O(n²). Above this
+ * length they are skipped (a giant `[`-only blob has no real links — purely
+ * cosmetic to leave brackets), bounding the worst case on the synchronous send
+ * path. Normal replies are far below this; only pathological/oversized text is
+ * affected, and the linear bold/italic/code transforms always still apply.
+ */
+const MAX_LINK_TRANSFORM_LEN = 16_000;
+
+/**
  * Convert Claude's markdown to WhatsApp-compatible formatting.
  * Applied before message splitting.
  */
@@ -55,18 +65,27 @@ export function markdownToWhatsApp(text: string): string {
   // Horizontal rules: --- or *** or ___ (3+ chars) → remove entirely
   out = out.replace(/^[\-\*_]{3,}\s*$/gm, '');
 
-  // Image links: ![alt](url) → remove (not useful in WhatsApp text)
-  out = out.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
+  // QR-083: the four bracket transforms below use `[^\]]+` which, on a
+  // bracket-heavy run with no closing `]`, backtracks O(n) per `[` → O(n²)
+  // overall (40K `[` = ~1.2s, 80K = ~5s). They run on the FULL uncapped reply
+  // before splitMessage, so a long `[`-heavy reply would block the synchronous
+  // send path / event loop. Skip them past a generous length cap — a giant
+  // `[`-only blob has no real links, so leaving brackets unconverted is purely
+  // cosmetic; the linear bold/italic/code/heading transforms above still apply.
+  if (out.length <= MAX_LINK_TRANSFORM_LEN) {
+    // Image links: ![alt](url) → remove (not useful in WhatsApp text)
+    out = out.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
 
-  // Links: [text](url) → text (url)
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
+    // Links: [text](url) → text (url)
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
 
-  // Reference-style link definitions: [label]: url → remove
-  out = out.replace(/^\[([^\]]+)\]:\s+\S+.*$/gm, '');
+    // Reference-style link definitions: [label]: url → remove
+    out = out.replace(/^\[([^\]]+)\]:\s+\S+.*$/gm, '');
 
-  // Bare bracket references: [text] without (url) → strip brackets
-  // Must run AFTER link conversion to avoid mangling [text](url)
-  out = out.replace(/\[([^\]]+)\]/g, '$1');
+    // Bare bracket references: [text] without (url) → strip brackets
+    // Must run AFTER link conversion to avoid mangling [text](url)
+    out = out.replace(/\[([^\]]+)\]/g, '$1');
+  }
 
   // --- Strip HTML ---
 
@@ -93,7 +112,17 @@ export function markdownToWhatsApp(text: string): string {
   out = out.replace(/^\|[\s\-:|]+\|\s*$/gm, '');
 
   // Pipe table rows: | cell | cell | → cell | cell (strip leading/trailing pipes)
-  out = out.replace(/^\|\s*(.+?)\s*\|\s*$/gm, '$1');
+  // QR-127: the prior pattern `/^\|\s*(.+?)\s*\|\s*$/gm` is catastrophically
+  // backtracking — the `\s*(.+?)\s*` around the lazy dot makes whitespace runs
+  // ambiguous, so a single crafted line (leading `|` + a long whitespace run + no
+  // closing `|`) drives it to ~cubic time (~11s at 4 KB), a whole-process DoS since
+  // this runs synchronously on every outbound reply. Greedy `(.*)` (which excludes
+  // newlines, so it stays within one line) backtracks at most once from end-of-line
+  // to find the trailing `\|\s*$`, giving linear time, and the capture is trimmed in
+  // the replacer to preserve the old leading/trailing-whitespace behavior. Verified
+  // full output parity with the prior regex across multi-column, single-cell, padded,
+  // and non-matching rows.
+  out = out.replace(/^\|(.*)\|\s*$/gm, (_m, cell: string) => cell.trim());
 
   // --- Clean whitespace ---
 

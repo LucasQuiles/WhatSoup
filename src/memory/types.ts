@@ -18,7 +18,7 @@ export interface MemoryCluster {
   records: Array<{
     id: string;
     text: string;
-    claim: string;
+    claim?: string;
     evidence: string;
     createdAt: string;
     confidence: number;

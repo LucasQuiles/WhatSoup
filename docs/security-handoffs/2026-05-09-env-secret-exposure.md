@@ -14,13 +14,25 @@ Phase letters map to the W-1..W-6 wave nomenclature used in the kickoff doc's Co
 | Phase | Title | Status | Accepted provider/phase work (PR/SHA/date) | Pending provider/scope |
 |---|---|---|---|---|
 | W-1 / Phase A | Extend `keyring.ts` with a typed lookup API (no behavior change) | pending | — | Full phase pending |
-| W-2 / Phase B | Provider boundary migration (one provider per PR) | in-progress | OpenAI API + Anthropic API providers: [#370](https://github.com/LucasQuiles/WhatSoup/pull/370), SHA `a4bcb536`, merged 2026-05-12 | Whisper, Pinecone, Knowledge MCP, ElevenLabs, health auth |
+| W-2 / Phase B | Provider boundary migration (one provider per PR) | in-progress | OpenAI API + Anthropic API providers: [#370](https://github.com/LucasQuiles/WhatSoup/pull/370), SHA `a4bcb536`, merged 2026-05-12. ElevenLabs provider: routed through `lookupCredential('elevenlabs')` in `src/runtimes/chat/providers/elevenlabs.ts:20`, SHA `ef20d66d`, merged 2026-04-06 (predates this handoff) | Whisper, Pinecone, Knowledge MCP, health auth |
 | W-3 / Phase C | Reverse the precedence (resolver-first, env-fallback) | pending | — | Full phase pending |
 | W-4 / Phase D | Stop child env inheritance | pending | — | Full phase pending |
 | W-5 / Phase E | Health token migration (move off `tokens.env`) | pending | — | Full phase pending |
 | W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | pending | — | Full phase pending |
 
-Phase B notes: PR #370 routed OpenAI and Anthropic API providers through `lookupCredential(apiKeyService)` with env fallback preserved. The remaining Phase B providers per kickoff line 206 — Whisper, Pinecone, Knowledge MCP, ElevenLabs, and health auth — are still pending. Phase A (the formal `lookupCredentialTyped` typed API) has not landed yet; PR #370 used the existing `lookupCredential` shim.
+Phase B notes: PR #370 routed OpenAI and Anthropic API providers through `lookupCredential(apiKeyService)` with env fallback preserved. ElevenLabs is ALSO already migrated: `src/runtimes/chat/providers/elevenlabs.ts:20` resolves its key via `lookupCredential('elevenlabs')` (env-first with keyring fallback), landed in SHA `ef20d66d` on 2026-04-06 — before this handoff was written — so its prior `pending` listing was a documentation staleness error, corrected in the 2026-07-01 re-grounding below.
+
+The remaining Phase B providers, re-verified against `origin/main` (SHA `c40e2992`) on 2026-07-01, are still OPEN (read `process.env.*` directly, not the resolver):
+- Whisper — `src/runtimes/chat/providers/transcription/openai-whisper.ts:23,72` read `process.env.OPENAI_API_KEY` directly.
+- Pinecone — `src/runtimes/chat/providers/pinecone.ts:116,392` read `process.env[configuredPineconeApiKeyEnv()]` directly.
+- Knowledge MCP — `src/mcp/tools/knowledge.ts:182,260` read `process.env[apiKeyEnv]` directly.
+- Health auth — `src/core/health.ts:461` reads `process.env.WHATSOUP_HEALTH_TOKEN` directly.
+
+Phase A (the formal `lookupCredentialTyped` typed API) has not landed yet; the migrated providers (OpenAI, Anthropic, ElevenLabs) use the existing `lookupCredential` shim.
+
+### 2026-07-01 re-grounding (issue #1431)
+
+This handoff was re-verified against `origin/main` at SHA `c40e2992`. Correction: ElevenLabs was wrongly listed as a pending Phase B provider; it has been resolver-routed since 2026-04-06 (`ef20d66d`). The Phase B table and pending list above now reflect actual source state. Phase B remains IN-PROGRESS: 3 of 7 providers migrated (OpenAI, Anthropic, ElevenLabs), 4 still OPEN (Whisper, Pinecone, Knowledge MCP, health auth). No migration code was changed by this re-grounding — the remaining migrations are separate owner-gated security work. The handoff stays OPEN.
 
 ## Finding
 

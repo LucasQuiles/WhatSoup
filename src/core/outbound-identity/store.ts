@@ -31,6 +31,21 @@ export class SqliteIdentityStore implements IdentityStore {
       .get(barePhone);
     if (access !== undefined) return true;
 
+    // QR-098: a BLOCKED sender is never a warm egress target. ingest stores every
+    // inbound BEFORE the access/block check ("always, even if we later reject
+    // it"), so a blocked sender still has is_from_me=0 rows below — but
+    // shouldRespond refuses to REPLY to them, and the anti-exfil floor must not
+    // then permit SENDING to them (respond-vs-egress asymmetry). Explicit
+    // contact/allowed rows above still win (a blocked-AND-allowed row is
+    // contradictory operator state). This only gates the unsolicited-inbound
+    // warm clause below.
+    const blocked = this.raw
+      .prepare(
+        "SELECT 1 FROM access_list WHERE subject_type = 'phone' AND subject_id = ? AND status = 'blocked' LIMIT 1",
+      )
+      .get(barePhone);
+    if (blocked !== undefined) return false;
+
     const inbound = this.raw
       .prepare(
         'SELECT 1 FROM messages WHERE is_from_me = 0 AND (sender_jid = ? OR sender_jid LIKE ?) LIMIT 1',
@@ -39,8 +54,14 @@ export class SqliteIdentityStore implements IdentityStore {
     return inbound !== undefined;
   }
 
-  isKnownGroup(groupJid: string): boolean {
-    const row = this.raw.prepare('SELECT 1 FROM groups WHERE jid = ? LIMIT 1').get(groupJid);
+  isApprovedGroup(groupJid: string): boolean {
+    // QR-038: operator approval, NOT membership. A bare `groups` row is auto-created on
+    // join (handleGroupsUpsert on 'groups.upsert'), so membership alone is too weak an
+    // egress bar — require an access_list group entry explicitly 'allowed' (parity with the
+    // auto-respond gate), so the anti-exfil floor for groups matches the warm-only DM bar.
+    const row = this.raw.prepare(
+      "SELECT 1 FROM access_list WHERE subject_type = 'group' AND subject_id = ? AND status = 'allowed' LIMIT 1",
+    ).get(groupJid);
     return row !== undefined;
   }
 }

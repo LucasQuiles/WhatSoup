@@ -7,8 +7,9 @@ import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger,
-  validateTriggerSpec, dueTriggers, isSafeSqliteSql,
+  validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
 } from '../../../src/core/substrate/triggers.ts';
+import { nextCronRun } from '../../../src/core/cron.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -35,6 +36,33 @@ describe('triggers core', () => {
     expect(t.next_fire_at).not.toBeNull();
     const kinds = (db.raw.prepare('SELECT event_type FROM bead_events WHERE bead_id = ?').all(bead.id) as Array<{ event_type: string }>).map(e => e.event_type);
     expect(kinds).toContain('trigger_created');
+  });
+
+  it('QR-046: dedupe_key makes createTrigger idempotent for a LIVE (kind, dedupe_key)', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'dedupe', ownerJid: 'mw', actor: 'user' });
+    const base = {
+      beadId: bead.id, kind: 'poll.email' as const, spec: { source: 'gmail' as const, sender: 'x@y' },
+      reportChatJid: 'c', dedupeKey: 'daily-x', actor: 'user',
+    };
+    const first = createTrigger(db.raw, base);
+    const second = createTrigger(db.raw, base);
+    // Re-creating with the same (kind, dedupe_key) returns the SAME trigger, not a duplicate.
+    expect(second.id).toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(1);
+
+    // Precision: a DIFFERENT dedupe_key creates a new trigger.
+    const other = createTrigger(db.raw, { ...base, dedupeKey: 'daily-y' });
+    expect(other.id).not.toBe(first.id);
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(2);
+
+    // Precision: a DIFFERENT kind with the SAME dedupe_key creates a new trigger (index is (kind, dedupe_key)).
+    createTrigger(db.raw, { ...base, kind: 'poll.url', spec: { url: 'https://x.example.com', hash_mode: 'text' } });
+    expect(listTriggers(db.raw, { kind: 'poll.url' })).toHaveLength(1);
+
+    // Precision: NO dedupe_key never dedupes.
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    createTrigger(db.raw, { ...base, dedupeKey: undefined });
+    expect(listTriggers(db.raw, { kind: 'poll.email' })).toHaveLength(4);
   });
 
   it('watch TTL clamps to maxHours', () => {
@@ -239,6 +267,18 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
     expect(isSafeSqliteSql('SELECT 1; SELECT 2')).toBe(false); // multi-statement
   });
 
+  it('QR-026: isSafeSqliteSql rejects recursive CTEs (unbounded-CPU vector under query_only)', () => {
+    // A count/aggregate over a recursive CTE returns ONE row → the poller row-cap can't
+    // bound it, and node:sqlite DatabaseSync has no statement-time interrupt → whole-process
+    // freeze. Reject at validation so it never executes.
+    expect(
+      isSafeSqliteSql('WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r WHERE x<1000000000) SELECT count(*) FROM r'),
+    ).toBe(false);
+    expect(isSafeSqliteSql('with recursive cnt(n) as (select 1 union all select n+1 from cnt) select n from cnt')).toBe(false);
+    // A NON-recursive CTE remains allowed — only the recursive keyword is the CPU vector.
+    expect(isSafeSqliteSql('WITH recent AS (SELECT id FROM messages LIMIT 10) SELECT * FROM recent')).toBe(true);
+  });
+
   it('validateTriggerSpec rejects a poll.sqlite spec with ATTACH', () => {
     expect(() =>
       validateTriggerSpec('poll.sqlite', {
@@ -250,5 +290,32 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
         sql: 'SELECT count(*) FROM messages', fire_when: 'rows_returned',
       }),
     ).not.toThrow();
+  });
+});
+
+describe('QR-092: substrate schedule.cron honors the tz field', () => {
+  const baseArgs = {
+    beadId: 1, reportChatJid: '15550100001@s.whatsapp.net', actor: 'test',
+  };
+
+  it('threads spec.tz into next_fire_at (not evaluated in UTC)', () => {
+    const { now, nextFireAt } = prepareTrigger({
+      ...baseArgs,
+      kind: 'schedule.cron',
+      spec: { expr: '0 12 * * *', tz: 'America/New_York' },
+    });
+    // The computed next fire must honor the tz — equal to the tz-aware cron
+    // computation, and DIFFERENT from the UTC one (noon-NY != noon-UTC).
+    expect(nextFireAt).toBe(nextCronRun('0 12 * * *', now, 'America/New_York'));
+    expect(nextFireAt).not.toBe(nextCronRun('0 12 * * *', now, 'UTC'));
+  });
+
+  it('defaults to UTC when no tz is provided', () => {
+    const { now, nextFireAt } = prepareTrigger({
+      ...baseArgs,
+      kind: 'schedule.cron',
+      spec: { expr: '0 12 * * *' },
+    });
+    expect(nextFireAt).toBe(nextCronRun('0 12 * * *', now, 'UTC'));
   });
 });

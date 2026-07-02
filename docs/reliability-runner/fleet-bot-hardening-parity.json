@@ -172,7 +172,7 @@
     {
       "file": "tests/runtimes/agent/fallback-chain-selection.test.ts",
       "anchors": [
-        "reports configured chain eligibility as unknown before an arm-time selection pass",
+        "reports configured chain eligibility from credential presence before an arm-time selection pass",
         "skips same-provider model tiers for auth-required windows and selects an independent provider"
       ]
     },

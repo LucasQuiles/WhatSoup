@@ -48,19 +48,33 @@ const DEFAULT_EXTRACT_MESSAGE_KEYS = [
 ] as const;
 
 /**
+ * Max recursion depth for {@link extractMessage}. Provider stdout is untrusted
+ * (QR-070): a single deeply-nested JSON line parses fine but unbounded recursion
+ * here throws an uncaught RangeError in the session stdout handler → instance
+ * shutdown (DoS). Past this depth, treat the value as having no extractable
+ * message rather than walking it. 64 is far beyond any real provider payload.
+ */
+const MAX_EXTRACT_DEPTH = 64;
+
+/**
  * Recursively extract a string message from an unknown value.
  * Searches object keys in the provided order; defaults to the union of all
- * per-parser key lists.
+ * per-parser key lists. Recursion is bounded by {@link MAX_EXTRACT_DEPTH} so a
+ * deeply-nested (or maliciously-nested) provider payload degrades to `null`
+ * instead of overflowing the call stack (QR-070).
  */
 export function extractMessage(
   value: unknown,
   keys: readonly string[] = DEFAULT_EXTRACT_MESSAGE_KEYS,
+  depth = 0,
 ): string | null {
   if (typeof value === 'string') return value || null;
 
+  if (depth >= MAX_EXTRACT_DEPTH) return null;
+
   if (Array.isArray(value)) {
     const parts = value
-      .map((item) => extractMessage(item, keys))
+      .map((item) => extractMessage(item, keys, depth + 1))
       .filter((item): item is string => Boolean(item));
     return parts.length > 0 ? parts.join('\n') : null;
   }
@@ -68,7 +82,7 @@ export function extractMessage(
   if (!isRecord(value)) return null;
 
   for (const key of keys) {
-    const nested = extractMessage(value[key], keys);
+    const nested = extractMessage(value[key], keys, depth + 1);
     if (nested) return nested;
   }
 

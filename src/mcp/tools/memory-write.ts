@@ -51,12 +51,10 @@ function stableId(chatKey: string, memoryType: string, text: string): string {
 /**
  * Register the `memory_write` tool.
  *
- * @param getBotJid  resolves the bot's own JID (for self_fact sender attribution)
  * @param register   registry register callback
  * @param makeWriter optional writer factory (defaults to a live PineconeMemory) — injectable for tests
  */
 export function registerMemoryWriteTools(
-  getBotJid: () => string | undefined,
   register: (tool: ToolDeclaration) => void,
   makeWriter: () => MemoryWriter = () => new PineconeMemory(),
 ): void {
@@ -68,7 +66,7 @@ export function registerMemoryWriteTools(
     description:
       'Persist a durable memory about this conversation to your long-term memory store. ' +
       'Use for facts, preferences, and corrections worth remembering across sessions. ' +
-      'memory_type: user_fact | group_context | preference | correction | self_fact. ' +
+      'memory_type: user_fact | group_context | preference | correction. ' +
       'The conversation and the speaker are recorded automatically — do not pass identities.',
     schema: MemoryWriteSchema,
     scope: 'chat',
@@ -87,10 +85,27 @@ export function registerMemoryWriteTools(
       const rawChat = session.conversationKey;
 
       const memoryType = p.memory_type;
-      // Sender is DERIVED, never caller-supplied; FAIL CLOSED if it cannot be
-      // resolved (no bot JID for self_fact, or no session actor) — never write a
-      // placeholder/empty sender.
-      const senderJid = memoryType === 'self_fact' ? getBotJid() : session.actorJid;
+      // QR-082: FORBID self_fact from this chat-scoped tool. self_fact memories are
+      // recalled GLOBALLY (searchSelfFacts filters on memory_type only — NO chat_jid
+      // filter, pinecone.ts) and injected into EVERY conversation's context under a
+      // TRUSTED directive ("Things you have said about yourself before — stay
+      // consistent with these", context.ts), unlike user_fact/group_context which
+      // recall per-chat/per-sender and, per QR-031, are framed reference-only. A
+      // chat-scoped session is steered by UNTRUSTED conversation content (prompt
+      // injection), so permitting it to author a global-identity self_fact lets one
+      // chat poison the bot's self-identity across ALL chats. self_fact must originate
+      // ONLY from the trusted/global path (enrichment/config), never from this
+      // per-chat write primitive — which restores the trusted-author invariant the
+      // "stay consistent" recall framing already assumes.
+      if (memoryType === 'self_fact') {
+        return errorResult(
+          'memory_write cannot write a self_fact from a chat-scoped session — global self-identity memories must originate from a trusted source, not per-chat input',
+        );
+      }
+      // Sender is DERIVED from the session actor, never caller-supplied; FAIL CLOSED
+      // if it cannot be resolved — never write a placeholder/empty sender. (self_fact,
+      // the only case that used the bot's own JID, is rejected above — QR-082.)
+      const senderJid = session.actorJid;
       if (!senderJid) {
         return errorResult('memory_write could not resolve a sender identity');
       }

@@ -259,6 +259,40 @@ describe('ChatQueue — negative / invariant', () => {
     expect(completed).toContain('B');
   });
 
+  it('QR-060: sheds same-chat tasks beyond the per-chat depth cap (admission control)', async () => {
+    // maxConcurrent=1, per-chat depth cap=3. A blocking first task holds the single slot so
+    // subsequent same-chat tasks stay pending and accumulate against the cap.
+    const queue = new ChatQueue(1, 3);
+    let release!: () => void;
+
+    const r0 = await queue.enqueue('chat-A', () => new Promise<void>((r) => { release = r; }));
+    const r1 = await queue.enqueue('chat-A', () => Promise.resolve());
+    const r2 = await queue.enqueue('chat-A', () => Promise.resolve());
+    // pending is now 3 (= cap) → the next two are shed.
+    const r3 = await queue.enqueue('chat-A', () => Promise.resolve());
+    const r4 = await queue.enqueue('chat-A', () => Promise.resolve());
+
+    expect([r0, r1, r2]).toEqual([true, true, true]);
+    expect([r3, r4]).toEqual([false, false]);
+    expect(queue.droppedCount).toBe(2);
+
+    // Drain.
+    release();
+    await vi.waitFor(() => { expect(queue.stats.activeChats).toBe(0); });
+  });
+
+  it('QR-060: per-chat cap does not shed across distinct chats (no over-trigger)', async () => {
+    // Cap is PER chat: 10 different chats each with one task stay well under the cap of 3.
+    const queue = new ChatQueue(2, 3);
+    const results: boolean[] = [];
+    for (let i = 0; i < 10; i++) {
+      results.push(await queue.enqueue(`chat-${i}`, () => Promise.resolve()));
+    }
+    expect(results.every(Boolean)).toBe(true);
+    expect(queue.droppedCount).toBe(0);
+    await vi.waitFor(() => { expect(queue.stats.activeChats).toBe(0); });
+  });
+
   it('MUST NOT drop messages when at capacity', async () => {
     const queue = new ChatQueue(2);
     const completed: string[] = [];

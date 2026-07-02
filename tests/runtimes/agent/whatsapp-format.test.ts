@@ -361,3 +361,45 @@ describe('repairChunkFormatting', () => {
     expect(result[2]).toBe('*close*');
   });
 });
+
+describe('markdownToWhatsApp — bracket-transform DoS bound (QR-083)', () => {
+  it('does not blow up O(n^2) on a long bracket-heavy reply (event-loop DoS)', () => {
+    const huge = '['.repeat(200_000);
+    const start = Date.now();
+    const out = markdownToWhatsApp(huge);
+    const elapsed = Date.now() - start;
+    // Without the length guard this is multi-second (quadratic). With it, the
+    // oversized bracket blob skips the expensive transforms → near-instant.
+    expect(elapsed).toBeLessThan(200);
+    // Oversized text is returned (un-mangled is fine; brackets left as-is).
+    expect(out.length).toBeGreaterThan(0);
+  });
+
+  it('still converts brackets/links for normal-size replies (below the cap)', () => {
+    expect(markdownToWhatsApp('see [the docs](https://x.example)')).toContain('the docs (https://x.example)');
+    expect(markdownToWhatsApp('a [bare] ref')).toBe('a bare ref');
+    // bold still applies regardless
+    expect(markdownToWhatsApp('**hi**')).toBe('*hi*');
+  });
+});
+
+describe('QR-127: table-row cleanup is linear (no catastrophic backtracking)', () => {
+  it('handles a pathological unclosed table row in linear time', () => {
+    // Leading `|` + a long whitespace run + no closing `|`. The prior
+    // /^\|\s*(.+?)\s*\|\s*$/gm drove ~cubic backtracking (~11s at 4 KB) — a
+    // whole-process DoS, since the table cleanup runs UNCONDITIONALLY (outside the
+    // QR-083 link-transform length cap) on the full reply before splitMessage.
+    const evil = '|' + ' '.repeat(4000) + 'x';
+    const start = Date.now();
+    markdownToWhatsApp(evil);
+    // Fixed: ~0ms. Unfixed: multiple seconds. 500ms cleanly separates them.
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it('still strips leading/trailing pipes and trims cells (output parity)', () => {
+    expect(markdownToWhatsApp('| a | b |')).toBe('a | b');
+    expect(markdownToWhatsApp('|  cell  |')).toBe('cell');
+    expect(markdownToWhatsApp('|a|b|c|')).toBe('a|b|c');
+    expect(markdownToWhatsApp('| left | right |')).toBe('left | right');
+  });
+});

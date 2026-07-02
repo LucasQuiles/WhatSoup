@@ -67,43 +67,13 @@ const advancedConfigs: SockToolConfig<any>[] = [
       return sock.createCallLink(type, event, timeoutMs);
     },
   },
-  {
-    name: 'share_phone_number',
-    description: 'Share your phone number with a contact via a WhatsApp message (global).',
-    schema: z.object({
-      jid: z.string().describe('JID of the contact to share your phone number with'),
-    }),
-    replayPolicy: 'unsafe',
-    call: async ({ jid }, sock) => {
-      await sock.sendMessage(jid, { sharePhoneNumber: true } as any);
-      return { sent: true, jid };
-    },
-  },
-  {
-    name: 'request_phone_number',
-    description: 'Request a contact to share their phone number with you (global).',
-    schema: z.object({
-      jid: z.string().describe('JID of the contact whose phone number you are requesting'),
-    }),
-    replayPolicy: 'safe',
-    call: async ({ jid }, sock) => {
-      await sock.sendMessage(jid, { requestPhoneNumber: true } as any);
-      return { sent: true, jid };
-    },
-  },
-  {
-    name: 'send_product_message',
-    description: 'Send a product catalog message to a WhatsApp chat (global).',
-    schema: z.object({
-      jid: z.string().describe('JID of the recipient chat'),
-      product: ProductSchema.describe('Product object from the business catalog'),
-    }),
-    replayPolicy: 'unsafe',
-    call: async ({ jid, product }, sock) => {
-      await sock.sendMessage(jid, { product } as any);
-      return { sent: true, jid };
-    },
-  },
+  // QR-067: share_phone_number / request_phone_number / send_product_message were
+  // sock-only configs that called sock.sendMessage(jid) DIRECTLY with a
+  // caller-supplied jid — bypassing the outbound identity guard (anti-exfil
+  // floor). They are now db-aware guarded factories below (makeSharePhoneNumber
+  // etc.), mirroring relay_message/forward_message, so egress to a cold/unknown
+  // target is floored. They are also marked scope:'global' (their documented
+  // intent) so a chat-scoped sandbox session can no longer call them.
   {
     name: 'request_pairing_code',
     description: 'Request a pairing code for linking a device by phone number (global).',
@@ -224,6 +194,85 @@ const advancedConfigs: SockToolConfig<any>[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// QR-067: caller-supplied-recipient egress tools — guarded db-aware factories.
+// These send to a caller-supplied `jid` via sock.sendMessage directly (no
+// Messenger choke point), so each floors the egress through the outbound
+// identity guard first, exactly like relay_message/forward_message. With db
+// omitted the guard uses a null store (no block) — same as before this guard.
+// ---------------------------------------------------------------------------
+
+/** Shared outbound-identity floor for the caller-supplied-jid egress tools. */
+function floorEgress(jid: string, db?: Database): void {
+  applyOutboundIdentityGuard(
+    jid,
+    { caller: 'mcp', mode: config.outboundIdentityMode },
+    db ? new SqliteIdentityStore(db.raw) : null,
+  );
+}
+
+function makeSharePhoneNumber(getSock: () => ExtendedBaileysSocket | null, db?: Database): ToolDeclaration {
+  return {
+    name: 'share_phone_number',
+    description: 'Share your phone number with a contact via a WhatsApp message (global).',
+    schema: z.object({ jid: z.string().describe('JID of the contact to share your phone number with') }),
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
+    handler: async (params) => {
+      const { jid } = z.object({ jid: z.string() }).parse(params);
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
+      floorEgress(jid, db);
+      await sock.sendMessage(jid, { sharePhoneNumber: true } as Parameters<ExtendedBaileysSocket['sendMessage']>[1]);
+      return { sent: true, jid };
+    },
+  };
+}
+
+function makeRequestPhoneNumber(getSock: () => ExtendedBaileysSocket | null, db?: Database): ToolDeclaration {
+  return {
+    name: 'request_phone_number',
+    description: 'Request a contact to share their phone number with you (global).',
+    schema: z.object({ jid: z.string().describe('JID of the contact whose phone number you are requesting') }),
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid } = z.object({ jid: z.string() }).parse(params);
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
+      floorEgress(jid, db);
+      await sock.sendMessage(jid, { requestPhoneNumber: true } as Parameters<ExtendedBaileysSocket['sendMessage']>[1]);
+      return { sent: true, jid };
+    },
+  };
+}
+
+const SendProductSchema = z.object({
+  jid: z.string().describe('JID of the recipient chat'),
+  product: ProductSchema.describe('Product object from the business catalog'),
+});
+
+function makeSendProductMessage(getSock: () => ExtendedBaileysSocket | null, db?: Database): ToolDeclaration {
+  return {
+    name: 'send_product_message',
+    description: 'Send a product catalog message to a WhatsApp chat (global).',
+    schema: SendProductSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
+    handler: async (params) => {
+      const { jid, product } = SendProductSchema.parse(params);
+      const sock = getSock();
+      if (!sock) throw new Error('WhatsApp is not connected');
+      floorEgress(jid, db);
+      await sock.sendMessage(jid, { product } as Parameters<ExtendedBaileysSocket['sendMessage']>[1]);
+      return { sent: true, jid };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // relay_message — raw-socket free-recipient egress; needs db for the identity
 // guard, so it is a db-aware factory (mirrors reset_enrichment_errors) rather
 // than a sock-only config. Disabled by default; guarded before it can be enabled.
@@ -325,6 +374,13 @@ export function registerAdvancedTools(
 ): void {
   registerSockTools(getSock, advancedConfigs, register);
   // Note: fetch_message_history already exists in chat-operations.ts (Wave 2). Skipped here.
+
+  // QR-067: caller-supplied-jid egress tools — db-aware so the outbound identity
+  // guard floors a cold/unknown target before sock.sendMessage. Mirrors
+  // relay_message; db omitted → null store → no block (prior behavior).
+  register(makeSharePhoneNumber(getSock, db));
+  register(makeRequestPhoneNumber(getSock, db));
+  register(makeSendProductMessage(getSock, db));
 
   // relay_message: db-aware so the identity guard can read the warm set. When db
   // is omitted the guard falls back to a null store (no block) — same behavior
