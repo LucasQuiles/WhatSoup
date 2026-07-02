@@ -1424,18 +1424,46 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
+      // QR-134: the inbound message dispatches run inside the async sock.ev.process
+      // callback. Baileys' ev.process does `await handler(map)` with NO try/catch,
+      // and a rejected listener promise becomes a Node unhandledRejection, which
+      // main.ts turns into a full instance shutdown. The sibling handlers
+      // (messages.reaction / message-receipt.update / chats.*) are already wrapped
+      // for exactly this reason; the parser-heaviest paths (messages.upsert/update/
+      // delete, which run parseIncomingMessage on attacker bytes) were NOT. Wrap them
+      // so any handler throw is logged and the batch continues instead of crashing
+      // the instance (the QR-070 class, on the inbound side).
       if (events['messages.upsert']) {
-        this.handleMessagesUpsert(events['messages.upsert']);
+        try {
+          this.handleMessagesUpsert(events['messages.upsert']);
+        } catch (err) {
+          this.log.error({ err, event: 'messages.upsert' }, 'event handler failed');
+        }
       }
 
       if (events['messages.update']) {
-        this.handleMessagesUpdate(events['messages.update'] as any[]);
+        try {
+          this.handleMessagesUpdate(events['messages.update'] as any[]);
+        } catch (err) {
+          this.log.error({ err, event: 'messages.update' }, 'event handler failed');
+        }
       }
 
       if (events['messages.delete']) {
-        this.handleMessagesDelete(events['messages.delete'] as any);
+        try {
+          this.handleMessagesDelete(events['messages.delete'] as any);
+        } catch (err) {
+          this.log.error({ err, event: 'messages.delete' }, 'event handler failed');
+        }
       }
 
+      // QR-134: the remaining inbound dispatches are bare too and have concrete throw
+      // vectors on malformed events (handleCall does `for (const call of calls)` -> throws
+      // if calls is a non-array; group-participants does `(participants || []).some(...)`
+      // -> throws if participants is a non-array truthy). A throw here has the same
+      // ev.process-unhandledRejection -> shutdown blast radius. Wrap the group so a
+      // malformed metadata event is logged and the batch continues instead of crashing.
+      try {
       if (events['contacts.upsert']) {
         const contacts = events['contacts.upsert'] as Array<{
           id: string;
@@ -1491,6 +1519,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.log.info({ lid: mapping.lid, pn: mapping.pn, conversationKey }, 'LID mapping updated');
           this.emit('jidAliasChanged', conversationKey, mapping.pn);
         }
+      }
+      } catch (err) {
+        this.log.error({ err, event: 'inbound-metadata-dispatch' }, 'event handler failed');
       }
 
       try {

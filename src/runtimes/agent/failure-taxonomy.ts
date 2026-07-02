@@ -359,7 +359,17 @@ export function detectAutoSwitchNotice(text: string): AutoSwitchNotice | null {
   //   "(You're) Now using <to> · resets <time>"
   // Anchored on the literal verbs at start-of-line / start-of-text so ordinary
   // mid-sentence usage ("Now using opus is the default…") never matches.
-  const switched = text.match(/(?:^|\n|\s)Switched to (?<to>[^·\n]+?) due to high demand for (?<from>[^\n·]+?)(?:\s*·|\s*$|\.\s*$|\.\s+(?=[A-Z]))/i);
+  // QR-130: the start anchor was `(?:^|\n|\s)` — the `\s` alternative matches at
+  // EVERY whitespace, creating O(n) start positions, and at each one the lazy
+  // `[^·\n]+?` re-scans for the " due to high demand for " literal → O(n²)
+  // catastrophic backtracking on a crafted reply (e.g. "Switched to " repeated:
+  // ~4.7s at 480 KB, ~30s at 1.2 MB). This runs synchronously on the FULL agent
+  // reply text (enqueueAutoSwitchNotice) BEFORE splitMessage, so a prompt-injected
+  // reply freezes the event loop (Node single-thread → all chats/heartbeat). Pin
+  // the start to a true line/text anchor plus bounded indent (`[ \t]*`): one start
+  // per line, linear. This also matches the code's OWN stated intent
+  // (start-of-line/text) — the `\s` form actually violated it by matching mid-line.
+  const switched = text.match(/(?:^|\n)[ \t]*Switched to (?<to>[^·\n]+?) due to high demand for (?<from>[^\n·]+?)(?:\s*·|\s*$|\.\s*$|\.\s+(?=[A-Z]))/i);
   if (switched?.groups) {
     return {
       from: switched.groups.from.trim(),
@@ -367,7 +377,15 @@ export function detectAutoSwitchNotice(text: string): AutoSwitchNotice | null {
       reason: 'high-demand',
     };
   }
-  const nowUsing = text.match(/(?:^|\n)(?:You're n|N)ow using (?<to>[^·\n]+?)\s*·/);
+  // QR-133: the prior capture `(?<to>[^·\n]+?)\s*·` is quadratic — the lazy
+  // `[^·\n]+?` overlaps the trailing `\s*` on whitespace (both match spaces), so a
+  // crafted "Now using x" + a long space run with no `·` backtracks O(n²) (~1.2s at
+  // 50 KB, ~19s at 200 KB). Same synchronous reply-path sink as QR-130 (runs in this
+  // same detectAutoSwitchNotice). Use a greedy capture bounded by the `·` delimiter
+  // (which the class excludes) — linear — and let the existing `.trim()` drop the
+  // trailing space. Verified identical `.trim()` output to the prior regex on real
+  // "Now using <model> · resets …" notices.
+  const nowUsing = text.match(/(?:^|\n)(?:You're n|N)ow using (?<to>[^·\n]+)·/);
   if (nowUsing?.groups) {
     return { from: null, to: nowUsing.groups.to.trim(), reason: 'auto-routed' };
   }
