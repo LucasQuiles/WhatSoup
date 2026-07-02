@@ -130,6 +130,49 @@ describe('connection event dispatch — newsletter + error isolation', () => {
     })).not.toThrow();
     expect(after).toHaveBeenCalledTimes(1);
   });
+
+  it('QR-134: a throwing messages.upsert is caught so the batch continues (no crash)', async () => {
+    const groupHandler = vi.fn();
+    cm.on('groupParticipantsUpdate', groupHandler);
+
+    // contactsArrayMessage.contacts as a NON-array makes parseIncomingMessage throw a
+    // synchronous TypeError (('str' ?? []).map is not a function) — the class of parser
+    // throw QR-134 guards. Without the wrap this rejects the async ev.process callback
+    // -> Node unhandledRejection -> main.ts shutdown; with it, the throw is logged and
+    // the rest of the batch (group-participants) still dispatches.
+    const throwingMsg = {
+      key: { remoteJid: 'sender@s.whatsapp.net', id: 'M1' },
+      message: { contactsArrayMessage: { contacts: 'not-an-array' } },
+    };
+    emit({
+      'messages.upsert': { messages: [throwingMsg], type: 'notify' },
+      'group-participants.update': { id: 'grp@g.us', action: 'add', participants: ['member@s.whatsapp.net'], author: 'admin@s.whatsapp.net' },
+    });
+    await new Promise((r) => setImmediate(r)); // let the async ev.process callback settle
+
+    // Batch survived the caught messages.upsert throw -> the later dispatch still ran.
+    expect(groupHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('QR-134: a throwing call event is caught so a later dispatch (reaction) still runs', async () => {
+    const reactionHandler = vi.fn();
+    cm.on('reactionReceived', reactionHandler);
+
+    // `call: 42` is non-iterable, so handleCall's `for (const call of calls)` throws a
+    // TypeError. Without the metadata-dispatch wrap this aborts the whole ev.process
+    // callback -> the reaction dispatch (a few lines later) never runs; with it, the
+    // throw is caught and messages.reaction still dispatches.
+    emit({
+      call: 42,
+      'messages.reaction': [{
+        key: { id: 'R1', remoteJid: 'chat@s.whatsapp.net' },
+        reaction: { text: '\u{1F44D}', key: { participant: 'sender@s.whatsapp.net' } },
+      }],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(reactionHandler).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('connection diagnostics redaction (security-sensitive)', () => {
