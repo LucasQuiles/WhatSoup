@@ -2130,6 +2130,15 @@ export class AgentRuntime implements Runtime {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
     }
 
+    // QR-099: conversation keys whose prior-instance child the sweep left running
+    // (authoritative_live) or declined to touch (ambiguous). The proactive-resume
+    // loop below MUST NOT spawn a second session for these — a live child + a
+    // resumable checkpoint for the same key would otherwise yield two agent
+    // sessions for one chat (duplicate turn processing / replies, contended
+    // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
+    // instance's own spawns; it cannot see a prior-instance child.
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+
     // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
     // Cross-references agent_sessions with session_checkpoints to safely identify which
     // processes to keep and which to reap. Only kills PIDs verified as owned children.
@@ -2160,8 +2169,13 @@ export class AgentRuntime implements Runtime {
                 conversationKey: session.conversationKey,
                 reason: session.reason,
               }, 'ambiguous session — not touching');
+              // Left running — block a duplicate proactive resume for this key.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
               break;
-            // authoritative_live: leave alone
+            case 'authoritative_live':
+              // Verified-live child left in place — block a duplicate proactive resume.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
           }
         }
       }
@@ -2176,6 +2190,14 @@ export class AgentRuntime implements Runtime {
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
+
+        // QR-099: a still-live (authoritative_live) or ambiguous session for this
+        // key was left running by the sweep above — resuming would double-spawn.
+        // Skipping degrades to lazy resume on the next message (fail-safe).
+        if (proactiveResumeBlockedConversationKeys.has(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — live/ambiguous session already present');
+          continue;
+        }
 
         // AE1: Skip group conversations — groups should not be proactively resumed.
         // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
