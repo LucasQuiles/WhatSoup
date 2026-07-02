@@ -81,4 +81,45 @@ describe('harness auto-switch transparency notice', () => {
   it('does not classify an auto-switch notice as a failure (transparency only)', () => {
     expect(classifyProviderFailure('Switched to Opus 4.7 due to high demand for Opus 4.8')).toBeNull();
   });
+
+  // QR-130: the start anchor must not be `(?:^|\n|\s)` (O(n) start positions ×
+  // O(n) lazy scan = catastrophic backtracking). detectAutoSwitchNotice runs
+  // synchronously on the FULL agent reply text before splitMessage, so a
+  // prompt-injected reply of repeated "Switched to " would freeze the event loop.
+  it('is linear on a crafted "Switched to " flood (no catastrophic backtracking)', () => {
+    const evil = 'Switched to '.repeat(40000); // ~480 KB
+    const start = Date.now();
+    const n = detectAutoSwitchNotice(evil);
+    // Unfixed: ~4.7s at this size. Fixed: <5ms. 500ms cleanly separates them.
+    expect(Date.now() - start).toBeLessThan(500);
+    expect(n).toBeNull(); // no valid "due to high demand for" clause → no match
+  });
+
+  it('still matches real notices with a leading newline/indent (anchor parity)', () => {
+    const withNewline = 'some prior line\nSwitched to Opus 4.7 due to high demand for Opus 4.8 · resets 5pm';
+    const n = detectAutoSwitchNotice(withNewline);
+    expect(n).not.toBeNull();
+    expect(n!.to).toBe('Opus 4.7');
+    expect(n!.from).toBe('Opus 4.8');
+  });
+
+  // QR-133: the "Now using" branch's capture must not overlap its trailing
+  // whitespace matcher. `(?<to>[^·\n]+?)\s*·` backtracks O(n²) on a crafted
+  // "Now using x" + long space run with no `·`. Same synchronous reply-path sink.
+  it('is linear on a crafted "Now using" flood with no delimiter (no catastrophic backtracking)', () => {
+    const evil = 'Now using x' + ' '.repeat(200000) + 'y'; // no `·` terminator
+    const start = Date.now();
+    const n = detectAutoSwitchNotice(evil);
+    const elapsedMs = Date.now() - start;
+    expect(n).toBeNull(); // no `·` delimiter → no auto-switch notice
+    // Unfixed: ~19s at this size. Fixed: <1ms. 500ms cleanly separates them.
+    expect(elapsedMs).toBeLessThan(500);
+  });
+
+  it('still parses the "Now using <model> ·" notice after the QR-133 rewrite', () => {
+    const n = detectAutoSwitchNotice("You're now using Sonnet 4.6 · resets 5pm (America/New_York)");
+    expect(n).not.toBeNull();
+    expect(n!.to).toBe('Sonnet 4.6');
+    expect(n!.reason).toBe('auto-routed');
+  });
 });
