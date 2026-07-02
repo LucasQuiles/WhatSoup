@@ -8036,6 +8036,39 @@ describe('AgentRuntime', () => {
       mockSession.shutdown.mockResolvedValue(undefined);
     });
 
+    it('legacy active rows with no chat_jid are skipped before checkpoint lookup', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      mockGetActiveSession.mockReturnValue({
+        id: 8,
+        session_id: 'sess-legacy-null-chat',
+        chat_jid: null,
+        claude_pid: 0,
+        status: 'active',
+        started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+        last_message_at: null,
+        message_count: 0,
+      });
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+      const mockDurability = {
+        getSessionCheckpoint: vi.fn(),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      await runtime.start();
+
+      expect(mockDurability.getSessionCheckpoint).not.toHaveBeenCalled();
+      expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalled();
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(runtime.popStartupMessage()).toBeNull();
+      expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+        'skipping shared/single resume — no chat_jid on session row',
+      );
+    });
+
     it('stale session skipped — single mode, session older than 60 min', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
