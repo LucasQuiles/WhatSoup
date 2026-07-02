@@ -138,6 +138,15 @@ export async function withNormalizedAudioFile<T>(
       '-hide_banner',
       '-loglevel', 'error',
       '-y',
+      // Untrusted-media hardening: `buffer` is attacker-controlled bytes (a
+      // WhatsApp voice note) and ffmpeg auto-probes the container from CONTENT,
+      // not the extension. A crafted concat/HLS payload would otherwise let
+      // ffmpeg follow embedded file:// or http(s):// references (local-file read
+      // / SSRF). Pin the input protocol whitelist to `file` so no demuxer can
+      // reach off-disk, instead of relying on the host ffmpeg's implicit `safe`
+      // default (which varies by version across the fleet). Placed before -i so
+      // it governs the demuxer that opens the media.
+      '-protocol_whitelist', 'file',
       '-i', inputPath,
       '-ar', '16000',
       '-ac', '1',
