@@ -53,6 +53,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
+    getProviderId: vi.fn((): string => 'claude-cli'),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -1114,6 +1115,56 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
   });
 
+  // ── QR-105: auto-compact must be provider-gated (/compact is claude-cli only) ──
+
+  it('QR-105: does NOT fire /compact when the session provider is not claude-cli', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getProviderId.mockReturnValue('codex-cli');
+    mockSession.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // Well over threshold, lastCompactInputTokens > 0 (not the bootstrap path) — a
+    // claude-cli session here WOULD fire /compact.
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000, totalOutputTokens: 10,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+    });
+
+    (runtime as unknown as {
+      maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
+    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+
+    // Gated out: no /compact sent, and the counter is NOT advanced (no false success).
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('QR-105: DOES fire /compact for a claude-cli session over threshold (gate does not regress the happy path)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockSession.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000, totalOutputTokens: 10,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+    });
+
+    (runtime as unknown as {
+      maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
+    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+  });
+
   it('waits for an in-flight auto-compact before sending the next turn', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -1603,6 +1654,28 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
+  // QR-108: /new is a clean reset — it must drop the one-message-handoff latches
+  // (standby notice + handoff artifact) for the conversation, else they leak into
+  // the next reply/prelude (both keyed by the stable conversation_key). This
+  // harness uses a mock db, so we assert /new issues the two DELETE statements
+  // rather than round-tripping real rows.
+  it('handleMessage /new clears the standby notice and handoff artifact for the chat', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    // Isolate /new's DB activity from setup/start().
+    const prepareSpy = db.raw.prepare as unknown as { mock: { calls: unknown[][] }; mockClear: () => void };
+    prepareSpy.mockClear();
+
+    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+
+    const sql = prepareSpy.mock.calls.map((c) => String(c[0]));
+    expect(sql.some((s) => s.includes('DELETE FROM standby_notice'))).toBe(true);
+    expect(sql.some((s) => s.includes('DELETE FROM agent_handoff_artifacts'))).toBe(true);
+  });
+
   it('/new calls abortTurn() on the old queue before replacing it', async () => {
     // abortTurn() must fire BEFORE the new queue is created — it clears the typing
     // heartbeat interval and tool timers so the old session's state does not bleed
@@ -2032,6 +2105,44 @@ describe('AgentRuntime', () => {
     expect(mockSession.spawnSession).not.toHaveBeenCalled();
     expect(getSessionCheckpoint).not.toHaveBeenCalled();
     expect(getResumableCheckpoints).not.toHaveBeenCalled();
+  });
+
+  // QR-099: a conversation whose prior-instance child the startup sweep classified
+  // authoritative_live (verified-live) must NOT also be proactively resumed — that
+  // would spawn a SECOND session for one chat (duplicate turns/replies, contended
+  // per-chat state). The in-loop chatSessions.has() guard can't see the prior-
+  // instance child, so the sweep must record the live key and the resume loop skip it.
+  it('does not proactively resume a conversation with an authoritative_live session (QR-099)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    // Sweep leaves a verified-live child in place for this conversation_key.
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValueOnce([{
+      id: 1, sessionId: 'sess-live', claudePid: process.pid,
+      chatJid: null, conversationKey: '15550001111',
+      status: 'active', classification: 'authoritative_live', reason: 'pid alive + checkpoint active',
+    }]);
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      durability: {
+        getResumableCheckpoints: () => Array<{ conversation_key: string }>;
+        getSessionCheckpoint: (key: string) => { session_id: string } | null;
+      } | null;
+    };
+    // Same key ALSO has a resumable checkpoint — the double-spawn precondition.
+    state.durability = {
+      getResumableCheckpoints: () => [{ conversation_key: '15550001111' }],
+      getSessionCheckpoint: () => ({ session_id: 'resume-1' }),
+    };
+
+    await runtime.start();
+
+    // The live child is left in place: no resume session is wired (notifyUser
+    // stays unset) and — the load-bearing assertion — NO second session is
+    // spawned for the already-live conversation.
+    expect(capturedNotifyUserRef.current).toBeNull();
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
   });
 
   it('sandbox per_chat notifyUser cleanup removes only the crashed workspace state', async () => {
@@ -3677,6 +3788,43 @@ describe('AgentRuntime', () => {
     // No stranded +1 — otherwise the next real user-turn result would be
     // misclassified as a system turn.
     expect(state.pendingSystemResults.counts.get(chatJid) ?? 0).toBe(0);
+  });
+
+  // QR-095: in single/shared mode the context-injection system turn must be
+  // marked under GLOBAL_TOOL_SCOPE_KEY (the key the single/shared result handler
+  // consumes), NOT under an undefined mapKey (which is a no-op → the injected
+  // '[Recent chat context]' turn's result would be mis-classified as a USER turn
+  // and leak to the user).
+  it('single/shared: context-injection system turn is marked under the global scope (QR-095)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single/shared (no sessionScope)
+    const chatJid = '15550005555@s.whatsapp.net';
+    const state = runtime as unknown as {
+      pendingSystemResults: { mark: (k: string) => void };
+    };
+
+    vi.mocked(getRecentMessages).mockReturnValue([
+      {
+        pk: 1, chatJid, conversationKey: 'k', senderJid: 'sender@s.whatsapp.net',
+        senderName: 'Alice', messageId: 'm1', content: 'earlier message', contentType: 'text',
+        isFromMe: false, timestamp: 1_700_000_000, quotedMessageId: null,
+        enrichmentProcessedAt: null, enrichmentRetries: 0, createdAt: new Date().toISOString(),
+        mediaPath: null, contentText: null,
+      },
+    ]);
+    // Inactive session → sendTurnToSession respawns and injects context.
+    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+
+    await runtime.start();
+    const markSpy = vi.spyOn(state.pendingSystemResults, 'mark');
+    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+
+    const markedKeys = markSpy.mock.calls.map((c) => c[0]);
+    // RED pre-fix: the injection marked `undefined` (a no-op → phantom leak).
+    expect(markedKeys).not.toContain(undefined);
+    // GREEN post-fix: marked under the global scope the single/shared handler consumes.
+    expect(markedKeys).toContain('__global__');
   });
 
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
