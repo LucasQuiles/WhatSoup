@@ -85,6 +85,24 @@ export function isSmsJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_SMS);
 }
 
+/**
+ * True only for WhatsApp-authenticated transports — personal (@s.whatsapp.net)
+ * and linked-device (@lid) — whose sender identity WhatsApp verifies via E2E
+ * device pairing.
+ *
+ * NON-authenticated transports (e.g. @sms via Twilio) are deliberately excluded:
+ * the Twilio webhook signature only authenticates the request is *from Twilio*,
+ * NOT that the SMS `From` is the claimed sender — SMS sender-ID is spoofable.
+ * Because `resolvePhoneFromJid` collapses `<num>@sms` to the same bare phone as
+ * WhatsApp `<num>`, admin/allow GRANT decisions MUST gate on this predicate
+ * before matching the phone, so a spoofed SMS cannot inherit a WhatsApp
+ * identity's privileges (QR-143). Deny-side (block) checks intentionally do NOT
+ * use this — a blocked number must stay blocked across every transport.
+ */
+export function isWhatsAppAuthenticatedJid(jid: string | null | undefined): boolean {
+  return isPnJid(jid) || isLidJid(jid);
+}
+
 // ── JID parsing ─────────────────────────────────────────────────────────────
 
 /** Extract the local part (everything before @) from a JID. Returns the input if no @ present. */

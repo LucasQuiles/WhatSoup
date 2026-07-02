@@ -101,6 +101,20 @@ describe('isAdminMessage -- positive', () => {
   });
 });
 
+describe('isAdminMessage -- QR-143 cross-transport admin spoof guard', () => {
+  it('rejects an @sms sender whose bare number equals an admin phone (spoofable transport)', () => {
+    // The Twilio-bridged sender resolves to the same bare phone ('15550100001')
+    // as the WhatsApp admin, but its SMS sender-ID is spoofable — must NOT be admin.
+    const msg = makeIncomingMsg({ senderJid: '15550100001@sms', isGroup: false });
+    expect(isAdminMessage(msg, mockDb)).toBe(false);
+  });
+
+  it('still accepts the same admin number over the WhatsApp-authenticated transport (no regression)', () => {
+    const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: false });
+    expect(isAdminMessage(msg, mockDb)).toBe(true);
+  });
+});
+
 describe('isAdminMessage -- negative', () => {
   it('returns false for non-admin phone DM', () => {
     const msg = makeIncomingMsg({ senderJid: '15559998888@s.whatsapp.net', isGroup: false });
