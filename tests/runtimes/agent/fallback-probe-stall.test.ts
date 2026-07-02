@@ -392,6 +392,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(rearmedWindow).not.toBe(firstWindow);
 
     resolveProbe!(true);
+    await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -439,6 +440,83 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackWindow.activeUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
+    expect(v.fallbackProbeAttempts).toBe(0);
+  });
+
+  it('(i) treats a throwing revert-timer probe as failed and keeps fallback armed', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    const probe = vi.fn(() => {
+      throw new Error('probe exploded');
+    });
+    v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+    v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
+
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
+    expect(v.fallbackWindow.activeUntil!).toBeGreaterThan(Date.now());
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.fallbackProbeAttempts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(v.fallbackProbeAttempts).toBe(2);
+  });
+
+  it('(j) ignores a stale successful revert-timer probe result after the fallback window is re-armed', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    let resolveProbe: ((value: boolean) => void) | null = null;
+    const probeResult = new Promise<boolean>((resolve) => {
+      resolveProbe = resolve;
+    });
+    const probe = vi.fn(() => probeResult);
+    v.probePrimaryProviderRecovered = probe as unknown as () => Promise<boolean>;
+    const deactivateSpy = vi.spyOn(v, 'deactivateProviderFallback');
+
+    v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
+    const firstWindow = v.fallbackWindow.activeUntil;
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    v.deactivateProviderFallback('test-rearm');
+    v.activateProviderFallback(null, 'auth-required');
+    deactivateSpy.mockClear();
+    const rearmedWindow = v.fallbackWindow.activeUntil;
+    expect(rearmedWindow).not.toBe(firstWindow);
+
+    resolveProbe!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deactivateSpy).not.toHaveBeenCalled();
+    expect(v.fallbackWindow.activeUntil).toBe(rearmedWindow);
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.fallbackProbeAttempts).toBe(0);
+  });
+
+  it('(k) treats a throwing standing probe as failed without ending the early-recovery cadence', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    const probe = vi.fn(() => {
+      throw new Error('standing probe exploded');
+    });
+    v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+    v.activateProviderFallback(null, 'auth-required');
+
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.fallbackProbeAttempts).toBe(0);
+    expect(v.fallbackPrimaryProbeTimer).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(v.fallbackWindow.activeUntil).not.toBeNull();
     expect(v.fallbackProbeAttempts).toBe(0);
   });
 });
