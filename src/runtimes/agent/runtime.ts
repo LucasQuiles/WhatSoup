@@ -4860,6 +4860,17 @@ export class AgentRuntime implements Runtime {
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
       this.chatQueues.delete(syntheticJid);
+      // QR-094: the control OperationTracker (wired above alongside the session/
+      // queue) arms progress/liveness timers. This error path nulls controlSession
+      // and deletes its map entries, so the next handleControlTurn RECREATES the
+      // tracker and overwrites operationTrackers[syntheticJid] — orphaning the old
+      // tracker's armed timers. Shut it down here too, mirroring the per-chat
+      // cleanup teardown, so a heal-error-recreate cycle does not leak timers.
+      const controlTracker = this.operationTrackers.get(syntheticJid);
+      if (controlTracker) {
+        controlTracker.shutdown();
+        this.operationTrackers.delete(syntheticJid);
+      }
       if (controlSession) {
         try {
           await controlSession.shutdown();
