@@ -895,13 +895,19 @@ function runMigration34(db: DatabaseSync): void {
  * transitions remain consistent.
  */
 function runMigration35(db: DatabaseSync): void {
-  // Skip if the messages table is not present (fresh install running in an
-  // order where the initial schema hasn't been executed yet, or a partial
-  // install).
+  // Skip if the messages table or the messages_fts virtual table is not
+  // present (fresh install running in an order where the initial schema hasn't
+  // been executed yet, or a partial install). Both FTS triggers rewritten
+  // below reference messages_fts, so recreating them without that table would
+  // install triggers that fail on the next content_text UPDATE / row DELETE.
   const table = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
     .get() as { name: string } | undefined;
   if (!table) return;
+  const fts = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
+    .get() as { name: string } | undefined;
+  if (!fts) return;
 
   db.exec(`
     DROP TRIGGER IF EXISTS messages_fts_update;
