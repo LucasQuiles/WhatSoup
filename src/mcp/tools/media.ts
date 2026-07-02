@@ -47,6 +47,7 @@ function buildSendMediaPayload(
   resolved: string,
   basename: string,
   mime: string,
+  allowedRoot: string | undefined,
   params: {
     caption?: string;
     viewOnce?: boolean;
@@ -59,15 +60,15 @@ function buildSendMediaPayload(
 ): OutboundMedia {
   switch (type) {
     case 'image':
-      return { type: 'image', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
+      return { type: 'image', stream: createMediaReadStream(resolved, allowedRoot as string, log), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
     case 'document':
-      return { type: 'document', stream: createMediaReadStream(resolved, log), filename: basename, mimetype: mime, caption: params.caption };
+      return { type: 'document', stream: createMediaReadStream(resolved, allowedRoot as string, log), filename: basename, mimetype: mime, caption: params.caption };
     case 'audio':
-      return { type: 'audio', stream: createMediaReadStream(resolved, log), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
+      return { type: 'audio', stream: createMediaReadStream(resolved, allowedRoot as string, log), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
     case 'video':
-      return { type: 'video', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
+      return { type: 'video', stream: createMediaReadStream(resolved, allowedRoot as string, log), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
     case 'sticker':
-      return { type: 'sticker', stream: createMediaReadStream(resolved, log), mimetype: mime, isAnimated: params.isAnimated };
+      return { type: 'sticker', stream: createMediaReadStream(resolved, allowedRoot as string, log), mimetype: mime, isAnimated: params.isAnimated };
   }
 }
 
@@ -174,7 +175,7 @@ export function registerMediaTools(
       const mediaParams = { caption, viewOnce, ptt, seconds, ptv, gifPlayback, isAnimated };
 
       for (let attempt = 0; ; attempt += 1) {
-        const media = buildSendMediaPayload(effectiveType, resolved, basename, mime, mediaParams);
+        const media = buildSendMediaPayload(effectiveType, resolved, basename, mime, session.allowedRoot, mediaParams);
         try {
           await connection.sendMedia(chatJid, media);
           break;

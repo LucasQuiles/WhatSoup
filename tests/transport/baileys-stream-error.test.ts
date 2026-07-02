@@ -68,7 +68,7 @@ describe('createMediaReadStream — race-delete safety', () => {
     writeFileSync(filePath, 'fake-payload');
 
     const { log } = makeStubLog();
-    const stream = createMediaReadStream(filePath, log);
+    const stream = createMediaReadStream(filePath, tmpDir, log);
 
     // Listener count must be >0 at THIS point — before caller does anything
     expect(stream.listenerCount('error')).toBeGreaterThan(0);
@@ -86,7 +86,7 @@ describe('createMediaReadStream — race-delete safety', () => {
     writeFileSync(filePath, 'fake-enc-payload');
 
     const { log, warned } = makeStubLog();
-    const stream = createMediaReadStream(filePath, log);
+    const stream = createMediaReadStream(filePath, tmpDir, log);
 
     // Simulate Baileys race: unlink the tempfile before the stream body is read
     unlinkSync(filePath);
@@ -116,7 +116,7 @@ describe('createMediaReadStream — race-delete safety', () => {
     writeFileSync(filePath, 'fake-image-payload');
 
     const { log } = makeStubLog();
-    const stream = createMediaReadStream(filePath, log);
+    const stream = createMediaReadStream(filePath, tmpDir, log);
 
     // Caller attaches their own listener (simulating retry logic)
     const callerErrors: Error[] = [];
