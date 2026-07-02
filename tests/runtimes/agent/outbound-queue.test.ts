@@ -147,6 +147,38 @@ describe('OutboundQueue', () => {
     );
   });
 
+  // QR-114: the agent reply path must scrub operator-local internal artifacts
+  // before egress (parity with the chat runtime + MCP send tools), on BOTH the
+  // enqueued and streamed paths.
+  it('redacts internal artifacts from an enqueued agent reply before send', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueText('Your key lives at ~/.ssh/id_rsa - check it');
+    await vi.runAllTimersAsync();
+    await queue.flush();
+
+    const sent = calls.join('');
+    // Security property: the operator-local path never reaches the user.
+    expect(sent).not.toContain('~/.ssh/id_rsa');
+    // The redaction marker is present (brackets are stripped by downstream
+    // markdown handling; the marker text alone proves redactInternalArtifacts ran).
+    expect(sent).toContain('internal-path');
+  });
+
+  it('redacts internal artifacts from a streamed agent reply before send', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('config is under ~/.config/whatsoup/instances/example/auth');
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+    await queue.flush();
+
+    const sent = calls.join('');
+    expect(sent).not.toContain('~/.config/whatsoup/instances/example/auth');
+    expect(sent).toContain('internal-path');
+  });
+
   it('uses the default streaming aggregation window until overridden', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
@@ -2568,4 +2600,3 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
     expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
   });
 });
-
