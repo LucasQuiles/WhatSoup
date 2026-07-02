@@ -1,7 +1,7 @@
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, resolvePhoneFromJid } from './access-list.ts';
-import { bareNumber, normalizeLid, isLidJid } from './jid-constants.ts';
+import { bareNumber, normalizeLid, isLidJid, isWhatsAppAuthenticatedJid } from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAdminPhone } from '../lib/phone.ts';
@@ -73,7 +73,10 @@ export function shouldRespond(
       return { respond: false, reason: 'self_only_lid_unresolvable', accessStatus: 'blocked' };
     }
 
-    if (isAdminPhone(effectivePhone, config.adminPhones)) {
+    // QR-143: only a WhatsApp-authenticated sender may be granted the self_only
+    // admin path. A spoofable @sms sender resolves to the same bare phone as the
+    // WhatsApp admin, so gate on the transport before the adminPhones match.
+    if (isWhatsAppAuthenticatedJid(msg.senderJid) && isAdminPhone(effectivePhone, config.adminPhones)) {
       log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: self_only admin DM → respond');
       return { respond: true, reason: 'self_only_admin', accessStatus: 'allowed' };
     }
