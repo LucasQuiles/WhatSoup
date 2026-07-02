@@ -1120,6 +1120,19 @@ export class AgentRuntime implements Runtime {
 
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
     if (this.autoCompactInputTokens === undefined || session === null) return;
+    // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
+    // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
+    // plain user message that never emits a compact_boundary — so markSessionCompacted
+    // never advances and EVERY over-threshold turn re-fires it, UNTHROTTLED (the
+    // rapid-rearm + cooldown safeguards below key on the claude-only compact_boundary /
+    // success / timeout events, which never fire). Gate on the SESSION's actual provider
+    // (getProviderId, not the primary this.agentProvider) so a fallback-to-non-claude
+    // session is skipped too. If per-provider compaction is added later, extend here.
+    // Defensive typeof check mirrors the getProviderId call site at ~5366; an
+    // indeterminate provider fails safe (skip the claude-only command).
+    const sessionProvider =
+      typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== 'claude-cli') return;
     if (this.sessionScope === 'shared') return;
     if (!session.getStatus().active) return;
 
