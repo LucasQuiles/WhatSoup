@@ -225,9 +225,11 @@ describe('withNormalizedAudioFile', () => {
     const buf = Buffer.from([0x00]);
 
     try {
+      const callback = vi.fn(async () => 'unreachable');
       await expect(
-        isolatedWithNormalizedAudioFile(buf, 'audio/ogg', async () => 'ok'),
+        isolatedWithNormalizedAudioFile(buf, 'audio/ogg', callback),
       ).rejects.toThrow(/ffmpeg is not installed/i);
+      expect(callback).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock('node:fs');
       vi.resetModules();
