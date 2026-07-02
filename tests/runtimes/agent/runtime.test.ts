@@ -53,6 +53,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
+    getProviderId: vi.fn((): string => 'claude-cli'),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -1112,6 +1113,56 @@ describe('AgentRuntime', () => {
 
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
     expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+  });
+
+  // ── QR-105: auto-compact must be provider-gated (/compact is claude-cli only) ──
+
+  it('QR-105: does NOT fire /compact when the session provider is not claude-cli', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getProviderId.mockReturnValue('codex-cli');
+    mockSession.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // Well over threshold, lastCompactInputTokens > 0 (not the bootstrap path) — a
+    // claude-cli session here WOULD fire /compact.
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000, totalOutputTokens: 10,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+    });
+
+    (runtime as unknown as {
+      maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
+    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+
+    // Gated out: no /compact sent, and the counter is NOT advanced (no false success).
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('QR-105: DOES fire /compact for a claude-cli session over threshold (gate does not regress the happy path)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockSession.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000, totalOutputTokens: 10,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+    });
+
+    (runtime as unknown as {
+      maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
+    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
 
   it('waits for an in-flight auto-compact before sending the next turn', async () => {
