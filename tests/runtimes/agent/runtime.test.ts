@@ -1182,6 +1182,48 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, 'follow-up');
   });
 
+  it('clears auto-compact bookkeeping when the compact send fails immediately', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const state = runtime as unknown as {
+      autoCompact: AutoCompactView;
+      pendingSystemResults: { counts: Map<string, number> };
+    };
+    const globalScope = '__global__';
+    mockActiveAgentSession();
+    mockTokenSnapshot(250, 100);
+    mockSession.sendTurn
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('compact stdin closed'));
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await emitAgentResult(150);
+
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(2, '/compact');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: expect.any(Error),
+        rowId: 42,
+        scopeKey: globalScope,
+      }),
+      'auto compact send failed',
+    );
+    expect(state.pendingSystemResults.counts.get(globalScope) ?? 0).toBe(0);
+    expect(state.autoCompact.waiters.has(globalScope)).toBe(false);
+    expect(state.autoCompact.silentCompactScopes.has(globalScope)).toBe(false);
+
+    mockSession.sendTurn.mockClear();
+    mockSession.sendTurn.mockResolvedValue(undefined);
+    await emitAgentResult(200);
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+  });
+
   it('does not retry auto-compact within the cooldown window after a timeout', async () => {
     vi.useFakeTimers();
     try {
