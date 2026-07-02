@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
@@ -206,5 +209,39 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     expect(types).not.toContain('log_entry');
 
     poller.stop();
+  });
+
+  it('falls back to the cached log path when a transient scan miss hides an existing file', async () => {
+    const logDir = mkdtempSync(join(tmpdir(), 'realtime-log-cache-'));
+    try {
+      const logFile = join(logDir, 'app.log');
+      writeFileSync(logFile, 'baseline\n');
+      const firstTime = new Date('2026-06-21T10:00:00.000Z');
+      const secondTime = new Date('2026-06-21T10:02:00.000Z');
+      utimesSync(logFile, firstTime, firstTime);
+
+      const discovery = makeDiscovery({
+        test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
+      });
+      const dbReader = makeDbReader({ latestMessagePk: 1, latestAccessMarker: 'a' });
+      const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+      mockFindLatestLogFile.mockReturnValueOnce({ path: logFile, mtimeMs: firstTime.getTime() });
+      await poller.poll();
+      publisher.calls.length = 0;
+
+      writeFileSync(logFile, 'baseline\nnext line\n');
+      utimesSync(logFile, secondTime, secondTime);
+      mockFindLatestLogFile.mockReturnValueOnce(null);
+      await poller.poll();
+
+      const types = publisher.calls.map((e: any) => e.type);
+      expect(types).toContain('log_entry');
+      expect(types).toContain('feed_event');
+
+      poller.stop();
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+    }
   });
 });
