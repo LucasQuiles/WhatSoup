@@ -192,9 +192,8 @@ export function registerAllTools(
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
   if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
-    const getBotJid = (): string | undefined => getSock()?.user?.id ?? undefined;
     runModule('memory-write', false, (register) =>
-      memoryWriteTools.registerMemoryWriteTools(getBotJid, register),
+      memoryWriteTools.registerMemoryWriteTools(register),
     );
   }
 
