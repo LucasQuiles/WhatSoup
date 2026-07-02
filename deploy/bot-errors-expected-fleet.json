@@ -27,16 +27,10 @@
       "collectorRemote": true,
       "instances": [
         {
-          "name": "primary-bot",
+          "name": "mw-bot",
           "expected": "always_on",
-          "service": "com.whatsoup.primary-bot",
+          "service": "com.whatsoup.mw-bot",
           "healthPort": 9090
-        },
-        {
-          "name": "secondary-bot",
-          "expected": "always_on",
-          "service": "com.whatsoup.secondary-bot",
-          "healthPort": 9091
         }
       ]
     },

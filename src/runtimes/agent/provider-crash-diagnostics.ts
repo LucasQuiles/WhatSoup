@@ -21,9 +21,17 @@ export function appendProviderCrashPreview(
   maxLength = PROVIDER_CRASH_PREVIEW_MAX,
 ): string {
   const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  const next = sanitizeProviderCrashText(raw).trim();
-  if (!next) return existing;
-  return `${existing}\n${next}`.trim().slice(-maxLength);
+  if (!raw.trim()) return existing;
+  // QR-112: sanitize the JOINED buffer (existing + raw), NOT the raw chunk in
+  // isolation. The provider CLI writes stderr in arbitrary byte-sized chunks, so a
+  // secret can straddle a chunk boundary — the per-chunk sanitizer then sees `sk`+
+  // <12 chars in one chunk and the remainder (no prefix) in the next, redacting
+  // NEITHER. Joining first makes the split token contiguous so the whole-token
+  // regexes match. No artificial '\n' separator: inserting one at a byte boundary
+  // would itself break a boundary-straddling token's `\b…\b` match. The returned
+  // buffer stays fully sanitized, so the direct-log sinks (session.ts / claude.ts
+  // 'claude stderr', which log this value) remain safe with no per-sink edits.
+  return sanitizeProviderCrashText(`${existing}${raw}`).trim().slice(-maxLength);
 }
 
 export function classifyProviderCrash(text: string): AgentFailureClass | undefined {

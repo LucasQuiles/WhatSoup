@@ -730,6 +730,8 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [30, runMigration30],
   [31, runMigration31],
   [32, runMigration32],
+  [33, runMigration33],
+  [34, runMigration34],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -808,6 +810,73 @@ function runMigration32(db: DatabaseSync): void {
     SET send_started_at = unixepoch()
     WHERE status = 'processing' AND send_started_at IS NULL
   `);
+}
+
+const MIGRATION_33_AUTH_LOSS_SIGNAL = `
+CREATE TABLE IF NOT EXISTS auth_loss_signal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance TEXT NOT NULL,
+  host TEXT NOT NULL,
+  classifier TEXT NOT NULL CHECK (classifier IN ('logged_out', 'weak_logged_out_signal')),
+  reason TEXT NOT NULL CHECK (reason IN (
+    'explicit_auth_loss',
+    'weak_signal_persisted',
+    'whatsapp_auth_loss_with_disconnect_corroboration'
+  )),
+  confidence TEXT NOT NULL CHECK (confidence IN ('confirmed', 'inferred', 'ambiguous')),
+  observed_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_reason TEXT CHECK (resolved_reason IN ('stable_authenticated_open') OR resolved_reason IS NULL),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_loss_signal_instance_created
+  ON auth_loss_signal(instance, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_auth_loss_signal_instance_classifier
+  ON auth_loss_signal(instance, classifier, created_at);
+`;
+
+function runMigration33(db: DatabaseSync): void {
+  db.exec(MIGRATION_33_AUTH_LOSS_SIGNAL);
+}
+
+function runMigration34(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inbound_events'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db
+    .prepare("PRAGMA table_info('inbound_events')")
+    .all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has('continuity_candidate_reason')) {
+    db.exec(`
+      ALTER TABLE inbound_events
+      ADD COLUMN continuity_candidate_reason TEXT
+      CHECK (
+        continuity_candidate_reason IS NULL OR
+        continuity_candidate_reason IN ('crash_reclaim_no_terminal_outbound', 'runtime_fault_no_terminal_outbound')
+      )
+    `);
+  }
+
+  if (!names.has('continuity_candidate_source')) {
+    db.exec(`
+      ALTER TABLE inbound_events
+      ADD COLUMN continuity_candidate_source TEXT
+      CHECK (
+        continuity_candidate_source IS NULL OR
+        continuity_candidate_source IN ('pre_connect_recovery', 'runtime_fault_disarm')
+      )
+    `);
+  }
+
+  if (!names.has('continuity_candidate_marked_at')) {
+    db.exec('ALTER TABLE inbound_events ADD COLUMN continuity_candidate_marked_at TEXT');
+  }
 }
 
 function runMigration27(db: DatabaseSync): void {
@@ -1279,6 +1348,42 @@ export class Database {
       `UPDATE messages SET deleted_at = datetime('now')
        WHERE conversation_key = ? AND deleted_at IS NULL`,
     ).run(conversationKey);
+    return Number(result.changes);
+  }
+
+  /**
+   * Soft-delete specific messages by WhatsApp message id (revoke /
+   * "delete for everyone"). Sets deleted_at on each currently-live match; the
+   * messages_fts_soft_delete trigger drops them from FTS automatically, so the
+   * revoked content can no longer be recalled. Returns the number of rows newly
+   * soft-deleted (already-deleted ids are not re-counted). An empty id list is a
+   * no-op.
+   */
+  markMessagesDeleted(messageIds: string[]): number {
+    if (messageIds.length === 0) return 0;
+    const placeholders = messageIds.map(() => '?').join(',');
+    const result = this.db.prepare(
+      `UPDATE messages SET deleted_at = datetime('now')
+       WHERE message_id IN (${placeholders}) AND deleted_at IS NULL`,
+    ).run(...messageIds);
+    return Number(result.changes);
+  }
+
+  /**
+   * Apply a WhatsApp message EDIT by WhatsApp message id. Overwrites both
+   * `content` and `content_text` with the new (plain-text) body and stamps
+   * `edited_at`; updating content_text fires the messages_fts_update trigger so
+   * the FTS index reflects the corrected text (old text is no longer recallable).
+   * Only currently-live rows are edited (`deleted_at IS NULL`) so a revoked
+   * message cannot be resurrected via a late edit. Returns the number of rows
+   * updated (0 for an unknown or already-deleted id — a safe no-op). This is the
+   * edit-half counterpart to markMessagesDeleted (the revoke half).
+   */
+  markMessageEdited(messageId: string, newContent: string): number {
+    const result = this.db.prepare(
+      `UPDATE messages SET content = ?, content_text = ?, edited_at = datetime('now')
+       WHERE message_id = ? AND deleted_at IS NULL`,
+    ).run(newContent, newContent, messageId);
     return Number(result.changes);
   }
 

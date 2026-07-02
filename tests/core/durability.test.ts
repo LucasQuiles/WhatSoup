@@ -381,6 +381,17 @@ describe('DurabilityEngine', () => {
       await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', undefined, { replayPolicy: 'safe' });
       expect(mockMessenger.sendMessage).toHaveBeenCalledWith('jid@s.whatsapp.net', 'hello');
     });
+
+    it('forwards an infra caller token to messenger.sendMessage (QR-086)', async () => {
+      const mockMessenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', undefined, { replayPolicy: 'unsafe', caller: 'health' });
+      // The health-server admin /send tags itself as a system caller so the
+      // guard's spec §4.2-B exemption is reachable.
+      expect(mockMessenger.sendMessage).toHaveBeenCalledWith('jid@s.whatsapp.net', 'hello', { caller: 'health' });
+    });
   });
 });
 

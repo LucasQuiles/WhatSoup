@@ -161,7 +161,7 @@ export function registerAllTools(
   runModule('search', true, (register) => searchTools.registerSearchTools(db, register));
 
   // Pattern 3 — socket+callback. Same core-aware register binding as Pattern 2.
-  runModule('groups', true, (register) => groupTools.registerGroupTools(getSock, register));
+  runModule('groups', true, (register) => groupTools.registerGroupTools(getSock, register, db));
   runModule('community', true, (register) => communityTools.registerCommunityTools(getSock, register));
   runModule('newsletter', true, (register) => newsletterTools.registerNewsletterTools(getSock, register));
   runModule('business', true, (register) => businessTools.registerBusinessTools(getSock, register));
@@ -192,9 +192,8 @@ export function registerAllTools(
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
   if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
-    const getBotJid = (): string | undefined => getSock()?.user?.id ?? undefined;
     runModule('memory-write', false, (register) =>
-      memoryWriteTools.registerMemoryWriteTools(getBotJid, register),
+      memoryWriteTools.registerMemoryWriteTools(register),
     );
   }
 

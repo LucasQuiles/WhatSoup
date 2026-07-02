@@ -97,9 +97,19 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
 
 // Unit tests must never spawn the real fallback binary; 'unknown' is the
 // safe fail-open value (no alert, no version log).
+const probeBinaryCommandMock = vi.fn<
+  (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: unknown,
+  ) => Promise<{ status: 'ok' | 'failed'; output: string }>
+>(() => Promise.resolve({ status: 'failed', output: '' }));
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
   probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+  probeBinaryCommand: (binary: string, args: string[], env: NodeJS.ProcessEnv, options?: unknown) =>
+    probeBinaryCommandMock(binary, args, env, options),
 }));
 
 // ─── Imports after mocks ──────────────────────────────────────────────────────
@@ -163,12 +173,12 @@ type FallbackView = {
   pendingTurnActorJid: Map<string, string | undefined>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'empty-output' | 'probe-unusable',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error' | 'empty-output' | 'probe-unusable',
   ): {
     primaryProvider: string;
     fallbackProvider: string;
     fallbackModel: string | undefined;
-    reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'empty-output' | 'probe-unusable';
+    reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error' | 'empty-output' | 'probe-unusable';
     resetAt: Date | null;
     activeUntil: number;
     extended: boolean;
@@ -342,7 +352,9 @@ describe('AgentRuntime — provider fallback state machine', () => {
 
   it('auto-reverts to the primary provider after the window elapses', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
-    view(runtime).activateProviderFallback(null);
+    // server-error is a window-elapse reason (NOT recovery-probe-gated, unlike
+    // usage/rate/auth/empty/probe), so it reverts purely on window expiry.
+    view(runtime).activateProviderFallback(null, 'server-error');
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
 
     // Advance past the 5h default window.
@@ -419,6 +431,34 @@ describe('AgentRuntime — provider fallback state machine', () => {
   });
 
   it.each(['auth-required', 'empty-output', 'probe-unusable'] as const)(
+    'keeps %s fallback armed until a primary recovery probe succeeds',
+    async (reason) => {
+      const runtime = makeRuntime({
+        agentFallbackProvider: 'opencode-cli',
+        agentFallbackModel: 'minimax/MiniMax-M2.7',
+      });
+      const v = view(runtime);
+      v.probePrimaryProviderRecovered = vi.fn(() => false);
+
+      v.activateProviderFallback(null, reason);
+      expect(v.effectiveProvider).toBe('opencode-cli');
+      expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+      expect(v.effectiveProvider).toBe('opencode-cli');
+      expect(v.fallbackWindow.activeUntil).not.toBeNull();
+
+      v.probePrimaryProviderRecovered = vi.fn(() => true);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(v.fallbackWindow.activeUntil).toBeNull();
+      expect(v.effectiveProvider).toBe('claude-cli');
+    },
+  );
+
+  // Recovery gap regression: a usage/rate-limit fallback must ALSO re-probe the
+  // primary and revert as soon as it recovers, instead of blind-waiting for the
+  // (often mis-parsed) reset window to elapse. Mirrors the auth-required case.
+  it.each(['usage-limit', 'rate-limit'] as const)(
     'keeps %s fallback armed until a primary recovery probe succeeds',
     async (reason) => {
       const runtime = makeRuntime({
@@ -635,6 +675,81 @@ describe('AgentRuntime — fallback key-presence guard', () => {
   });
 });
 
+// ─── Primary recovery probe validity ────────────────────────────────────────
+
+describe('AgentRuntime — primary recovery probe validity', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue(null);
+    probeBinaryCommandMock.mockClear();
+    probeBinaryCommandMock.mockResolvedValue({ status: 'failed', output: '' });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['openai-api', 'openai', 'gpt-5.2', 'https://api.openai.com/v1/chat/completions'],
+    ['anthropic-api', 'anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com/v1/messages'],
+  ])(
+    'does not mark %s recovered from key presence when the live API probe rejects the credential',
+    async (provider, service, model, expectedUrl) => {
+      lookupCredentialMock.mockImplementation((svc) => (svc === service ? 'present-but-invalid' : null));
+      const fetchMock = vi.fn(async () => ({
+        status: 401,
+        ok: false,
+        json: vi.fn(async () => ({ data: [] })),
+        text: vi.fn(async () => 'Invalid authentication credentials'),
+      }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const runtime = makeRuntime({
+        agentProvider: provider,
+        agentProviderConfig: { apiKeyService: service },
+        model,
+        agentFallbackProvider: 'opencode-cli',
+        agentFallbackModel: 'minimax/MiniMax-M2.7',
+      });
+
+      // A present-but-invalid credential must NOT count as recovery: the probe
+      // sends a real minimal-generation turn and a 401 keeps the primary down.
+      await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expectedUrl,
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.any(Object),
+          signal: expect.any(AbortSignal),
+        }),
+      );
+    },
+  );
+
+  it('does not mark opencode-cli recovered from model-prefix key presence when the live CLI probe fails auth', async () => {
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'openai' ? 'present-but-invalid' : null));
+    probeBinaryCommandMock.mockResolvedValue({
+      status: 'failed',
+      output: 'Error: invalid_api_key',
+    });
+    const runtime = makeRuntime({
+      agentProvider: 'opencode-cli',
+      model: 'openai/gpt-5.2',
+      agentFallbackProvider: 'claude-cli',
+    });
+
+    await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
+    expect(probeBinaryCommandMock).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
+      expect.objectContaining({ OPENAI_API_KEY: 'present-but-invalid' }),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+});
+
 // ─── assistant_text vs result asymmetry ──────────────────────────────────────
 
 /** IOutboundQueue stub covering all members the result paths touch. */
@@ -642,6 +757,7 @@ function makeFakeQueue() {
   return {
     targetChatJid: 'fake@s.whatsapp.net',
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueResultText: vi.fn(),
     enqueueStreamingText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -942,7 +1058,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
       activeUntil,
       activatedAt: originalActivatedAt,
-      reason: 'usage-limit',
+      reason: 'server-error',
       probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
@@ -968,7 +1084,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       expect.anything(),
       expect.objectContaining({
         activatedAt: originalActivatedAt,
-        reason: 'usage-limit',
+        reason: 'server-error',
       }),
     );
 

@@ -76,6 +76,18 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 |----------|------|---------|-------------|
 | `MAX_TOKENS` | integer | `750` | Maximum tokens in a single LLM response. Parsed by `intEnv()` — invalid values fall back to the default. |
 | `RATE_LIMIT_PER_HOUR` | integer | `45` | Maximum messages per user per hour (chat runtime). |
+| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts:928`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
+
+### Agent session lifecycle (per_chat / shared agent runtimes)
+
+Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs (`TURN_WATCHDOG_MS` etc.) handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_SESSION_IDLE_MS` | integer (ms) | `3600000` (1h) | Idle threshold: a resident session with no message for longer than this is suspended on the next sweep. Setting this below ~35 min can suspend a session shortly after a long (multi-minute) turn completes, since idle is measured from the turn's last message. |
+| `WHATSOUP_SESSION_SWEEP_MS` | integer (ms) | `600000` (10m) | How often the idle-session sweep runs. |
+| `WHATSOUP_MAX_SESSIONS` | integer | `12` | LRU ceiling on concurrent resident sessions. When exceeded, the longest-idle evictable sessions are suspended down toward the cap even if still within `WHATSOUP_SESSION_IDLE_MS`, bounding memory under a burst of many active chats. |
+| `WHATSOUP_SESSION_MIN_RESIDENCY_MS` | integer (ms) | `300000` (5m) | Anti-thrash floor: a freshly-spawned session is never suspended until it has lived at least this long, preventing evict→respawn churn under a burst. |
 
 ### Access Control
 
@@ -161,6 +173,9 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
 | `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. |
 | `WHATSOUP_REPO_ROOT` | path | `process.cwd()` | Repository root scanned for the ARC binding file reported under the `arc` key of `GET /health` (`src/core/health.ts:1059`); a missing/unparseable file degrades to `{loaded:false,reason}` without failing the process. Only needed when the process CWD is not the repo checkout. |
+| `WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS` | integer (ms) | `30000` | Fleet health-poller (`src/fleet/health-poller.ts:23`): minimum time an instance must stay continuously unreachable before an `instance_unreachable` alert fires — debounces transient probe failures. |
+| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS` | integer | `2` | Fleet health-poller (`src/fleet/health-poller.ts:27`): consecutive degraded `GET /health` body polls required before a `health_body_degraded` alert fires. Floored to a minimum of `1`. |
+| `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS` | integer (ms) | `10000` | Fleet health-poller (`src/fleet/health-poller.ts:31`): minimum dwell time in the degraded state (applied alongside `WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_POLLS`) before a `health_body_degraded` alert fires. |
 
 #### Agent compact endpoint
 
@@ -1170,6 +1185,9 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 30 | Adds `scheduled_messages.timezone` (IANA zone) so recurring schedules evaluate their cron in the user's timezone (DST-aware); `NULL` preserves the legacy UTC interpretation (`runMigration30`) |
 | 31 | Adds the `llm_attempts` table (`sender_jid`, `attempt_at`) — records every LLM invocation, separate from the `rate_limits` (successful-response) counter, so outage/retry LLM cost is observable without charging the user's response rate-limit (`runMigration31`) |
 | 32 | Adds `scheduled_messages.send_started_at` so scheduler crash recovery can distinguish pre-send claims from uncertain in-flight sends and fail closed instead of blindly replaying accepted messages (`runMigration32`) |
+| 33 | Adds `auth_loss_signal` with active-signal and classifier indexes so auth-loss evidence can be recorded once, resolved after stable authenticated-open dwell, and counted across later recurrences (`runMigration33`) |
+| 34 | Adds nullable `inbound_events` continuity-candidate marker columns (`continuity_candidate_reason`, `continuity_candidate_source`, `continuity_candidate_marked_at`) so restart recovery and runtime fault/disarm branches can tag no-terminal-outbound inbounds before any queue/consumer exists (`runMigration34`) |
+
 
 ---
 

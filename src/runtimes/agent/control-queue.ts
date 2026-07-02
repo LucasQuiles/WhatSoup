@@ -97,6 +97,12 @@ export class ControlQueue implements IOutboundQueue {
     return this.chatJid;
   }
 
+  /** Control queues are not group-flood-relevant; a fixed token is sufficient
+   *  for the IOutboundQueue contract (QR-069). */
+  getSenderToken(): string {
+    return 'control-queue';
+  }
+
   updateDeliveryJid(jid: string): void {
     this.chatJid = jid;
   }

@@ -153,7 +153,7 @@ type Activation = {
   primaryProvider: string;
   fallbackProvider: string;
   fallbackModel: string | undefined;
-  reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+  reason: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error';
   resetAt: Date | null;
   activeUntil: number;
   extended: boolean;
@@ -170,7 +170,7 @@ type FallbackView = {
   pendingTurnActorJid: Map<string, string | undefined>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): Activation | null;
   deactivateProviderFallback(reason: string): void;
   scheduleFallbackReplay(args: {
@@ -225,7 +225,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable'); // +1h
     const activated = alertsFor('provider_fallback_activated');
     expect(activated).toHaveLength(1);
     const [instance, source, , evidence, severity] = activated[0];
@@ -234,14 +234,14 @@ describe('AgentRuntime — fallback transition alerts', () => {
     // Activation is a FAULT (primary provider failed) — keeps the critical
     // default. Asymmetry with the revert (info) is the point.
     expect(severity ?? 'critical').toBe('critical');
-    expect(evidence).toContain('reason=usage-limit');
+    expect(evidence).toContain('reason=model-unavailable');
     expect(evidence).toContain('provider=opencode-cli');
     expect(evidence).toContain('model=minimax/MiniMax-M2.7');
     expect(evidence).toContain('until=2026-06-10T11:00:00.000Z');
     expect(evidence).not.toContain('present-key');
 
     // Extension of the active window: no second activation alert.
-    const extended = v.activateProviderFallback(new Date(Date.now() + 3 * 60 * 60 * 1000), 'usage-limit')!;
+    const extended = v.activateProviderFallback(new Date(Date.now() + 3 * 60 * 60 * 1000), 'model-unavailable')!;
     expect(extended.extended).toBe(true);
     expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
   });
@@ -250,7 +250,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable'); // +1h
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
     v.fallbackMetrics.turnsServed = 3;
     v.fallbackMetrics.turnsEmpty = 1;
@@ -280,7 +280,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const v = view(runtime);
 
     // Window 1: 3 turns served (1 empty), then elapse.
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable'); // +1h
     v.fallbackMetrics.turnsServed = 3;
     v.fallbackMetrics.turnsEmpty = 1;
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
@@ -292,7 +292,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     // Window 2 in the SAME process: 2 more turns (1 empty). The lifetime
     // counters keep accruing (5/2 — getFallbackState contract), but the
     // revert evidence must report only THIS window's delta (2/1).
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit');
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable');
     v.fallbackMetrics.turnsServed = 5;
     v.fallbackMetrics.turnsEmpty = 2;
     runtime.disableFallback();
@@ -312,7 +312,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    v.activateProviderFallback(null, 'usage-limit');
+    v.activateProviderFallback(null, 'model-unavailable');
     runtime.disableFallback();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
@@ -331,7 +331,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
     v.replayTurnOnFallback = vi.fn(async () => {});
@@ -353,7 +353,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(replayed).toHaveLength(1);
     const [instance, , , evidence] = replayed[0];
     expect(instance).toBe('test');
-    expect(evidence).toContain('reason=usage-limit');
+    expect(evidence).toContain('reason=model-unavailable');
     expect(evidence).toContain('provider=opencode-cli');
     expect(evidence).toContain('model=minimax/MiniMax-M2.7');
     expect(v.getFallbackState().fallbackReplays).toBe(1);
@@ -363,7 +363,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
     v.replayTurnOnFallback = vi.fn(async () => {
@@ -390,7 +390,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.replayTurnOnFallback = vi.fn(async () => {});
 
@@ -453,14 +453,14 @@ describe('AgentRuntime — fallback transition counters', () => {
     const v = view(runtime);
 
     // Window 1: activate (+extend — no extra count), then elapse.
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit');
-    v.activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'usage-limit');
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable');
+    v.activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'model-unavailable');
     expect(v.getFallbackState().fallbackActivations).toBe(1);
     vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 1);
     expect(v.getFallbackState().fallbackReverts).toBe(1);
 
     // Window 2: activate, then admin-disable. Counters accumulate — no reset.
-    v.activateProviderFallback(null, 'usage-limit');
+    v.activateProviderFallback(null, 'model-unavailable');
     expect(v.getFallbackState().fallbackActivations).toBe(2);
     runtime.disableFallback();
     expect(v.getFallbackState().fallbackReverts).toBe(2);
@@ -474,7 +474,7 @@ describe('AgentRuntime — fallback transition counters', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    const activation = v.activateProviderFallback(null, 'model-unavailable')!;
     v.pendingTurnText.set('chat-key', 'please continue the task');
     v.replayTurnOnFallback = vi.fn(async () => {});
 
@@ -518,7 +518,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     loadFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     });
     const runtime = makeRuntime();
     const v = view(runtime);
@@ -538,7 +538,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     loadFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     });
     const runtime = makeRuntime();
     const v = view(runtime);
@@ -550,7 +550,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     const [instance, source, , evidence] = restored[0];
     expect(instance).toBe('test');
     expect(source).toBe('provider_fallback_restored');
-    expect(evidence).toContain('reason=usage-limit');
+    expect(evidence).toContain('reason=model-unavailable');
     expect(evidence).toContain('provider=opencode-cli');
     expect(evidence).toContain('model=minimax/MiniMax-M2.7');
     expect(evidence).toContain('until=2026-06-10T11:00:00.000Z');
@@ -563,14 +563,14 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
   it('three restarts of one window: exactly one activated + two restored (the crash-loop repro)', () => {
     // Process 1: the window first arms — the one true activation.
     const first = makeRuntime();
-    view(first).activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'usage-limit');
+    view(first).activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'model-unavailable');
     expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
 
     // The window persists; two subsequent process restarts restore it.
     const persisted = {
       activeUntil: Date.now() + 2 * 60 * 60 * 1000,
       activatedAt: Date.now(),
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     };
     loadFallbackStateMock.mockReturnValue(persisted);
     for (let restart = 0; restart < 2; restart++) {
@@ -590,7 +590,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     loadFallbackStateMock.mockReturnValue({
       activeUntil: until,
       activatedAt: Date.now() - 30 * 60 * 1000,
-      reason: 'usage-limit',
+      reason: 'model-unavailable',
     });
     const runtime = makeRuntime();
     const v = view(runtime);

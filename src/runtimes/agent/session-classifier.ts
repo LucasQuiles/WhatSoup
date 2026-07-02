@@ -201,12 +201,24 @@ export function classifyActiveSessions(
       const pidCheck = pidChecker(session.claude_pid);
 
       if (session === matchingSession) {
-        // Full match AND checkpoint is active
-        results.push({
-          ...sessionFields(session, convKey),
-          classification: 'authoritative_live',
-          reason: `matches active checkpoint (pid=${checkpoint.claudePid}, sessionId=${checkpoint.sessionId})`,
-        });
+        // Full match AND checkpoint is active — but only 'authoritative_live' if the
+        // PID is actually ALIVE. QR-101: a checkpoint match with a DEAD pid (the
+        // process crashed and the checkpoint row was never reconciled) was wrongly
+        // classified live, so the runtime "leaves it alone" and the chat is silently
+        // dead. Gate on LIVENESS ONLY (not ownership): pidChecker returns alive:false
+        // ONLY for a genuinely-gone PID (process.kill(pid,0) → ESRCH); every transient
+        // ps/proc failure returns alive:true, so this never demotes a live session on a
+        // flaky check, and it stays provider-agnostic (a live codex/opencode session is
+        // alive:true even though the claude-only ownership check reports owned:false).
+        if (!pidCheck.alive) {
+          classifyNonAuthoritative(results, session, convKey, pidCheck, checkpoint);
+        } else {
+          results.push({
+            ...sessionFields(session, convKey),
+            classification: 'authoritative_live',
+            reason: `matches active checkpoint (pid=${checkpoint.claudePid}, sessionId=${checkpoint.sessionId})`,
+          });
+        }
       } else if (matchingSession) {
         // Another session in this conversation is authoritative — this one is stale
         classifyNonAuthoritative(results, session, convKey, pidCheck, checkpoint);
@@ -219,11 +231,17 @@ export function classifyActiveSessions(
         // Check PID-only match (respawn without resume gives new session_id)
         if (checkpoint.claudePid !== null && session.claude_pid === checkpoint.claudePid) {
           if (sessions.length === 1) {
-            results.push({
-              ...sessionFields(session, convKey),
-              classification: 'authoritative_live',
-              reason: 'PID matches active checkpoint, session_id differs (respawned without resume)',
-            });
+            // QR-101: same liveness gate as the full-match branch — a dead PID that
+            // happens to equal the checkpoint pid is a stale row, not a live respawn.
+            if (!pidCheck.alive) {
+              classifyNonAuthoritative(results, session, convKey, pidCheck, checkpoint);
+            } else {
+              results.push({
+                ...sessionFields(session, convKey),
+                classification: 'authoritative_live',
+                reason: 'PID matches active checkpoint, session_id differs (respawned without resume)',
+              });
+            }
           } else {
             results.push({
               ...sessionFields(session, convKey),

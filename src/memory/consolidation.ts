@@ -52,7 +52,7 @@ export function clusterMemories(
   records: Array<{
     id: string;
     text: string;
-    claim: string;
+    claim?: string;
     evidence: string;
     createdAt: string;
     confidence: number;
@@ -109,7 +109,7 @@ export async function consolidateCluster(
     topic: cluster.topic,
     records: cluster.records.map((r) => ({
       id: r.id,
-      claim: r.claim,
+      claim: r.claim || r.text,
       text: r.text,
       confidence: r.confidence,
       created: r.createdAt,

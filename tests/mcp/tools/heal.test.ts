@@ -34,6 +34,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
@@ -108,6 +109,7 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 const { mockControlQueueInstance } = vi.hoisted(() => {
   const mockControlQueueInstance = {
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),

@@ -2281,6 +2281,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
         BOT_ERRORS_DRY_PLATFORM: 'darwin',
         BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
         BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,list_chats,search_messages,get_chat,get_group_metadata',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'darwin-log-paths',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          expectRuntimeManifest: false,
+        }),
       },
     });
 
@@ -2368,6 +2378,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
         BOT_ERRORS_DRY_PLATFORM_RELEASE: '6.6.87.2-microsoft-standard-WSL2',
         BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
         BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,list_chats,search_messages,get_chat,get_group_metadata',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'wsl-log-paths',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          expectRuntimeManifest: false,
+        }),
       },
     });
 

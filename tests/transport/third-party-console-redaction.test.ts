@@ -288,3 +288,29 @@ describe('third-party console redaction', () => {
     expect(redactThirdPartyConsoleValue(objectNamedObject)).toEqual({ type: 'Object', redacted: true });
   });
 });
+
+describe('third-party console redaction — compound/camelCase secret keys (QR-080)', () => {
+  // Fixture VALUES carry an `example` marker so the repo-hygiene secret-assignment
+  // guard treats them as obvious non-secrets; still 8+ char single tokens so the
+  // redactor's value match fires.
+  const LEAKED_BEFORE: Array<[string, string]> = [
+    ['AWS multi-underscore', 'AWS_SESSION_TOKEN=exampleAwsSessionTokenValue01'],
+    ['camelCase session', 'sessionToken=exampleSessionTokenValue02'],
+    ['camelCase bearer', 'bearerToken=exampleBearerTokenValue03'],
+    ['aws secret access key', 'aws_secret_access_key=exampleAwsSecretAccessKey04'],
+    ['oauth client secret', 'client_secret=exampleClientSecretValue05'],
+  ];
+  it.each(LEAKED_BEFORE)('redacts compound/camelCase secret in free-text: %s', (_l, input) => {
+    const out = redactThirdPartyConsoleString(input);
+    expect(out).toContain('<redacted>');
+    expect(out).not.toContain(input.split('=')[1]);
+  });
+  it('still redacts the original keys (no regression)', () => {
+    expect(redactThirdPartyConsoleString('token=exampleBareTokenValue06')).toContain('<redacted>');
+    expect(redactThirdPartyConsoleString('access_token=exampleAccessTokenValue07')).toContain('<redacted>');
+  });
+  it.each(['retry_count=12345678', 'patch=v2'])(
+    'does not over-redact benign text: %s',
+    (input) => { expect(redactThirdPartyConsoleString(input)).toBe(input); },
+  );
+});

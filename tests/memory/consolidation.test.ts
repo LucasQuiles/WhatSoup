@@ -30,6 +30,21 @@ describe('clusterMemories', () => {
     const clusters = clusterMemories(records);
     expect(clusters).toHaveLength(2);
   });
+
+  it('clusters by text when records lack a claim, tolerating empty text', () => {
+    // UNHAPPY: records without a `claim` fall back to `text` for topic + tokenization;
+    // an empty-text record must not crash the tokenizer.
+    const records = [
+      { id: 'a', text: 'enjoys hiking mountain trails', createdAt: '2026-04-01', confidence: 0.9, evidence: '' },
+      { id: 'b', text: 'enjoys hiking mountain paths', createdAt: '2026-04-02', confidence: 0.8, evidence: '' },
+      { id: 'c', text: '', createdAt: '2026-04-03', confidence: 0.5, evidence: '' },
+    ];
+    const clusters = clusterMemories(records);
+    const hiking = clusters.find((cl) => cl.records.some((r) => r.id === 'a'));
+    expect(hiking).toBeDefined();
+    expect(hiking!.topic).toContain('enjoys');
+    expect(hiking!.records.some((r) => r.id === 'b')).toBe(true);
+  });
 });
 
 describe('consolidateCluster', () => {
@@ -98,5 +113,42 @@ describe('consolidateCluster', () => {
     const cluster: MemoryCluster = { topic: 'empty', records: [] };
     const result = await consolidateCluster(mockProvider as any, cluster);
     expect(result.durableKnowledge).toEqual([]);
+  });
+
+  it('returns empty when the LLM JSON fields are not arrays', async () => {
+    // UNHAPPY: a malformed-but-parseable response (non-array durableKnowledge/discarded)
+    // must coerce to empty arrays, never propagate the wrong type.
+    const mockProvider = {
+      name: 'mock',
+      generate: async () => ({
+        content: JSON.stringify({ durableKnowledge: 'oops', discarded: null }),
+        inputTokens: 1, outputTokens: 1, model: 'mock', durationMs: 1,
+      }),
+    };
+    const cluster: MemoryCluster = {
+      topic: 'x',
+      records: [{ id: '1', text: 'x', claim: 'x', createdAt: '', confidence: 0.5, evidence: '' }],
+    };
+    const result = await consolidateCluster(mockProvider as any, cluster);
+    expect(result.durableKnowledge).toEqual([]);
+    expect(result.discarded).toEqual([]);
+  });
+
+  it('returns empty when the LLM returns unparseable JSON', async () => {
+    // UNHAPPY: non-JSON content must hit the parse-failure path and degrade to empty.
+    const mockProvider = {
+      name: 'mock',
+      generate: async () => ({
+        content: 'definitely not json {{{',
+        inputTokens: 1, outputTokens: 1, model: 'mock', durationMs: 1,
+      }),
+    };
+    const cluster: MemoryCluster = {
+      topic: 'x',
+      records: [{ id: '1', text: 'x', claim: 'x', createdAt: '', confidence: 0.5, evidence: '' }],
+    };
+    const result = await consolidateCluster(mockProvider as any, cluster);
+    expect(result.durableKnowledge).toEqual([]);
+    expect(result.discarded).toEqual([]);
   });
 });

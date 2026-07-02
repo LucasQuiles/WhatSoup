@@ -721,3 +721,31 @@ describe('ContactsDirectory eviction guard (#1091)', () => {
     expect(dir.size).toBe(1);
   });
 });
+
+describe('ContactsDirectory — pushName spoofing guard (QR-044)', () => {
+  it('keeps the first-seen name→phone mapping; a spoofed pushName from a different phone cannot hijack @Name', () => {
+    const dir = new ContactsDirectory();
+    // Legit: phone ...001 is known as 'Boss'.
+    dir.observe('15550100001@s.whatsapp.net', 'Boss');
+    expect(dir.resolve('boss')).toBe('15550100001');
+
+    // Attacker (...099) sets their pushName to 'Boss' and messages the bot.
+    dir.observe('15550100099@s.whatsapp.net', 'Boss');
+
+    // The @Boss mention must STILL resolve to the original contact, not the attacker.
+    expect(dir.resolve('boss')).toBe('15550100001');
+    // The attacker's own phone self-key still resolves (not spoofable).
+    expect(dir.resolve('15550100099')).toBe('15550100099');
+  });
+
+  it('still lets the SAME phone re-observe (idempotent) and index new aliases', () => {
+    const dir = new ContactsDirectory();
+    dir.observe('15550100001@s.whatsapp.net', 'Bob');
+    expect(dir.resolve('bob')).toBe('15550100001');
+
+    // Same phone, a new display name → the new alias is added; the old one is preserved.
+    dir.observe('15550100001@s.whatsapp.net', 'Robert');
+    expect(dir.resolve('robert')).toBe('15550100001');
+    expect(dir.resolve('bob')).toBe('15550100001');
+  });
+});

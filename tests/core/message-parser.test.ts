@@ -51,6 +51,7 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 import { parseIncomingMessage, unwrapMessage, extractContextInfo } from '../../src/core/message-parser.ts';
+import { hasLoneSurrogates } from '../../src/core/sanitize-surrogates.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,6 +79,24 @@ function msgWith(messagePayload: Record<string, unknown>, overrides: Record<stri
 // ---------------------------------------------------------------------------
 // T23: Message Parsing — Positive
 // ---------------------------------------------------------------------------
+
+describe('parseIncomingMessage — surrogate sanitization (QR-056)', () => {
+  it('strips lone surrogates from senderName (pushName) as well as content', () => {
+    const LS = '\uD800'; // lone high surrogate
+    const msg = msgWith({ conversation: `hi${LS}there` }, { pushName: `Mallory${LS}` });
+    const result = parseIncomingMessage(msg);
+    expect(result).not.toBeNull();
+    // content was already sanitized on main; senderName must be too (the gap).
+    expect(hasLoneSurrogates(result!.content ?? '')).toBe(false);
+    expect(hasLoneSurrogates(result!.senderName ?? '')).toBe(false);
+    expect(result!.senderName).toBe('Mallory\uFFFD'); // lone surrogate -> replacement char
+  });
+
+  it('leaves a clean senderName unchanged', () => {
+    const msg = msgWith({ conversation: 'hello' }, { pushName: 'Alice' });
+    expect(parseIncomingMessage(msg)!.senderName).toBe('Alice');
+  });
+});
 
 describe('parseIncomingMessage — positive cases', () => {
   it('plain text (conversation field) → content extracted, contentType=text', () => {

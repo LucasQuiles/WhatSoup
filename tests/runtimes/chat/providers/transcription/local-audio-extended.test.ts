@@ -215,20 +215,19 @@ describe('withNormalizedAudioFile', () => {
   // L129 if[0]: ffmpeg not found → throw
   it('throws "ffmpeg is not installed" when ffmpeg binary is not found (L129 if[0])', async () => {
     vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn(() => false),
-      };
-    });
+    vi.doMock('node:fs', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:fs')>()),
+      existsSync: vi.fn(() => false),
+    }));
+    const { withNormalizedAudioFile: isolatedWithNormalizedAudioFile } = await import(
+      '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
+    );
+    const buf = Buffer.from([0x00]);
 
     try {
-      const localAudio = await import('../../../../../src/runtimes/chat/providers/transcription/local-audio.ts');
       const callback = vi.fn(async () => 'unreachable');
-
       await expect(
-        localAudio.withNormalizedAudioFile(Buffer.from([0x00]), 'audio/ogg', callback),
+        isolatedWithNormalizedAudioFile(buf, 'audio/ogg', callback),
       ).rejects.toThrow(/ffmpeg is not installed/i);
       expect(callback).not.toHaveBeenCalled();
     } finally {

@@ -106,6 +106,33 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(runs[0].output_summary).toContain('0 rows');
   });
 
+  it('QR-026: a query exceeding the MAX_SQLITE_ROWS cap fails (bounds large-result DoS)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    // 22 rows → a 3-way cartesian join yields 22^3 = 10648 > MAX_SQLITE_ROWS (10000),
+    // tripping the iterate cap WITHOUT a recursive CTE (those are rejected at validation).
+    const insert = db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`);
+    for (let i = 0; i < 22; i++) insert.run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT 1 AS one FROM probes a, probes b, probes c`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    // Capped → failed outcome, no notification dispatched.
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string; output_json: string }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].output_summary).toContain('10000-row cap');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCap: 10000 });
+  });
+
   it('fire_when=rowcount_changed: first run with 0 rows is noop, count increase fires, stable count noops', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
