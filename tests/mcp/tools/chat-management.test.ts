@@ -498,6 +498,31 @@ describe('chat-management tools', () => {
       expect(result.isError).toBe(true);
     });
 
+    // QR-109: reject a malformed to_jid whose local part carries the '_at_'
+    // conversation-key separator (which could collide with another chat's key)
+    // at the tool boundary, before it reaches the cross-conversation access check
+    // or the send. A well-formed group target validates.
+    it('rejects a to_jid containing the "_at_" conversation-key separator (QR-109)', async () => {
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333_at_g.us@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid parameters|to_jid/);
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('accepts a well-formed group to_jid and forwards to it', async () => {
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@g.us' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith('333@g.us', { text: 'First message' });
+    });
+
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
       registerChatManagementTools(db, () => null, (tool) => nullRegistry.register(tool));
@@ -929,8 +954,11 @@ describe('chat-management.ts uncovered-branch coverage', () => {
   // --- forward_message: error & fallback branches ---
 
   describe('forward_message — residual branches', () => {
-    it('rejects a malformed to_jid when a global session is bound to a conversation', async () => {
-      // session.conversationKey is set AND to_jid has no '@' -> toConversationKey throws.
+    it('rejects a malformed to_jid at the tool boundary (QR-109)', async () => {
+      // QR-109: to_jid is now schema-validated (isForwardableJid), so a
+      // non-JID string is rejected at the boundary BEFORE the handler/access
+      // check — an earlier, stricter rejection than the old handler-level
+      // toConversationKey throw. Still no send.
       const result = await registry.call(
         'forward_message',
         { message_id: 'msg1', to_jid: 'not-a-jid' },
@@ -938,8 +966,7 @@ describe('chat-management.ts uncovered-branch coverage', () => {
       );
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Invalid to_jid');
-      expect(result.content[0].text).toContain('not-a-jid');
+      expect(result.content[0].text).toMatch(/Invalid parameters|to_jid/);
       expect(mockSock.sendMessage).not.toHaveBeenCalled();
     });
 

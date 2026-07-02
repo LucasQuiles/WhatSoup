@@ -12,6 +12,7 @@ import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
@@ -429,9 +430,32 @@ function makeGetChat(db: Database): ToolDeclaration {
 // forward_message — forward a stored message to another chat (scope: global)
 // ---------------------------------------------------------------------------
 
+// QR-109: forward_message is a scope:'global' egress tool. Validate to_jid at the
+// tool boundary instead of accepting any z.string(). toConversationKey is
+// non-injective (a personal local part containing the '_at_' separator collides
+// with a group conversation key), so an unvalidated to_jid could pass the
+// cross-conversation access check under a key it doesn't actually route to. Reject
+// anything that isn't a well-formed, routable WhatsApp JID: <local>@<domain> for a
+// known domain, non-empty local part with no whitespace/'@', and no '_at_'
+// separator. Real forward targets (<digits>@s.whatsapp.net, <lid>@lid,
+// <group>@g.us) never contain '_at_', so this has no legitimate-traffic impact.
+const FORWARDABLE_DOMAINS = new Set<string>([DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP]);
+export function isForwardableJid(jid: string): boolean {
+  const at = jid.lastIndexOf('@');
+  if (at <= 0) return false;
+  const local = jid.slice(0, at);
+  const domain = jid.slice(at + 1);
+  if (!FORWARDABLE_DOMAINS.has(domain)) return false;
+  if (local.length === 0 || local.includes('@') || /\s/.test(local)) return false;
+  if (local.includes('_at_')) return false; // conversation-key separator collision
+  return true;
+}
+
 const ForwardMessageSchema = z.object({
   message_id: z.string(),
-  to_jid: z.string(),
+  to_jid: z.string().refine(isForwardableJid, {
+    message: 'to_jid must be a routable WhatsApp JID (<local>@s.whatsapp.net|lid|g.us, no "_at_")',
+  }),
 });
 
 function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
