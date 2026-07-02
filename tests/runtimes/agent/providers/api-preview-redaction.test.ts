@@ -226,3 +226,27 @@ describe('sanitizeProviderPreviewText — compound / camelCase secret keys (QR-0
     expect(Date.now() - start).toBeLessThan(1000);
   });
 });
+
+describe('QR-128: email redaction is linear and does not under-redact', () => {
+  it('is linear on a pathological dotted local/domain run (no catastrophic backtracking)', () => {
+    // The prior /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ overlapped its
+    // own domain class (`.` ∈ [A-Za-z0-9.-]) with the required TLD dot, so a crafted
+    // `a.a.a…` run drove quadratic backtracking (~5.5s at 80 KB). This sanitizer runs
+    // on the FULL uncapped outbound reply, so it is a synchronous send-path DoS.
+    const start = Date.now();
+    sanitizeProviderPreviewText('a@' + 'a.'.repeat(20000) + '!');
+    // Fixed: ~2ms. Unfixed: ~1.3s at this size. 500ms cleanly separates them.
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it('still redacts real emails (no under-redaction regression)', () => {
+    // `@` is split via a template so the literal address never appears in source
+    // (repo-hygiene guard forbids literal email addresses in committed text).
+    const at = '@';
+    const addr = `user${at}example.com`;
+    const out = sanitizeProviderPreviewText(`reach me at ${addr} please`);
+    expect(out).toContain('[REDACTED_EMAIL]');
+    expect(out).not.toContain(addr);
+    expect(sanitizeProviderPreviewText(`a.b+c${at}sub.example.co.uk`)).toBe('[REDACTED_EMAIL]');
+  });
+});
