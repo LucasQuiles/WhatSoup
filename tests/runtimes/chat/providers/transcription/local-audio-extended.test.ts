@@ -262,6 +262,13 @@ describe('withNormalizedAudioFile', () => {
         } as unknown as import('node:child_process').ChildProcess;
       }),
     }));
+    // ffmpeg-presence must be deterministic on CI (no ffmpeg installed):
+    // mock existsSync->true so resolveBinaryPath finds ffmpeg and execution
+    // reaches the spawn assertion below (sibling absence test mocks ->false).
+    vi.doMock('node:fs', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:fs')>()),
+      existsSync: vi.fn(() => true),
+    }));
     const { withNormalizedAudioFile: isolated } = await import(
       '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
     );
@@ -278,6 +285,7 @@ describe('withNormalizedAudioFile', () => {
       expect(seenWavPath).toMatch(/normalized\.wav$/);
     } finally {
       vi.doUnmock('node:child_process');
+      vi.doUnmock('node:fs');
       vi.resetModules();
     }
   });
