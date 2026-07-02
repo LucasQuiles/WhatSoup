@@ -7934,6 +7934,7 @@ describe('AgentRuntime', () => {
             session_id: 'dm-sess-continuation',
             updated_at: '2026-06-10T09:59:00',
           })),
+          completeTurn: vi.fn(),
           upsertSessionCheckpoint: vi.fn(),
         };
         (runtime as unknown as { durability: unknown }).durability = mockDurability;
@@ -7941,13 +7942,10 @@ describe('AgentRuntime', () => {
         const state = runtime as unknown as {
           injectMissedMessages: ReturnType<typeof vi.fn>;
           pendingSystemResults: {
-            mark: ReturnType<typeof vi.fn>;
-            unmark: ReturnType<typeof vi.fn>;
+            counts: Map<string, number>;
           };
         };
         state.injectMissedMessages = vi.fn(async () => true);
-        state.pendingSystemResults.mark = vi.fn();
-        state.pendingSystemResults.unmark = vi.fn();
 
         await runtime.start();
         await Promise.resolve();
@@ -7958,11 +7956,10 @@ describe('AgentRuntime', () => {
           '15551230008@lid',
           Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
         );
-        expect(state.pendingSystemResults.mark).toHaveBeenCalledWith('15551230008@lid');
         expect(mockSession.sendTurn).toHaveBeenCalledWith(
           '[System: session resumed after service restart — continue where you left off]',
         );
-        expect(state.pendingSystemResults.unmark).toHaveBeenCalledWith('15551230008@lid');
+        expect(state.pendingSystemResults.counts.get('15551230008@lid') ?? 0).toBe(1);
         expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
           expect.objectContaining({
             err: expect.any(Error),
@@ -7970,6 +7967,10 @@ describe('AgentRuntime', () => {
           }),
           'failed to send continuation turn after resume',
         );
+
+        await emitAgentResult(25, 'context received');
+
+        expect(state.pendingSystemResults.counts.get('15551230008@lid') ?? 0).toBe(0);
       } finally {
         vi.useRealTimers();
       }
