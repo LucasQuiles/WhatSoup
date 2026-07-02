@@ -222,7 +222,10 @@ export class DurabilityEngine {
         `UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = ?`,
       ),
       selectEchoedOutboundInbound: prepare(
-        `SELECT source_inbound_seq, is_terminal FROM outbound_ops WHERE id = ?`,
+        // QR-102: also select `status` so markTerminal can detect an op that was
+        // ALREADY echoed before being marked terminal (echo-before-terminal ordering)
+        // and finalize the linked inbound then.
+        `SELECT source_inbound_seq, is_terminal, status FROM outbound_ops WHERE id = ?`,
       ),
       markMaybeSent: prepare(
         `UPDATE outbound_ops SET status = 'maybe_sent', error = ? WHERE id = ?`,
@@ -508,7 +511,7 @@ export class DurabilityEngine {
     this.statements.markEchoed.run(id);
     // If this is a terminal op, complete the linked inbound event
     const row = this.statements.selectEchoedOutboundInbound.get(id) as
-      { source_inbound_seq: number | null; is_terminal: number } | undefined;
+      { source_inbound_seq: number | null; is_terminal: number; status: string } | undefined;
     if (row?.is_terminal && row.source_inbound_seq) {
       this.completeInbound(row.source_inbound_seq, 'response_sent');
     }
@@ -528,6 +531,20 @@ export class DurabilityEngine {
 
   markTerminal(id: number): void {
     this.statements.markTerminal.run(id);
+    // QR-102: markEchoed only completes the linked inbound if the op was ALREADY
+    // terminal at echo time. In the real ordering the reply is sent + echoed
+    // (markEchoed, is_terminal=0 -> skipped) BEFORE markLastTerminal runs, so the
+    // echo-path completion is missed and -- if the process crashes before the direct
+    // completeInbound -- the inbound is stranded (processing/turn_done). Mirror
+    // markEchoed here: if this op is already 'echoed', finalize the inbound now.
+    // completeInbound is idempotent (status-guarded markTurnDone + a redundant
+    // markInboundComplete), so this never double-finalizes when the direct path also
+    // runs, and the terminal-then-echo ordering still completes via markEchoed.
+    const row = this.statements.selectEchoedOutboundInbound.get(id) as
+      { source_inbound_seq: number | null; is_terminal: number; status: string } | undefined;
+    if (row?.status === 'echoed' && row.source_inbound_seq) {
+      this.completeInbound(row.source_inbound_seq, 'response_sent');
+    }
   }
 
   // ── Echo matching ──
