@@ -1470,7 +1470,7 @@ describe('Migration-numbering split-brain guard (static structural invariants)',
     }
     expect(
       dups,
-      `duplicate MIGRATIONS key(s) ${JSON.stringify(dups)} — two branches defined the same migration number (split-brain). Renumber one.`,
+      `duplicate MIGRATIONS key(s) detected — two branches defined the same migration number (split-brain). Renumber one.`,
     ).toEqual([]);
   });
 
@@ -1513,7 +1513,7 @@ describe('Migration-numbering split-brain guard (static structural invariants)',
       .sort((a, b) => a - b);
     expect(
       dupDefs,
-      `duplicate runMigration<K> function definition(s) for ${JSON.stringify(dupDefs)} — a merge collided two branches' migrations. Renumber one and re-key its MIGRATIONS entry.`,
+      `duplicate runMigration<K> function definition(s) detected — a merge collided two branches' migrations. Renumber one and re-key its MIGRATIONS entry.`,
     ).toEqual([]);
   });
 
@@ -1522,7 +1522,7 @@ describe('Migration-numbering split-brain guard (static structural invariants)',
     const orphanDefs = [...new Set(defNumbers)].filter((k) => !keySet.has(k)).sort((a, b) => a - b);
     expect(
       orphanDefs,
-      `runMigration<K> defined but not wired into MIGRATIONS for ${JSON.stringify(orphanDefs)}`,
+      `runMigration<K> defined but not wired into MIGRATIONS (see received value)`,
     ).toEqual([]);
   });
 });
