@@ -8,6 +8,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
+import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
@@ -408,7 +409,13 @@ export class OutboundQueue implements IOutboundQueue {
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
     this.turnHasVisibleText = true;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
+    // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
+    // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
+    // mirrors the chat runtime's unconditional redactInternalArtifacts on the
+    // response. Applied to the assembled text BEFORE splitMessage so a secret is
+    // never split across chunks (boundary-safe).
+    const safe = redactInternalArtifacts(text).text;
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
     }
@@ -440,7 +447,11 @@ export class OutboundQueue implements IOutboundQueue {
     const text = this.streamBufferParts.join('');
     this.streamBufferParts = [];
     if (!text || text.trim() === '') return;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
+    // QR-114: redact operator-local internal artifacts on the assembled buffer
+    // before splitMessage (boundary-safe), same as enqueueText — the streamed
+    // reply path otherwise reaches the user with zero redaction.
+    const safe = redactInternalArtifacts(text).text;
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
     }

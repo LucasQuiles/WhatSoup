@@ -23,11 +23,12 @@ import {
   ensureStandbyNoticeSchema,
   stashStandbyNotice,
   consumeStandbyNotice,
+  clearStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
-import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artifact.ts';
+import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
@@ -1120,6 +1121,19 @@ export class AgentRuntime implements Runtime {
 
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
     if (this.autoCompactInputTokens === undefined || session === null) return;
+    // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
+    // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
+    // plain user message that never emits a compact_boundary — so markSessionCompacted
+    // never advances and EVERY over-threshold turn re-fires it, UNTHROTTLED (the
+    // rapid-rearm + cooldown safeguards below key on the claude-only compact_boundary /
+    // success / timeout events, which never fire). Gate on the SESSION's actual provider
+    // (getProviderId, not the primary this.agentProvider) so a fallback-to-non-claude
+    // session is skipped too. If per-provider compaction is added later, extend here.
+    // Defensive typeof check mirrors the getProviderId call site at ~5366; an
+    // indeterminate provider fails safe (skip the claude-only command).
+    const sessionProvider =
+      typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== 'claude-cli') return;
     if (this.sessionScope === 'shared') return;
     if (!session.getStatus().active) return;
 
@@ -2117,6 +2131,15 @@ export class AgentRuntime implements Runtime {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
     }
 
+    // QR-099: conversation keys whose prior-instance child the sweep left running
+    // (authoritative_live) or declined to touch (ambiguous). The proactive-resume
+    // loop below MUST NOT spawn a second session for these — a live child + a
+    // resumable checkpoint for the same key would otherwise yield two agent
+    // sessions for one chat (duplicate turn processing / replies, contended
+    // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
+    // instance's own spawns; it cannot see a prior-instance child.
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+
     // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
     // Cross-references agent_sessions with session_checkpoints to safely identify which
     // processes to keep and which to reap. Only kills PIDs verified as owned children.
@@ -2147,8 +2170,13 @@ export class AgentRuntime implements Runtime {
                 conversationKey: session.conversationKey,
                 reason: session.reason,
               }, 'ambiguous session — not touching');
+              // Left running — block a duplicate proactive resume for this key.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
               break;
-            // authoritative_live: leave alone
+            case 'authoritative_live':
+              // Verified-live child left in place — block a duplicate proactive resume.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
           }
         }
       }
@@ -2163,6 +2191,14 @@ export class AgentRuntime implements Runtime {
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
+
+        // QR-099: a still-live (authoritative_live) or ambiguous session for this
+        // key was left running by the sweep above — resuming would double-spawn.
+        // Skipping degrades to lazy resume on the next message (fail-safe).
+        if (proactiveResumeBlockedConversationKeys.has(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — live/ambiguous session already present');
+          continue;
+        }
 
         // AE1: Skip group conversations — groups should not be proactively resumed.
         // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
@@ -2779,6 +2815,17 @@ export class AgentRuntime implements Runtime {
           // which creates a fresh session+queue in the map. This is a narrow window
           // inherited from the original design, not a regression from the race fix.
           await sessionForNew?.handleNew();
+          // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+          // for this conversation too — otherwise a standby notice or handoff
+          // artifact stashed before /new leaks into the NEXT reply/prelude (both
+          // tables are keyed by the stable conversation_key, which /new does not
+          // change). Both fns are idempotent no-ops when nothing is pending, and
+          // their own JSDoc already documents "cleared on /new".
+          {
+            const resetKey = toConversationKey(chatJid);
+            clearStandbyNotice(this.db, resetKey);
+            deleteHandoffArtifact(this.db, resetKey);
+          }
           // Reset turn flag — stale value from the old session must not suppress the
           // _(no response)_ fallback if the first new-session turn has no visible text.
           this.turnHadVisibleOutput = false;
@@ -3095,13 +3142,20 @@ export class AgentRuntime implements Runtime {
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            this.pendingSystemResults.mark(mapKey);
+            // QR-095: mark under the SAME scope the single/shared result handler
+            // consumes (GLOBAL_TOOL_SCOPE_KEY). mapKey is undefined for single/
+            // shared callers (sendTurnNonShared), so mark(mapKey) would be a no-op
+            // and the injected system turn's result would be mis-classified as a
+            // USER turn (phantom '[Recent chat context]' reply leaks to the user +
+            // wrong post-turn gate). In per_chat mapKey is defined so this is a
+            // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
+            this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
           // Context-injection send failed — no result will arrive for its mark.
-          this.pendingSystemResults.unmark(mapKey);
+          this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
         }
       }
     }
@@ -4847,6 +4901,17 @@ export class AgentRuntime implements Runtime {
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
       this.chatQueues.delete(syntheticJid);
+      // QR-094: the control OperationTracker (wired above alongside the session/
+      // queue) arms progress/liveness timers. This error path nulls controlSession
+      // and deletes its map entries, so the next handleControlTurn RECREATES the
+      // tracker and overwrites operationTrackers[syntheticJid] — orphaning the old
+      // tracker's armed timers. Shut it down here too, mirroring the per-chat
+      // cleanup teardown, so a heal-error-recreate cycle does not leak timers.
+      const controlTracker = this.operationTrackers.get(syntheticJid);
+      if (controlTracker) {
+        controlTracker.shutdown();
+        this.operationTrackers.delete(syntheticJid);
+      }
       if (controlSession) {
         try {
           await controlSession.shutdown();
@@ -7645,13 +7710,18 @@ export class AgentRuntime implements Runtime {
             const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
-              this.pendingSystemResults.mark(mapKey);
+              // QR-095: same fix as the sendTurnToSession injection — in single/
+              // shared mode mapKey is undefined here, so mark under GLOBAL to match
+              // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise
+              // the '[CONTEXT RECOVERY]' system turn's result leaks to the user.
+              // No-op in per_chat (mapKey defined, consumed per-chat).
+              this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
             // Context-recovery send failed — no result will arrive for its mark.
-            this.pendingSystemResults.unmark(mapKey);
+            this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
           }
 
           // Replay the pending turn that was lost during the failed resume

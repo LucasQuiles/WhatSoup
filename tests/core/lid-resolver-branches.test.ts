@@ -261,6 +261,50 @@ describe('upsertLidMapping — orphaned access_list migration branches', () => {
     expect(accessStatus('15550001')).toBe('blocked');  // pre-existing preserved
   });
 
+  // QR-106: deny-wins. A LID-keyed BLOCK must never be silently erased by a
+  // LID→phone merge just because a non-blocked phone-keyed row exists — that is
+  // blocklist evasion (access-policy keys the block on the resolved phone). The
+  // surviving phone row must inherit the block.
+  it('preserves a blocked orphan over an allowed phone row (deny-wins, no blocklist evasion)', () => {
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'blocked')",
+    ).run(LID_1);
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')",
+    ).run('15550001');
+
+    upsertLidMapping(db, LID_1, PHONE_1, 'L2');
+
+    expect(accessStatus(LID_1)).toBeUndefined();       // orphan deleted
+    expect(accessStatus('15550001')).toBe('blocked');  // block followed the identity
+  });
+
+  it('deny-wins also elevates a blocked orphan over a pending phone row', () => {
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'blocked')",
+    ).run(LID_1);
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'pending')",
+    ).run('15550001');
+
+    upsertLidMapping(db, LID_1, PHONE_1, 'L2');
+
+    expect(accessStatus('15550001')).toBe('blocked');
+  });
+
+  it('does not re-block: allowed orphan over an allowed phone row stays allowed', () => {
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')",
+    ).run(LID_1);
+    db.raw.prepare(
+      "INSERT INTO access_list (subject_type, subject_id, status) VALUES ('phone', ?, 'allowed')",
+    ).run('15550001');
+
+    upsertLidMapping(db, LID_1, PHONE_1, 'L2');
+
+    expect(accessStatus('15550001')).toBe('allowed');  // no spurious escalation
+  });
+
   it('no orphan migration when phone === lid (guard arm)', () => {
     // phone derived from JID equals the lid string → the `phone !== lid` guard
     // is false, so the migration block is skipped entirely.
