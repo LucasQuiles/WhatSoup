@@ -42,7 +42,22 @@ export interface MediaDownload {
 export async function downloadMedia(
   downloadFn: () => Promise<Buffer>,
   mimeType: string,
+  declaredSizeBytes?: number,
 ): Promise<MediaDownload | null> {
+  // QR-057: reject BEFORE buffering when the server-declared fileLength already exceeds the
+  // cap. The post-download check below (buffer.length) is a fail-safe that fires only after
+  // downloadMediaMessage has fully buffered the blob into memory (no streaming abort); this
+  // pre-check avoids that allocation for honest large media. Same media is rejected either
+  // way — no behavioural change, just earlier. An understated fileLength still falls through
+  // to the post-download cap (bounded by the 30s timeout + WhatsApp's upload ceiling).
+  if (declaredSizeBytes !== undefined && declaredSizeBytes > MAX_SIZE_BYTES) {
+    log.warn(
+      { mimeType, declaredSizeBytes, maxBytes: MAX_SIZE_BYTES },
+      'Media download rejected pre-fetch — declared fileLength exceeds 25MB limit',
+    );
+    return null;
+  }
+
   const startMs = Date.now();
   let handle: ReturnType<typeof setTimeout> | null = null;
   try {

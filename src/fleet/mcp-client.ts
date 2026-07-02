@@ -44,6 +44,9 @@ export async function mcpCall(
 
     try {
       socket = createConnection({ path: socketPath });
+      // QR-053: UTF-8-decode the line-delimited JSON-RPC stream so a multibyte char
+      // split across a read boundary is not silently corrupted to U+FFFD.
+      socket.setEncoding('utf8');
     } catch (err) {
       settle({ success: false, error: `connection failed: ${(err as Error).message}` });
       return;

@@ -80,6 +80,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
   OutboundQueue: vi.fn().mockImplementation(() => ({
     enqueueText: vi.fn(),
+    getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),

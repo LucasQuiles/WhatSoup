@@ -60,6 +60,37 @@ function classifyIPv4(ip: string): boolean | null {
  * through `classifyIPv4` so a mapped private/loopback address is also blocked.
  * Returns null when `ip` is not parseable as IPv6 (caller falls through).
  */
+/**
+ * Expand an IPv6 string (no embedded dotted IPv4, no zone id) into exactly 8
+ * numeric hextets, resolving a single `::` compression. Returns null for any
+ * form that is not a clean 8-hextet IPv6 (dotted forms, >1 `::`, bad groups) so
+ * callers fall through to the other classifiers. Used for exact-prefix checks
+ * (e.g. NAT64 64:ff9b::/96) where the embedded IPv4 sits in fixed hextets.
+ */
+function expandIPv6Hextets(bare: string): number[] | null {
+  if (bare.includes('.')) return null;
+  const parts = bare.split('::');
+  if (parts.length > 2) return null;
+  const head = parts[0] ? parts[0].split(':') : [];
+  const tail = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+  let groups: string[];
+  if (parts.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const missing = 8 - head.length - tail.length;
+    if (missing < 1) return null; // '::' must stand for at least one zero group
+    groups = [...head, ...Array(missing).fill('0'), ...tail];
+  }
+  if (groups.length !== 8) return null;
+  const out: number[] = [];
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    out.push(parseInt(g, 16));
+  }
+  return out;
+}
+
 function classifyIPv6(ip: string): boolean | null {
   if (!ip.includes(':')) return null;
   const lower = ip.toLowerCase();
@@ -80,6 +111,25 @@ function classifyIPv6(ip: string): boolean | null {
   if (hexMapped) {
     const hi = parseInt(hexMapped[1], 16);
     const lo = parseInt(hexMapped[2], 16);
+    const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    const embedded = classifyIPv4(v4);
+    if (embedded !== null) return embedded;
+  }
+  // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052): the trailing 32 bits embed an
+  // IPv4. The dotted NAT64 form (64:ff9b::169.254.169.254) is already caught by the
+  // dotted regex above; this covers the HEX form (64:ff9b::a9fe:a9fe == 169.254.169.254
+  // / 64:ff9b::7f00:1 == 127.0.0.1) which otherwise PASSED because first-group 0x64 is
+  // not a blocked prefix (QR-032 SSRF gap, reachable via link-preview). Only the exact
+  // /96 prefix is decomposed, so a normal global IPv6 whose tail looks like a private
+  // IPv4 (2001:db8::a9fe:a9fe) is NOT misclassified.
+  const hextets = expandIPv6Hextets(bare);
+  if (
+    hextets &&
+    hextets[0] === 0x0064 && hextets[1] === 0xff9b &&
+    hextets[2] === 0 && hextets[3] === 0 && hextets[4] === 0 && hextets[5] === 0
+  ) {
+    const hi = hextets[6];
+    const lo = hextets[7];
     const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
     const embedded = classifyIPv4(v4);
     if (embedded !== null) return embedded;

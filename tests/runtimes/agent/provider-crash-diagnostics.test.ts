@@ -28,6 +28,38 @@ describe('provider crash diagnostics', () => {
     expect(text).not.toContain(secretValue);
   });
 
+  it('QR-112: redacts a secret that straddles a stderr chunk boundary', () => {
+    // Anthropic-style key; split so the FIRST chunk holds only `sk-a` (too short
+    // to match the >=12-char token rule) and the SECOND chunk completes it. The
+    // per-chunk sanitizer misses both halves; the stored preview is what the
+    // direct-log sinks (session.ts / claude.ts 'claude stderr') emit, so the
+    // fix must keep that stored buffer redacted.
+    const suffix = 'ABCDEFGHIJKLMNOP1234';
+    const fullSecret = `sk-ant-api03-${suffix}`;
+    const chunk1 = 'auth error: invalid api key sk-a';
+    const chunk2 = `nt-api03-${suffix} (exiting)`;
+    expect(chunk1 + chunk2).toContain(fullSecret); // sanity: the split reconstructs the secret
+
+    const preview1 = appendProviderCrashPreview('', chunk1);
+    const preview2 = appendProviderCrashPreview(preview1, chunk2);
+
+    // The completed secret must be redacted in the stored buffer (= what sinks log).
+    expect(preview2).toContain('[REDACTED_TOKEN]');
+    expect(preview2).not.toContain(fullSecret);
+    expect(preview2).not.toContain(suffix);
+    // Non-secret context is preserved.
+    expect(preview2).toContain('auth error: invalid api key');
+    expect(preview2).toContain('(exiting)');
+    // The intermediate preview never held the full secret either.
+    expect(preview1).not.toContain(fullSecret);
+  });
+
+  it('QR-112: still caps the accumulated preview at maxLength', () => {
+    let preview = '';
+    for (let i = 0; i < 50; i++) preview = appendProviderCrashPreview(preview, 'x'.repeat(100), 200);
+    expect(preview.length).toBeLessThanOrEqual(200);
+  });
+
   it.each([
     ['Please run /login before using provider CLI', 'provider_auth_required'],
     ['Invalid API key provided', 'provider_auth_required'],

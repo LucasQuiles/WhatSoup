@@ -62,6 +62,34 @@ function sendJsonRpc(socketPath: string, msg: unknown): Promise<unknown> {
   });
 }
 
+/**
+ * QR-053: send a JSON-RPC line split into two raw TCP chunks at a chosen byte
+ * offset, delivered as SEPARATE 'data' events (setImmediate between writes), and
+ * return the first response line. Used to split a multibyte UTF-8 char across a
+ * read boundary.
+ */
+function sendSplitAtByte(socketPath: string, msg: unknown, splitByte: number): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const full = Buffer.from(JSON.stringify(msg) + '\n', 'utf8');
+    const a = full.subarray(0, splitByte);
+    const b = full.subarray(splitByte);
+    const client = createConnection(socketPath, () => {
+      client.write(a);
+      setTimeout(() => client.write(b), 40);
+    });
+    let buf = '';
+    client.on('data', (chunk) => {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      for (const line of lines) {
+        if (line.trim()) { try { resolve(JSON.parse(line)); client.end(); } catch { /* partial */ } }
+      }
+    });
+    client.on('error', reject);
+    setTimeout(() => reject(new Error('timeout')), 3000);
+  });
+}
+
 function sendRawJsonRpcLine(socketPath: string, line: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath, () => {
@@ -223,6 +251,24 @@ describe('WhatSoupSocketServer', () => {
     expect(response.result).toHaveProperty('capabilities');
   });
 
+  it('QR-059: applies a bounded concurrent-connection cap on start (defends against a connection flood)', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    // Before start there is no underlying server → cap reports 0.
+    expect(server.maxConnections).toBe(0);
+
+    server.start();
+    await waitForSocket(socketPath);
+
+    // After start a bounded positive cap is applied (node drops connections beyond it),
+    // instead of the default unbounded acceptance the unfixed server used.
+    expect(server.maxConnections).toBeGreaterThan(0);
+    expect(server.maxConnections).toBeLessThanOrEqual(1024);
+
+    // A normal single request still succeeds well under the cap.
+    const response = await sendJsonRpc(socketPath, { jsonrpc: '2.0', id: 7, method: 'initialize', params: {} }) as { id: number };
+    expect(response.id).toBe(7);
+  });
+
   it('treats an explicit id:null as a request (not a notification) and echoes null', async () => {
     server = new WhatSoupSocketServer(socketPath, registry, session);
     server.start();
@@ -286,6 +332,73 @@ describe('WhatSoupSocketServer', () => {
 
     expect(response.result.isError).toBeUndefined();
     expect(response.result.content[0].text).toContain('echoed: hello');
+  });
+
+  it('QR-053: a multibyte UTF-8 char split across a socket read boundary is not corrupted', async () => {
+    registry.register(
+      makeTool({
+        name: 'echo_tool',
+        schema: z.object({ message: z.string() }),
+        handler: async (params) => `echoed: ${params['message']}`,
+      }),
+    );
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const message = 'AB\u{1F600}CD'; // grinning face = 4 bytes F0 9F 98 80
+    const req = { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'echo_tool', arguments: { message } } };
+    const fullStr = JSON.stringify(req);
+    const emojiByteStart = Buffer.byteLength(fullStr.slice(0, fullStr.indexOf('\u{1F600}')), 'utf8');
+    const splitByte = emojiByteStart + 2; // split INSIDE the emoji (after 2 of its 4 bytes)
+
+    const response = (await sendSplitAtByte(socketPath, req, splitByte)) as {
+      result: { content: Array<{ text: string }> };
+    };
+    expect(response.result.content[0].text).toBe(`echoed: ${message}`);
+  });
+
+  it('QR-042: snapshots the session per request — a concurrent updateActorJid cannot race an in-flight tool', async () => {
+    let started = false;
+    let release!: () => void;
+    const blocked = new Promise<void>((r) => { release = r; });
+    let observedActorJid: string | undefined = 'UNSET';
+
+    registry.register(
+      makeTool({
+        name: 'slow_actor_tool',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async (_params, toolSession) => {
+          started = true;
+          await blocked;                            // stay in-flight across the racing mutation
+          observedActorJid = toolSession.actorJid;  // read AFTER the concurrent updateActorJid
+          return 'done';
+        },
+      }),
+    );
+
+    server = new WhatSoupSocketServer(socketPath, registry, makeSession({ actorJid: 'actor-A' }));
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Dispatch the tool call; the handler blocks and stays in-flight.
+    const callPromise = sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 42, method: 'tools/call',
+      params: { name: 'slow_actor_tool', arguments: {} },
+    });
+    await vi.waitFor(() => { expect(started).toBe(true); });
+
+    // Next-turn mutation while the previous turn's tool is still in-flight (the QR-042 race window).
+    server.updateActorJid('actor-B');
+
+    // Unblock → the handler now reads its session's actorJid.
+    release();
+    await callPromise;
+
+    // The in-flight tool MUST observe its dispatch-time actor ('actor-A'), not the racing 'actor-B'.
+    // Without the per-request snapshot it reads the shared, mutated connSession → 'actor-B'.
+    expect(observedActorJid).toBe('actor-A');
   });
 
   // --- notifications ---

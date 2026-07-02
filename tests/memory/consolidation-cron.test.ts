@@ -339,4 +339,71 @@ describe('runConsolidation', () => {
     expect(serializedLogs).not.toContain(sensitiveClaim);
     expect(serializedLogs).toContain('claimHashes');
   });
+
+  it('skips unscoped records and returns early when none have chat/sender scope', async () => {
+    // UNHAPPY: a record missing chatJid/senderJid cannot be scope-consolidated, so it is
+    // skipped (unscopedSkipped) via the `?? ''` fallbacks; when no scoped records remain,
+    // consolidation returns early without ever invoking the LLM provider or upserting.
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'rec-unscoped',
+        score: 0.9,
+        record: {
+          id: 'rec-unscoped',
+          text: 'Floating fact with no scope',
+          createdAt: new Date().toISOString(),
+          confidence: 0.9,
+          // claim, evidence, chatJid, senderJid intentionally absent
+        },
+      },
+    ]);
+    const mockProvider = { name: 'test', generate: vi.fn() };
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result.promoted).toBe(0);
+    expect(result.clustersProcessed).toBe(0);
+    expect(mockProvider.generate).not.toHaveBeenCalled();
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+  });
+
+  it('processes the cluster but promotes nothing when the LLM returns no durable knowledge', async () => {
+    // UNHAPPY: a scoped cluster whose consolidation yields zero durableKnowledge is counted
+    // as processed and its discards tallied, but nothing is promoted or upserted.
+    const mockPinecone = makeMockPinecone([
+      {
+        id: 'rec-1',
+        score: 0.9,
+        record: {
+          id: 'rec-1',
+          text: 'Ambiguous fact',
+          claim: 'Ambiguous fact',
+          evidence: '',
+          createdAt: new Date().toISOString(),
+          confidence: 0.5,
+          chatJid: 'chat-1@g.us',
+          senderJid: 'sender-1@s.whatsapp.net',
+        },
+      },
+    ]);
+    const mockProvider = makeMockProvider({
+      durableKnowledge: [],
+      discarded: [{ recordId: 'rec-1', reason: 'transient' }],
+    });
+
+    const result = await runConsolidation(
+      mockPinecone,
+      mockProvider,
+      { lookbackDays: 7, dryRun: false },
+    );
+
+    expect(result.clustersProcessed).toBe(1);
+    expect(result.promoted).toBe(0);
+    expect(result.discarded).toBe(1);
+    expect(mockPinecone.upsert).not.toHaveBeenCalled();
+  });
 });

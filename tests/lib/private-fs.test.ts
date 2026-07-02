@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  appendPrivateJsonLineSync,
   assertPrivateDirectorySync,
   assertWritablePrivateFileSync,
   ensurePrivateDirectorySync,
@@ -142,6 +143,36 @@ describe('writePrivateFileSync', () => {
 
     expect(() => writeWithOpenFailure('/tmp/private-fixture/priv/secret.json', '{}')).toThrow(/open denied/);
     expect(closeSyncMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('appendPrivateJsonLineSync', () => {
+  it('appends newline-delimited JSON to a private 0600 file', () => {
+    const root = makeTmp();
+    const target = join(root, 'priv', 'events.ndjson');
+
+    appendPrivateJsonLineSync(target, { event: 'one', count: 1 });
+    appendPrivateJsonLineSync(target, { event: 'two', count: 2 });
+
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(target, 'utf-8').trimEnd().split('\n').map(line => JSON.parse(line));
+    expect(lines).toEqual([
+      { event: 'one', count: 1 },
+      { event: 'two', count: 2 },
+    ]);
+  });
+
+  it('refuses to append through a symlinked event file', () => {
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const outside = join(root, 'outside.ndjson');
+    const target = join(dir, 'events.ndjson');
+    writeFileSync(outside, 'unchanged\n', { mode: 0o600 });
+    symlinkSync(outside, target);
+
+    expect(() => appendPrivateJsonLineSync(target, { event: 'blocked' })).toThrow(/symlink/);
+    expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
   });
 });
 

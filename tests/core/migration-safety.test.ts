@@ -15,10 +15,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { unlinkSync, existsSync } from 'node:fs';
-import { Database } from '../../src/core/database.ts';
+import { readFileSync, unlinkSync, existsSync } from 'node:fs';
+import { Database, CURRENT_SCHEMA_MIGRATION } from '../../src/core/database.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 32 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 34 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1053,6 +1053,49 @@ describe('scheduled_messages send-start migration contract', () => {
 
     db.close();
   });
+
+  it('migration 34 adds inbound continuity candidate marker columns', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    const cols = (
+      db.raw.prepare("PRAGMA table_info('inbound_events')").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 34')
+      .get() as { version: number } | undefined;
+
+    expect(version?.version).toBe(34);
+    expect(cols).toContain('continuity_candidate_reason');
+    expect(cols).toContain('continuity_candidate_source');
+    expect(cols).toContain('continuity_candidate_marked_at');
+    db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      'migration-33-runtime-marker',
+      'migration-33-runtime-conv',
+      'migration-33-runtime-jid',
+      'runtime_fault_no_terminal_outbound',
+      'runtime_fault_disarm',
+    );
+    expect(() => {
+      db.raw.prepare(`
+        INSERT INTO inbound_events (
+          message_id, conversation_key, chat_jid, continuity_candidate_reason, continuity_candidate_source
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        'migration-33-invalid-marker',
+        'migration-33-invalid-conv',
+        'migration-33-invalid-jid',
+        'raw-runtime-string',
+        'unknown-source',
+      );
+    }).toThrow();
+
+    db.close();
+  });
 });
 
 describe('outbound_sends migration contract', () => {
@@ -1371,5 +1414,115 @@ describe('Test 11 — a crashing migration rolls back atomically (BEAD-061)', ()
     expect(v3Recorded?.version).toBe(3);
 
     db.close();
+  });
+});
+
+// ─── Migration-numbering split-brain guard (static structural invariants) ─────
+//
+// This campaign hit migration-numbering split-brain 3× (#1503/#1511/#1568):
+// two branches each defined the SAME migration number (e.g. two `runMigration33`
+// definitions / two `[33, …]` MIGRATIONS entries), so when both merged the map
+// silently collided — a later entry clobbered an earlier one, or a number was
+// skipped entirely. The runtime-apply tests above (Tests 3/8/9) only observe the
+// versions a fresh/incremental DB records; they cannot catch a DUPLICATE
+// `runMigration33` or a numbering GAP at author time, because the Map literal
+// resolves a duplicate key to a single entry before any DB is opened.
+//
+// This block parses src/core/database.ts as source text and asserts the numbering
+// is UNIQUE + CONTIGUOUS 1..N, that CURRENT_SCHEMA_MIGRATION === max === N === the
+// number of entries, that ALL_MIGRATION_VERSIONS covers exactly 1..N, and that
+// every named `runMigration<K>` is DEFINED exactly once. A collision, gap, or
+// max/length mismatch FAILS with a clear message — before it can reach main.
+describe('Migration-numbering split-brain guard (static structural invariants)', () => {
+  const DATABASE_TS = resolve(import.meta.dirname, '../../src/core/database.ts');
+  const source = readFileSync(DATABASE_TS, 'utf8');
+
+  // Extract the MIGRATIONS map literal body: everything between `new Map([` and
+  // the closing `]);` that terminates the map. The closing token `]);` is unique
+  // to the map literal in this file.
+  const mapStart = source.indexOf('new Map([');
+  const mapEnd = source.indexOf(']);', mapStart);
+  const mapBody =
+    mapStart >= 0 && mapEnd > mapStart ? source.slice(mapStart, mapEnd) : '';
+
+  // Map entry keys: leading `[<N>,` on a line inside the map body.
+  const entryKeys = Array.from(mapBody.matchAll(/^\s*\[\s*(\d+)\s*,/gm)).map((m) =>
+    Number(m[1]),
+  );
+
+  // All `runMigration<K>` FUNCTION DEFINITIONS across the whole file (not call
+  // sites): `function runMigration33(` — the shape a duplicate branch introduces.
+  const defNumbers = Array.from(
+    source.matchAll(/function\s+runMigration(\d+)\s*\(/g),
+  ).map((m) => Number(m[1]));
+
+  it('MIGRATIONS map literal was located and parsed', () => {
+    expect(mapStart, 'could not find `new Map([` in database.ts').toBeGreaterThanOrEqual(0);
+    expect(entryKeys.length, 'no `[N, …]` MIGRATIONS entries parsed').toBeGreaterThan(0);
+  });
+
+  it('MIGRATIONS map keys are UNIQUE (no split-brain duplicate number)', () => {
+    const seen = new Set<number>();
+    const dups: number[] = [];
+    for (const k of entryKeys) {
+      if (seen.has(k)) dups.push(k);
+      seen.add(k);
+    }
+    expect(
+      dups,
+      `duplicate MIGRATIONS key(s) ${JSON.stringify(dups)} — two branches defined the same migration number (split-brain). Renumber one.`,
+    ).toEqual([]);
+  });
+
+  it('MIGRATIONS map keys are CONTIGUOUS 1..N (no gap)', () => {
+    const sorted = [...entryKeys].sort((a, b) => a - b);
+    const n = sorted.length;
+    const expected = Array.from({ length: n }, (_, i) => i + 1);
+    expect(
+      sorted,
+      `MIGRATIONS keys must be contiguous 1..${n} with no gap; got ${JSON.stringify(sorted)}`,
+    ).toEqual(expected);
+  });
+
+  it('CURRENT_SCHEMA_MIGRATION === max(keys) === N === entry count', () => {
+    const max = Math.max(...entryKeys);
+    const n = entryKeys.length;
+    expect(max, 'max(MIGRATIONS keys) must equal the number of entries (contiguous 1..N)').toBe(n);
+    expect(
+      CURRENT_SCHEMA_MIGRATION,
+      `CURRENT_SCHEMA_MIGRATION (${CURRENT_SCHEMA_MIGRATION}) must equal max migration number (${max})`,
+    ).toBe(max);
+  });
+
+  it('ALL_MIGRATION_VERSIONS covers exactly 1..N (test fixture parity)', () => {
+    const n = entryKeys.length;
+    expect(
+      ALL_MIGRATION_VERSIONS.length,
+      `ALL_MIGRATION_VERSIONS.length (${ALL_MIGRATION_VERSIONS.length}) must equal the migration count (${n}); update the fixture when adding a migration`,
+    ).toBe(n);
+    expect(ALL_MIGRATION_VERSIONS).toEqual(Array.from({ length: n }, (_, i) => i + 1));
+    expect(ALL_MIGRATION_VERSIONS[ALL_MIGRATION_VERSIONS.length - 1]).toBe(CURRENT_SCHEMA_MIGRATION);
+  });
+
+  it('each named runMigration<K> is DEFINED exactly once (no duplicate function def)', () => {
+    const counts = new Map<number, number>();
+    for (const k of defNumbers) counts.set(k, (counts.get(k) ?? 0) + 1);
+    const dupDefs = Array.from(counts.entries())
+      .filter(([, c]) => c > 1)
+      .map(([k]) => k)
+      .sort((a, b) => a - b);
+    expect(
+      dupDefs,
+      `duplicate runMigration<K> function definition(s) for ${JSON.stringify(dupDefs)} — a merge collided two branches' migrations. Renumber one and re-key its MIGRATIONS entry.`,
+    ).toEqual([]);
+  });
+
+  it('every named runMigration<K> definition has a matching MIGRATIONS entry', () => {
+    const keySet = new Set(entryKeys);
+    const orphanDefs = [...new Set(defNumbers)].filter((k) => !keySet.has(k)).sort((a, b) => a - b);
+    expect(
+      orphanDefs,
+      `runMigration<K> defined but not wired into MIGRATIONS for ${JSON.stringify(orphanDefs)}`,
+    ).toEqual([]);
   });
 });

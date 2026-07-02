@@ -20,7 +20,10 @@ const LIBSIGNAL_SESSION_DUMP_PREFIXES = [
   'Session already open',
 ] as const;
 
-const SENSITIVE_KEY_RE = /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|identitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey|ratchet|rootkey|basekey|chainkey|messagekeys|ephemeralkey|remoteidentitykey|lastremoteephemeralkey|pubkey|privkey)/i;
+// SSOT for keyed-secret detection across redaction sites (QR-080/QR-118). Also
+// consumed by connection.ts's diagnostic redactor (isSensitiveDiagnosticKey) so the
+// two denylists cannot drift. No `g` flag — safe to reuse via .test().
+export const SENSITIVE_KEY_RE = /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|identitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey|ratchet|rootkey|basekey|chainkey|messagekeys|ephemeralkey|remoteidentitykey|lastremoteephemeralkey|pubkey|privkey)/i;
 
 function isPlainObject(value: object): boolean {
   const prototype = Object.getPrototypeOf(value);
@@ -38,7 +41,11 @@ export function redactThirdPartyConsoleString(value: string): string {
     .replace(/<Buffer(?:\s+[0-9a-f]{2})+>/gi, '<Buffer redacted>')
     .replace(jidPattern(), '<jid:redacted>')
     .replace(
-      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization|bearer)\b\s*[:=]\s*[^\s"',}]+/gi,
+      // QR-080: extend the free-text keyed-secret rule to compound-snake
+      // (AWS_SESSION_TOKEN) and camelCase-glued (sessionToken/bearerToken) keys,
+      // matching the QR-052/QR-079-hardened coverage. (Structured object KEYS are
+      // already covered by SENSITIVE_KEY_RE; this closes the free-text-string path.)
+      /\b((?:[A-Za-z0-9]+_)*(?:client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passphrase|authorization|bearer|session|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)))\b\s*[:=]\s*[^\s"',}]+/gi,
       '$1=<redacted>',
     );
 }

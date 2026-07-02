@@ -106,6 +106,47 @@ describe('classifyActiveSessions', () => {
     expect(stale?.classification).toBe('stale_dead');
   });
 
+  // ── QR-101: authoritative_live must be gated on PID liveness ──
+
+  it('QR-101: session matching active checkpoint but with DEAD pid is stale_dead, not authoritative_live', () => {
+    insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: '12345@s.whatsapp.net' });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 1000, sessionId: 'ses-1', sessionStatus: 'active',
+    });
+    // PID 1000 is DEAD (crashed; checkpoint row not yet reconciled). A checkpoint
+    // match must NOT classify a dead process 'authoritative_live' — that leaves the
+    // chat silently dead (the runtime "leaves authoritative_live alone"). It must be
+    // stale_dead so the runtime reclaims/respawns it.
+    const results = classifyActiveSessions(db, durability, allDead);
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('stale_dead');
+  });
+
+  it('QR-101: PID-only-match (respawn) with DEAD pid is stale_dead, not authoritative_live', () => {
+    // Same pid as checkpoint, different session_id (respawn without resume), single
+    // session for the conversation — the PID-only-match branch. Dead PID must not be live.
+    insertSession({ claudePid: 1000, sessionId: 'respawned', chatJid: '12345@s.whatsapp.net' });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 1000, sessionId: 'checkpoint-sid', sessionStatus: 'active',
+    });
+    const results = classifyActiveSessions(db, durability, allDead);
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('stale_dead');
+  });
+
+  it('QR-101: matching checkpoint with ALIVE-but-unowned pid stays authoritative_live (non-claude provider not regressed)', () => {
+    // A live codex/opencode session reports alive:true, owned:false (the ownership
+    // check is claude-substring-only — QR-101 axis 2). The liveness gate keys on
+    // `alive` ONLY, so a live session of any provider stays authoritative_live.
+    insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: '12345@s.whatsapp.net' });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 1000, sessionId: 'ses-1', sessionStatus: 'active',
+    });
+    const results = classifyActiveSessions(db, durability, allAliveNotOwned);
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('authoritative_live');
+  });
+
   // ── PID ownership verification ──
 
   it('classifies alive-but-unowned PID as ambiguous (not stale_live)', () => {

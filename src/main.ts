@@ -397,6 +397,30 @@ connectionManager.on('chatCleared', (jid: string) => {
   }
 });
 
+connectionManager.on('messageDeleted', (messageIds: string[]) => {
+  try {
+    const count = db.markMessagesDeleted(messageIds);
+    log.info(
+      { count, requested: messageIds.length },
+      'messageDeleted: soft-deleted revoked messages',
+    );
+  } catch (err) {
+    log.error({ err, messageIds }, 'messageDeleted: failed to soft-delete revoked messages');
+  }
+});
+
+connectionManager.on('messageEdited', (messageId: string, newContent: string) => {
+  try {
+    const count = db.markMessageEdited(messageId, newContent);
+    log.info(
+      { messageId, applied: count > 0 },
+      'messageEdited: applied WhatsApp message edit to local store',
+    );
+  } catch (err) {
+    log.error({ err, messageId }, 'messageEdited: failed to apply message edit');
+  }
+});
+
 connectionManager.on('contactsUpsert', (contacts) => {
   try {
     handleContactsUpsert(db, contacts);

@@ -59,6 +59,7 @@ describe('bot-errors-health-check daily event classification', () => {
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: '',
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'unhealthy',
@@ -126,6 +127,7 @@ describe('bot-errors-health-check daily event classification', () => {
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: '',
         BOT_ERRORS_DRY_HEALTH_STATUS: '200',
         BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
           status: 'unhealthy',

@@ -70,7 +70,7 @@ describe('Provider ID registry (#447)', () => {
     const idToFilePatterns: Record<ProviderId, RegExp[]> = {
       'claude-cli': [/^claude\.ts$/], // claude.ts is the runtime helper
       'codex-cli': [/^codex-parser\.ts$/],
-      'gemini-cli': [/^gemini-acp-parser\.ts$/, /^gemini-parser\.ts$/],
+      'gemini-cli': [/^gemini-acp-parser\.ts$/],
       'opencode-cli': [/^opencode-parser\.ts$/],
       'openai-api': [/^openai-api\.ts$/],
       'anthropic-api': [/^anthropic-api\.ts$/],
