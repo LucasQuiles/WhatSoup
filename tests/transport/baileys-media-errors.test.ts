@@ -142,7 +142,7 @@ describe('createMediaReadStream — error-listener callback', () => {
     // on the next tick. The function's internal listener logs the failure
     // before any caller listener can observe the same event.
     const missingPath = '/nonexistent-dir-xyz/document-deadbeef-enc';
-    const stream = createMediaReadStream(missingPath, log);
+    const stream = createMediaReadStream(missingPath, '/nonexistent-dir-xyz', log);
 
     // Attach our own listener so we can await the re-emission without
     // relying on real timers. The internal listener runs synchronously,
@@ -175,7 +175,7 @@ describe('createMediaReadStream — error-listener callback', () => {
     writeFileSync(filePath, 'payload');
 
     try {
-      const stream = createMediaReadStream(filePath, log);
+      const stream = createMediaReadStream(filePath, tmpDir, log);
 
       // Sanity: the returned object is a Readable (has .on, .pipe, etc.).
       expect(typeof stream.on).toBe('function');
