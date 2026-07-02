@@ -1106,6 +1106,28 @@ def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: 
     return evidence_epoch(probe, "outbound_success_at") is not None
 
 
+def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
+    """True iff this incident record's last-known health probe is a VERIFIED
+    WhatsApp recovery per the exogenous oracle.
+
+    The age-out close path (sweep_stale_incidents) fires on a QUIET incident that
+    received no fresh events. By construction its lastEvidence is the last probe
+    we saw; a genuinely recovered daily-health incident is closed earlier by
+    close_recovered_daily_health_incidents (a fresh 200 probe) and never reaches
+    age-out. So this normally returns False for a quiet failure incident — which
+    is exactly the point: age alone must not be read as recovery (#1429). Reuses
+    the same probe-extraction shape and the same oracle as the recovery path; no
+    parallel verification logic. Fail-closed: any parse error -> not verified.
+    """
+    for raw_line in str(record.get("lastEvidence") or "").splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
+        probe = match.group(2).strip() if match else line
+        if is_verified_whatsapp_health_recovery(probe):
+            return True
+    return False
+
+
 def daily_health_recovered_incident_keys(
     event: dict[str, Any],
     incident_state: dict[str, Any],
@@ -2943,6 +2965,28 @@ def _source_of_key(key: str) -> str:
     return parts[2] if len(parts) >= 3 else ""
 
 
+def is_whatsapp_daily_health_key(key: str) -> bool:
+    """True iff this incident key is a WhatsApp daily-health incident that the
+    recovery oracle (is_verified_whatsapp_health_recovery) actually governs.
+
+    Scoped to exactly the keys close_recovered_daily_health_incidents can close:
+    a ``daily-health-fail:`` incident, or a WhatsApp recovery source (optionally
+    ``daily-health:``-prefixed). Non-WhatsApp daily-health incidents (e.g.
+    provider-probe) are deliberately excluded so the WhatsApp oracle does not
+    gate incidents it cannot verify — they keep the legacy age-out close.
+    """
+    source = _source_of_key(key)
+    if source.startswith("daily-health-fail:"):
+        return True
+    tail = source.split(":")[-1] if source else ""
+    prefix = source.split(":", 1)[0] if source else ""
+    if prefix in {"", "daily-health"} and tail in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
+        return True
+    if source in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
+        return True
+    return False
+
+
 def daily_health_monitoring_stale(machine: str, open_incidents: dict[str, Any]) -> bool:
     """A2 / §10 C2: is this machine's OWN daily-health cadence currently flagged
     stale by the heartbeat-watchdog?
@@ -3046,16 +3090,85 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                             "incidentKey": key,
                             "error": str(exc),
                         })
+                # #1429 / §10 C2: an age-out close on a daily-health incident must
+                # be gated on POSITIVE recovery proof, not elapsed time alone. If
+                # the exogenous oracle (is_verified_whatsapp_health_recovery, via
+                # record_has_verified_health_recovery) confirms recovery -> close
+                # as recovered (existing labeling). Otherwise HOLD (still
+                # suppressed, not sent), REUSING the same bounded hold-cap as the
+                # liveness gate (autocloseFirstHeldAt + AUTOCLOSE_LIVENESS_HOLD_CAP_
+                # SECONDS) so openIncidents stays bounded (§10 C5). Once the cap
+                # elapses, allow a BOUNDED, clearly-labeled unverified close that is
+                # auditably distinct from a verified-recovery close. Fail-open on any
+                # bug (never leak the close). Only daily-health incidents have a
+                # WhatsApp-health oracle; other sources keep the legacy age-out close.
+                held_for_recovery = False
+                if will_close and AUTOCLOSE_LIVENESS_GATE \
+                        and is_whatsapp_daily_health_key(str(key)):
+                    try:
+                        machine = _machine_of_key(str(key))
+                        if record_has_verified_health_recovery(record):
+                            record["autocloseRecoveryVerified"] = True
+                            append_dispatch_log(paths, {
+                                "type": "autoclose_recovery_verified",
+                                "incidentKey": key,
+                                "machine": machine,
+                                "ageSeconds": age,
+                            })
+                        else:
+                            first_held = int_field(record, "autocloseFirstHeldAt")
+                            if first_held <= 0:
+                                first_held = current
+                                record["autocloseFirstHeldAt"] = first_held
+                            held_seconds = max(0, current - first_held)
+                            if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
+                                will_close = False
+                                held_for_recovery = True
+                                record["autocloseHeldForRecovery"] = True
+                                record["lastAutocloseHoldAt"] = current
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_held_for_recovery",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "reason": "recovery_not_verified",
+                                    "ageSeconds": age,
+                                    "heldSeconds": held_seconds,
+                                })
+                            else:
+                                # Bounded fallback: cap exceeded with no verified
+                                # recovery. Close, but tag it distinctly so it is
+                                # auditable and never read as a verified recovery.
+                                record["autocloseBoundedUnverified"] = True
+                                append_dispatch_log(paths, {
+                                    "type": "autoclose_bounded_unverified_cap_reached",
+                                    "incidentKey": key,
+                                    "machine": machine,
+                                    "reason": "recovery_not_verified_cap_reached",
+                                    "heldSeconds": held_seconds,
+                                })
+                    except Exception as exc:  # fail-open: never leak the close on a bug
+                        append_dispatch_log(paths, {
+                            "type": "autoclose_recovery_gate_error",
+                            "incidentKey": key,
+                            "error": str(exc),
+                        })
                 if will_close:
                     auto_closed.append(str(key))
+                bounded_unverified = bool(record.get("autocloseBoundedUnverified"))
                 append_dispatch_log(paths, {
                     "type": "stale_renotify_suppressed",
+                    "reason": (
+                        "bounded_unverified_autoclose_cap_reached"
+                        if (will_close and bounded_unverified)
+                        else "nonactionable_aged_out_unverified"
+                    ),
                     "incidentKey": key,
-                    "reason": "nonactionable_aged_out_unverified",
                     "staleSuppressedCount": record.get("staleSuppressedCount"),
                     "ageSeconds": age,
                     "willAutoClose": will_close,
                     "heldForLiveness": held_for_liveness,
+                    "heldForRecovery": held_for_recovery,
+                    "boundedUnverifiedClose": bool(will_close and bounded_unverified),
                 })
                 continue
         if sent + failed >= INCIDENT_STALE_SWEEP_MAX_EVENTS:

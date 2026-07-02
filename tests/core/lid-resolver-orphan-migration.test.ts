@@ -90,13 +90,27 @@ describe('QR-034 — access_list orphan migration runs from all resolution paths
     expect(statusOf(db, LID)).toBeUndefined();
   });
 
-  it('clobber-drop: when a phone-keyed row already exists, the orphan is dropped and the explicit decision wins', () => {
-    seedOrphan(db, LID, 'blocked'); // stale orphan
+  it('deny-wins: a blocked orphan is preserved over an existing allowed phone row (QR-106, no blocklist evasion)', () => {
+    // Previously asserted the phone-keyed 'allowed' decision won unconditionally,
+    // which silently erased the block on identity merge — exactly the blocklist
+    // evasion this file's header warns against. Deny-wins closes it: a block
+    // follows the identity to the phone key and is never dropped by the merge.
+    seedOrphan(db, LID, 'blocked'); // stale orphan (blocked before mapping known)
+    seedOrphan(db, PHONE_DIGITS, 'allowed'); // phone-keyed row
+
+    upsertLidMapping(db, LID, PHONE_JID, 'L2');
+
+    expect(statusOf(db, PHONE_DIGITS)).toBe('blocked'); // block survives the merge
+    expect(statusOf(db, LID)).toBeUndefined(); // redundant orphan dropped
+  });
+
+  it('clobber-drop preserved for non-block collisions: allowed orphan over allowed phone stays allowed', () => {
+    seedOrphan(db, LID, 'allowed'); // no block involved
     seedOrphan(db, PHONE_DIGITS, 'allowed'); // explicit phone-keyed decision
 
     upsertLidMapping(db, LID, PHONE_JID, 'L2');
 
-    expect(statusOf(db, PHONE_DIGITS)).toBe('allowed'); // explicit decision preserved
+    expect(statusOf(db, PHONE_DIGITS)).toBe('allowed'); // explicit decision preserved, no spurious escalation
     expect(statusOf(db, LID)).toBeUndefined(); // redundant orphan dropped
   });
 

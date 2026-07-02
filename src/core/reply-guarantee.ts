@@ -113,6 +113,10 @@ export class ReplyGuaranteeManager {
     this.armed.delete(inboundSeq);
   }
 
+  isArmed(inboundSeq: number | undefined): boolean {
+    return inboundSeq !== undefined && this.armed.has(inboundSeq);
+  }
+
   shutdown(): void {
     for (const { timer } of this.armed.values()) {
       this.clearTimer(timer);
@@ -141,8 +145,16 @@ export class ReplyGuaranteeManager {
     // pass the guard above before any of them recorded a send (TOCTOU), causing
     // duplicate "still working" bursts. Reserving synchronously closes the race.
     this.lastFallbackByChat.set(chatJid, now);
+    // QR-107: separate a SEND failure from a FINALIZE failure. The single try
+    // previously wrapped both sendFallback and completeTurn, and the catch
+    // unconditionally released the rate-limit reservation. A completeTurn/DB
+    // failure AFTER a successful send was thus conflated with a send failure —
+    // releasing the slot despite the "still working" message having been
+    // delivered, so a subsequent same-chat timeout fired a DUPLICATE burst.
+    let sent = false;
     try {
       await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
+      sent = true;
       this.durability.completeTurn({
         inbound: {
           seq: inboundSeq,
@@ -150,13 +162,24 @@ export class ReplyGuaranteeManager {
         },
       });
     } catch (err) {
-      // Send failed: release the reservation (only if no other send claimed the
-      // slot meanwhile) so a future legitimate fallback is not blocked by this
-      // failed attempt — preserves retry-after-failure behavior.
-      if (this.lastFallbackByChat.get(chatJid) === now) {
-        this.lastFallbackByChat.delete(chatJid);
+      if (!sent) {
+        // TRUE send failure: nothing was delivered. Release the reservation
+        // (only if no other send claimed the slot meanwhile) so a future
+        // legitimate fallback is not blocked — preserves retry-after-failure.
+        if (this.lastFallbackByChat.get(chatJid) === now) {
+          this.lastFallbackByChat.delete(chatJid);
+        }
+        log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback send failed');
+      } else {
+        // The fallback WAS delivered but completeTurn (durability write) failed.
+        // Do NOT release the slot — releasing would allow a duplicate "still
+        // working" burst for a message the user already received. The inbound is
+        // left unfinalized for durability recovery to reconcile.
+        log.error(
+          { err, inboundSeq, chatJid },
+          'reply guarantee fallback delivered but completeTurn failed — inbound left for recovery',
+        );
       }
-      log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback send failed');
     }
   }
 }

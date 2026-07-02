@@ -17,7 +17,8 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
-import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { isRecord } from '../lib/type-guards.ts';
+import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -25,7 +26,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts'
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
 import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.ts';
-import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
+import type { Messenger, IncomingMessage, OutboundMedia, SendOptions, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
@@ -37,7 +38,7 @@ import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
-import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
+import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
@@ -104,6 +105,9 @@ export interface CredentialLifecycleEvent {
   reconnectPhase: 'backoff' | 'cooldown' | 'retry';
   statusCode?: number;
   reason?: string;
+  conflictType?: string | null;
+  reconnectDecision?: string;
+  lastDisconnectDiagnostic?: unknown;
   baileysVersion?: string;
   authBondStatus?: AuthBondSnapshot['status'];
   authBondIssues?: string[];
@@ -265,14 +269,35 @@ function shortHashOrNull(value: string | null | undefined): string | null {
   return value ? value.slice(0, 20) : null;
 }
 
-function isSensitiveDiagnosticKey(key: string): boolean {
-  return /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey)/i.test(key);
+// QR-118: delegate to the shared SSOT (SENSITIVE_KEY_RE) rather than a hand-maintained
+// inline copy, which had drifted to a strict subset missing 11 Signal-protocol key names
+// (identityKey/ratchet/rootKey/chainKey/ephemeralKey/…). The redactor feeds the persisted
+// auth-bond context, so a missing key would leave that material unredacted at rest.
+export function isSensitiveDiagnosticKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key);
 }
 
 function redactDiagnosticString(value: string): string {
   return value
     .replace(jidPattern(), (match) => `<jid:${shortHash(match, 20)}>`)
-    .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortHash(match, 20)}>`);
+    .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortHash(match, 20)}>`)
+    .replace(
+      /\b(token|secret|password|passphrase|pairing|authorization|bearer|api[_-]?key)\b\s*[:=]?\s*["']?[A-Za-z0-9._~+/=-]{6,}["']?/gi,
+      (_match, label: string) => `${label} <redacted>`,
+    );
+}
+
+/**
+ * Auth-bond issue strings come from hardenPrivateTree as `code`, `code:rel`, or
+ * `code:rel:errorMessage`. `rel` is a Baileys session filename that embeds a contact
+ * JID/phone, and `errorMessage` can carry an absolute auth path. The detail is NEVER
+ * emitted raw into the durable bond event: keep the diagnostic code (the triage signal)
+ * and replace all detail with a stable short hash for correlating repeats.
+ */
+function redactAuthBondIssue(issue: string): string {
+  const sep = issue.indexOf(':');
+  if (sep === -1) return issue;
+  return `${issue.slice(0, sep)}:<redacted:${shortHash(issue.slice(sep + 1), 16)}>`;
 }
 
 function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
@@ -305,6 +330,46 @@ function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
   const entryCount = Object.keys(value as Record<string, unknown>).length;
   if (entryCount > 80) out['<truncated_keys>'] = entryCount - 80;
   return out;
+}
+
+function extractStreamErrorConflictType(lastDisconnect: unknown): string | null | undefined {
+  const error = isRecord(lastDisconnect) ? lastDisconnect.error : undefined;
+  const data = isRecord(error) ? error.data : undefined;
+  if (data === undefined) return undefined;
+
+  let sawStreamError = false;
+
+  const visit = (value: unknown, depth = 0): string | null | undefined => {
+    if (depth > 8) return undefined;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item, depth + 1);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    if (!isRecord(value)) return undefined;
+
+    const tag = typeof value.tag === 'string' ? value.tag : '';
+    const attrs = isRecord(value.attrs) ? value.attrs : {};
+    if (tag === 'stream:error') sawStreamError = true;
+    if (tag === 'conflict') {
+      return typeof attrs.type === 'string' ? attrs.type : null;
+    }
+
+    const content = value.content;
+    const childFound = visit(content, depth + 1);
+    if (childFound !== undefined) return childFound;
+    return undefined;
+  };
+
+  const found = visit(data);
+  if (found !== undefined) return found;
+  return sawStreamError ? null : undefined;
+}
+
+function formatReconnectDecision(action: ReturnType<typeof decideDisconnectAction>): string {
+  return `${action.type}:${action.reason}`;
 }
 
 type AuthBondClearCandidate = {
@@ -430,6 +495,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
+  private unclassified401ReconnectSpent = false;
   private localAuthAlertEmitted = false;
   private pendingAuthBondClearSends = new Map<string, AuthBondClearCandidate>();
   private confirmedAuthBondSendProofs = new Map<string, AuthBondSendProof>();
@@ -629,11 +695,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     return this.shutdown();
   }
 
-  async sendMessage(chatJid: string, text: string, messageId?: string): Promise<SubmissionReceipt> {
+  async sendMessage(chatJid: string, text: string, opts?: SendOptions): Promise<SubmissionReceipt> {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
-    applyOutboundIdentityGuard(chatJid, { caller: 'agent', mode: this.identityMode }, this.identityStore);
+    // QR-086: honour an OPTIONAL infra caller token so the guard's SYSTEM_CALLERS
+    // exemption (spec §4.2 step B — infra never floored) is reachable. Only
+    // trusted infra (health admin /send via sendTracked) sets opts.caller;
+    // every other path leaves it undefined → 'agent' → full cold-floor.
+    applyOutboundIdentityGuard(chatJid, { caller: opts?.caller ?? 'agent', mode: this.identityMode }, this.identityStore);
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
@@ -674,8 +744,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (hasMentions) this.log.info({ mentions }, 'Outbound message includes mentions');
     try {
       result = await withSendTimeout(
-        messageId
-          ? this.sock.sendMessage(chatJid, content, { messageId })
+        opts?.messageId
+          ? this.sock.sendMessage(chatJid, content, { messageId: opts.messageId })
           : this.sock.sendMessage(chatJid, content),
         'sendMessage',
       );
@@ -873,6 +943,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     options: {
       statusCode?: number;
       reason?: string;
+      conflictType?: string | null;
+      reconnectDecision?: string;
+      lastDisconnectDiagnostic?: unknown;
       note?: string;
       baileysVersion?: string;
       authBond?: AuthBondSnapshot;
@@ -889,6 +962,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     if (options.statusCode !== undefined) entry.statusCode = options.statusCode;
     if (options.reason !== undefined) entry.reason = options.reason;
+    if ('conflictType' in options) entry.conflictType = options.conflictType ?? null;
+    if (options.reconnectDecision !== undefined) entry.reconnectDecision = options.reconnectDecision;
+    if (options.lastDisconnectDiagnostic !== undefined) {
+      entry.lastDisconnectDiagnostic = options.lastDisconnectDiagnostic;
+    }
     if (options.note !== undefined) entry.note = options.note;
     if (options.baileysVersion !== undefined) entry.baileysVersion = options.baileysVersion;
     if (authBond) {
@@ -918,6 +996,165 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         0,
         this.credentialLifecycleEvents.length - ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT,
       );
+    }
+    this.persistBondEvent(entry);
+  }
+
+  private sanitizeLifecycleEventForBondEvent(event: CredentialLifecycleEvent): Record<string, unknown> {
+    return {
+      at: event.at,
+      event: event.event,
+      state: event.state,
+      reconnectAttempts: event.reconnectAttempts,
+      reconnectPhase: event.reconnectPhase,
+      statusCode: event.statusCode ?? null,
+      reason: event.reason ?? null,
+      conflictType: event.conflictType ?? null,
+      reconnectDecision: event.reconnectDecision ?? null,
+      baileysVersion: event.baileysVersion ?? null,
+      authBondStatus: event.authBondStatus ?? null,
+      authBondIssues: (event.authBondIssues ?? []).map(redactAuthBondIssue),
+      authDirMode: event.authDirMode ?? null,
+      authDirMtime: event.authDirMtime ?? null,
+      credentialMode: event.credsMode ?? null,
+      credentialMtime: event.credsMtime ?? null,
+      credentialSize: event.credsSize ?? null,
+      credentialHash: event.credsHash ?? null,
+      identityHash: event.identityHash ?? null,
+      treeHash: event.treeHash ?? null,
+      latestBackupHash: event.latestBackup ? shortHash(event.latestBackup, 20) : null,
+      latestBackupAt: event.latestBackupAt ?? null,
+      latestBackupReason: event.latestBackupReason ?? null,
+      lastCaptureError: event.lastCaptureError ? redactDiagnosticString(event.lastCaptureError) : null,
+      lastCaptureDeferredAt: event.lastCaptureDeferredAt ?? null,
+      lastCaptureDeferredReason: event.lastCaptureDeferredReason ?? null,
+      lastCaptureDeferredAgeMs: event.lastCaptureDeferredAgeMs ?? null,
+      lastRestoreError: event.lastRestoreError ? redactDiagnosticString(event.lastRestoreError) : null,
+      notePresent: event.note !== undefined,
+      noteHash: event.note ? shortHash(event.note, 20) : null,
+    };
+  }
+
+  private authBondEventDigest(snapshot: AuthBondSnapshot): Record<string, unknown> {
+    return {
+      status: snapshot.status,
+      issues: snapshot.issues.map(redactAuthBondIssue),
+      authRoot: {
+        pathHash: shortHash(snapshot.authDir.path, 20),
+        exists: snapshot.authDir.exists,
+        mode: snapshot.authDir.mode,
+        size: snapshot.authDir.size,
+        mtime: snapshot.authDir.mtime,
+      },
+      credentialFile: {
+        pathHash: shortHash(snapshot.creds.path, 20),
+        exists: snapshot.creds.exists,
+        mode: snapshot.creds.mode,
+        size: snapshot.creds.size,
+        mtime: snapshot.creds.mtime,
+        hash: shortHashOrNull(snapshot.creds.sha256),
+        identityHash: snapshot.meHash,
+      },
+      treeHash: shortHashOrNull(snapshot.treeHash),
+      backup: {
+        rootHash: snapshot.backup.root ? shortHash(snapshot.backup.root, 20) : null,
+        latestHash: snapshot.backup.latest ? shortHash(snapshot.backup.latest, 20) : null,
+        latestAt: snapshot.backup.latestAt,
+        latestReason: snapshot.backup.latestReason,
+        latestTreeHash: shortHashOrNull(snapshot.backup.latestTreeHash),
+        lastCaptureAt: snapshot.backup.lastCaptureAt,
+        lastCaptureReason: snapshot.backup.lastCaptureReason,
+        lastCaptureError: snapshot.backup.lastCaptureError
+          ? redactDiagnosticString(snapshot.backup.lastCaptureError)
+          : null,
+        lastCaptureDeferredAt: snapshot.backup.lastCaptureDeferredAt,
+        lastCaptureDeferredReason: snapshot.backup.lastCaptureDeferredReason,
+        lastCaptureDeferredAgeMs: snapshot.backup.lastCaptureDeferredAgeMs,
+        lastRestoreAt: snapshot.backup.lastRestoreAt,
+        lastRestoreSourceHash: snapshot.backup.lastRestoreSource
+          ? shortHash(snapshot.backup.lastRestoreSource, 20)
+          : null,
+        lastRestoreError: snapshot.backup.lastRestoreError
+          ? redactDiagnosticString(snapshot.backup.lastRestoreError)
+          : null,
+      },
+    };
+  }
+
+  private persistBondEvent(entry: CredentialLifecycleEvent): void {
+    if (!config.dataRoot) return;
+
+    try {
+      const authBond = this.authBond.inspect();
+      const eventPath = join(config.dataRoot, 'bond-events.ndjson');
+      const payload = {
+        version: 1,
+        eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
+        timestamp: entry.at,
+        event: entry.event,
+        redaction: {
+          version: 1,
+          policy: 'no raw JIDs, phone numbers, message content, QR/pairing codes, auth content, tokens, or credential paths',
+        },
+        runtime: {
+          host: hostname(),
+          bot: config.botName,
+          pid: process.pid,
+          processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+          processUptimeSeconds: Math.floor(process.uptime()),
+          codeSha: process.env.WHATSOUP_GIT_SHA ?? process.env.GIT_SHA ?? null,
+          nodeVersion: process.version,
+          platform: platform(),
+          arch: arch(),
+          release: release(),
+        },
+        service: {
+          healthPort: config.healthPort,
+          provider: config.agentProvider,
+        },
+        auth: {
+          accountHash: authBond.meHash,
+          authRootHash: shortHash(config.authDir, 20),
+          stateRootHash: config.stateRoot ? shortHash(config.stateRoot, 20) : null,
+          dataRootHash: config.dataRoot ? shortHash(config.dataRoot, 20) : null,
+          metadataClass: authBond.status,
+          bond: this.authBondEventDigest(authBond),
+        },
+        connection: {
+          state: entry.state,
+          currentState: this.connectionState,
+          reconnectAttempts: entry.reconnectAttempts,
+          reconnectPhase: entry.reconnectPhase,
+          lastStatusCode: this.lastStatusCode,
+          lastDisconnectReason: this.lastDisconnectReason,
+          credsUpdateSeenSinceStart: this.credsUpdateCount > 0,
+          credsUpdateCount: this.credsUpdateCount,
+          lastCredsUpdateAt: toIso(this.lastCredsUpdateAt),
+          lastCredsUpdateFailedAt: toIso(this.lastCredsUpdateFailedAt),
+          authSnapshotCaptureCount: this.authSnapshotCaptureCount,
+          authSnapshotFailureCount: this.authSnapshotFailureCount,
+        },
+        statusCode: entry.statusCode ?? null,
+        reason: entry.reason ?? null,
+        conflictType: entry.conflictType ?? null,
+        reconnectDecision: entry.reconnectDecision ?? null,
+        rawDisconnect: {
+          statusCode: entry.statusCode ?? null,
+          reason: entry.reason ?? null,
+          streamError: entry.lastDisconnectDiagnostic ?? null,
+        },
+        lifecycle: {
+          recentEvents: this.credentialLifecycleEvents
+            .slice(-50)
+            .map(event => this.sanitizeLifecycleEventForBondEvent(event)),
+        },
+        ownerEvidence: {
+          status: 'not_recorded',
+        },
+      };
+      appendPrivateJsonLineSync(eventPath, payload);
+    } catch (err) {
+      this.log.warn({ err }, 'failed to persist WhatsApp bond event');
     }
   }
 
@@ -1537,6 +1774,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastStatusCode = null;
       this.lastDisconnectReason = null;
       this.loggedOutAlertEmitted = false;
+      this.unclassified401ReconnectSpent = false;
       this.localAuthAlertEmitted = false;
       this.gracefulReconnectInFlight = false;
       if (this.cooldownTimer !== null) {
@@ -1566,20 +1804,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (connection === 'close') {
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? 'Unknown') : 'Unknown';
+      const conflictType = extractStreamErrorConflictType(lastDisconnect);
 
       this.lastStatusCode = statusCode ?? null;
       this.lastDisconnectReason = reason;
       this.recordDisconnect(statusCode ?? null, reason);
       this.lastCloseAt = Date.now();
       this.lastDisconnectDiagnostic = redactDiagnosticValue(lastDisconnect);
-      this.recordCredentialLifecycle('connection_close', {
-        statusCode,
-        reason,
-        authBond: this.authBond.inspect(),
-      });
-      this.persistConnectionRuntimeState('connection_close');
-
-      this.log.warn({ statusCode, reason }, 'WhatsApp connection closed');
 
       // Invalidate the stale socket before deciding whether to reconnect
       this.stopKeepalive();
@@ -1596,14 +1827,39 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         restartRequiredCount = this.restartRequiredTimestamps.length;
       }
 
-      const action = decideDisconnectAction(statusCode, { restartRequiredCount });
+      const actionContext: {
+        restartRequiredCount: number;
+        conflictType?: string | null;
+        unclassified401Attempted?: boolean;
+      } = { restartRequiredCount };
+      if (conflictType !== undefined) actionContext.conflictType = conflictType;
+      if (statusCode === DisconnectReason.loggedOut) {
+        actionContext.unclassified401Attempted = this.unclassified401ReconnectSpent;
+      }
+      const action = decideDisconnectAction(statusCode, actionContext);
+      const reconnectDecision = formatReconnectDecision(action);
+      this.recordCredentialLifecycle('connection_close', {
+        statusCode,
+        reason,
+        conflictType,
+        reconnectDecision,
+        lastDisconnectDiagnostic: this.lastDisconnectDiagnostic,
+        authBond: this.authBond.inspect(),
+      });
+      this.persistConnectionRuntimeState('connection_close');
+
+      this.log.warn({ statusCode, reason, conflictType, reconnectDecision }, 'WhatsApp connection closed');
 
       if (action.type === 'exit') {
         this.setConnectionState('disconnected');
-        this.emitDeviceBondLostAlert(statusCode, reason, lastDisconnect);
+        this.emitDeviceBondLostAlert(statusCode, reason, lastDisconnect, conflictType);
         this.persistConnectionRuntimeState('disconnect_exit_logged_out');
         this.log.error('Logged out — re-authenticate with the auth CLI');
         return;
+      }
+
+      if (action.reason === 'auth-401-unclassified') {
+        this.unclassified401ReconnectSpent = true;
       }
 
       if (action.reason === 'restart-required-flapping') {
@@ -1636,11 +1892,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     statusCode: number | undefined,
     reason: string,
     lastDisconnect: unknown,
+    conflictType?: string | null,
   ): void {
     if (this.loggedOutAlertEmitted) return;
 
     const authBond = this.authBond.inspect();
-    this.recordCredentialLifecycle('device_bond_lost', { statusCode, reason, authBond });
+    this.recordCredentialLifecycle('device_bond_lost', {
+      statusCode,
+      reason,
+      conflictType,
+      reconnectDecision: 'exit:logged-out',
+      lastDisconnectDiagnostic: this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect),
+      authBond,
+    });
     const lifecycle = this.getCredentialLifecycleSnapshot(authBond);
     const credsPath = join(config.authDir, 'creds.json');
     const lockPath = config.lockPath ?? 'unknown';

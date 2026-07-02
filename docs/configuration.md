@@ -869,6 +869,8 @@ Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.
 
 **Bash `pathRestricted` is best-effort, not a real sandbox.** When `bash.pathRestricted` is `true`, the hook scans the *raw* command string and denies obvious out-of-sandbox escapes: absolute paths outside `allowedPaths` (including quoted paths with spaces), `../` traversal, known credential paths (`.ssh/`, `.gnupg/`, `secret-tool`), tilde expansion (`~`, `~user`), `$HOME`/`$XDG_*` and their brace/quote/default-value split forms, and command substitution (`$(...)`, backticks). This raises the bar against low-effort escapes but **cannot fully contain bash** — a shell can still construct an out-of-sandbox path at runtime in ways a static string scan cannot see (e.g. values read from files, `eval`, `base64 -d`, `$IFS` tricks, env vars assigned earlier in the same command). For hard isolation, run the agent under an OS-level boundary (separate UID, container, or `sandbox-exec`/`bwrap`) in addition to this hook. The residual-bypass note in `deploy/hooks/agent-sandbox.sh` documents this scope.
 
+**Network egress is NOT confined.** This hook inspects filesystem paths in the command string only — it applies no network restriction whatsoever. Any subprocess an agent starts (`curl`, `node`, `python`, …) can open a connection to any host; **agent subprocess network egress is unbounded**. Closing this requires an OS-hard boundary (a dedicated agent UID + host-firewall egress allowlist, network namespaces, or an allowlisting proxy), which is design-gated — see QR-008 / issue #1607.
+
 #### `agentOptions.enabledPlugins`
 
 Controls which Claude Code plugins are loaded for this instance's sessions. Each key is a plugin identifier in `plugin@marketplace` format. Set to `false` to disable a plugin that would otherwise be inherited from the global `~/.claude/settings.json`.
@@ -1186,6 +1188,9 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 31 | Adds the `llm_attempts` table (`sender_jid`, `attempt_at`) — records every LLM invocation, separate from the `rate_limits` (successful-response) counter, so outage/retry LLM cost is observable without charging the user's response rate-limit (`runMigration31`) |
 | 32 | Adds `scheduled_messages.send_started_at` so scheduler crash recovery can distinguish pre-send claims from uncertain in-flight sends and fail closed instead of blindly replaying accepted messages (`runMigration32`) |
 | 33 | Adds `auth_loss_signal` with active-signal and classifier indexes so auth-loss evidence can be recorded once, resolved after stable authenticated-open dwell, and counted across later recurrences (`runMigration33`) |
+| 34 | Adds nullable `inbound_events` continuity-candidate marker columns (`continuity_candidate_reason`, `continuity_candidate_source`, `continuity_candidate_marked_at`) so restart recovery and runtime fault/disarm branches can tag no-terminal-outbound inbounds before any queue/consumer exists (`runMigration34`) |
+| 35 | Rebuilds `messages_fts_delete` and `messages_fts_update` triggers with an `OLD.deleted_at IS NULL` guard on the FTS `'delete'` command, so a hard-delete or content_text update of a since-soft-deleted row no longer double-deletes the FTS entry (which threw `database disk image is malformed`, crashing retention pruning and transcription updates) — QR-115 (`runMigration35`) |
+
 
 ---
 

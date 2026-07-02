@@ -112,7 +112,17 @@ export function markdownToWhatsApp(text: string): string {
   out = out.replace(/^\|[\s\-:|]+\|\s*$/gm, '');
 
   // Pipe table rows: | cell | cell | → cell | cell (strip leading/trailing pipes)
-  out = out.replace(/^\|\s*(.+?)\s*\|\s*$/gm, '$1');
+  // QR-127: the prior pattern `/^\|\s*(.+?)\s*\|\s*$/gm` is catastrophically
+  // backtracking — the `\s*(.+?)\s*` around the lazy dot makes whitespace runs
+  // ambiguous, so a single crafted line (leading `|` + a long whitespace run + no
+  // closing `|`) drives it to ~cubic time (~11s at 4 KB), a whole-process DoS since
+  // this runs synchronously on every outbound reply. Greedy `(.*)` (which excludes
+  // newlines, so it stays within one line) backtracks at most once from end-of-line
+  // to find the trailing `\|\s*$`, giving linear time, and the capture is trimmed in
+  // the replacer to preserve the old leading/trailing-whitespace behavior. Verified
+  // full output parity with the prior regex across multi-column, single-cell, padded,
+  // and non-matching rows.
+  out = out.replace(/^\|(.*)\|\s*$/gm, (_m, cell: string) => cell.trim());
 
   // --- Clean whitespace ---
 

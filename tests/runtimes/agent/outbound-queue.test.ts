@@ -10,10 +10,11 @@ import {
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
+  MAX_CHUNKS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
@@ -140,11 +141,43 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Final answer for the user');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(
       'status-log@g.us',
       expect.stringContaining('Final answer'),
     );
+  });
+
+  // QR-114: the agent reply path must scrub operator-local internal artifacts
+  // before egress (parity with the chat runtime + MCP send tools), on BOTH the
+  // enqueued and streamed paths.
+  it('redacts internal artifacts from an enqueued agent reply before send', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueText('Your key lives at ~/.ssh/id_rsa - check it');
+    await vi.runAllTimersAsync();
+    await queue.flush();
+
+    const sent = calls.join('');
+    // Security property: the operator-local path never reaches the user.
+    expect(sent).not.toContain('~/.ssh/id_rsa');
+    // The redaction marker is present (brackets are stripped by downstream
+    // markdown handling; the marker text alone proves redactInternalArtifacts ran).
+    expect(sent).toContain('internal-path');
+  });
+
+  it('redacts internal artifacts from a streamed agent reply before send', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('config is under ~/.config/whatsoup/instances/example/auth');
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+    await queue.flush();
+
+    const sent = calls.join('');
+    expect(sent).not.toContain('~/.config/whatsoup/instances/example/auth');
+    expect(sent).toContain('internal-path');
   });
 
   it('uses the default streaming aggregation window until overridden', async () => {
@@ -261,7 +294,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Ping');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', { messageId: expect.any(String) });
   });
 
   it('converts markdown checkboxes to WhatsApp box characters', async () => {
@@ -944,7 +977,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Hello retargeted');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', { messageId: expect.any(String) });
     expect(messenger.sendMessage).not.toHaveBeenCalledWith('original@s.whatsapp.net', expect.anything());
   });
 
@@ -1791,7 +1824,7 @@ describe('OutboundQueue', () => {
     queue.enqueueText('Subsequent text');
     await vi.runAllTimersAsync();
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', expect.any(String));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', { messageId: expect.any(String) });
   });
 
   // ─── durability: markMaybeSent after retry exhaustion ────────────────────
@@ -1942,11 +1975,11 @@ describe('OutboundQueue', () => {
     const ids: Array<string | undefined> = [];
     let callCount = 0;
     const idMessenger: Messenger = {
-      sendMessage: vi.fn(async (_jid: string, _text: string, messageId?: string) => {
-        ids.push(messageId);
+      sendMessage: vi.fn(async (_jid: string, _text: string, opts?: SendOptions) => {
+        ids.push(opts?.messageId);
         callCount += 1;
         if (callCount <= 1) return new Promise<never>(() => {}); // first attempt times out
-        return { waMessageId: messageId ?? null };
+        return { waMessageId: opts?.messageId ?? null };
       }),
       sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
@@ -2567,5 +2600,36 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
     expect(inheritingReplacement.getSenderToken()).toBe(oldToken);
     expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
   });
-});
 
+  describe('QR-126: outbound chunk-count cap (message-amplification guard)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('caps a huge reply at MAX_CHUNKS sends with a truncation notice', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      // 256 KB reply → 64 uncapped chunks (ceil(len / 4000)). A prompt-injected
+      // max-length agent reply is the realistic trigger; the cap must bound the fan-out.
+      queue.enqueueText('x'.repeat(256 * 1024));
+      await vi.runAllTimersAsync();
+
+      // Uncapped this is 64 sends; capped it is exactly MAX_CHUNKS.
+      expect(calls.length).toBeLessThanOrEqual(MAX_CHUNKS);
+      expect(calls.length).toBe(MAX_CHUNKS);
+      // The final message is the visible truncation notice, not silently dropped.
+      expect(calls[calls.length - 1]).toContain('[reply truncated]');
+    });
+
+    it('does not truncate a reply that fits within MAX_CHUNKS', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      // ~3 chunks worth — well under the cap; must pass through untouched.
+      queue.enqueueText('y'.repeat(3 * 4000 + 100));
+      await vi.runAllTimersAsync();
+
+      expect(calls.length).toBeGreaterThan(1);
+      expect(calls.length).toBeLessThan(MAX_CHUNKS);
+      expect(calls.join('')).not.toContain('[reply truncated]');
+    });
+  });
+});

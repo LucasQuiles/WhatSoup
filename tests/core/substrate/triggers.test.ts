@@ -7,8 +7,9 @@ import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger,
-  validateTriggerSpec, dueTriggers, isSafeSqliteSql,
+  validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
 } from '../../../src/core/substrate/triggers.ts';
+import { nextCronRun } from '../../../src/core/cron.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -211,5 +212,32 @@ describe('poll.sqlite SQL safety guard (#1096)', () => {
         sql: 'SELECT count(*) FROM messages', fire_when: 'rows_returned',
       }),
     ).not.toThrow();
+  });
+});
+
+describe('QR-092: substrate schedule.cron honors the tz field', () => {
+  const baseArgs = {
+    beadId: 1, reportChatJid: '15550100001@s.whatsapp.net', actor: 'test',
+  };
+
+  it('threads spec.tz into next_fire_at (not evaluated in UTC)', () => {
+    const { now, nextFireAt } = prepareTrigger({
+      ...baseArgs,
+      kind: 'schedule.cron',
+      spec: { expr: '0 12 * * *', tz: 'America/New_York' },
+    });
+    // The computed next fire must honor the tz — equal to the tz-aware cron
+    // computation, and DIFFERENT from the UTC one (noon-NY != noon-UTC).
+    expect(nextFireAt).toBe(nextCronRun('0 12 * * *', now, 'America/New_York'));
+    expect(nextFireAt).not.toBe(nextCronRun('0 12 * * *', now, 'UTC'));
+  });
+
+  it('defaults to UTC when no tz is provided', () => {
+    const { now, nextFireAt } = prepareTrigger({
+      ...baseArgs,
+      kind: 'schedule.cron',
+      spec: { expr: '0 12 * * *' },
+    });
+    expect(nextFireAt).toBe(nextCronRun('0 12 * * *', now, 'UTC'));
   });
 });

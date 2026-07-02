@@ -12,6 +12,15 @@ import {
   SsrfBlockedError,
 } from '../../src/lib/ssrf-fetch.ts';
 
+// Mock node:dns promises.lookup so the DNS-aware pre-check (resolve-to-private,
+// dns_failed) can be exercised deterministically. The callback `lookup` used by
+// ssrfSafeAgent is left intact.
+const { dnsLookupMock } = vi.hoisted(() => ({ dnsLookupMock: vi.fn() }));
+vi.mock('node:dns', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns')>();
+  return { ...actual, promises: { ...actual.promises, lookup: dnsLookupMock } };
+});
+
 describe('ssrf-fetch — host/IP classification', () => {
   it('QR-032: isPrivateHost blocks NAT64-wrapped private/metadata addresses (hex form)', () => {
     // 64:ff9b::/96 (RFC 6052) embeds an IPv4 in the last 32 bits. The dotted form
@@ -94,6 +103,15 @@ describe('ssrf-fetch — host/IP classification', () => {
     expect(isPrivateIP('::ffff:8.8.8.8')).toBe(false);
   });
 
+  it('isPrivateIP handles adversarial/malformed IPv6 inputs as not-private', () => {
+    // UNHAPPY: a ::-prefixed address that is neither unspecified, loopback, nor an
+    // embedded private IPv4 must NOT be misclassified as private (e.g. ::2 is public).
+    expect(isPrivateIP('::2')).toBe(false);
+    // Invalid IPv6 (non-hex first group) and non-IP garbage classify as not-private.
+    expect(isPrivateIP('xyz::1')).toBe(false);
+    expect(isPrivateIP('not-an-ip')).toBe(false);
+  });
+
   it('isPrivateHost blocks IPv6 literal private ranges and mapped IPv4', () => {
     expect(isPrivateHost('fc00::1')).toBe(true);
     expect(isPrivateHost('fe80::1')).toBe(true);
@@ -154,5 +172,65 @@ describe('ssrf-fetch — fetchUrlGuarded fail-closed', () => {
 
   it('throws SsrfBlockedError(invalid_url) for an unparseable URL', async () => {
     await expect(fetchUrlGuarded('::::not a url')).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+});
+
+describe('ssrf-fetch — fetchUrlGuarded DNS + connect-time SSRF defenses', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    dnsLookupMock.mockReset();
+  });
+
+  it('blocks a public hostname that DNS-resolves to a private IP (rebinding/SSRF)', async () => {
+    // UNHAPPY/adversarial: hostname looks public but resolves into RFC1918 — must block
+    // BEFORE any fetch is issued.
+    dnsLookupMock.mockResolvedValue({ address: '10.0.0.1', family: 4 });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(fetchUrlGuarded('https://evil.example.com/x')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'private_ip',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws dns_failed when resolution errors', async () => {
+    dnsLookupMock.mockRejectedValue(new Error('ENOTFOUND'));
+    await expect(fetchUrlGuarded('https://nope.example.com/x')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'dns_failed',
+    });
+  });
+
+  it('treats a connect/redirect-time SSRF block (fetch throw) as private_ip', async () => {
+    // UNHAPPY: pre-check passes (public IP) but the redirect hop resolves to a private IP;
+    // undici surfaces it as a fetch throw whose message mentions "SSRF blocked".
+    dnsLookupMock.mockResolvedValue({ address: '8.8.8.8', family: 4 });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('SSRF blocked: redirect to 169.254.169.254')));
+    await expect(fetchUrlGuarded('https://redirector.example.com/x')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'private_ip',
+    });
+  });
+
+  it('re-throws a non-SSRF fetch error unchanged', async () => {
+    dnsLookupMock.mockResolvedValue({ address: '8.8.8.8', family: 4 });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('socket hang up')));
+    await expect(fetchUrlGuarded('https://flaky.example.com/x')).rejects.toThrow(/socket hang up/);
+  });
+
+  it('returns status/headers/body on a successful guarded fetch', async () => {
+    dnsLookupMock.mockResolvedValue({ address: '8.8.8.8', family: 4 });
+    const response = {
+      status: 200,
+      headers: { forEach: (cb: (v: string, k: string) => void) => cb('text/plain', 'Content-Type') },
+      body: null,
+      text: async () => 'hello world',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+    const result = await fetchUrlGuarded('https://ok.example.com/x');
+    expect(result.status).toBe(200);
+    expect(result.headers['content-type']).toBe('text/plain');
+    expect(result.body).toBe('hello world');
   });
 });

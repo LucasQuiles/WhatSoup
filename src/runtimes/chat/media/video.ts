@@ -44,6 +44,15 @@ async function getVideoDuration(inputPath: string): Promise<number> {
       '-v', 'error',
       '-show_entries', 'format=duration',
       '-of', 'default=noprint_wrappers=1:nokey=1',
+      // QR-123: `inputPath` is attacker-controlled bytes (a WhatsApp video) and
+      // ffmpeg/ffprobe auto-probe the container from CONTENT, not the extension.
+      // A crafted concat/HLS payload would otherwise let a demuxer follow embedded
+      // file:// or http(s):// references (local-file read / SSRF). Pin the protocol
+      // whitelist to `file` so no demuxer can reach off-disk, instead of relying on
+      // the host ffmpeg's implicit `safe` default (varies by version across the
+      // fleet). Mirrors the transcription fix (QR-122 / #1601); applies to all
+      // three decode calls in this file (ffprobe + both ffmpeg passes).
+      '-protocol_whitelist', 'file',
       inputPath,
     ], { ...opts, encoding: 'utf8' });
     const duration = parseFloat((stdout as string).trim());
@@ -101,6 +110,8 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
     try {
       const opts: ExecFileOptions = { timeout: FFMPEG_TIMEOUT_MS };
       await execFile('ffmpeg', [
+        // QR-123: pin protocol whitelist to `file` before -i (see getVideoDuration).
+        '-protocol_whitelist', 'file',
         '-i', inputPath,
         '-vf', `fps=${fps}`,
         '-frames:v', String(MAX_FRAMES),
@@ -116,6 +127,8 @@ export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoF
       try {
         const opts: ExecFileOptions = { timeout: FFMPEG_TIMEOUT_MS };
         await execFile('ffmpeg', [
+          // QR-123: pin protocol whitelist to `file` before -i (see getVideoDuration).
+          '-protocol_whitelist', 'file',
           '-i', inputPath,
           '-frames:v', '1',
           '-q:v', '2',

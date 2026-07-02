@@ -65,6 +65,22 @@ describe('ConnectionManager egress is guarded', () => {
     await cm.sendMessage('15550001111@s.whatsapp.net', 'hi');
     expect(sock.sendMessage).toHaveBeenCalledTimes(1);
   });
+
+  // QR-086: the guard's SYSTEM_CALLERS exemption (spec §4.2 step B — "infra
+  // callers must never be floored") was unreachable because sendMessage
+  // hardcoded caller:'agent'. The health-server admin /send (sendTracked →
+  // connectionManager.sendMessage) thus hit the cold floor and a deliberate
+  // admin send to a cold target was wrongly BLOCKED under enforce. An infra
+  // caller token threaded via SendOptions makes the exemption reachable.
+  it('sendMessage with caller=health bypasses the cold floor (spec §4.2 step B, QR-086)', async () => {
+    await cm.sendMessage(COLD, 'admin broadcast', { caller: 'health' });
+    expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendMessage with no caller still floors a cold target under enforce (default agent)', async () => {
+    await expect(cm.sendMessage(COLD, 'hi')).rejects.toBeInstanceOf(OutboundIdentityError);
+    expect(sock.sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe('outbound identity guard — incident regression', () => {

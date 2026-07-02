@@ -119,8 +119,10 @@ function computeNextFireAt(
   intervalSeconds: number | null,
 ): number | null {
   if (kind === 'schedule.cron') {
-    const { expr } = spec as { expr: string; tz?: string };
-    return nextCronRun(expr, now);
+    // QR-092: honor the persisted tz (CronSpec.tz) instead of silently evaluating
+    // in UTC — parity with the scheduled_messages path. Default to UTC when absent.
+    const { expr, tz } = spec as { expr: string; tz?: string };
+    return nextCronRun(expr, now, tz ?? 'UTC');
   }
   if (kind === 'schedule.at_time') {
     return (spec as { fire_at: number }).fire_at;

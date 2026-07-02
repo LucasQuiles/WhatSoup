@@ -23,11 +23,12 @@ import {
   ensureStandbyNoticeSchema,
   stashStandbyNotice,
   consumeStandbyNotice,
+  clearStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
-import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artifact.ts';
+import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
@@ -570,9 +571,6 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
   );
 }
 
-function fallbackRecoveryRequiresModelUsability(reason: string | null | undefined): boolean {
-  return reason === 'usage-limit' || reason === 'rate-limit';
-}
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
   // Routed through the central classifier (SSOT). Only fallback-arming kinds map to
@@ -1123,6 +1121,19 @@ export class AgentRuntime implements Runtime {
 
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
     if (this.autoCompactInputTokens === undefined || session === null) return;
+    // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
+    // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
+    // plain user message that never emits a compact_boundary — so markSessionCompacted
+    // never advances and EVERY over-threshold turn re-fires it, UNTHROTTLED (the
+    // rapid-rearm + cooldown safeguards below key on the claude-only compact_boundary /
+    // success / timeout events, which never fire). Gate on the SESSION's actual provider
+    // (getProviderId, not the primary this.agentProvider) so a fallback-to-non-claude
+    // session is skipped too. If per-provider compaction is added later, extend here.
+    // Defensive typeof check mirrors the getProviderId call site at ~5366; an
+    // indeterminate provider fails safe (skip the claude-only command).
+    const sessionProvider =
+      typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== 'claude-cli') return;
     if (this.sessionScope === 'shared') return;
     if (!session.getStatus().active) return;
 
@@ -2120,6 +2131,15 @@ export class AgentRuntime implements Runtime {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
     }
 
+    // QR-099: conversation keys whose prior-instance child the sweep left running
+    // (authoritative_live) or declined to touch (ambiguous). The proactive-resume
+    // loop below MUST NOT spawn a second session for these — a live child + a
+    // resumable checkpoint for the same key would otherwise yield two agent
+    // sessions for one chat (duplicate turn processing / replies, contended
+    // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
+    // instance's own spawns; it cannot see a prior-instance child.
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+
     // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
     // Cross-references agent_sessions with session_checkpoints to safely identify which
     // processes to keep and which to reap. Only kills PIDs verified as owned children.
@@ -2150,8 +2170,13 @@ export class AgentRuntime implements Runtime {
                 conversationKey: session.conversationKey,
                 reason: session.reason,
               }, 'ambiguous session — not touching');
+              // Left running — block a duplicate proactive resume for this key.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
               break;
-            // authoritative_live: leave alone
+            case 'authoritative_live':
+              // Verified-live child left in place — block a duplicate proactive resume.
+              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
           }
         }
       }
@@ -2166,6 +2191,14 @@ export class AgentRuntime implements Runtime {
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
+
+        // QR-099: a still-live (authoritative_live) or ambiguous session for this
+        // key was left running by the sweep above — resuming would double-spawn.
+        // Skipping degrades to lazy resume on the next message (fail-safe).
+        if (proactiveResumeBlockedConversationKeys.has(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — live/ambiguous session already present');
+          continue;
+        }
 
         // AE1: Skip group conversations — groups should not be proactively resumed.
         // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
@@ -2343,6 +2376,7 @@ export class AgentRuntime implements Runtime {
             this.cleanupSharedCrashTurnState();
             // Mark inbound event failed so it doesn't stay stuck in processing
             if (this.durability && this.currentInboundSeq !== undefined) {
+              this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
               this.replyGuarantee?.disarm(this.currentInboundSeq);
               this.durability.markInboundFailed(this.currentInboundSeq);
               this.currentInboundSeq = undefined;
@@ -2656,6 +2690,7 @@ export class AgentRuntime implements Runtime {
           `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
         );
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -2676,6 +2711,7 @@ export class AgentRuntime implements Runtime {
         );
         // Mark inbound event as failed so it doesn't stay stuck in 'processing'
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
@@ -2779,6 +2815,17 @@ export class AgentRuntime implements Runtime {
           // which creates a fresh session+queue in the map. This is a narrow window
           // inherited from the original design, not a regression from the race fix.
           await sessionForNew?.handleNew();
+          // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+          // for this conversation too — otherwise a standby notice or handoff
+          // artifact stashed before /new leaks into the NEXT reply/prelude (both
+          // tables are keyed by the stable conversation_key, which /new does not
+          // change). Both fns are idempotent no-ops when nothing is pending, and
+          // their own JSDoc already documents "cleared on /new".
+          {
+            const resetKey = toConversationKey(chatJid);
+            clearStandbyNotice(this.db, resetKey);
+            deleteHandoffArtifact(this.db, resetKey);
+          }
           // Reset turn flag — stale value from the old session must not suppress the
           // _(no response)_ fallback if the first new-session turn has no visible text.
           this.turnHadVisibleOutput = false;
@@ -3095,13 +3142,20 @@ export class AgentRuntime implements Runtime {
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            this.pendingSystemResults.mark(mapKey);
+            // QR-095: mark under the SAME scope the single/shared result handler
+            // consumes (GLOBAL_TOOL_SCOPE_KEY). mapKey is undefined for single/
+            // shared callers (sendTurnNonShared), so mark(mapKey) would be a no-op
+            // and the injected system turn's result would be mis-classified as a
+            // USER turn (phantom '[Recent chat context]' reply leaks to the user +
+            // wrong post-turn gate). In per_chat mapKey is defined so this is a
+            // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
+            this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
           // Context-injection send failed — no result will arrive for its mark.
-          this.pendingSystemResults.unmark(mapKey);
+          this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
         }
       }
     }
@@ -3242,6 +3296,7 @@ export class AgentRuntime implements Runtime {
         this.pendingTurnActorJid.delete(mapKey);
         if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
+          this.markRuntimeFaultContinuityCandidate(failedSeq);
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq);
         }
@@ -3373,6 +3428,19 @@ export class AgentRuntime implements Runtime {
     if (inboundSeq === undefined) return;
     this.durability?.completeInbound(inboundSeq, terminalReason);
     this.replyGuarantee?.disarm(inboundSeq);
+  }
+
+  private markRuntimeFaultContinuityCandidate(inboundSeq: number | undefined): void {
+    if (inboundSeq === undefined || !this.durability || !this.replyGuarantee?.isArmed(inboundSeq)) return;
+    try {
+      this.durability.markContinuityCandidateIfNoTerminalOutbound(
+        inboundSeq,
+        'runtime_fault_no_terminal_outbound',
+        'runtime_fault_disarm',
+      );
+    } catch (err) {
+      log.warn({ err, inboundSeq }, 'failed to mark runtime-fault continuity candidate');
+    }
   }
 
   /**
@@ -4833,6 +4901,17 @@ export class AgentRuntime implements Runtime {
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
       this.chatQueues.delete(syntheticJid);
+      // QR-094: the control OperationTracker (wired above alongside the session/
+      // queue) arms progress/liveness timers. This error path nulls controlSession
+      // and deletes its map entries, so the next handleControlTurn RECREATES the
+      // tracker and overwrites operationTrackers[syntheticJid] — orphaning the old
+      // tracker's armed timers. Shut it down here too, mirroring the per-chat
+      // cleanup teardown, so a heal-error-recreate cycle does not leak timers.
+      const controlTracker = this.operationTrackers.get(syntheticJid);
+      if (controlTracker) {
+        controlTracker.shutdown();
+        this.operationTrackers.delete(syntheticJid);
+      }
       if (controlSession) {
         try {
           await controlSession.shutdown();
@@ -6417,36 +6496,13 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Probe whether the primary provider can serve again. Key-service primaries
-   * normally use a synchronous key-presence check; quota fallbacks and binary
-   * primaries run a real model-usability probe (timeout-bounded, never blocks
-   * the event loop) and recover only on a `usable` verdict.
-   *
-   * A binary primary must NOT be judged by `<binary> auth status`: an
-   * expired-but-present OAuth credential makes claude-cli report
-   * `loggedIn:true` while live inference returns 401 Invalid authentication
-   * credentials. auth-status checks credential *presence*, not *validity*, so
-   * it falsely reports recovery and flaps the fallback window onto a dead
-   * primary. The usability probe spawns one minimal inference turn that
-   * genuinely exercises auth. Never rejects.
+   * Probe whether the primary provider can serve again. Recovery requires a
+   * real model-usability success, not credential presence: a revoked API key or
+   * expired OAuth token can still be present in the key store while live turns
+   * continue returning auth failures. The probe is timeout-bounded and never
+   * rejects.
    */
   private async probePrimaryProviderRecovered(): Promise<boolean> {
-    const requiresUsabilityProbe = fallbackRecoveryRequiresModelUsability(this.fallbackWindow.armReason);
-    const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
-    if (service && !requiresUsabilityProbe) {
-      return lookupCredential(service) !== null;
-    }
-    if (!service) {
-      let binary: string | null;
-      try {
-        binary = getProviderBinary(this.agentProvider);
-      } catch {
-        // getProviderBinary throws on an unknown provider; honor the never-rejects
-        // contract the revert-timer relies on by treating that as not-recovered.
-        return false;
-      }
-      if (!binary) return false;
-    }
     const result = await probePrimaryModelUsability(
       { provider: this.agentProvider, model: this.model ?? null },
       createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
@@ -6834,7 +6890,24 @@ export class AgentRuntime implements Runtime {
     oldSession: SessionManager | null;
     hadToolActivity?: boolean;
   }): boolean {
-    if (args.activation.extended || args.activation.keyPresent === false || args.hadToolActivity) return false;
+    // QR-103: never replay a turn that ALREADY delivered a visible reply — the
+    // fallback replay would send a SECOND full answer (user gets both the primary
+    // streamed reply AND the backup reply). The sibling recordFallbackTurnOutcome
+    // already treats hadVisibleOutput||hadToolWork as a delivered reply; mirror
+    // that here. Derived from the same per-turn state the streaming path sets
+    // (reset at turn start, so never stale): per_chat reads its accumulated
+    // perChatTurnText[mapKey], singleton/shared reads turnHadVisibleOutput. Uses
+    // the streamed reply text, NOT the terminal result text (which is the failure
+    // string that was just classified) — so a genuinely silent turn still replays.
+    const hadVisibleOutput = args.mapKey !== undefined
+      ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
+      : this.turnHadVisibleOutput;
+    if (
+      args.activation.extended
+      || args.activation.keyPresent === false
+      || args.hadToolActivity
+      || hadVisibleOutput
+    ) return false;
     const replayText = args.mapKey !== undefined
       ? this.pendingTurnText.get(args.mapKey)
       : this.currentTurnReplayText;
@@ -7304,6 +7377,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
+            this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
             this.replyGuarantee?.disarm(this.currentInboundSeq);
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
@@ -7361,6 +7435,7 @@ export class AgentRuntime implements Runtime {
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
     if (this.durability && inboundSeq !== undefined) {
+      this.markRuntimeFaultContinuityCandidate(inboundSeq);
       this.replyGuarantee?.disarm(inboundSeq);
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
@@ -7652,13 +7727,18 @@ export class AgentRuntime implements Runtime {
             const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
-              this.pendingSystemResults.mark(mapKey);
+              // QR-095: same fix as the sendTurnToSession injection — in single/
+              // shared mode mapKey is undefined here, so mark under GLOBAL to match
+              // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise
+              // the '[CONTEXT RECOVERY]' system turn's result leaks to the user.
+              // No-op in per_chat (mapKey defined, consumed per-chat).
+              this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
             // Context-recovery send failed — no result will arrive for its mark.
-            this.pendingSystemResults.unmark(mapKey);
+            this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
           }
 
           // Replay the pending turn that was lost during the failed resume

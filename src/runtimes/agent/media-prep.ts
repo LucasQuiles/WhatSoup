@@ -16,7 +16,7 @@ import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { IncomingMessage } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
-import { extractRawMime } from '../../core/media-mime.ts';
+import { extractRawMime, extractRawFileLength } from '../../core/media-mime.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -111,7 +111,7 @@ export async function prepareContentForAgent(msg: IncomingMessage, db?: Database
   const downloadMime = extractRawMime(msg.rawMessage, contentType) ?? typeInfo.mime;
 
   // Download the file
-  const result = await downloadMedia(downloadFn, downloadMime);
+  const result = await downloadMedia(downloadFn, downloadMime, extractRawFileLength(msg.rawMessage, contentType));
   if (!result) {
     return `[${contentType} — download failed]${content ? '\n' + content : ''}`;
   }

@@ -489,20 +489,29 @@ describe('Sent message contract', () => {
     expect(sent.trim().length).toBeGreaterThan(0);
   });
 
-  it('approval request: exact format "New contact: {name} (+{phone})\\nMessage: ..."', async () => {
+  it('approval request: structured sanitized format (QR-100) — untrusted fields labeled, fixed command line', async () => {
     const cm = makeMockConnectionManager();
 
     const name = 'Bob Smith';
     const phone = '15559876543';
     const userMessage = 'Hey can I join?';
-    const approvalText = `New contact: ${name} (+${phone})\nMessage: ${userMessage}`;
+    // QR-100: the hardened approval prompt labels the sender-provided Name/Message on
+    // their own quoted lines and puts the ALLOW/BLOCK command on a FIXED trailing line
+    // referencing only the trusted phone (mirrors src/core/admin.ts sendApprovalRequest).
+    const approvalText =
+      `New contact request — Name and Message below are SENDER-PROVIDED (untrusted):\n` +
+      `Name: "${name}"\n` +
+      `Message: "${userMessage}"\n` +
+      `To respond, reply exactly: ALLOW ${phone} or BLOCK ${phone}`;
 
     await cm.sendMessage('15551230008@s.whatsapp.net', approvalText);
     const { text: sent } = cm.sent[0]!;
 
-    expect(sent).toMatch(/^New contact: .+ \(\+\d+\)\nMessage: .+$/);
-    expect(sent).toContain(`New contact: ${name} (+${phone})`);
-    expect(sent).toContain(`\nMessage: ${userMessage}`);
+    expect(sent).toMatch(/^New contact request — .*SENDER-PROVIDED/);
+    expect(sent).toContain(`Name: "${name}"`);
+    expect(sent).toContain(`Message: "${userMessage}"`);
+    expect(sent).toMatch(new RegExp(`To respond, reply exactly: ALLOW ${phone} or BLOCK ${phone}$`));
+    expect(sent.split('\n').length).toBe(4);
   });
 
   it('conversation_key pattern: does not expose internal DB keys in messages', async () => {

@@ -187,6 +187,40 @@ export function writePrivateJsonMarkerSync(filePath: string, value: unknown): vo
 }
 
 /**
+ * Append one JSON value to a newline-delimited private event file (mode 0600).
+ * This is for append-only evidence streams where overwriting a marker would lose
+ * the incident timeline. The target is guarded before open and by O_NOFOLLOW;
+ * the parent directory is private 0700 and the descriptor is fsynced before
+ * close so an event is durable before a process parks or exits.
+ */
+export function appendPrivateJsonLineSync(filePath: string, value: unknown): void {
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertPrivateDirectorySync(dir);
+  chmodSync(dir, 0o700);
+  assertWritablePrivateFileSync(filePath, 'event log');
+
+  const flags = constants.O_WRONLY |
+    constants.O_CREAT |
+    constants.O_APPEND |
+    constants.O_NOFOLLOW;
+  let fd: number | null = null;
+  try {
+    fd = openSync(filePath, flags, 0o600);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to write event log over non-regular path', 'EINVAL');
+    }
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, JSON.stringify(value) + '\n', 'utf-8');
+    fsyncSync(fd);
+    fchmodSync(fd, 0o600);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
  * Read a private JSON marker and return it only if it is fresh — within
  * `maxAgeMs` of its `timestamp` (ISO) field. Returns null when the file is
  * missing, the timestamp is missing/unparseable (non-finite age), the age is

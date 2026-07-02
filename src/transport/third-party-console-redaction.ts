@@ -20,7 +20,10 @@ const LIBSIGNAL_SESSION_DUMP_PREFIXES = [
   'Session already open',
 ] as const;
 
-const SENSITIVE_KEY_RE = /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|identitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey|ratchet|rootkey|basekey|chainkey|messagekeys|ephemeralkey|remoteidentitykey|lastremoteephemeralkey|pubkey|privkey)/i;
+// SSOT for keyed-secret detection across redaction sites (QR-080/QR-118). Also
+// consumed by connection.ts's diagnostic redactor (isSensitiveDiagnosticKey) so the
+// two denylists cannot drift. No `g` flag — safe to reuse via .test().
+export const SENSITIVE_KEY_RE = /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|identitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey|ratchet|rootkey|basekey|chainkey|messagekeys|ephemeralkey|remoteidentitykey|lastremoteephemeralkey|pubkey|privkey)/i;
 
 function isPlainObject(value: object): boolean {
   const prototype = Object.getPrototypeOf(value);

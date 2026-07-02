@@ -331,8 +331,18 @@ export function migrateAccessListOrphan(db: Database, lid: string, phoneJid: str
       "UPDATE access_list SET subject_id = ? WHERE subject_type = 'phone' AND subject_id = ?",
     ).run(phone, lid);
   } else {
-    // A row already exists under the phone key — drop the now-redundant orphan
-    // (the explicit phone-keyed decision wins). Preserves prior clobber semantics.
+    // A row already exists under the phone key. The phone-keyed decision wins,
+    // EXCEPT that a block may never be silently erased by the merge (QR-106):
+    // access-policy keys the blocklist on the resolved phone, so dropping a
+    // blocked orphan in favour of a non-blocked phone row is blocklist evasion.
+    // Deny-wins (fail-closed): if the orphan is blocked and the surviving phone
+    // row is not, the block follows the identity to the phone key before the
+    // orphan is dropped. (A blocked existing row already fails safe.)
+    if (orphan.status === 'blocked' && existing.status !== 'blocked') {
+      db.raw.prepare(
+        "UPDATE access_list SET status = 'blocked' WHERE subject_type = 'phone' AND subject_id = ?",
+      ).run(phone);
+    }
     db.raw.prepare(
       "DELETE FROM access_list WHERE subject_type = 'phone' AND subject_id = ?",
     ).run(lid);
