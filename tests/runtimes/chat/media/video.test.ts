@@ -676,3 +676,74 @@ describe('extractFramesDetailed — ffmpeg dependency missing (#1075)', () => {
     expect(details.frames).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// QR-123: untrusted-media hardening — every ffprobe/ffmpeg decode of the
+// attacker-controlled video buffer must pin `-protocol_whitelist file` so a
+// crafted concat/HLS payload cannot make a demuxer follow embedded file:// or
+// http(s):// references (local-file read / SSRF). Sibling of QR-122 / #1601
+// (transcription). RED pre-fix: no whitelist arg → indexOf === -1.
+// ---------------------------------------------------------------------------
+
+describe('QR-123: protocol whitelist pins ffprobe/ffmpeg to the file protocol', () => {
+  function assertWhitelistedBeforeInput(args: string[], inputToken: string): void {
+    const wlIndex = args.indexOf('-protocol_whitelist');
+    const inputIndex = args.indexOf(inputToken);
+    expect(wlIndex).toBeGreaterThanOrEqual(0);
+    expect(args[wlIndex + 1]).toBe('file');
+    // The whitelist option must PRECEDE the input so it governs the demuxer.
+    expect(wlIndex).toBeLessThan(inputIndex);
+  }
+
+  it('pins -protocol_whitelist file before the input on ffprobe AND both ffmpeg passes', async () => {
+    // ffprobe (duration) → main ffmpeg extract. readdir returns no frames, so the
+    // fallback ffmpeg pass is NOT reached here; the two decode calls we assert on
+    // are ffprobe + the main ffmpeg pass.
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '12.34\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([]);
+
+    await extractFramesDetailed(Buffer.from('fake-video'));
+
+    const [ffprobeBin, ffprobeArgs] = mockExecFile.mock.calls[0] as [string, string[]];
+    const [ffmpegBin, ffmpegArgs] = mockExecFile.mock.calls[1] as [string, string[]];
+    expect(ffprobeBin).toBe('ffprobe');
+    expect(ffmpegBin).toBe('ffmpeg');
+    // ffprobe: input is the positional path (writeTempFile mock returns this literal).
+    assertWhitelistedBeforeInput(ffprobeArgs, '/tmp/test-video.mp4');
+    // ffmpeg main pass: input is `-i <path>`.
+    assertWhitelistedBeforeInput(ffmpegArgs, '-i');
+  });
+
+  it('pins -protocol_whitelist file before -i on the single-frame FALLBACK ffmpeg pass', async () => {
+    // ffprobe ok → main ffmpeg FAILS → fallback ffmpeg pass runs. Assert the
+    // fallback pass (mock.calls[2]) also carries the whitelist before -i.
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '12.34\n', stderr: '' }),
+      )
+      .mockImplementationOnce((_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+        cb(new Error('main ffmpeg pass failed')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([]);
+
+    await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(mockExecFile.mock.calls.length).toBeGreaterThanOrEqual(3);
+    const [fallbackBin, fallbackArgs] = mockExecFile.mock.calls[2] as [string, string[]];
+    expect(fallbackBin).toBe('ffmpeg');
+    assertWhitelistedBeforeInput(fallbackArgs, '-i');
+  });
+});
