@@ -86,6 +86,21 @@ export async function downloadMedia(
       );
     }
 
+    // QR-097: type-confusion reject. If the bytes are a RECOGNIZED non-image
+    // (e.g. application/pdf, audio/ogg) but the declared MIME is image/*, this is
+    // malformed or hostile — feeding those bytes to the image resizer would hand
+    // a PDF/other payload to a libvips loader under an image pretext. Drop it
+    // before decode. Zero legitimate-traffic impact: a real image's magic bytes
+    // are png/jpeg/gif/webp (detected as image/*) or unrecognized (null, left to
+    // the resizer as before) — never a known non-image type.
+    if (detectedMime !== null && !detectedMime.startsWith('image/') && mimeType.startsWith('image/')) {
+      log.warn(
+        { declared: mimeType, detected: detectedMime, sizeBytes: buffer.length },
+        'Media type-confusion rejected — declared image/* but bytes are a recognized non-image',
+      );
+      return null;
+    }
+
     log.info({ mimeType, sizeBytes: buffer.length, durationMs }, 'Media downloaded');
 
     // Resize images that exceed Claude's 2000px multi-image limit
