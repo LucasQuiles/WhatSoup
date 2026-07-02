@@ -6890,7 +6890,24 @@ export class AgentRuntime implements Runtime {
     oldSession: SessionManager | null;
     hadToolActivity?: boolean;
   }): boolean {
-    if (args.activation.extended || args.activation.keyPresent === false || args.hadToolActivity) return false;
+    // QR-103: never replay a turn that ALREADY delivered a visible reply — the
+    // fallback replay would send a SECOND full answer (user gets both the primary
+    // streamed reply AND the backup reply). The sibling recordFallbackTurnOutcome
+    // already treats hadVisibleOutput||hadToolWork as a delivered reply; mirror
+    // that here. Derived from the same per-turn state the streaming path sets
+    // (reset at turn start, so never stale): per_chat reads its accumulated
+    // perChatTurnText[mapKey], singleton/shared reads turnHadVisibleOutput. Uses
+    // the streamed reply text, NOT the terminal result text (which is the failure
+    // string that was just classified) — so a genuinely silent turn still replays.
+    const hadVisibleOutput = args.mapKey !== undefined
+      ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
+      : this.turnHadVisibleOutput;
+    if (
+      args.activation.extended
+      || args.activation.keyPresent === false
+      || args.hadToolActivity
+      || hadVisibleOutput
+    ) return false;
     const replayText = args.mapKey !== undefined
       ? this.pendingTurnText.get(args.mapKey)
       : this.currentTurnReplayText;
