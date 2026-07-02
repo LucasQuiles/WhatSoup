@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -383,6 +383,46 @@ describe('agent-sandbox.sh — Bash path restriction (R1-B)', () => {
       dir,
     );
     // pathRestricted is falsy → no path scan applies; tilde is allowed.
+    expect(result.decision).toBe('allow');
+  });
+});
+
+
+// -----------------------------------------------------------------------------
+// Phase-0 honest-scope contract (QR-008 / #1607)
+// The sandbox hook is a best-effort denylist, NOT an OS-hard boundary, and it
+// applies ZERO network-egress confinement. These assertions lock that honesty
+// in place so no future change can silently strip the caveat and imply a real
+// sandbox. When OS-hard egress confinement lands (design-gated), the behavioral
+// marker below intentionally flips and forces #1607 to be re-evaluated.
+// -----------------------------------------------------------------------------
+describe('agent-sandbox.sh \u2014 honest-scope contract (QR-008/#1607)', () => {
+  const DOCS_PATH = resolve(new URL('.', import.meta.url).pathname, '../../docs/configuration.md');
+
+  it('hook documents its best-effort / not-a-real-sandbox scope', () => {
+    const src = readFileSync(HOOK_PATH, 'utf8');
+    expect(src).toMatch(/best-effort denylist/i);
+    expect(src).toMatch(/NOT a real sandbox/i);
+    expect(src).toMatch(/OS-level boundary/i);
+  });
+
+  it('docs explicitly state network egress is NOT confined (QR-008 gap)', () => {
+    const docs = readFileSync(DOCS_PATH, 'utf8');
+    expect(docs).toMatch(/network egress is not confined/i);
+    expect(docs).toMatch(/QR-008|#1607/);
+  });
+
+  it('applies NO network-egress restriction: an outbound network command is allowed (documents the unbounded-egress gap)', () => {
+    const dir = makeTmpDir();
+    // Path-restricted policy + a command with NO filesystem-path tokens that
+    // nonetheless performs network egress. The hook ALLOWS it because it has no
+    // egress control \u2014 proving QR-008. (The command is never executed; only the
+    // hook's allow/deny decision is asserted.)
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedMcpTools: [], bash: { enabled: true, pathRestricted: true } },
+      { tool_name: 'Bash', tool_input: { command: 'curl example.com' } },
+      dir,
+    );
     expect(result.decision).toBe('allow');
   });
 });
