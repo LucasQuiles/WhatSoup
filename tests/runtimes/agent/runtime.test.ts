@@ -1807,6 +1807,55 @@ describe('AgentRuntime', () => {
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
   });
 
+  // QR-103: a fallback replay must NOT fire when the turn already delivered a
+  // visible reply — otherwise the user gets BOTH the primary streamed answer and
+  // the backup answer (double-send). scheduleFallbackReplay must suppress the
+  // replay when the turn produced visible output.
+  {
+    const makeActivation = () => ({
+      primaryProvider: 'claude-cli', fallbackProvider: 'openai-api', fallbackModel: undefined,
+      reason: 'usage-limit', resetAt: null, activeUntil: 0, extended: false,
+      keyPresent: true, recoveryProbeRequired: false,
+    });
+
+    it('QR-103: single/shared — suppresses replay when a visible reply was already sent', () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+      const state = runtime as unknown as {
+        currentTurnReplayText: string | null;
+        turnHadVisibleOutput: boolean;
+        scheduleFallbackReplay: (a: unknown) => boolean;
+      };
+      // A replay text exists (so the pre-fix code would pass the replayText gate
+      // and dispatch), and a visible reply was already streamed this turn.
+      state.currentTurnReplayText = 'original user question';
+      state.turnHadVisibleOutput = true;
+
+      const result = state.scheduleFallbackReplay({
+        activation: makeActivation(), chatJid: 'test@s.whatsapp.net', oldSession: null, hadToolActivity: false,
+      });
+
+      expect(result).toBe(false); // suppressed — no second reply
+    });
+
+    it('QR-103: per_chat — suppresses replay when perChatTurnText holds a streamed reply', () => {
+      const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as {
+        perChatTurnText: Map<string, string>;
+        pendingTurnText: Map<string, string>;
+        scheduleFallbackReplay: (a: unknown) => boolean;
+      };
+      const mk = 'mk-1';
+      state.perChatTurnText.set(mk, 'a streamed reply the user already saw');
+      state.pendingTurnText.set(mk, 'original user question'); // replayText gate would pass
+
+      const result = state.scheduleFallbackReplay({
+        activation: makeActivation(), chatJid: 'test@s.whatsapp.net', mapKey: mk, oldSession: null, hadToolActivity: false,
+      });
+
+      expect(result).toBe(false);
+    });
+  }
+
   it('single-session crash callback marks runtime-fault continuity candidate before failing inbound', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
