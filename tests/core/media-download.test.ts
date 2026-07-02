@@ -65,6 +65,41 @@ describe('downloadMedia — positive', () => {
   });
 });
 
+// QR-097: type-confusion — declared image/* but the magic bytes are a recognized
+// non-image (pdf/ogg). The media must be dropped BEFORE the image resizer (never
+// hand a PDF/other payload to libvips under an image pretext).
+describe('downloadMedia — QR-097 image/non-image type-confusion', () => {
+  it('rejects declared image/png whose bytes are actually a PDF, without decoding', async () => {
+    const pdfBytes = Buffer.concat([Buffer.from([0x25, 0x50, 0x44, 0x46]), Buffer.alloc(64, 0)]); // %PDF...
+    const downloadFn = vi.fn().mockResolvedValue(pdfBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).toBeNull();
+    expect(mockResizeImageIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('still processes a genuine PNG declared image/png (regression)', async () => {
+    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(64, 0)]);
+    const downloadFn = vi.fn().mockResolvedValue(pngBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the unrecognized-signature path (null detect) — declared image still resized', async () => {
+    const unknownBytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const downloadFn = vi.fn().mockResolvedValue(unknownBytes);
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledOnce();
+  });
+});
+
 describe('downloadMedia — negative', () => {
   it('returns null when download function rejects (simulates timeout)', async () => {
     const downloadFn = vi.fn().mockRejectedValue(new Error('Download timed out after 30s'));
