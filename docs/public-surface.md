@@ -269,6 +269,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-publication-staged` | `npm run guard:publication:staged` | `package.json` | stable | active | Publication audit guard for pre-commit use |
 | `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
+| `cli:npm.guard-doc-tally` | `npm run guard:doc-tally` | `package.json` | stable | active | Verify hand-maintained tally docs declared header count matches actual body row count (doc-tally split-brain, #1524 class) |
 | `cli:npm.guard-design-system-hygiene` | `npm run guard:design-system-hygiene` | `package.json` | internal | active | Staged/changed-range guard requiring tracked design-system SSOT docs for token, lint, and QA harness changes |
 | `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
 | `cli:npm.guard-source-runtime-drift` | `npm run guard:source-runtime-drift` | `package.json` | stable | active | Verify deployed runtime scripts match their checked-in sources against `deploy/source-runtime-manifest.json` |
