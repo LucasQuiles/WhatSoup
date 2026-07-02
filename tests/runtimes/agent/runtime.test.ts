@@ -1993,6 +1993,88 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('auto-respawn unmarks only the failed continuation after injecting missed messages', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const queue = makeQueueMock('chat-auto@s.whatsapp.net');
+      const session = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        sendTurn: vi.fn().mockRejectedValueOnce(new Error('stdin closed after respawn')),
+        getStatus: vi
+          .fn()
+          .mockReturnValueOnce({
+            active: false,
+            pid: null,
+            sessionId: 'sess-auto',
+            startedAt: null,
+            messageCount: 0,
+            lastMessageAt: null,
+          })
+          .mockReturnValue({
+            active: true,
+            pid: 123,
+            sessionId: 'sess-auto',
+            startedAt: new Date().toISOString(),
+            messageCount: 1,
+            lastMessageAt: null,
+          }),
+      };
+      const state = runtime as unknown as {
+        chatSessions: Map<string, typeof session>;
+        chatQueues: Map<string, IOutboundQueue>;
+        injectMissedMessages: ReturnType<typeof vi.fn>;
+        pendingSystemResults: { counts: Map<string, number> };
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      state.chatSessions.set('chat-auto', session);
+      state.chatQueues.set('chat-auto', queue);
+      state.injectMissedMessages = vi.fn(async () => true);
+
+      state.handlePerChatCrash('chat-auto', 'chat-auto@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-auto',
+        dbRowId: 42,
+      });
+
+      await vi.advanceTimersByTimeAsync(2_500);
+
+      expect(state.injectMissedMessages).toHaveBeenCalledWith(
+        session,
+        'chat-auto@s.whatsapp.net',
+        Math.floor(new Date('2026-06-10T10:00:00Z').getTime() / 1000),
+      );
+      expect(session.sendTurn).toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+      );
+      expect(session.sendTurn).toHaveBeenCalledWith(
+        expect.stringContaining('continue where you left off'),
+      );
+      expect(state.pendingSystemResults.counts.get('chat-auto') ?? 0).toBe(1);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.any(Error),
+          mapKey: 'chat-auto',
+        }),
+        'failed to send continuation turn after auto-respawn',
+      );
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('tracks per-chat crash counts independently when scheduling auto-respawn', () => {
     vi.useFakeTimers();
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
