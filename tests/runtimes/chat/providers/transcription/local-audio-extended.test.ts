@@ -235,4 +235,58 @@ describe('withNormalizedAudioFile', () => {
       vi.resetModules();
     }
   });
+
+  // QR-122: untrusted-media decode hardening. The ffmpeg input is attacker-
+  // controlled bytes (a WhatsApp voice note); ffmpeg auto-probes the container
+  // from CONTENT (not the extension), so a crafted concat/HLS payload could
+  // reach out over the network or read local files on any host whose ffmpeg
+  // lacks a safe default. The invocation must therefore pin the protocol
+  // whitelist to `file` rather than relying on the host ffmpeg's implicit
+  // `safe`/whitelist posture (which varies by version across the fleet).
+  it('pins ffmpeg to the file protocol whitelist for untrusted media (QR-122)', async () => {
+    vi.resetModules();
+    const spawnCalls: Array<{ command: string; args: string[] }> = [];
+    vi.doMock('node:child_process', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:child_process')>()),
+      spawn: vi.fn((command: string, args: string[]) => {
+        spawnCalls.push({ command, args });
+        // Minimal child stub: no stream data, immediate clean exit so
+        // runCommand resolves and withNormalizedAudioFile proceeds to fn().
+        return {
+          stdout: { on: () => {} },
+          stderr: { on: () => {} },
+          on: (event: string, cb: (code: number, signal: null) => void) => {
+            if (event === 'close') queueMicrotask(() => cb(0, null));
+          },
+          kill: () => {},
+        } as unknown as import('node:child_process').ChildProcess;
+      }),
+    }));
+    // ffmpeg-presence must be deterministic on CI (no ffmpeg installed):
+    // mock existsSync->true so resolveBinaryPath finds ffmpeg and execution
+    // reaches the spawn assertion below (sibling absence test mocks ->false).
+    vi.doMock('node:fs', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:fs')>()),
+      existsSync: vi.fn(() => true),
+    }));
+    const { withNormalizedAudioFile: isolated } = await import(
+      '../../../../../src/runtimes/chat/providers/transcription/local-audio.ts'
+    );
+    try {
+      const seenWavPath = await isolated(Buffer.from([0x00]), 'audio/ogg', async (wavPath) => wavPath);
+      expect(spawnCalls).toHaveLength(1);
+      const { args } = spawnCalls[0];
+      // The security control: -protocol_whitelist file, applied as an input
+      // option (before -i) so it governs the demuxer that opens the media.
+      const wlIndex = args.indexOf('-protocol_whitelist');
+      expect(wlIndex).toBeGreaterThanOrEqual(0);
+      expect(args[wlIndex + 1]).toBe('file');
+      expect(wlIndex).toBeLessThan(args.indexOf('-i'));
+      expect(seenWavPath).toMatch(/normalized\.wav$/);
+    } finally {
+      vi.doUnmock('node:child_process');
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
 });
