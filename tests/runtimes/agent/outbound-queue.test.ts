@@ -10,6 +10,7 @@ import {
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
+  MAX_CHUNKS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -2598,5 +2599,37 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
     const inheritingReplacement = new OutboundQueue(messenger, GROUP_JID, oldToken);
     expect(inheritingReplacement.getSenderToken()).toBe(oldToken);
     expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
+  });
+
+  describe('QR-126: outbound chunk-count cap (message-amplification guard)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('caps a huge reply at MAX_CHUNKS sends with a truncation notice', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      // 256 KB reply → 64 uncapped chunks (ceil(len / 4000)). A prompt-injected
+      // max-length agent reply is the realistic trigger; the cap must bound the fan-out.
+      queue.enqueueText('x'.repeat(256 * 1024));
+      await vi.runAllTimersAsync();
+
+      // Uncapped this is 64 sends; capped it is exactly MAX_CHUNKS.
+      expect(calls.length).toBeLessThanOrEqual(MAX_CHUNKS);
+      expect(calls.length).toBe(MAX_CHUNKS);
+      // The final message is the visible truncation notice, not silently dropped.
+      expect(calls[calls.length - 1]).toContain('[reply truncated]');
+    });
+
+    it('does not truncate a reply that fits within MAX_CHUNKS', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      // ~3 chunks worth — well under the cap; must pass through untouched.
+      queue.enqueueText('y'.repeat(3 * 4000 + 100));
+      await vi.runAllTimersAsync();
+
+      expect(calls.length).toBeGreaterThan(1);
+      expect(calls.length).toBeLessThan(MAX_CHUNKS);
+      expect(calls.join('')).not.toContain('[reply truncated]');
+    });
   });
 });
