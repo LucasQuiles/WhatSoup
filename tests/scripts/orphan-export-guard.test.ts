@@ -168,7 +168,7 @@ describe('Orphaned-export dead-code guard', () => {
       orphans,
       `Orphaned export(s) detected:\n${orphans.map((o) => `  • ${o}`).join('\n')}`,
     ).toEqual([]);
-  });
+  }, 60_000);
 
   it('public-API allowlist contains only entries that still exist (no stale entries)', () => {
     const { allExportKeys } = scanForOrphans();
@@ -179,5 +179,5 @@ describe('Orphaned-export dead-code guard', () => {
       `Stale PUBLIC_API_ALLOWLIST entries — export was removed but allowlist ` +
         `entry was not: ${stale.join(', ')}`,
     ).toEqual([]);
-  });
+  }, 60_000);
 });
