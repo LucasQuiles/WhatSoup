@@ -310,7 +310,7 @@ export class DurabilityEngine {
         `SELECT seq FROM inbound_events WHERE processing_status = 'turn_done'`,
       ),
       getTerminalOutboundForInbound: prepare(
-        `SELECT id FROM outbound_ops
+        `SELECT id, status FROM outbound_ops
          WHERE source_inbound_seq = ? AND is_terminal = 1
            AND status NOT IN ('quarantined', 'failed_permanent')`,
       ),
@@ -722,7 +722,8 @@ export class DurabilityEngine {
 
       for (const ev of processingEvents) {
         // Check if there's any terminal outbound op linked to this inbound
-        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
+        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as
+          { id: number; status: OutboundStatus } | undefined;
 
         if (!terminalOp) {
           this.markContinuityCandidate(ev.seq, 'crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
@@ -730,6 +731,18 @@ export class DurabilityEngine {
           log.info(
             { inboundSeq: ev.seq },
             'preConnectRecovery: inbound processing with no terminal op marked failed',
+          );
+        } else if (terminalOp.status === 'echoed') {
+          // QR-102 (recovery site): the reply was echoed (delivery confirmed) but the
+          // inbound completion was interrupted — the echo path finalizes in autocommit
+          // steps (markEchoed.run → completeInbound) and a crash between them leaves the
+          // op 'echoed' while the inbound is still 'processing'. postConnect only
+          // reconciles submitted/maybe_sent ops, so an already-echoed op is NEVER
+          // revisited and the inbound would leak. Finalize it here (idempotent).
+          this.completeInbound(ev.seq, 'response_sent');
+          log.info(
+            { inboundSeq: ev.seq, terminalOpId: terminalOp.id },
+            'preConnectRecovery: inbound processing with echoed terminal op finalized (QR-102)',
           );
         } else {
           log.info(
@@ -755,8 +768,23 @@ export class DurabilityEngine {
         // postConnect, which reconciles the op (echo/replay) and marks the inbound
         // complete only after delivery is confirmed — finalizing it here would
         // prematurely complete it before its reply is verified.
-        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
-        if (terminalOp) continue;
+        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as
+          { id: number; status: OutboundStatus } | undefined;
+        if (terminalOp) {
+          // QR-102 (recovery site): a turn_done with an already-echoed terminal op is
+          // the same interrupted-completion strand (crash after markTurnDone, before
+          // markInboundComplete). Delivery is confirmed, and postConnect never revisits
+          // an echoed op — so finalize it now (idempotent). A non-echoed terminal op is
+          // still left for postConnect (delivery not yet confirmed).
+          if (terminalOp.status === 'echoed') {
+            this.completeInbound(ev.seq, 'response_sent');
+            log.info(
+              { inboundSeq: ev.seq, terminalOpId: terminalOp.id },
+              'preConnectRecovery: stranded turn_done inbound with echoed terminal op finalized (QR-102)',
+            );
+          }
+          continue;
+        }
         this.markInboundComplete(ev.seq, 'recovered_turn_done');
         log.info({ inboundSeq: ev.seq }, 'preConnectRecovery: stranded turn_done inbound (no terminal op) finalized to complete');
       }
