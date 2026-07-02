@@ -6247,35 +6247,46 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
 
     let active = false;
+    let markSpawnStarted!: () => void;
     let releaseSpawn!: () => void;
+    const spawnStarted = new Promise<void>((resolve) => {
+      markSpawnStarted = resolve;
+    });
     const spawnBlocked = new Promise<void>((resolve) => {
       releaseSpawn = resolve;
     });
 
-    mockSession.getStatus.mockImplementation(() => ({
-      active,
-      pid: active ? 123 : null,
-      sessionId: active ? 'sess-per-chat' : null,
-      startedAt: active ? new Date().toISOString() : null,
-      messageCount: 0,
-      lastMessageAt: null,
-    }));
-    mockSession.spawnSession.mockImplementation(async () => {
-      await spawnBlocked;
-      active = true;
+    const localSession = {
+      ...mockSession,
+      getStatus: vi.fn(() => ({
+        active,
+        pid: active ? 123 : null,
+        sessionId: active ? 'sess-per-chat' : null,
+        startedAt: active ? new Date().toISOString() : null,
+        messageCount: 0,
+        lastMessageAt: null,
+      })),
+      spawnSession: vi.fn(async () => {
+        markSpawnStarted();
+        await spawnBlocked;
+        active = true;
+      }),
+      sendTurn: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+    };
+    (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return localSession;
     });
 
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
 
     await runtime.handleMessage(makeMsg({ messageId: 'msg-1', chatJid: 'same@s.whatsapp.net', content: 'first' }));
+    await spawnStarted;
     await runtime.handleMessage(makeMsg({ messageId: 'msg-2', chatJid: 'same@s.whatsapp.net', content: 'second' }));
 
-    await vi.waitFor(() => {
-      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
-    });
-
-    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect(localSession.spawnSession).toHaveBeenCalledTimes(1);
+    expect(localSession.sendTurn).not.toHaveBeenCalled();
     expect((MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
 
     releaseSpawn();
@@ -6284,9 +6295,9 @@ describe('AgentRuntime', () => {
     const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
     expect(chatSessions.size).toBe(1);
     expect(chatSessions.has('same@s.whatsapp.net')).toBe(true);
-    expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
-    expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
-    const userTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
+    expect(localSession.shutdown).toHaveBeenCalledTimes(1);
+    expect(localSession.spawnSession).toHaveBeenCalledTimes(1);
+    const userTurns = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
       .map(([turnText]) => turnText as string)
       .filter((turnText) => turnText === 'first' || turnText === 'second');
     expect(userTurns).toEqual(['first', 'second']);
