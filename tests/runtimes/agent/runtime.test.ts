@@ -10374,6 +10374,65 @@ describe('AgentRuntime', () => {
       db.close();
     });
 
+    it('rehydrate logs and drops expired polls when the downtime notice send rejects', async () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const past = Date.now() - 10_000;
+      const sendError = new Error('socket closed');
+      messenger.sendMessage = vi.fn(async () => {
+        throw sendError;
+      });
+      mockRuntimeLogger.warn.mockClear();
+
+      insertRow(db, 'send_poll:reject', 'chatReject@g.us', past, buildPayload({ chatJid: 'chatReject@g.us' }));
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await expect((runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls()).resolves.toBeUndefined();
+      await Promise.resolve();
+
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        'chatReject@g.us',
+        expect.stringContaining('A poll I was waiting on expired'),
+      );
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        { err: sendError, chatJid: 'chatReject@g.us' },
+        'notifyPollExpiredDuringDowntime: send failed (non-fatal)',
+      );
+      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
+      expect(remaining.cnt).toBe(0);
+
+      db.close();
+    });
+
+    it('rehydrate logs and drops expired polls when downtime notice dispatch throws synchronously', async () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const past = Date.now() - 10_000;
+      const dispatchError = new Error('transport unavailable');
+      messenger.sendMessage = vi.fn(() => {
+        throw dispatchError;
+      }) as unknown as Messenger['sendMessage'];
+      mockRuntimeLogger.warn.mockClear();
+
+      insertRow(db, 'send_poll:throw', 'chatThrow@g.us', past, buildPayload({ chatJid: 'chatThrow@g.us' }));
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await expect((runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls()).resolves.toBeUndefined();
+
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        'chatThrow@g.us',
+        expect.stringContaining('A poll I was waiting on expired'),
+      );
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        { err: dispatchError, chatJid: 'chatThrow@g.us' },
+        'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)',
+      );
+      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
+      expect(remaining.cnt).toBe(0);
+
+      db.close();
+    });
+
     it('persistPendingPoll failure increments pollPersistenceErrors and surfaces it in the health snapshot', async () => {
       const db = makeRealDb();
       const { messenger } = makeMessenger();
