@@ -1993,6 +1993,80 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('auto-respawn aborts when the crashed session is replaced before the timer fires', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const queue = makeQueueMock('chat-replaced@s.whatsapp.net');
+      const staleSession = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        sendTurn: vi.fn(),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: 'stale-sess',
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      };
+      const replacementSession = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: 'replacement-sess',
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      };
+      const state = runtime as unknown as {
+        chatSessions: Map<string, typeof staleSession>;
+        chatQueues: Map<string, IOutboundQueue>;
+        injectMissedMessages: ReturnType<typeof vi.fn>;
+        pendingSystemResults: { counts: Map<string, number> };
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      state.chatSessions.set('chat-replaced', staleSession);
+      state.chatQueues.set('chat-replaced', queue);
+      state.injectMissedMessages = vi.fn(async () => true);
+
+      state.handlePerChatCrash('chat-replaced', 'chat-replaced@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'stale-sess',
+        dbRowId: 42,
+      });
+
+      state.chatSessions.set('chat-replaced', replacementSession);
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      expect(staleSession.spawnSession).not.toHaveBeenCalled();
+      expect(staleSession.sendTurn).not.toHaveBeenCalled();
+      expect(state.injectMissedMessages).not.toHaveBeenCalled();
+      expect(replacementSession.getStatus).not.toHaveBeenCalled();
+      expect(state.pendingSystemResults.counts.get('chat-replaced') ?? 0).toBe(0);
+      expect(mockRuntimeLogger.info).not.toHaveBeenCalledWith(
+        expect.objectContaining({ mapKey: 'chat-replaced', sessionId: 'stale-sess' }),
+        'auto-respawn: attempting resume',
+      );
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('auto-respawn unmarks only the failed continuation after injecting missed messages', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
