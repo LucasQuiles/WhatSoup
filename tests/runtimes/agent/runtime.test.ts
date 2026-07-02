@@ -1654,6 +1654,28 @@ describe('AgentRuntime', () => {
     expect(enqueuedTexts.some((t) => t.includes('new session'))).toBe(true);
   });
 
+  // QR-108: /new is a clean reset — it must drop the one-message-handoff latches
+  // (standby notice + handoff artifact) for the conversation, else they leak into
+  // the next reply/prelude (both keyed by the stable conversation_key). This
+  // harness uses a mock db, so we assert /new issues the two DELETE statements
+  // rather than round-tripping real rows.
+  it('handleMessage /new clears the standby notice and handoff artifact for the chat', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    // Isolate /new's DB activity from setup/start().
+    const prepareSpy = db.raw.prepare as unknown as { mock: { calls: unknown[][] }; mockClear: () => void };
+    prepareSpy.mockClear();
+
+    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+
+    const sql = prepareSpy.mock.calls.map((c) => String(c[0]));
+    expect(sql.some((s) => s.includes('DELETE FROM standby_notice'))).toBe(true);
+    expect(sql.some((s) => s.includes('DELETE FROM agent_handoff_artifacts'))).toBe(true);
+  });
+
   it('/new calls abortTurn() on the old queue before replacing it', async () => {
     // abortTurn() must fire BEFORE the new queue is created — it clears the typing
     // heartbeat interval and tool timers so the old session's state does not bleed
