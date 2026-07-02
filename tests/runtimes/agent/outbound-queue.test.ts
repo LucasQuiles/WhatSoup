@@ -131,6 +131,38 @@ describe('OutboundQueue', () => {
     );
   });
 
+  it('logs and suppresses rejected tool-status redirect sends', async () => {
+    mockLog.warn.mockClear();
+    const redirectError = new Error('redirect socket unavailable');
+    const { messenger } = makeMessenger();
+    vi.mocked(messenger.sendMessage).mockImplementation(async (jid: string, text: string) => {
+      if (jid === 'status-log@g.us') {
+        throw redirectError;
+      }
+      return { waMessageId: null };
+    });
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.setToolUpdateRedirectJid('status-log@g.us');
+    queue.enqueueToolUpdate({ category: 'running', detail: 'Running redirect probe' });
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+    await Promise.resolve();
+    queue.abortTurn();
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      'status-log@g.us',
+      expect.stringContaining('Running redirect probe'),
+    );
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: redirectError,
+        target: 'status-log@g.us',
+        textLength: expect.any(Number),
+      }),
+      'tool-status redirect send failed',
+    );
+  });
+
   it('keeps normal text delivery on the main chat when tool-status redirect is configured', async () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
@@ -679,6 +711,29 @@ describe('OutboundQueue', () => {
     expect(messenger.setTyping).not.toHaveBeenCalled();
   });
 
+  it('suppresses typing transport rejections during start, refresh, and stop', async () => {
+    const typingCalls: Array<boolean> = [];
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async () => ({ waMessageId: null })),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async (_jid: string, typing: boolean) => {
+        typingCalls.push(typing);
+        throw new Error(`typing ${typing ? 'start' : 'stop'} failed`);
+      }),
+    };
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.indicateTyping();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(TYPING_REFRESH_MS);
+    queue.endTurn();
+    await Promise.resolve();
+
+    expect(messenger.setTyping).toHaveBeenCalledWith(CHAT_JID, true);
+    expect(typingCalls.filter((value) => value === true).length).toBeGreaterThanOrEqual(2);
+    expect(typingCalls.filter((value) => value === false)).toHaveLength(1);
+  });
+
   // ─── Serialization ─────────────────────────────────────────────────────────
 
   it('sends messages serially (only one in-flight at a time)', async () => {
@@ -931,6 +986,31 @@ describe('OutboundQueue', () => {
     expect(successCalls.some((t) => t.includes('could not be delivered'))).toBe(true);
     // Queue kept draining — 'good message' was delivered
     expect(successCalls.some((t) => t === 'good message')).toBe(true);
+  });
+
+  it('resets sending when the drain safety-net catches an unexpected pacing failure', async () => {
+    mockLog.error.mockClear();
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const internals = queue as unknown as {
+      sendWithPacing: (text: string) => Promise<void>;
+      sending: boolean;
+      chain: Promise<void>;
+    };
+    const pacingError = new Error('unexpected pacing failure');
+    internals.sendWithPacing = vi.fn(async () => {
+      throw pacingError;
+    });
+
+    queue.enqueueText('message that trips the safety net');
+    await internals.chain;
+
+    expect(internals.sendWithPacing).toHaveBeenCalledWith('message that trips the safety net');
+    expect(mockLog.error).toHaveBeenCalledWith(
+      { err: pacingError },
+      'drain queue error — resetting',
+    );
+    expect(internals.sending).toBe(false);
   });
 
   // ─── updateDeliveryJid ─────────────────────────────────────────────────────
@@ -2508,4 +2588,3 @@ describe('OutboundQueue', () => {
     });
   });
 });
-
