@@ -407,6 +407,60 @@ describe('MessageScheduler — start/stop lifecycle', () => {
     scheduler.stop();
     setIntervalSpy.mockRestore();
   });
+
+  it('logs and suppresses rejected immediate and interval ticks', async () => {
+    const log = {
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      trace: vi.fn(),
+    };
+    vi.resetModules();
+    vi.doMock('../../src/logger.ts', () => ({
+      createChildLogger: vi.fn(() => log),
+      default: log,
+      flushLogger: vi.fn(async () => undefined),
+    }));
+    const [{ Database: IsolatedDatabase }, { MessageScheduler: IsolatedMessageScheduler }] = await Promise.all([
+      import('../../src/core/database.ts'),
+      import('../../src/core/scheduler.ts'),
+    ]);
+    vi.useFakeTimers();
+    const db = new IsolatedDatabase(':memory:');
+    db.open();
+    const { mock: conn } = makeMockConnection();
+    const scheduler = new IsolatedMessageScheduler(db, conn as ConnectionManager, { intervalMs: 10_000, maxRetries: 3 });
+    const tickSpy = vi.spyOn(scheduler, 'tick').mockRejectedValue(new Error('tick failed'));
+
+    try {
+      scheduler.start();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'scheduler initial tick failed',
+      );
+      expect(tickSpy).toHaveBeenCalledTimes(1);
+      log.error.mockClear();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'scheduler tick failed',
+      );
+      expect(tickSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      scheduler.stop();
+      tickSpy.mockRestore();
+      db.close();
+      vi.useRealTimers();
+      vi.doUnmock('../../src/logger.ts');
+      vi.resetModules();
+    }
+  });
 });
 describe('MessageScheduler — recurring message scheduling', () => {
   let db: Database;
