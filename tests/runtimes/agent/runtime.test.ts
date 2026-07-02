@@ -2107,6 +2107,44 @@ describe('AgentRuntime', () => {
     expect(getResumableCheckpoints).not.toHaveBeenCalled();
   });
 
+  // QR-099: a conversation whose prior-instance child the startup sweep classified
+  // authoritative_live (verified-live) must NOT also be proactively resumed — that
+  // would spawn a SECOND session for one chat (duplicate turns/replies, contended
+  // per-chat state). The in-loop chatSessions.has() guard can't see the prior-
+  // instance child, so the sweep must record the live key and the resume loop skip it.
+  it('does not proactively resume a conversation with an authoritative_live session (QR-099)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    // Sweep leaves a verified-live child in place for this conversation_key.
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValueOnce([{
+      id: 1, sessionId: 'sess-live', claudePid: process.pid,
+      chatJid: null, conversationKey: '15550001111',
+      status: 'active', classification: 'authoritative_live', reason: 'pid alive + checkpoint active',
+    }]);
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      durability: {
+        getResumableCheckpoints: () => Array<{ conversation_key: string }>;
+        getSessionCheckpoint: (key: string) => { session_id: string } | null;
+      } | null;
+    };
+    // Same key ALSO has a resumable checkpoint — the double-spawn precondition.
+    state.durability = {
+      getResumableCheckpoints: () => [{ conversation_key: '15550001111' }],
+      getSessionCheckpoint: () => ({ session_id: 'resume-1' }),
+    };
+
+    await runtime.start();
+
+    // The live child is left in place: no resume session is wired (notifyUser
+    // stays unset) and — the load-bearing assertion — NO second session is
+    // spawned for the already-live conversation.
+    expect(capturedNotifyUserRef.current).toBeNull();
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
+  });
+
   it('sandbox per_chat notifyUser cleanup removes only the crashed workspace state', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
