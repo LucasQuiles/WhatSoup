@@ -23,11 +23,12 @@ import {
   ensureStandbyNoticeSchema,
   stashStandbyNotice,
   consumeStandbyNotice,
+  clearStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
-import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artifact.ts';
+import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude } from './handoff-prelude.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
@@ -2792,6 +2793,17 @@ export class AgentRuntime implements Runtime {
           // which creates a fresh session+queue in the map. This is a narrow window
           // inherited from the original design, not a regression from the race fix.
           await sessionForNew?.handleNew();
+          // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+          // for this conversation too — otherwise a standby notice or handoff
+          // artifact stashed before /new leaks into the NEXT reply/prelude (both
+          // tables are keyed by the stable conversation_key, which /new does not
+          // change). Both fns are idempotent no-ops when nothing is pending, and
+          // their own JSDoc already documents "cleared on /new".
+          {
+            const resetKey = toConversationKey(chatJid);
+            clearStandbyNotice(this.db, resetKey);
+            deleteHandoffArtifact(this.db, resetKey);
+          }
           // Reset turn flag — stale value from the old session must not suppress the
           // _(no response)_ fallback if the first new-session turn has no visible text.
           this.turnHadVisibleOutput = false;
