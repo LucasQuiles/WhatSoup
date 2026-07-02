@@ -732,6 +732,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [32, runMigration32],
   [33, runMigration33],
   [34, runMigration34],
+  [35, runMigration35],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -877,6 +878,52 @@ function runMigration34(db: DatabaseSync): void {
   if (!names.has('continuity_candidate_marked_at')) {
     db.exec('ALTER TABLE inbound_events ADD COLUMN continuity_candidate_marked_at TEXT');
   }
+}
+
+/**
+ * QR-115: guard the FTS `'delete'` command against a since-soft-deleted row on
+ * BOTH triggers that emit it. The `messages_fts_soft_delete` trigger already
+ * removes a row from FTS when `deleted_at` is set; if `messages_fts_delete`
+ * (AFTER DELETE) or `messages_fts_update` (AFTER UPDATE OF content_text) then
+ * fires a second `'delete'` for the same rowid, SQLite throws
+ * "database disk image is malformed" at the DML statement — retention pruning
+ * (deleteOldMessages) crashes on any hard-delete of a soft-deleted row, and
+ * transcription updates (updateTranscription) crash on any since-revoked audio.
+ * Fix: add `AND OLD.deleted_at IS NULL` to `messages_fts_delete`'s WHEN clause
+ * and to `messages_fts_update`'s delete-half WHERE clause. The insert-halves
+ * already correctly gate on `NEW.deleted_at IS NULL`, so live↔soft-deleted
+ * transitions remain consistent.
+ */
+function runMigration35(db: DatabaseSync): void {
+  // Skip if the messages table is not present (fresh install running in an
+  // order where the initial schema hasn't been executed yet, or a partial
+  // install).
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_fts_update;
+    DROP TRIGGER IF EXISTS messages_fts_delete;
+
+    CREATE TRIGGER messages_fts_update AFTER UPDATE OF content_text ON messages
+    BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content)
+        SELECT 'delete', OLD.pk, OLD.content_text
+        WHERE OLD.content_text IS NOT NULL AND OLD.deleted_at IS NULL;
+      INSERT INTO messages_fts(rowid, content)
+        SELECT NEW.pk, NEW.content_text
+        WHERE NEW.content_text IS NOT NULL AND NEW.deleted_at IS NULL;
+    END;
+
+    CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages
+      WHEN OLD.content_text IS NOT NULL AND OLD.deleted_at IS NULL
+    BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', OLD.pk, OLD.content_text);
+    END;
+  `);
 }
 
 function runMigration27(db: DatabaseSync): void {
