@@ -77,6 +77,17 @@ describe('keyring', () => {
       expect(lookupCredential('anthropic')).toBe('sk-test-123');
     });
 
+    it('QR-157: returns null for a whitespace-only env var (trims to empty, not the empty string)', () => {
+      // A whitespace-only value is truthy but trims to '' — returning '' is dangerous
+      // for HMAC-key consumers (empty key is forgeable). Must yield null, matching the
+      // trim-then-check keyring/file paths.
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      for (const ws of ['   ', '\t', '\n', ' \t\n ']) {
+        process.env.ANTHROPIC_API_KEY = ws;
+        expect(lookupCredential('anthropic')).toBeNull();
+      }
+    });
+
     it('falls back to secret-tool on linux', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('/usr/bin/secret-tool'));

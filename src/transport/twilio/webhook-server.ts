@@ -137,7 +137,12 @@ export class TwilioWebhookServer {
     // Token first: with no token nothing can be validated — reject before
     // spending any parse work on the request.
     const token = this.opts.getAuthToken();
-    if (token === null) {
+    // QR-157: reject a null/empty/whitespace-only token — not just `=== null`.
+    // `token` is the HMAC key for validateRequest below; an empty key is universally
+    // attacker-forgeable, so an empty OR whitespace-only token must never reach
+    // signature validation. `!token?.trim()` catches null, '', and '   ' independently
+    // of the keyring trim-then-check fix (defense-in-depth at the security boundary).
+    if (!token?.trim()) {
       log.warn({ path: url }, 'twilio-webhook: auth token unavailable, rejecting 503');
       res.writeHead(503).end();
       return;

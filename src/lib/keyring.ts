@@ -128,7 +128,13 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     const envKey = SERVICE_ENV_MAP[service];
     if (!envKey) return null;
     const envVal = process.env[envKey];
-    if (envVal) return envVal.trim();
+    // QR-157: trim FIRST, then check — a whitespace-only env var (`'   '`) is
+    // truthy but trims to `''`. Returning that empty string is dangerous for
+    // consumers that use the credential as an HMAC key (Twilio validateRequest):
+    // an empty key is attacker-forgeable. Mirror the keyring/file paths below,
+    // which already trim-then-check, so an empty-after-trim value yields null.
+    const trimmed = envVal?.trim();
+    if (trimmed) return trimmed;
     return null;
   };
 

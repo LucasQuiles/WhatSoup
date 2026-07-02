@@ -73,6 +73,20 @@ describe('TwilioWebhookServer signature gate', () => {
     expect(smsRecords).toHaveLength(0);
   });
 
+  it('QR-157: fails closed with 503 for an EMPTY/whitespace auth token (empty HMAC key is forgeable)', async () => {
+    // An empty or whitespace-derived token must never reach validateRequest — the
+    // empty-key HMAC-SHA1 is universally attacker-forgeable, so a crafted signature
+    // would otherwise be accepted. The guard checks `!token`, not just `=== null`.
+    for (const emptyish of ['', '   ']) {
+      const { server, smsRecords } = makeServer({ getAuthToken: () => emptyish });
+      const port = await server.start(); active = server;
+      const res = await post(port, '/twilio/sms', { MessageSid: 'SM1', From: '+1', To: '+2', Body: 'x' }, 'anything');
+      expect(res.status).toBe(503);
+      expect(smsRecords).toHaveLength(0);
+      await server.stop(); active = null;
+    }
+  });
+
   it('returns 404 for unknown paths and 405 for GET on known paths', async () => {
     const { server } = makeServer();
     const port = await server.start(); active = server;
