@@ -117,4 +117,66 @@ describe('ensureClaudeFileStoreCredential', () => {
     expect(r.outcome).toBe('skipped-no-keychain-token');
     expect(writeFileStore).not.toHaveBeenCalled();
   });
+
+  it('treats an empty-string keychain accessToken as no token (no false heal)', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readKeychain: () => JSON.stringify({ claudeAiOauth: { accessToken: '', expiresAt: NOW + 60_000 } }),
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('skipped-no-keychain-token');
+    expect(writeFileStore).not.toHaveBeenCalled();
+  });
+
+  it('treats a non-object keychain claudeAiOauth as no token', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readKeychain: () => JSON.stringify({ claudeAiOauth: 'oops-a-string' }),
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('skipped-no-keychain-token');
+    expect(writeFileStore).not.toHaveBeenCalled();
+  });
+
+  it('treats expiresAt exactly equal to now as expired (boundary, no resurrection)', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(NOW) }),
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('skipped-no-keychain-token');
+    expect(writeFileStore).not.toHaveBeenCalled();
+  });
+
+  it('heals a missing file token even when the keychain token has no recorded expiry', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(null, 'no-exp') }),
+      readFileStore: () => null,
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('healed');
+    expect(JSON.parse(writeFileStore.mock.calls[0][1]).claudeAiOauth.accessToken).toBe('no-exp');
+  });
+
+  it('does NOT downgrade when neither token records an expiry (cannot prove keychain newer)', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(null, 'kc') }),
+      readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(null, 'disk') }),
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('skipped-file-store-current');
+    expect(writeFileStore).not.toHaveBeenCalled();
+  });
+
+  it('is fail-open when readFileStore itself throws', () => {
+    const writeFileStore = vi.fn();
+    const r = ensureClaudeFileStoreCredential(baseDeps({
+      readFileStore: () => { throw new Error('EACCES'); },
+      writeFileStore,
+    }));
+    expect(r.outcome).toBe('skipped-error');
+    expect(writeFileStore).not.toHaveBeenCalled();
+  });
 });

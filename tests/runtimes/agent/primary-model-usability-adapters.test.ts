@@ -95,6 +95,65 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(1); // unchanged — not called for opencode
   });
 
+  it('restoration cycle: probe recovers to ok after the heal populates the file store', async () => {
+    // Model the fleet failure→recovery: probe #1 sees an unauthenticated CLI
+    // (fallback would arm), then the heal populates the file store and probe #2
+    // succeeds (the recovery probe returns ok → the runtime revert timer fires).
+    const outputs = ['Error: invalid API key provided', 'OK'];
+    const statuses = ['failed', 'ok'] as const;
+    let call = 0;
+    const probeBinaryCommand = vi.fn(async () => {
+      const i = call++;
+      return { status: statuses[i], output: outputs[i] };
+    });
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'healed' as const }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand,
+      ensureClaudeFileStoreCredential,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'credential_unavailable' });
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+    expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(2); // heal attempted before each probe
+  });
+
+  it('false-negative safety: a skipped heal does NOT mask a genuinely dead credential', async () => {
+    // If the credential is truly unavailable (nothing valid to heal from), the
+    // probe must still report credential_unavailable — the heal must never
+    // fabricate a pass and suppress a real fallback.
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-no-keychain-token' as const }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand: vi.fn(async () => ({ status: 'failed' as const, output: 'Error: invalid API key provided' })),
+      ensureClaudeFileStoreCredential,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'credential_unavailable' });
+    expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throwing heal never breaks the probe (fail-open at the call site)', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const ensureClaudeFileStoreCredential = vi.fn(() => { throw new Error('heal blew up'); });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand,
+      ensureClaudeFileStoreCredential,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+    expect(probeBinaryCommand).toHaveBeenCalledTimes(1);
+  });
+
   it('maps the real Claude CLI selected-model rejection through the shared binary status contract', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),

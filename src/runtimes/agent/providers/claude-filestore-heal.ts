@@ -200,9 +200,14 @@ export function ensureClaudeFileStoreCredential(
       };
     }
 
-    // Merge: preserve every other file-store key (e.g. mcpOAuth), replace only
-    // claudeAiOauth. Start from the existing file store when present.
-    const merged: Record<string, unknown> = { ...(fileStore ?? {}) };
+    // Merge policy:
+    //   - every EXISTING file-store key wins (never clobber what the CLI wrote,
+    //     e.g. a file-store-only mcpOAuth),
+    //   - gaps are filled from the keychain blob (so a fresh/empty file store
+    //     still gets mcpOAuth and MCP-connector auth isn't lost), and
+    //   - the serving credential (claudeAiOauth) is always taken from the
+    //     keychain — that IS the heal.
+    const merged: Record<string, unknown> = { ...(keychainStore ?? {}), ...(fileStore ?? {}) };
     merged[OAUTH_KEY] = keychainOAuth as unknown;
 
     (deps.writeFileStore ?? defaultWriteFileStore)(path, `${JSON.stringify(merged, null, 2)}\n`);

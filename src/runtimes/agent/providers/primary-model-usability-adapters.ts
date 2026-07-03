@@ -81,7 +81,14 @@ async function probeCliModel(
   // — arming the fallback and preventing revert. No-op off-darwin / when
   // CLAUDE_CONFIG_DIR is unset / when the file store is already current.
   if (provider !== 'opencode-cli') {
-    (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
+    // Best-effort: the heal is fail-open by contract, but guard the call site too
+    // so no future/injected heal fault can ever break the probe (a broken probe
+    // would strand the fallback — the exact failure mode this change fixes).
+    try {
+      (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
+    } catch {
+      // swallow — proceed to probe exactly as before
+    }
   }
 
   const probe = deps.probeBinaryCommand
