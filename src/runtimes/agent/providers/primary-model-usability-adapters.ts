@@ -52,7 +52,7 @@ export function createPrimaryModelProbeAdapters(
 
 async function probeCliModel(
   provider: string,
-  model: string,
+  model: string | null,
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
 ): Promise<BinaryModelProbeResult> {
@@ -81,7 +81,7 @@ async function probeCliModel(
 
 function modelProbeCommand(
   provider: string,
-  model: string,
+  model: string | null,
   providerConfig: Record<string, unknown> | undefined,
 ): string[] {
   if (provider === 'opencode-cli') {
@@ -90,22 +90,24 @@ function modelProbeCommand(
       '--format',
       'json',
       '--pure',
-      ...(opencodeUsesConfigModel(providerConfig) ? [] : ['-m', model]),
+      ...(opencodeUsesConfigModel(providerConfig) || model === null ? [] : ['-m', model]),
       OPENCODE_MODEL_PROBE_PROMPT,
     ];
   }
-  return ['-p', CLAUDE_MODEL_PROBE_PROMPT, '--model', model];
+  // No configured model => probe the CLI's own default (omit --model) instead of
+  // never probing at all — a model-less instance must be able to recover.
+  return ['-p', CLAUDE_MODEL_PROBE_PROMPT, ...(model === null ? [] : ['--model', model])];
 }
 
 function modelProbeEnv(
   provider: string,
-  model: string,
+  model: string | null,
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
 ): NodeJS.ProcessEnv {
   if (provider === 'opencode-cli') {
     const buildEnv = deps.buildChildEnv ?? buildChildEnv;
-    return buildEnv('opencode-cli', undefined, model, providerConfig);
+    return buildEnv('opencode-cli', undefined, model ?? undefined, providerConfig);
   }
   return {
     HOME: process.env.HOME,
