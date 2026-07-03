@@ -173,7 +173,7 @@ describe('memory_write tool', () => {
     const originalApiKey = process.env.PINECONE_API_KEY;
     process.env.PINECONE_API_KEY = 'test-pinecone-key';
     try {
-      registerMemoryWriteTools(() => undefined, (t) => tools.push(t));
+      registerMemoryWriteTools((t) => tools.push(t));
       const tool = tools.find((t) => t.name === 'memory_write')!;
 
       const res = await tool.handler(

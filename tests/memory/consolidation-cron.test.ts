@@ -262,7 +262,9 @@ describe('runConsolidation', () => {
     const clusterPayload = JSON.parse(request.messages[0].content);
     expect(clusterPayload.records[0]).toMatchObject({
       id: 'text-only',
-      claim: '',
+      // A missing claim is backfilled from text at payload build (consolidation.ts
+      // `claim: r.claim || r.text`), not left empty.
+      claim: 'The user prefers early calls',
       text: 'The user prefers early calls',
       confidence: 0.8,
     });

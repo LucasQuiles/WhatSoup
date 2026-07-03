@@ -446,6 +446,8 @@ function makeSession() {
   return {
     spawnSession: vi.fn(async () => {}),
     sendTurn: vi.fn(async () => {}),
+    // QR-105: maybeStartAutoCompact is provider-gated to claude-cli sessions.
+    getProviderId: vi.fn(() => 'claude-cli'),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({
       active: false,
@@ -666,7 +668,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(persistence.remove).toHaveBeenCalledWith(mapKey);
   });
 
-  it('degrades a group send_poll awaiter when admin metadata cannot be fetched', async () => {
+  it('keeps the admin gate fail-closed for a group send_poll awaiter when admin metadata cannot be fetched (QR-036)', async () => {
     const groupMetadata = vi.fn(async () => {
       throw new Error('metadata unavailable');
     });
@@ -687,7 +689,9 @@ describe('AgentRuntime edge coverage', () => {
     const pending = view(runtime).pendingPolls.questions.get('send_poll:poll-group-edge');
 
     expect(pending?.adminJids).toBeNull();
-    expect(pending?.resolution).toBe('first-vote-wins');
+    // QR-036: admin metadata loss keeps the admin strategy (fail-closed); it no
+    // longer degrades to first-vote-wins.
+    expect(pending?.resolution).toBe('admin-wins');
     expect(groupMetadata).toHaveBeenCalledWith('group-edge@g.us');
 
     abort.abort();
