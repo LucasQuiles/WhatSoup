@@ -7,6 +7,10 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from './api-key-resolver.ts';
+import {
+  ensureClaudeFileStoreCredential,
+  type ClaudeFileStoreHealResult,
+} from './claude-filestore-heal.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
@@ -30,6 +34,11 @@ export interface PrimaryModelProbeAdapterDeps {
   ) => Promise<BinaryAuthStatusResult>;
   resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
   fetch?: typeof fetch;
+  /**
+   * Self-heal the claude file-store credential from the keychain before a
+   * claude-cli probe (see claude-filestore-heal.ts). Injectable for tests.
+   */
+  ensureClaudeFileStoreCredential?: () => ClaudeFileStoreHealResult;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -64,6 +73,23 @@ async function probeCliModel(
     return { status: 'provider_unavailable' };
   }
   if (!binary) return { status: 'provider_unavailable' };
+
+  // Before probing claude-cli, ensure the file store the CLI is pinned to (via
+  // CLAUDE_CONFIG_DIR) actually holds a usable token, mirroring it from the
+  // keychain when stale/missing. Without this the probe false-negatives to
+  // credential_unavailable whenever a native login refreshed only the keychain
+  // — arming the fallback and preventing revert. No-op off-darwin / when
+  // CLAUDE_CONFIG_DIR is unset / when the file store is already current.
+  if (provider !== 'opencode-cli') {
+    // Best-effort: the heal is fail-open by contract, but guard the call site too
+    // so no future/injected heal fault can ever break the probe (a broken probe
+    // would strand the fallback — the exact failure mode this change fixes).
+    try {
+      (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
+    } catch {
+      // swallow — proceed to probe exactly as before
+    }
+  }
 
   const probe = deps.probeBinaryCommand
     ?? ((cmd: string, args: string[], env: NodeJS.ProcessEnv, options?: BinaryCommandProbeOptions) => {
