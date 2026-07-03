@@ -192,6 +192,27 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it('probes OpenCode default model (null) with -m omitted, mirroring turn argv', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      cwd: '/agent-cwd',
+      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: null }),
+    ).resolves.toEqual({ status: 'ok' });
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
+      expect.any(Object),
+      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+    );
+  });
+
   it.each([
     ['auth-required', 'Error: invalid API key provided', { status: 'credential_unavailable' }],
     ['usage-limit', 'Claude usage limit reached. Your limit will reset at 9pm.', { status: 'provider_unavailable' }],

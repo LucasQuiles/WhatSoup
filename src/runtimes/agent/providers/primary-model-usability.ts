@@ -60,10 +60,12 @@ export async function probePrimaryModelUsability(
 ): Promise<PrimaryModelUsabilityResult> {
   const provider = target.provider;
   const model = normalizedModel(target.model);
-  // claude-cli resolves its own default model, so a null model is probeable —
-  // short-circuiting here stranded model-less instances in permanent fallback
-  // (recovery probe could never return usable — observed in production as a permanently extending fallback window).
-  if (model === null && provider !== 'claude-cli') {
+  // claude-cli and opencode-cli resolve their own default model, so a null model is
+  // probeable for both (their probe adapters omit the model flag, mirroring turn
+  // argv) — short-circuiting here stranded model-less instances in permanent
+  // fallback (recovery probe could never return usable — observed in production as
+  // a permanently extending fallback window).
+  if (model === null && provider !== 'claude-cli' && provider !== 'opencode-cli') {
     return result(target, null, 'unknown', 'model-not-configured');
   }
 
