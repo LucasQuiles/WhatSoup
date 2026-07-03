@@ -3,6 +3,7 @@
  * by the link-preview path and the substrate poll.url watch executor.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { promises as dns, type LookupAddress } from 'node:dns';
 import {
   isPrivateHost,
   isPrivateIP,
@@ -125,6 +126,16 @@ describe('ssrf-fetch — host/IP classification', () => {
     expect(isPrivateHost('224.0.0.1')).toBe(true);
     expect(isPrivateHost('2606:4700:4700::1111')).toBe(false);
   });
+
+  it('isPrivateHost handles bracketed IPv6 literals from URL hosts', () => {
+    expect(isPrivateHost('[::1]')).toBe(true);
+    expect(isPrivateHost('[2606:4700:4700::1111]')).toBe(false);
+  });
+
+  it('isPrivateIP treats malformed IPv4/IPv6 text as unclassified, not private', () => {
+    expect(isPrivateIP('999.1.2.3')).toBe(false);
+    expect(isPrivateIP('zzzz::1')).toBe(false);
+  });
 });
 
 describe('ssrf-fetch — ssrfSafeLookup', () => {
@@ -148,12 +159,103 @@ describe('ssrf-fetch — ssrfSafeLookup', () => {
     expect(resolvedErr).toBeNull();
     expect(resolvedAddr).toBe('93.184.216.34');
   });
+
+  it('passes resolver errors through unchanged', () => {
+    const resolverError = Object.assign(new Error('temporary DNS failure'), { code: 'EAI_AGAIN' });
+    const fakeResolve = ((_host: string, _opts: unknown, cb: (e: Error, a: string, f: number) => void) => {
+      cb(resolverError, '', 0);
+    }) as never;
+    let resolvedAddr: string | LookupAddress[] | null = null;
+    let resolvedFamily: number | undefined;
+    let resolvedErr: unknown = null;
+
+    ssrfSafeLookup('flaky.example', { family: 4 } as never, (e, a, f) => {
+      resolvedErr = e;
+      resolvedAddr = a;
+      resolvedFamily = f;
+    }, fakeResolve);
+
+    expect(resolvedErr).toBe(resolverError);
+    expect(resolvedAddr).toBe('');
+    expect(resolvedFamily).toBe(0);
+  });
 });
 
 describe('ssrf-fetch — readBodyCapped', () => {
   it('truncates a text() fallback body at the cap', async () => {
     const resp = { text: async () => 'abcdefghij' };
     expect(await readBodyCapped(resp, 4)).toBe('abcd');
+  });
+
+  it('reads a stream body until done and releases the reader', async () => {
+    const encoder = new TextEncoder();
+    const reads = [
+      { done: false, value: encoder.encode('hello') },
+      { done: true, value: undefined },
+    ];
+    const reader = {
+      read: vi.fn(async () => reads.shift() ?? { done: true, value: undefined }),
+      cancel: vi.fn(async () => undefined),
+      releaseLock: vi.fn(),
+    };
+    const resp = {
+      body: { getReader: () => reader },
+      text: async () => {
+        throw new Error('streaming response should not use text fallback');
+      },
+    };
+
+    await expect(readBodyCapped(resp, 100)).resolves.toBe('hello');
+    expect(reader.cancel).not.toHaveBeenCalled();
+    expect(reader.releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips empty stream reads, truncates at the cap, and cancels the reader', async () => {
+    const encoder = new TextEncoder();
+    const reads = [
+      { done: false, value: undefined },
+      { done: false, value: encoder.encode('abc') },
+      { done: false, value: encoder.encode('def') },
+      { done: true, value: undefined },
+    ];
+    const reader = {
+      read: vi.fn(async () => reads.shift() ?? { done: true, value: undefined }),
+      cancel: vi.fn(async () => undefined),
+      releaseLock: vi.fn(),
+    };
+    const resp = {
+      body: { getReader: () => reader },
+      text: async () => {
+        throw new Error('streaming response should not use text fallback');
+      },
+    };
+
+    await expect(readBodyCapped(resp, 4)).resolves.toBe('abcd');
+    expect(reader.cancel).toHaveBeenCalledTimes(1);
+    expect(reader.releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels immediately and returns empty text when the cap is zero', async () => {
+    const encoder = new TextEncoder();
+    const reads = [
+      { done: false, value: encoder.encode('discarded') },
+      { done: true, value: undefined },
+    ];
+    const reader = {
+      read: vi.fn(async () => reads.shift() ?? { done: true, value: undefined }),
+      cancel: vi.fn(async () => undefined),
+      releaseLock: vi.fn(),
+    };
+    const resp = {
+      body: { getReader: () => reader },
+      text: async () => {
+        throw new Error('streaming response should not use text fallback');
+      },
+    };
+
+    await expect(readBodyCapped(resp, 0)).resolves.toBe('');
+    expect(reader.cancel).toHaveBeenCalledTimes(1);
+    expect(reader.releaseLock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -172,6 +274,80 @@ describe('ssrf-fetch — fetchUrlGuarded fail-closed', () => {
 
   it('throws SsrfBlockedError(invalid_url) for an unparseable URL', async () => {
     await expect(fetchUrlGuarded('::::not a url')).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+
+  it('throws SsrfBlockedError(private_ip) when DNS resolves a public host to a private address', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '169.254.169.254', family: 4 });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(fetchUrlGuarded('https://attacker.example/path')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'private_ip',
+      message: expect.stringContaining('169.254.169.254'),
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws SsrfBlockedError(dns_failed) when DNS lookup fails before fetch', async () => {
+    vi.spyOn(dns, 'lookup').mockRejectedValue(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }));
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(fetchUrlGuarded('https://missing.example/path')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'dns_failed',
+      message: 'DNS resolution failed for missing.example',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('maps connect-time SSRF lookup failures into a blocked result', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    const connectError = new Error('fetch failed', {
+      cause: new Error('SSRF blocked: redirect.example resolves to private IP 127.0.0.1'),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw connectError;
+    }));
+
+    await expect(fetchUrlGuarded('https://redirect.example/path')).rejects.toMatchObject({
+      name: 'SsrfBlockedError',
+      reason: 'private_ip',
+      message: 'connect/redirect resolved to a private IP for redirect.example',
+    });
+  });
+
+  it('preserves generic fetch failures after DNS passes', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    const networkError = new Error('socket hang up');
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw networkError;
+    }));
+
+    await expect(fetchUrlGuarded('https://example.com/path')).rejects.toBe(networkError);
+  });
+
+  it('returns normalized headers and capped body for a public URL', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    const fetchSpy = vi.fn<(input: string, init?: RequestInit & { dispatcher?: unknown }) => Promise<Response>>(async () => new Response('abcdefghij', {
+      status: 203,
+      headers: { 'X-Trace-Id': 'abc123' },
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const result = await fetchUrlGuarded('https://example.com/path', { maxBytes: 4, timeoutMs: 250 });
+
+    expect(result.status).toBe(203);
+    expect(result.headers['x-trace-id']).toBe('abc123');
+    expect(result.body).toBe('abcd');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe('https://example.com/path');
+    expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; bot/1.0)' },
+    });
+    expect(fetchSpy.mock.calls[0]?.[1]).toHaveProperty('dispatcher');
+    expect(fetchSpy.mock.calls[0]?.[1]).toHaveProperty('signal');
   });
 });
 

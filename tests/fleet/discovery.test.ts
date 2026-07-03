@@ -96,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) {
       delete process.env[key];
@@ -220,6 +221,27 @@ describe('FleetDiscovery.scan — tokens.env', () => {
       configPath: path.join(configRoot, 'loops', 'config.json'),
     });
   });
+
+  it('warns and keeps polling when tokens.env is unreadable', () => {
+    writeInstanceConfig('loops', chatInstance);
+    fs.mkdirSync(path.join(configRoot, 'loops', 'tokens.env'));
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    expect(instances.get('loops')).toMatchObject({
+      name: 'loops',
+      healthToken: null,
+    });
+    expect(warnCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        msg: 'tokens.env unreadable; instance polled without a health token',
+        obj: expect.objectContaining({
+          tokensPath: path.join(configRoot, 'loops', 'tokens.env'),
+        }),
+      }),
+    ]));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -245,6 +267,19 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
 
     const broken = instances.get('broken');
     expect(broken?.configError).toMatch(/Expected property name/i);
+  });
+
+  it('keeps instances with a non-object config root and marks them config_error', () => {
+    writeInstanceConfig('array-root', []);
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    expect(instances.get('array-root')).toMatchObject({
+      name: 'array-root',
+      type: 'chat',
+      configError: 'Invalid config.json: config is not a JSON object',
+    });
   });
 
   it('keeps instances with schema errors and marks them config_error', () => {

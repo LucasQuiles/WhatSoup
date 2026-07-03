@@ -130,6 +130,26 @@ describe('FleetRealtimeEventPoller', () => {
     expect(publisher.calls).toHaveLength(0);
   });
 
+  it('does not start duplicate timers and contains rejected poll ticks', async () => {
+    const discovery = makeDiscovery();
+    const dbReader = makeDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher }, 100);
+    const pollSpy = vi.spyOn(poller, 'poll').mockRejectedValue(new Error('tick failed'));
+
+    try {
+      poller.start();
+      poller.start();
+      await vi.advanceTimersByTimeAsync(100);
+      await Promise.resolve();
+
+      expect(pollSpy).toHaveBeenCalledTimes(1);
+      expect(publisher.calls).toHaveLength(0);
+    } finally {
+      poller.stop();
+      pollSpy.mockRestore();
+    }
+  });
+
   it('skips a poll tick while the previous typing probe is still in flight', async () => {
     let resolveTyping!: (value: { status: number; body: string }) => void;
     mockProxyToInstance.mockImplementation(() => new Promise((resolve) => {
@@ -257,6 +277,55 @@ describe('FleetRealtimeEventPoller', () => {
         composing: true,
       }),
     ]);
+
+    poller.stop();
+  });
+
+  it('publishes typing stops for disappeared entries without re-publishing unchanged or invalid states', async () => {
+    mockProxyToInstance
+      .mockResolvedValueOnce({
+        status: 200,
+        body: JSON.stringify({ composing: [{ jid: 'group@g.us', since: 30 }] }),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        body: JSON.stringify({ composing: [{ jid: 'group@g.us', since: 30 }] }),
+      })
+      .mockResolvedValueOnce({ status: 503, body: 'unavailable' })
+      .mockResolvedValueOnce({ status: 200, body: JSON.stringify({ composing: { jid: 'group@g.us', since: 40 } }) });
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 },
+    });
+    const dbReader = makeDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({
+        type: 'typing_update',
+        instance: 'test',
+        jid: 'group@g.us',
+        composing: true,
+      }),
+    ]);
+
+    publisher.calls.length = 0;
+    await poller.poll();
+    expect(publisher.calls).toHaveLength(0);
+
+    await poller.poll();
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({
+        type: 'typing_update',
+        instance: 'test',
+        jid: 'group@g.us',
+        composing: false,
+      }),
+    ]);
+
+    publisher.calls.length = 0;
+    await poller.poll();
+    expect(publisher.calls).toHaveLength(0);
 
     poller.stop();
   });

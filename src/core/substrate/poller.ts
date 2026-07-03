@@ -38,7 +38,7 @@
 // rather than crashing.
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { resolve, sep } from 'node:path';
+import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
@@ -277,11 +277,7 @@ export class TriggerPoller {
     // so the exec-time symlink-escape recheck (which realpaths the TARGET)
     // compares like-with-like — otherwise platform symlinks such as macOS
     // /var -> /private/var would make every legitimate target appear to escape.
-    // Roots that do not yet exist fall back to their resolve()'d textual form.
-    this.fileWatchAllowedRoots = (opts.fileWatchAllowedRoots ?? []).map((r) => {
-      const abs = resolve(r);
-      try { return realpathSync(abs); } catch { return abs; }
-    });
+    this.fileWatchAllowedRoots = (opts.fileWatchAllowedRoots ?? []).map(canonicalizeAllowedRoot);
     this.enableUrlWatch = opts.enableUrlWatch ?? false;
     this.urlFetch = opts.urlFetch ?? fetchUrlGuarded;
   }
@@ -444,6 +440,7 @@ export class TriggerPoller {
     const row = this.db.prepare(
       `SELECT started_at FROM trigger_runs
        WHERE trigger_id = ? AND status = 'ok'
+         AND json_valid(output_json)
          AND json_extract(output_json, '$.deliveredWaMessageId') IS NOT NULL
        ORDER BY started_at DESC, id DESC
        LIMIT 1`,
@@ -1293,6 +1290,30 @@ function formatExpiryNotification(t: TriggerRow, reason: string): string {
 
 function formatPauseNotification(t: TriggerRow, failureCount: number): string {
   return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with extend_trigger or recreate.`;
+}
+
+function canonicalizeAllowedRoot(root: string): string {
+  const abs = resolve(root);
+  try {
+    return realpathSync(abs);
+  } catch {
+    // If the configured root does not exist yet, canonicalize the deepest
+    // existing ancestor and append the missing suffix. This preserves future
+    // roots under platform symlinks such as macOS /var -> /private/var.
+    const missingSegments: string[] = [];
+    let current = abs;
+    for (let i = 0; i < 64; i++) {
+      try {
+        return resolve(realpathSync(current), ...missingSegments.reverse());
+      } catch {
+        const parent = resolve(current, '..');
+        if (parent === current) return abs;
+        missingSegments.push(basename(current));
+        current = parent;
+      }
+    }
+    return abs;
+  }
 }
 
 /**

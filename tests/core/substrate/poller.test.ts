@@ -11,6 +11,7 @@ import {
   symlinkSync,
   utimesSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
@@ -84,6 +85,34 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(refreshed.last_fire_at).toBe(1_000_000_001);
   });
 
+  it('continues when recording a post-dispatch receipt fails', async () => {
+    const calls: Array<{ chatJid: string; text: string }> = [];
+    const messenger: Messenger = {
+      async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
+        calls.push({ chatJid, text });
+        db.raw.exec(`DROP TABLE trigger_runs`);
+        return { waMessageId: 'wa-after-drop' };
+      },
+      async sendMedia() { throw new Error('not used'); },
+    };
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('hit')`).run();
+    createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id, label FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await expect(poller.tickOnce()).resolves.toBe(1);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain('Watch fired');
+  });
+
   it('fire_when=rows_returned: does NOT fire on 0 rows', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
@@ -104,6 +133,27 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0].status).toBe('noop');
     expect(runs[0].output_summary).toContain('0 rows');
+  });
+
+  it('disables a non-scheduled trigger with no interval after a successful run', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: null, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const refreshed = db.raw.prepare(`SELECT next_fire_at, last_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number | null; last_fire_at: number };
+    expect(refreshed.next_fire_at).toBeNull();
+    expect(refreshed.last_fire_at).toBe(1_000_000_001);
   });
 
   it('QR-026: a query exceeding the MAX_SQLITE_ROWS cap fails (bounds large-result DoS)', async () => {
@@ -269,6 +319,100 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ kind: 'poll.sqlite' });
   });
 
+  it('legacy unsafe SQL specs are rejected by the runtime guard before query_only runs', () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'unsafe sql', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    const outcome = (poller as unknown as {
+      executeSqlite(trigger: typeof t, spec: { sql: string; fire_when: 'rows_returned' }): {
+        status: string;
+        fired: boolean;
+        outputSummary: string;
+        outputJson: Record<string, unknown>;
+        errorKind?: string;
+      };
+    }).executeSqlite(t, { sql: 'PRAGMA user_version', fire_when: 'rows_returned' });
+
+    expect(calls).toHaveLength(0);
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      fired: false,
+      outputSummary: 'unsafe SQL rejected',
+      outputJson: { reason: 'unsafe_sql' },
+      errorKind: 'unsafe_sql',
+    });
+  });
+
+  it('rowcount_changed treats malformed prior output_json as no prior rowcount', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'malformed rowcount', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id FROM probes`, fire_when: 'rowcount_changed' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'ok', ?, ?, 0, 'legacy malformed', ?, 1, '{}')`,
+    ).run(t.id, bead.id, 999_999_990, 999_999_991, '{not-json');
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    const latest = db.raw.prepare(
+      `SELECT status, output_summary, output_json FROM trigger_runs
+       WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(latest.status).toBe('ok');
+    expect(latest.output_summary).toContain('first run -> 1');
+    expect(JSON.parse(latest.output_json)).toMatchObject({ rowCount: 1, lastRowCount: null });
+  });
+
+  it('executor throws are converted into failed trigger runs and retry cooldowns', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'executor throw', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT id FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    vi.spyOn(
+      poller as unknown as { executeTrigger(trigger: unknown): Promise<unknown> },
+      'executeTrigger',
+    ).mockRejectedValueOnce(new Error('executor crashed'));
+
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      `SELECT status, error_kind, error_message FROM trigger_runs WHERE trigger_id = ?`,
+    ).get(t.id) as { status: string; error_kind: string; error_message: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'execute_throw' });
+    expect(run.error_message).toContain('executor crashed');
+    const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number };
+    expect(refreshed.next_fire_at).toBe(1_000_000_001 + 60);
+  });
+
   it("on_terminal='silent' still dispatches normal fire notifications", async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'silent terminal only', ownerJid: 'mw', actor: 'u' });
@@ -408,6 +552,29 @@ describe('TriggerPoller — schedule kinds', () => {
     expect(refreshed.status).toBe('active');
     // nextCronRun for */5 from 1_000_000_001 should be the next 5-minute mark, > now
     expect(refreshed.next_fire_at).toBeGreaterThan(1_000_000_001);
+  });
+
+  it('legacy malformed cron spec records failure and uses retry cooldown for next_fire_at', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'bad cron', ownerJid: 'mw', actor: 'u' });
+    const now = 1_000_000_000;
+    const info = db.raw.prepare(
+      `INSERT INTO bead_triggers (
+         bead_id, kind, spec_json, spec_version, status, interval_seconds,
+         next_fire_at, last_fire_at, terminal_at, on_terminal, report_chat_jid,
+         dedupe_key, created_at, updated_at
+       ) VALUES (?, 'schedule.cron', ?, 1, 'active', NULL, ?, NULL, NULL, 'notify', ?, NULL, ?, ?)`,
+    ).run(bead.id, '{"expr":', now, 'admin@s.whatsapp.net', now, now);
+    const triggerId = Number(info.lastInsertRowid);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => now + 1 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).get(triggerId) as { status: string; error_kind: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_parse' });
+    const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(triggerId) as { next_fire_at: number };
+    expect(refreshed.next_fire_at).toBe(now + 1 + 60);
   });
 });
 
@@ -710,6 +877,26 @@ describe('TriggerPoller — poll.pinecone', () => {
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ matchCount: 1, topScore: 0.41 });
   });
 
+  it('uses a singular Pinecone summary for exactly one firing match', async () => {
+    const { messenger, calls } = makeMessenger();
+    const search = vi.fn(async () => ({ matches: [{ score: 0.91 }] }));
+    const t = makePineconeTrigger({ index: 'mw-mind', namespace: 'ns_facts', query: 'q', threshold: 0.8 });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      pineconeAllowedIndexes: ['mw-mind'],
+      pineconeSearch: search,
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    const run = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(run.status).toBe('ok');
+    expect(run.output_summary).toContain('pinecone matched 1 result');
+    expect(run.output_summary).not.toContain('1 results');
+    expect(JSON.parse(run.output_json)).toMatchObject({ matchCount: 1, topScore: 0.91 });
+  });
+
   it('with no threshold, fires when results.length > 0 and noops on zero results', async () => {
     const { messenger } = makeMessenger();
     const search = vi.fn(async () => ({ matches: [{ score: 0.1 }] }));
@@ -787,6 +974,49 @@ describe('TriggerPoller — poll.pinecone', () => {
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('pinecone_unavailable');
   });
+
+  it('fails with pinecone_error when the search client throws', async () => {
+    const { messenger, calls } = makeMessenger();
+    const search = vi.fn(async () => {
+      throw new Error('pinecone offline');
+    });
+    const t = makePineconeTrigger({ index: 'mw-mind', namespace: 'ns', query: 'q' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      pineconeAllowedIndexes: ['mw-mind'],
+      pineconeSearch: search,
+    });
+    await poller.tickOnce();
+
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(
+      `SELECT status, error_kind, error_message, output_json FROM trigger_runs WHERE trigger_id = ?`,
+    ).all(t.id) as Array<{ status: string; error_kind: string; error_message: string; output_json: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('pinecone_error');
+    expect(runs[0].error_message).toContain('pinecone offline');
+    expect(JSON.parse(runs[0].output_json)).toEqual({ index: 'mw-mind' });
+  });
+
+  it('treats sparse Pinecone responses with non-array matches as an empty noop', async () => {
+    const { messenger, calls } = makeMessenger();
+    const search = vi.fn(async () => ({ matches: null as unknown as Array<{ score: number }> }));
+    const t = makePineconeTrigger({ index: 'mw-mind', namespace: 'ns', query: 'q' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      pineconeAllowedIndexes: ['mw-mind'],
+      pineconeSearch: search,
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs[0].status).toBe('noop');
+    expect(JSON.parse(runs[0].output_json)).toEqual({ matchCount: 0, topScore: null });
+  });
 });
 
 describe('TriggerPoller — poll.file', () => {
@@ -844,6 +1074,26 @@ describe('TriggerPoller — poll.file', () => {
     expect(calls).toHaveLength(0);
     const runs = db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string }>;
     expect(runs[0].status).toBe('noop');
+  });
+
+  it('allows a root that is created after the poller is constructed', async () => {
+    const { messenger, calls } = makeMessenger();
+    const futureRoot = join(root, 'future-root');
+    const filePath = join(futureRoot, 'created-later.txt');
+    const t = makeFileTrigger({ path: filePath, watch: 'exists' });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [futureRoot],
+    });
+
+    mkdirSync(futureRoot);
+    writeFileSync(filePath, 'created after constructor');
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    const run = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_json: string };
+    expect(run.status).toBe('ok');
+    expect(JSON.parse(run.output_json)).toMatchObject({ exists: true });
   });
 
   it('watch=mtime: fires when mtime changes, noop when unchanged', async () => {
@@ -981,6 +1231,43 @@ describe('TriggerPoller — poll.file', () => {
     expect(runs[0].error_kind).toBe('path_not_allowed');
   });
 
+  it('SECURITY: an absent /dev target is rejected before it can act as an existence oracle', async () => {
+    const { messenger, calls } = makeMessenger();
+    const missingDevicePath = `/dev/whatsoup-missing-${randomBytes(8).toString('hex')}`;
+    const t = makeFileTrigger({ path: missingDevicePath, watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: ['/'],
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('path_not_allowed');
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'path_not_allowed' });
+  });
+
+  it('SECURITY: an absent path under a symlinked denied ancestor is rejected', async () => {
+    const { messenger, calls } = makeMessenger();
+    const deviceLink = join(root, 'device-link');
+    symlinkSync('/dev', deviceLink);
+    const t = makeFileTrigger({ path: join(deviceLink, `missing-${randomBytes(8).toString('hex')}`), watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: ['/'],
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('path_not_allowed');
+    expect(JSON.parse(run.output_json)).toMatchObject({ reason: 'path_not_allowed' });
+  });
+
   it('SECURITY: a non-regular file (directory) is rejected', async () => {
     const { messenger } = makeMessenger();
     const dirPath = join(root, 'subdir');
@@ -996,6 +1283,133 @@ describe('TriggerPoller — poll.file', () => {
     const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('path_not_allowed');
+  });
+
+  it('SECURITY: an absent path outside allowed roots is rejected instead of becoming an existence oracle', async () => {
+    const { messenger, calls } = makeMessenger();
+    const outside = mkdtempSync(join(tmpdir(), 'pollfile-absent-outside-'));
+    const filePath = join(outside, 'missing.txt');
+    const t = makeFileTrigger({ path: filePath, watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [root],
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string; output_json: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('path_not_allowed');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ reason: 'path_not_allowed' });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('SECURITY: an absent path is denied when the file-watch allowlist is empty', async () => {
+    const { messenger } = makeMessenger();
+    const filePath = join(root, 'missing-empty-allowlist.txt');
+    const t = makeFileTrigger({ path: filePath, watch: 'exists' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [],
+    });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('path_not_allowed');
+  });
+
+  it('watch=mtime ignores malformed prior output_json and records the current mtime as first run', async () => {
+    const { messenger } = makeMessenger();
+    const filePath = join(root, 'mtime-malformed.txt');
+    writeFileSync(filePath, 'a');
+    utimesSync(filePath, new Date(7000), new Date(7000));
+    const t = makeFileTrigger({ path: filePath, watch: 'mtime' });
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'ok', ?, ?, 0, 'legacy malformed', ?, 1, '{}')`,
+    ).run(t.id, t.bead_id, 999_999_990, 999_999_991, '{not-json');
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, fileWatchAllowedRoots: [root] });
+    await poller.tickOnce();
+
+    const latest = db.raw.prepare(
+      `SELECT status, output_summary, output_json FROM trigger_runs
+       WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(latest.status).toBe('ok');
+    expect(latest.output_summary).toContain('first run');
+    expect(JSON.parse(latest.output_json)).toMatchObject({ exists: true, mtime: 7_000 });
+  });
+
+  it('watch=content_hash ignores malformed prior output_json and records a first-run hash', async () => {
+    const { messenger } = makeMessenger();
+    const filePath = join(root, 'hash-malformed.txt');
+    writeFileSync(filePath, 'hash me');
+    const t = makeFileTrigger({ path: filePath, watch: 'content_hash' });
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'ok', ?, ?, 0, 'legacy malformed', ?, 1, '{}')`,
+    ).run(t.id, t.bead_id, 999_999_990, 999_999_991, '{not-json');
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, fileWatchAllowedRoots: [root] });
+    await poller.tickOnce();
+
+    const latest = db.raw.prepare(
+      `SELECT status, output_summary, output_json FROM trigger_runs
+       WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(latest.status).toBe('ok');
+    expect(latest.output_summary).toBe('content hash recorded (first run)');
+    const parsed = JSON.parse(latest.output_json);
+    expect(parsed.hashChanged).toBe(true);
+    expect(parsed.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('watch=content_hash caps large file reads while still producing a stable digest marker', async () => {
+    const { messenger } = makeMessenger();
+    const filePath = join(root, 'large.txt');
+    writeFileSync(filePath, Buffer.alloc(16 * 1024 * 1024 + 1024, 0x61));
+    const t = makeFileTrigger({ path: filePath, watch: 'content_hash' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, fileWatchAllowedRoots: [root] });
+    await poller.tickOnce();
+
+    const run = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_json: string };
+    expect(run.status).toBe('ok');
+    const parsed = JSON.parse(run.output_json);
+    expect(parsed).toMatchObject({ exists: true, hashChanged: true });
+    expect(parsed.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('watch=content_hash records hash_error when a readable stat becomes an unreadable stream', async () => {
+    const { messenger, calls } = makeMessenger();
+    const filePath = join(root, 'unreadable.txt');
+    writeFileSync(filePath, 'secret');
+    chmodSync(filePath, 0);
+    const t = makeFileTrigger({ path: filePath, watch: 'content_hash' });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      fileWatchAllowedRoots: [root],
+    });
+    try {
+      await poller.tickOnce();
+    } finally {
+      chmodSync(filePath, 0o600);
+    }
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run.status).toBe('failed');
+    expect(run.error_kind).toBe('hash_error');
+    expect(JSON.parse(run.output_json)).toMatchObject({ exists: true });
   });
 });
 
@@ -1031,6 +1445,25 @@ describe('TriggerPoller — start/stop lifecycle', () => {
 
     poller.stop();
     expect(cleared).toHaveLength(1);
+  });
+
+  it('tick() catches unexpected tickOnce failures and reschedules while running', async () => {
+    const { messenger } = makeMessenger();
+    const scheduled: Array<{ ms: number; fn: () => void }> = [];
+    const fakeSetTimeout = ((fn: () => void, ms: number) => {
+      scheduled.push({ ms, fn });
+      return scheduled.length as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      intervalMs: 5_000,
+      setTimeoutImpl: fakeSetTimeout,
+    });
+    vi.spyOn(poller, 'tickOnce').mockRejectedValueOnce(new Error('tick failed unexpectedly'));
+
+    await (poller as unknown as { tick(): Promise<void> }).tick();
+
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].ms).toBe(5_000);
   });
 });
 
@@ -1744,6 +2177,132 @@ describe('TriggerPoller — poll.url (gated, default-OFF)', () => {
     const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null }>;
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('ssrf_blocked');
+  });
+
+  it('runtime URL guard rejects an unparsable legacy spec with ssrf_blocked before fetching', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: 'x' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/good', hash_mode: 'text' });
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    const outcome = await (poller as unknown as {
+      executeUrl(trigger: typeof t, spec: { url: string; hash_mode: 'text' }): Promise<{
+        status: string;
+        fired: boolean;
+        outputJson: Record<string, unknown>;
+        errorKind?: string;
+        errorMessage?: string;
+      }>;
+    }).executeUrl(t, { url: 'not a url', hash_mode: 'text' });
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      fired: false,
+      outputJson: { reason: 'ssrf_blocked' },
+      errorKind: 'ssrf_blocked',
+    });
+    expect(outcome.errorMessage).toContain('url is not parseable');
+  });
+
+  it('maps generic fetch failures to fetch_error without dispatching', async () => {
+    const { messenger, calls } = makeMessenger();
+    const urlFetch = vi.fn(async () => {
+      throw new Error('origin offline');
+    });
+    const t = makeUrlTrigger({ url: 'https://example.com/feed', hash_mode: 'text' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(`SELECT status, error_kind, error_message, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string; error_message: string; output_json: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('fetch_error');
+    expect(runs[0].error_message).toContain('origin offline');
+    expect(JSON.parse(runs[0].output_json)).toEqual({ reason: 'fetch_error' });
+  });
+
+  it('headers hash_mode ignores body changes and fires only when tracked headers change', async () => {
+    const { messenger } = makeMessenger();
+    let body = 'body-v1';
+    let etag = 'etag-v1';
+    const urlFetch = vi.fn(async () => ({
+      status: 200,
+      headers: { etag, 'content-type': 'text/plain', 'x-ignored': 'ignored' },
+      body,
+    }));
+    const t = makeUrlTrigger({ url: 'https://example.com/headers', hash_mode: 'headers' });
+
+    let poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    body = 'body-v2';
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_100, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_101, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    etag = 'etag-v2';
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_200, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_201, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs.map((r) => r.status)).toEqual(['ok', 'noop', 'ok']);
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ hashMode: 'headers' });
+  });
+
+  it('selector hash_mode with an omitted selector hashes a stable empty selection', async () => {
+    const { messenger } = makeMessenger();
+    let body = '<html><div id="price">10</div></html>';
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body }));
+    const t = makeUrlTrigger({ url: 'https://example.com/empty-selector', hash_mode: 'selector' });
+
+    let poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+    body = '<html><div id="price">20</div></html>';
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ?, status='active' WHERE id = ?`).run(1_000_000_100, t.id);
+    poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_101, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id ASC`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs.map((r) => r.status)).toEqual(['ok', 'noop']);
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ hashMode: 'selector' });
+  });
+
+  it('selector hash_mode falls back to a stable empty marker when selector parsing fails', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: '<html><div>A</div></html>' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/bad-selector', hash_mode: 'selector', selector: ':not(' });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const run = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; output_json: string };
+    expect(run.status).toBe('ok');
+    expect(JSON.parse(run.output_json)).toMatchObject({ hashChanged: true, hashMode: 'selector' });
+  });
+
+  it('malformed prior urlHash JSON is ignored and current URL hash is treated as first run', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: 'current' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/malformed-prior', hash_mode: 'text' });
+    db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'ok', ?, ?, 0, 'legacy malformed', ?, 1, '{}')`,
+    ).run(t.id, t.bead_id, 999_999_990, 999_999_991, '{not-json');
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    const latest = db.raw.prepare(
+      `SELECT status, output_summary, output_json FROM trigger_runs
+       WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(t.id) as { status: string; output_summary: string; output_json: string };
+    expect(latest.status).toBe('ok');
+    expect(latest.output_summary).toBe('url hash recorded (first run)');
+    expect(JSON.parse(latest.output_json)).toMatchObject({ hashChanged: true, hashMode: 'text' });
   });
 });
 

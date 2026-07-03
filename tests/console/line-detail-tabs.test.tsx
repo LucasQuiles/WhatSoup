@@ -21,6 +21,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance } from '../../console/src/types';
+import { api } from '../../console/src/lib/api';
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks — declared before any component import
@@ -85,7 +86,22 @@ vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
 
 // Stub the lazy RelinkModal so Suspense resolves synchronously in jsdom
 vi.mock('../../console/src/components/RelinkModal', () => ({
-  default: () => null,
+  default: ({
+    lineName,
+    open,
+    onClose,
+    onLinked,
+  }: {
+    lineName: string;
+    open: boolean;
+    onClose: () => void;
+    onLinked: () => void;
+  }) => open ? (
+    <div role="dialog" aria-label={`Re-link ${lineName}`}>
+      <button type="button" onClick={onClose}>Close re-link</button>
+      <button type="button" onClick={onLinked}>Mark linked</button>
+    </div>
+  ) : null,
 }));
 
 // Stub api — LineDetail calls api.restart / api.deleteLine
@@ -275,6 +291,24 @@ describe('LineDetail header — primitive buttons + overflow contract', () => {
 });
 
 describe('LineDetail missing-line route state', () => {
+  it('renders the loading skeleton while the line query is still pending', async () => {
+    useParamsMock.mockReturnValue({ name: 'loading-line' });
+    useLineMock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = renderLineDetailRoute('loading-line'));
+    });
+
+    expect(container.querySelectorAll('.animate-shimmer').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('tablist', { name: 'Line detail tabs' })).toBeNull();
+  });
+
   it('renders a retryable not-found state instead of a permanent loading skeleton', async () => {
     const refetch = vi.fn();
     useParamsMock.mockReturnValue({ name: 'missing-line' });
@@ -299,9 +333,59 @@ describe('LineDetail missing-line route state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to fleet' }));
     expect(navigateMock).toHaveBeenCalledWith('/');
   });
+
+  it('renders generic line-load failures with the original error and retry action', async () => {
+    const refetch = vi.fn();
+    useParamsMock.mockReturnValue({ name: 'broken-line' });
+    useLineMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error('health endpoint unavailable'),
+      refetch,
+    });
+
+    await act(async () => {
+      renderLineDetailRoute('broken-line');
+    });
+
+    expect(screen.getByText('Failed to load line')).toBeDefined();
+    expect(screen.getByText('health endpoint unavailable')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry line' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('LineDetail tab query error states', () => {
+  it('renders access and log loading states while their tab queries are pending', async () => {
+    useAccessMock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+    useLogsMock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /Access/ }));
+    });
+    await waitFor(() => expect(screen.getByText('Loading access list...')).toBeDefined());
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /Logs/ }));
+    });
+    await waitFor(() => expect(screen.getByText('Loading logs...')).toBeDefined());
+  });
+
   it('surfaces access query errors with retry instead of rendering an empty access list', async () => {
     const refetch = vi.fn();
     useAccessMock.mockReturnValue({
@@ -350,6 +434,171 @@ describe('LineDetail tab query error states', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LineDetail header workflows', () => {
+  it('navigates back to the fleet from the header action', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    expect(navigateMock).toHaveBeenCalledWith('/');
+  });
+
+  it('requests a restart from the header action and reports success', async () => {
+    vi.mocked(api.restart).mockResolvedValueOnce({ status: 'ok', instance: 'test-line' });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
+
+    expect(toastValue.info).toHaveBeenCalledWith('Restarting test-line...');
+    expect(api.restart).toHaveBeenCalledWith('test-line');
+    await waitFor(() => expect(toastValue.success).toHaveBeenCalledWith('test-line restart requested'));
+  });
+
+  it('reports restart failures from the header action', async () => {
+    vi.mocked(api.restart).mockRejectedValueOnce(new Error('supervisor unavailable'));
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
+
+    expect(toastValue.info).toHaveBeenCalledWith('Restarting test-line...');
+    await waitFor(() => expect(toastValue.error).toHaveBeenCalledWith('Restart failed: supervisor unavailable'));
+  });
+
+  it('opens the re-link action instead of restart for unlinked lines', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', linkedStatus: 'unlinked' }) });
+    });
+
+    expect(screen.getByRole('button', { name: 'Re-link' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Restart' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-link' }));
+
+    expect(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' })).toBeDefined();
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Close re-link' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Re-link test-line' })).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-link' }));
+
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Re-link test-line' })).getByRole('button', { name: 'Mark linked' }));
+
+    expect(toastValue.success).toHaveBeenCalledWith('test-line re-linked!');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Re-link test-line' })).toBeNull());
+  });
+
+  it('deletes a line from the header confirmation and navigates back to operator', async () => {
+    vi.mocked(api.deleteLine).mockResolvedValueOnce({ deleted: 'test-line' });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(screen.getByText('Delete test-line?')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
+
+    await waitFor(() => expect(api.deleteLine).toHaveBeenCalledWith('test-line'));
+    expect(toastValue.success).toHaveBeenCalledWith('test-line deleted');
+    expect(navigateMock).toHaveBeenCalledWith('/operator');
+    await waitFor(() => expect(screen.queryByText('Delete test-line?')).toBeNull());
+  });
+
+  it('keeps the user on the page when header delete fails', async () => {
+    vi.mocked(api.deleteLine).mockRejectedValueOnce(new Error('permission denied'));
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
+
+    await waitFor(() => expect(toastValue.error).toHaveBeenCalledWith('Delete failed: permission denied'));
+    expect(navigateMock).not.toHaveBeenCalledWith('/operator');
+    await waitFor(() => expect(screen.queryByText('Delete test-line?')).toBeNull());
+  });
+
+  it('cancels header delete without calling the API', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(api.deleteLine).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('Delete test-line?')).toBeNull());
+  });
+});
+
+describe('LineDetail page-level dialogs', () => {
+  it('opens the config editor from the summary tab when config is present', async () => {
+    await act(async () => {
+      renderLineDetail({
+        line: makeLine({
+          name: 'test-line',
+          mode: 'chat',
+          config: { type: 'chat', agentOptions: { provider: 'openai' } },
+        }),
+      });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+
+    expect(within(screen.getByRole('dialog')).getByText('Edit Configuration')).toBeDefined();
+
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close dialog' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('opens and closes the mode switch dialog from the summary tab', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change Mode' }));
+    expect(within(screen.getByRole('dialog')).getByText('Switch test-line Mode')).toBeDefined();
+
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close dialog' }));
+    await waitFor(() => expect(screen.queryByText('Switch test-line Mode')).toBeNull());
+  });
+
+  it('opens page-level dialogs from the mode tab controls', async () => {
+    await act(async () => {
+      renderLineDetail({
+        line: makeLine({
+          name: 'test-line',
+          mode: 'chat',
+          config: { type: 'chat', agentOptions: { provider: 'openai' } },
+        }),
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /Mode/ }));
+    });
+    await waitFor(() => expect(screen.getByRole('tabpanel').id).toBe('tabpanel-mode'));
+    const panel = within(screen.getByRole('tabpanel'));
+
+    fireEvent.click(panel.getByRole('button', { name: 'Edit Configuration' }));
+    expect(within(screen.getByRole('dialog')).getByText('Edit Configuration')).toBeDefined();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close dialog' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(panel.getByRole('button', { name: 'Change Mode' }));
+    expect(within(screen.getByRole('dialog')).getByText('Switch test-line Mode')).toBeDefined();
   });
 });
 

@@ -28,6 +28,7 @@ import {
   screen,
   within,
   act,
+  waitFor,
 } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
@@ -40,6 +41,9 @@ const useFeedMock = vi.hoisted(() => vi.fn());
 const useFleetMetricsMock = vi.hoisted(() => vi.fn());
 const useLogsMock = vi.hoisted(() => vi.fn());
 const navigateMock = vi.hoisted(() => vi.fn());
+const restartMock = vi.hoisted(() => vi.fn());
+const stopInstanceMock = vi.hoisted(() => vi.fn());
+const deleteLineMock = vi.hoisted(() => vi.fn());
 // FleetRowMenu (per-row action kebab) calls useQueryClient on render; the page
 // harness has no QueryClientProvider, so stub the client (same idiom as
 // ops-page.test.tsx). The menu's api wiring is exercised in fleet-row-menu.test.tsx.
@@ -79,6 +83,14 @@ vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
   };
 });
 
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    restart: restartMock,
+    stopInstance: stopInstanceMock,
+    deleteLine: deleteLineMock,
+  },
+}));
+
 // Transport status (DD-29). Default connected so the genuine-error branch
 // behaves as before; the offline-branch suite flips this to disconnected.
 const transportMock = vi.hoisted(() => ({
@@ -107,6 +119,12 @@ beforeEach(() => {
       }),
     });
   }
+  restartMock.mockReset();
+  restartMock.mockResolvedValue({ status: 'ok', instance: 'test-line' });
+  stopInstanceMock.mockReset();
+  stopInstanceMock.mockResolvedValue({ status: 'ok', instance: 'test-line' });
+  deleteLineMock.mockReset();
+  deleteLineMock.mockResolvedValue({ deleted: 'test-line' });
 });
 
 afterEach(() => {
@@ -165,6 +183,20 @@ interface RenderOptions {
   feedRefetch?: ReturnType<typeof vi.fn>;
   fleetMetrics?: Partial<FleetMetrics> | null;
   logs?: LogEntry[];
+  logsError?: Error | null;
+  logsRefetch?: ReturnType<typeof vi.fn>;
+  toastValue?: ToastContextValue;
+}
+
+function makeToastValue(): ToastContextValue {
+  return {
+    toast: vi.fn(),
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
+  };
 }
 
 function renderPage(opts: RenderOptions = {}) {
@@ -191,19 +223,12 @@ function renderPage(opts: RenderOptions = {}) {
   });
   useLogsMock.mockReturnValue({
     data: opts.logs ?? [],
-    isError: false,
-    error: null,
-    refetch: vi.fn(),
+    isError: Boolean(opts.logsError),
+    error: opts.logsError ?? null,
+    refetch: opts.logsRefetch ?? vi.fn(),
   });
 
-  const toastValue: ToastContextValue = {
-    toast: vi.fn(),
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    dismiss: vi.fn(),
-    clear: vi.fn(),
-  };
+  const toastValue = opts.toastValue ?? makeToastValue();
 
   return render(
     <ToastContext.Provider value={toastValue}>
@@ -514,11 +539,48 @@ describe('SoupKitchen instance table rendering', () => {
     expect(bar.textContent).toContain('1');
   });
 
+  it('toggling a selected row checkbox again deselects it without opening the drawer', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    const checkbox = within(row).getByRole('checkbox');
+
+    fireEvent.click(checkbox);
+    expect(screen.getByRole('region', { name: 'Bulk actions' })).toBeDefined();
+
+    fireEvent.click(checkbox);
+
+    expect(screen.queryByRole('region', { name: 'Bulk actions' })).toBeNull();
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
   it('the header select-all checkbox selects every visible line', () => {
     renderPage({ lines });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select all lines' }));
     const bar = screen.getByRole('region', { name: 'Bulk actions' });
     expect(bar.textContent).toContain(String(lines.length));
+  });
+
+  it('the header select-all checkbox can clear every visible selected line', () => {
+    renderPage({ lines });
+    const selectAll = screen.getByRole('checkbox', { name: 'Select all lines' });
+
+    fireEvent.click(selectAll);
+    expect(screen.getByRole('region', { name: 'Bulk actions' }).textContent).toContain(String(lines.length));
+
+    fireEvent.click(selectAll);
+
+    expect(screen.queryByRole('region', { name: 'Bulk actions' })).toBeNull();
+  });
+
+  it('the bulk clear button removes the current row selection', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    expect(screen.getByRole('region', { name: 'Bulk actions' })).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+
+    expect(screen.queryByRole('region', { name: 'Bulk actions' })).toBeNull();
   });
 
   it('"Open line" button inside the drawer navigates to /lines/<name>', () => {
@@ -529,6 +591,103 @@ describe('SoupKitchen instance table rendering', () => {
     fireEvent.click(openBtn);
     expect(navigateMock).toHaveBeenCalledTimes(1);
     expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3a. Bulk lifecycle workflows
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen bulk lifecycle workflows', () => {
+  const lines: LineInstance[] = [
+    makeLine({ name: 'alpha-line', mode: 'passive', status: 'online' }),
+    makeLine({ name: 'bravo-line', mode: 'agent', status: 'online' }),
+  ];
+
+  function selectLine(name: string) {
+    const row = screen.getByText(displayInstanceName(name)).closest('tr') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+  }
+
+  it('bulk restart sends the selected line and reports a singular success', async () => {
+    const toastValue = makeToastValue();
+    renderPage({ lines, toastValue });
+    selectLine('alpha-line');
+
+    fireEvent.click(within(screen.getByRole('region', { name: 'Bulk actions' })).getByRole('button', { name: 'Restart' }));
+
+    expect(restartMock).toHaveBeenCalledWith('alpha-line');
+    expect(toastValue.info).toHaveBeenCalledWith('Restarting 1 line…');
+    await waitFor(() => {
+      expect(toastValue.success).toHaveBeenCalledWith('Restarted 1 line');
+    });
+    expect(invalidateQueriesMock).toHaveBeenCalledWith({ queryKey: ['lines'] });
+  });
+
+  it('bulk restart reports mixed all-settled results without dropping selection', async () => {
+    const toastValue = makeToastValue();
+    restartMock
+      .mockResolvedValueOnce({ status: 'ok', instance: 'alpha-line' })
+      .mockRejectedValueOnce(new Error('restart denied'));
+    renderPage({ lines, toastValue });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all lines' }));
+
+    fireEvent.click(within(screen.getByRole('region', { name: 'Bulk actions' })).getByRole('button', { name: 'Restart' }));
+
+    expect(restartMock).toHaveBeenCalledWith('alpha-line');
+    expect(restartMock).toHaveBeenCalledWith('bravo-line');
+    expect(toastValue.info).toHaveBeenCalledWith('Restarting 2 lines…');
+    await waitFor(() => {
+      expect(toastValue.error).toHaveBeenCalledWith('Restarted 1, failed 1');
+    });
+    expect(screen.getByRole('region', { name: 'Bulk actions' }).textContent).toContain('2');
+  });
+
+  it('bulk stop confirms the selected names, calls stop for each line, and reports success', async () => {
+    const toastValue = makeToastValue();
+    renderPage({ lines, toastValue });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all lines' }));
+
+    fireEvent.click(within(screen.getByRole('region', { name: 'Bulk actions' })).getByRole('button', { name: 'Stop' }));
+
+    expect(screen.getByText('Stop 2 lines?')).toBeDefined();
+    expect(screen.getByText(/alpha-line, bravo-line/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop lines' }));
+
+    expect(toastValue.info).toHaveBeenCalledWith('Stopping 2 lines…');
+    await waitFor(() => {
+      expect(stopInstanceMock).toHaveBeenCalledWith('alpha-line');
+      expect(stopInstanceMock).toHaveBeenCalledWith('bravo-line');
+      expect(toastValue.success).toHaveBeenCalledWith('Stopped 2 lines');
+    });
+    expect(invalidateQueriesMock).toHaveBeenCalledWith({ queryKey: ['lines'] });
+  });
+
+  it('bulk delete confirms destructive copy and removes only fulfilled deletes from selection', async () => {
+    const toastValue = makeToastValue();
+    deleteLineMock
+      .mockResolvedValueOnce({ deleted: 'alpha-line' })
+      .mockRejectedValueOnce(new Error('delete denied'));
+    renderPage({ lines, toastValue });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select all lines' }));
+
+    fireEvent.click(within(screen.getByRole('region', { name: 'Bulk actions' })).getByRole('button', { name: 'Delete' }));
+
+    expect(screen.getByText('Delete 2 lines?')).toBeDefined();
+    expect(screen.getByText(/This will stop the process/)).toBeDefined();
+    expect(screen.getByText(/alpha-line, bravo-line/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
+
+    expect(toastValue.info).toHaveBeenCalledWith('Deleting 2 lines…');
+    await waitFor(() => {
+      expect(deleteLineMock).toHaveBeenCalledWith('alpha-line');
+      expect(deleteLineMock).toHaveBeenCalledWith('bravo-line');
+      expect(toastValue.error).toHaveBeenCalledWith('deleted 1, failed 1');
+    });
+    expect(screen.getByLabelText('1 selected')).toBeDefined();
+    expect(invalidateQueriesMock).toHaveBeenCalledWith({ queryKey: ['lines'] });
   });
 });
 
@@ -803,6 +962,93 @@ describe('SoupKitchen filter behavior', () => {
     expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
   });
 
+  it('preserves source order for rows tied on the active sort value', () => {
+    const tiedLines = [
+      makeLine({ name: 'tie-a', chatCounts: { chats: 2, groups: 0 } }),
+      makeLine({ name: 'tie-b', chatCounts: { chats: 2, groups: 0 } }),
+      makeLine({ name: 'tie-c', chatCounts: { chats: 4, groups: 0 } }),
+    ];
+    renderPage({ lines: tiedLines });
+    const chatsHeader = screen.getByRole('columnheader', { name: /^Chats\b/ });
+
+    fireEvent.click(getSortButton(chatsHeader));
+
+    expect(visibleTableLineNames(tiedLines)).toEqual(['tie-a', 'tie-b', 'tie-c']);
+  });
+
+  it('third click on the active sort column clears sorting and restores source order', () => {
+    const unsortedLines = [
+      makeLine({ name: 'charlie' }),
+      makeLine({ name: 'alpha' }),
+      makeLine({ name: 'bravo' }),
+    ];
+    renderPage({ lines: unsortedLines });
+    const lineHeader = screen.getByRole('columnheader', { name: /^Line\b/ });
+    const sortBtn = getSortButton(lineHeader);
+
+    fireEvent.click(sortBtn);
+    expect(visibleTableLineNames(unsortedLines)).toEqual(['alpha', 'bravo', 'charlie']);
+    fireEvent.click(sortBtn);
+    expect(visibleTableLineNames(unsortedLines)).toEqual(['charlie', 'bravo', 'alpha']);
+    fireEvent.click(sortBtn);
+
+    expect(lineHeader.getAttribute('aria-sort')).toBeNull();
+    expect(visibleTableLineNames(unsortedLines)).toEqual(['charlie', 'alpha', 'bravo']);
+  });
+
+  const sortableLines: LineInstance[] = [
+    makeLine({
+      name: 'middle-line',
+      mode: 'chat',
+      chatCounts: { chats: 5, groups: 7 },
+      messageStats: { sent: 12, received: 3, images: 0, audio: 0, documents: 0 },
+      tokenUsage: { input: 40, output: 10 },
+      totalSessions: 3,
+      provider: 'openai',
+      lastActive: '2026-04-05T12:00:00.000Z',
+    }),
+    makeLine({
+      name: 'first-line',
+      mode: 'agent',
+      chatCounts: { chats: 1, groups: 2 },
+      messageStats: { sent: 4, received: 30, images: 0, audio: 0, documents: 0 },
+      tokenUsage: { input: 5, output: 5 },
+      totalSessions: 1,
+      provider: 'claude-cli',
+      lastActive: '2026-04-05T10:00:00.000Z',
+    }),
+    makeLine({
+      name: 'last-line',
+      mode: 'passive',
+      chatCounts: { chats: 9, groups: 1 },
+      messageStats: { sent: 30, received: 9, images: 0, audio: 0, documents: 0 },
+      tokenUsage: { input: 200, output: 60 },
+      totalSessions: 9,
+      provider: 'gemini',
+      lastActive: '2026-04-05T14:00:00.000Z',
+    }),
+  ];
+
+  it.each([
+    ['Mode', ['first-line', 'middle-line', 'last-line']],
+    ['Chats', ['first-line', 'middle-line', 'last-line']],
+    ['Groups', ['last-line', 'first-line', 'middle-line']],
+    ['Sent', ['first-line', 'middle-line', 'last-line']],
+    ['Recv', ['middle-line', 'last-line', 'first-line']],
+    ['Tokens', ['first-line', 'middle-line', 'last-line']],
+    ['Sessions', ['first-line', 'middle-line', 'last-line']],
+    ['Provider', ['first-line', 'last-line', 'middle-line']],
+    ['Active', ['first-line', 'middle-line', 'last-line']],
+  ])('sorts by %s ascending through the table header control', (column, expectedOrder) => {
+    renderPage({ lines: sortableLines });
+    const header = screen.getByRole('columnheader', { name: new RegExp(`^${column}\\b`) });
+
+    fireEvent.click(getSortButton(header));
+
+    expect(header.getAttribute('aria-sort')).toBe('ascending');
+    expect(visibleTableLineNames(sortableLines)).toEqual(expectedOrder);
+  });
+
   it('clicking "Lines Connected" KPI filters to online lines only', () => {
     renderPage({ lines });
     fireEvent.click(getKpiCard('Lines Connected'));
@@ -1010,6 +1256,24 @@ describe('SoupKitchen KPI toggle', () => {
     expect(connected.getAttribute('aria-pressed')).toBe('false');
     expect(attention.getAttribute('aria-pressed')).toBe('true');
   });
+
+  it('chart-backed KPIs expand their chart column and collapse on second click', () => {
+    renderPage({ lines });
+    const messages = getKpiCard('Messages Sent');
+    const messagePanel = screen.getByText('Message Volume (24h)').closest('section')!.parentElement as HTMLElement;
+    const tokenPanel = screen.getByText('Token Usage (24h)').closest('section')!.parentElement as HTMLElement;
+
+    fireEvent.click(messages);
+
+    expect(messages.getAttribute('aria-pressed')).toBe('true');
+    expect(messagePanel.style.opacity).toBe('1');
+    expect(tokenPanel.style.opacity).toBe('0');
+
+    fireEvent.click(messages);
+
+    expect(messages.getAttribute('aria-pressed')).toBe('false');
+    expect(tokenPanel.style.opacity).toBe('1');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1068,6 +1332,22 @@ describe('SoupKitchen structural composition', () => {
   it('renders the Add Line button', () => {
     renderPage({ lines: [] });
     expect(screen.getByRole('button', { name: /Add Line/ })).toBeDefined();
+  });
+
+  it('opens and closes the lazy Add Line wizard from the primary toolbar action', async () => {
+    renderPage({ lines: [] });
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Line/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Add New Line' });
+    expect(within(dialog).getByRole('heading', { name: 'Identity' })).toBeDefined();
+    expect(within(dialog).getByRole('textbox', { name: 'Name' })).toBeDefined();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close dialog' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Add New Line' })).toBeNull();
+    });
   });
 
   it('renders activity feed events from the useFeed hook', () => {
@@ -1175,6 +1455,22 @@ describe('SoupKitchen drawer', () => {
     const drawer = screen.getByRole('complementary');
     expect(within(drawer).getByText('Phone')).toBeDefined();
     expect(within(drawer).getByText('Provider')).toBeDefined();
+  });
+
+  it('drawer log error state exposes retry for the selected line log query', () => {
+    const logsRefetch = vi.fn();
+    renderPage({
+      lines: [lineA],
+      logsError: new Error('logs offline'),
+      logsRefetch,
+    });
+
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+
+    expect(within(drawer).getByText('Could not load logs for this line.')).toBeDefined();
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Retry' }));
+    expect(logsRefetch).toHaveBeenCalledTimes(1);
   });
 
   it('drawer KV swaps to lineB fields on retarget', () => {

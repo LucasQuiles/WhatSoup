@@ -8,8 +8,8 @@
  * Uses real tmp dirs / files (no fs mocks) — helpers surface errors
  * explicitly, so behavior is observable on real filesystem state.
  */
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, mkdirSync } from 'node:fs';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -24,6 +24,8 @@ describe('findLatestLogFile', () => {
     dir = mkdtempSync(join(tmpdir(), 'log-utils-find-'));
   });
   afterEach(() => {
+    vi.doUnmock('node:fs');
+    vi.resetModules();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -65,6 +67,24 @@ describe('findLatestLogFile', () => {
     expect(findLatestLogFile(dir)).toBeNull();
   });
 
+  it('skips a .log entry that vanishes between directory scan and stat', () => {
+    symlinkSync(join(dir, 'missing.log'), join(dir, 'rotated.log'));
+
+    expect(inspectLatestLogFile(dir)).toEqual({ ok: true, file: null });
+  });
+
+  it('preserves a non-transient .log stat failure for callers', () => {
+    symlinkSync('loop.log', join(dir, 'loop.log'));
+
+    const result = inspectLatestLogFile(dir);
+
+    expect(result).toMatchObject({
+      ok: false,
+      path: join(dir, 'loop.log'),
+      code: 'ELOOP',
+    });
+  });
+
   it('returns null when the path is a file, not a directory', () => {
     const f = join(dir, 'app.log');
     writeFileSync(f, 'x');
@@ -82,6 +102,25 @@ describe('findLatestLogFile', () => {
       ok: false,
       path: f,
       code: 'ENOTDIR',
+    });
+  });
+
+  it('preserves scan failures that do not carry a Node error code', async () => {
+    vi.doMock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        readdirSync: vi.fn(() => {
+          throw new Error('scan exploded');
+        }),
+      };
+    });
+    const { inspectLatestLogFile: inspectWithMockedFs } = await import('../../src/fleet/log-utils.ts');
+
+    expect(inspectWithMockedFs(dir)).toEqual({
+      ok: false,
+      path: dir,
+      error: 'scan exploded',
     });
   });
 

@@ -155,12 +155,12 @@ const WizardWrapper: FC<{
 /**
  * Fill out step 0 identity fields (type + name + adminPhones).
  */
-async function fillIdentityStep(): Promise<void> {
+async function fillIdentityStep(typeName: RegExp = /passive/i): Promise<void> {
   // Select line type — passive card.
   // CardSelector uses role="radio"; accessible name derives from text content
   // inside the card div (label + description). Partial match /passive/i works.
-  const passiveCard = screen.getByRole('radio', { name: /passive/i })
-  await act(async () => { fireEvent.click(passiveCard) })
+  const typeCard = screen.getByRole('radio', { name: typeName })
+  await act(async () => { fireEvent.click(typeCard) })
 
   const nameInput = screen.getByLabelText('Name')
   await act(async () => {
@@ -174,6 +174,42 @@ async function fillIdentityStep(): Promise<void> {
     fireEvent.change(phoneInput, { target: { value: '15551234567' } })
     fireEvent.keyDown(phoneInput, { key: 'Enter' })
   })
+}
+
+async function advanceIdentityToLink(typeName: RegExp = /passive/i): Promise<void> {
+  await fillIdentityStep(typeName)
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /next/i }))
+  })
+  await waitFor(() => expect(mockCreateLine).toHaveBeenCalledTimes(1))
+}
+
+async function completeLinkStep(): Promise<void> {
+  await waitFor(() => expect(wizardEventSources).toHaveLength(1))
+  await act(async () => {
+    wizardEventSources[0].emit('connected')
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'View Line' }))
+  })
+  await waitFor(() => expect(screen.getByText('Model & Auth')).toBeDefined())
+}
+
+async function advanceToConfigStep(typeName: RegExp = /passive/i): Promise<void> {
+  await advanceIdentityToLink(typeName)
+  await completeLinkStep()
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+  })
+  await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
+}
+
+async function advanceToReviewStep(typeName: RegExp = /passive/i): Promise<void> {
+  await advanceToConfigStep(typeName)
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+  })
+  await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +483,97 @@ describe('AddLineWizard — discard flow option α (save unlinked)', () => {
     const discardBtn = within(confirmDialog).getByRole('button', { name: /discard/i })
     await act(async () => { fireEvent.click(discardBtn) })
     expect(mockDeleteLine).not.toHaveBeenCalled()
+  })
+})
+
+describe('AddLineWizard — config and review workflow', () => {
+  it('fills the default workspace before provisioning an agent line', async () => {
+    render(<WizardWrapper />)
+
+    await advanceIdentityToLink(/agent/i)
+
+    const payload = mockCreateLine.mock.calls[0][0] as {
+      agentOptions?: { cwd?: string }
+    }
+    expect(payload.agentOptions?.cwd).toBe('~/.local/share/whatsoup/instances/test-line/workspace')
+  })
+
+  it('blocks config advance when a non-passive line has no system prompt', async () => {
+    render(<WizardWrapper />)
+
+    await advanceToConfigStep(/chat/i)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /behavior/i }))
+    })
+
+    const promptInput = await screen.findByLabelText('System Prompt')
+    await act(async () => {
+      fireEvent.change(promptInput, { target: { value: '' } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+
+    expect(screen.getByText('Add a system prompt — this defines how the AI responds')).toBeDefined()
+    expect(screen.queryByRole('button', { name: /create line/i })).toBeNull()
+  })
+
+  it('warns on tab close after provisioning and removes the warning after final save', async () => {
+    const onClose = vi.fn()
+    render(<WizardWrapper onClose={onClose} />)
+
+    await advanceToReviewStep()
+
+    const beforeCompletion = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(beforeCompletion)
+    expect(beforeCompletion.defaultPrevented).toBe(true)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => {
+      expect(mockUpdateConfig).toHaveBeenCalledWith(
+        'test-line',
+        expect.objectContaining({ name: 'test-line' }),
+      )
+    })
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add New Line' })).toBeNull())
+
+    const afterCompletion = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(afterCompletion)
+    expect(afterCompletion.defaultPrevented).toBe(false)
+  })
+
+  it('keeps review open and shows a friendly error when final config save fails', async () => {
+    mockUpdateConfig.mockRejectedValueOnce(new Error('systemPrompt missing'))
+    const onClose = vi.fn()
+    render(<WizardWrapper onClose={onClose} />)
+
+    await advanceToReviewStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('A system prompt is required. Click "Edit" on the Config card above to add one.')).toBeDefined()
+    })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /create line/i })).toBeDefined()
+  })
+
+  it('review edit controls navigate back to the selected wizard phase', async () => {
+    render(<WizardWrapper />)
+
+    await advanceToReviewStep()
+    const editButtons = screen.getAllByRole('button', { name: /edit/i })
+    await act(async () => {
+      fireEvent.click(editButtons[2])
+    })
+
+    await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
+    expect(screen.queryByRole('button', { name: /create line/i })).toBeNull()
   })
 })
 

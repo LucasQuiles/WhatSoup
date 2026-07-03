@@ -2345,6 +2345,22 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     });
   });
 
+  it('returns a 500 JSON response when /heal persistence unexpectedly fails', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+    db.raw.prepare('DROP TABLE pending_heal_reports').run();
+
+    const { status, body } = await httpReq(
+      port,
+      '/heal',
+      'POST',
+      JSON.stringify({ reportId: 'report-db-failure', type: 'service_crash' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(500);
+    expect(JSON.parse(body)).toEqual({ error: 'internal error' });
+  });
+
   it('rejects non-object /access bodies and scalar subject ids', async () => {
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
@@ -2438,6 +2454,24 @@ describe('health command endpoints — malformed bodies and side effects', () =>
     expect(row).toEqual({ subject_type: 'phone', subject_id: '15551234567', status: 'allowed' });
   });
 
+  it('returns a 500 JSON response when /access persistence unexpectedly fails', async () => {
+    const handleAccessDecision = vi.fn();
+    ({ server, port } = await buildTestServer(makeDeps(db, { handleAccessDecision })));
+    db.raw.prepare('DROP TABLE access_list').run();
+
+    const { status, body } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType: 'phone', subjectId: '15551234567', action: 'allow' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(500);
+    expect(JSON.parse(body)).toEqual({ error: 'internal error' });
+    expect(handleAccessDecision).not.toHaveBeenCalled();
+  });
+
   it('rejects non-object and missing /mark-read bodies before touching chat state', async () => {
     ({ server, port } = await buildTestServer(makeDeps(db)));
 
@@ -2523,6 +2557,22 @@ describe('health command endpoints — malformed bodies and side effects', () =>
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
       .get('15551234567') as { unread_count: number };
     expect(row.unread_count).toBe(0);
+  });
+
+  it('returns a 500 JSON response when /mark-read persistence unexpectedly fails', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+    db.raw.prepare('DROP TABLE chats').run();
+
+    const { status, body } = await httpReq(
+      port,
+      '/mark-read',
+      'POST',
+      JSON.stringify({ conversation_key: '15551234567' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(500);
+    expect(JSON.parse(body)).toEqual({ error: 'internal error' });
   });
 });
 

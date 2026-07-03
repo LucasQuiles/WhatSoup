@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -14,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { writeAtomicBaileysJson } from '../../src/transport/atomic-auth-save.ts';
+import { createAtomicCredsSaver, writeAtomicBaileysJson } from '../../src/transport/atomic-auth-save.ts';
 
 const roots = new Set<string>();
 
@@ -78,5 +79,51 @@ describe('writeAtomicBaileysJson', () => {
       .rejects.toThrow(/auth directory.*symlink/);
 
     expect(existsSync(join(linkAuthDir, 'creds.json'))).toBe(false);
+  });
+
+  it('refuses to replace an existing creds directory with auth json', async () => {
+    const authDir = tempRoot();
+    const credsPath = join(authDir, 'creds.json');
+    mkdirSync(credsPath);
+
+    await expect(writeAtomicBaileysJson(credsPath, { registrationId: 1 }))
+      .rejects.toMatchObject({ code: 'EINVAL' });
+
+    expect(lstatSync(credsPath).isDirectory()).toBe(true);
+    expect(readdirSync(authDir).filter((entry) => entry.includes('.tmp'))).toEqual([]);
+  });
+
+  it('removes the temporary auth json file when serialization fails after open', async () => {
+    const authDir = tempRoot();
+    const credsPath = join(authDir, 'creds.json');
+
+    await expect(writeAtomicBaileysJson(credsPath, { registrationId: BigInt(42) }))
+      .rejects.toThrow(/BigInt/);
+
+    expect(existsSync(credsPath)).toBe(false);
+    expect(readdirSync(authDir).filter((entry) => entry.includes('.tmp'))).toEqual([]);
+  });
+});
+
+describe('createAtomicCredsSaver', () => {
+  it('continues the save queue after a failed creds snapshot', async () => {
+    const authDir = tempRoot();
+    const snapshots: unknown[] = [
+      { registrationId: BigInt(42) },
+      { registrationId: 43, me: { id: '15551230043:1@s.whatsapp.net' } },
+    ];
+    const saveCreds = createAtomicCredsSaver(authDir, () => snapshots.shift());
+
+    const failedSave = saveCreds();
+    const queuedSave = saveCreds();
+
+    await expect(failedSave).rejects.toThrow(/BigInt/);
+    await expect(queuedSave).resolves.toBeUndefined();
+
+    expect(JSON.parse(readFileSync(join(authDir, 'creds.json'), 'utf8'))).toMatchObject({
+      registrationId: 43,
+      me: { id: '15551230043:1@s.whatsapp.net' },
+    });
+    expect(readdirSync(authDir).filter((entry) => entry.includes('.tmp'))).toEqual([]);
   });
 });

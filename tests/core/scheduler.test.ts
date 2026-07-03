@@ -407,6 +407,60 @@ describe('MessageScheduler — start/stop lifecycle', () => {
     scheduler.stop();
     setIntervalSpy.mockRestore();
   });
+
+  it('logs and suppresses rejected immediate and interval ticks', async () => {
+    const log = {
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      trace: vi.fn(),
+    };
+    vi.resetModules();
+    vi.doMock('../../src/logger.ts', () => ({
+      createChildLogger: vi.fn(() => log),
+      default: log,
+      flushLogger: vi.fn(async () => undefined),
+    }));
+    const [{ Database: IsolatedDatabase }, { MessageScheduler: IsolatedMessageScheduler }] = await Promise.all([
+      import('../../src/core/database.ts'),
+      import('../../src/core/scheduler.ts'),
+    ]);
+    vi.useFakeTimers();
+    const db = new IsolatedDatabase(':memory:');
+    db.open();
+    const { mock: conn } = makeMockConnection();
+    const scheduler = new IsolatedMessageScheduler(db, conn as ConnectionManager, { intervalMs: 10_000, maxRetries: 3 });
+    const tickSpy = vi.spyOn(scheduler, 'tick').mockRejectedValue(new Error('tick failed'));
+
+    try {
+      scheduler.start();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'scheduler initial tick failed',
+      );
+      expect(tickSpy).toHaveBeenCalledTimes(1);
+      log.error.mockClear();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'scheduler tick failed',
+      );
+      expect(tickSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      scheduler.stop();
+      tickSpy.mockRestore();
+      db.close();
+      vi.useRealTimers();
+      vi.doUnmock('../../src/logger.ts');
+      vi.resetModules();
+    }
+  });
 });
 describe('MessageScheduler — recurring message scheduling', () => {
   let db: Database;
@@ -747,6 +801,51 @@ describe('scheduler.ts uncovered-branch coverage', () => {
       .get(1) as { status: string; error: string };
     expect(row.status).toBe('failed');
     expect(row.error).toContain('Invalid recurrence after send:');
+  });
+
+  it('fails a retry-exhausted recurring row when the next retry slot cannot be computed', async () => {
+    const failConn: Partial<ConnectionManager> = {
+      sendRaw: vi.fn().mockRejectedValue(new Error('send still failing')),
+      sendMedia: vi.fn().mockRejectedValue(new Error('send still failing')),
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const result = db.raw
+      .prepare(
+        `INSERT INTO scheduled_messages
+           (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550800006@s.whatsapp.net',
+        'text',
+        JSON.stringify({ text: 'bad retry cron' }),
+        now - 120,
+        'pending',
+        2,
+        '99 99 99 99 99',
+        now - 60,
+        0,
+      );
+    const id = Number(result.lastInsertRowid);
+
+    const scheduler = new MessageScheduler(db, failConn as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(failConn.sendRaw).toHaveBeenCalledTimes(1);
+    const row = db.raw
+      .prepare('SELECT status, retry_count, error, send_started_at, next_run_at FROM scheduled_messages WHERE id = ?')
+      .get(id) as {
+        status: string;
+        retry_count: number;
+        error: string | null;
+        send_started_at: number | null;
+        next_run_at: number;
+      };
+    expect(row.status).toBe('failed');
+    expect(row.retry_count).toBe(3);
+    expect(row.send_started_at).toBeNull();
+    expect(row.next_run_at).toBe(now - 60);
+    expect(row.error).toBe('Recurring failed (cannot compute next slot): send still failing');
   });
 
   // Cover line 194: legacy fallback that deserialises a Buffer encoded in JSON

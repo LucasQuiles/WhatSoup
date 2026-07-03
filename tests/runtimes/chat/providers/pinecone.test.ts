@@ -272,6 +272,56 @@ describe('PineconeMemory', () => {
       }
     });
 
+    it('context helper searches use their dedicated filters and topK settings', async () => {
+      const mutableConfig = configModule.config as unknown as {
+        pineconeSelfFactTopK?: number;
+      };
+      const previousSelfFactTopK = mutableConfig.pineconeSelfFactTopK;
+      mutableConfig.pineconeSelfFactTopK = 7;
+      try {
+        mockSearchRecords
+          .mockResolvedValueOnce({ result: { hits: [makePineconeHit('chat-hit', 0.91)] } })
+          .mockResolvedValueOnce({ result: { hits: [makePineconeHit('sender-hit', 0.82)] } })
+          .mockResolvedValueOnce({ result: { hits: [makePineconeHit('self-hit', 0.73)] } });
+
+        const chatResults = await memory.searchForChat('chat-42@g.us', 'where is the runbook?');
+        const senderResults = await memory.searchForSender('sender-17@s.whatsapp.net', 'what does Alice prefer?');
+        const selfResults = await memory.searchSelfFacts('what should Q remember about itself?');
+
+        expect(chatResults.map((r) => r.id)).toEqual(['chat-hit']);
+        expect(senderResults.map((r) => r.id)).toEqual(['sender-hit']);
+        expect(selfResults.map((r) => r.id)).toEqual(['self-hit']);
+        expect(mockSearchRecords.mock.calls).toEqual([
+          [{
+            query: {
+              topK: 10,
+              inputs: { text: 'where is the runbook?' },
+              filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+            },
+            fields: ['*'],
+          }],
+          [{
+            query: {
+              topK: 5,
+              inputs: { text: 'what does Alice prefer?' },
+              filter: { sender_jid: { $eq: 'sender-17@s.whatsapp.net' } },
+            },
+            fields: ['*'],
+          }],
+          [{
+            query: {
+              topK: 7,
+              inputs: { text: 'what should Q remember about itself?' },
+              filter: { memory_type: { $eq: 'self_fact' } },
+            },
+            fields: ['*'],
+          }],
+        ]);
+      } finally {
+        mutableConfig.pineconeSelfFactTopK = previousSelfFactTopK;
+      }
+    });
+
     it('returns empty array when hits is empty', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
       const results = await memory.search('nothing', {}, 5);

@@ -1385,6 +1385,24 @@ describe('handleConfigUpdate', () => {
     expect(JSON.parse(res._body).error).toMatch(/JSON object/);
   });
 
+  it('returns 500 and leaves a malformed existing config untouched', async () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, '{"type":"chat"');
+    const inst = fakeInstance({ configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to read config/);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"type":"chat"');
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
   it('merges patch into existing config and writes atomically', async () => {
     const configPath = path.join(tmpDir, 'config.json');
     fs.writeFileSync(configPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
@@ -1473,6 +1491,32 @@ describe('handleConfigUpdate', () => {
     expect(res._status).toBe(200);
     expect(fileMode(claudeMdPath)).toBe(0o600);
     expect(fileMode(settingsPath)).toBe(0o600);
+  });
+
+  it('returns 500 and preserves config when CLAUDE.md cannot be written during config update', async () => {
+    const originalConfig = {
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+    };
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify(originalConfig));
+    fs.writeFileSync(path.join(agentCwd, '.claude'), 'not a directory');
+
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to write CLAUDE\.md/);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   it('returns 500 and preserves config when settingsJson cannot be written during config update', async () => {

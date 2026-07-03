@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -31,9 +31,9 @@ function textMsg(opts: { id: string; chat: string; from?: string; text: string; 
   } as HistoryInput;
 }
 
-function envelopeOnlyMsg(opts: { id: string; chat: string; participant?: string; ts?: number }): HistoryInput {
+function envelopeOnlyMsg(opts: { id: string; chat: string; participant?: string; ts?: number; fromMe?: boolean }): HistoryInput {
   return {
-    key: { id: opts.id, remoteJid: opts.chat, participant: opts.participant },
+    key: { id: opts.id, remoteJid: opts.chat, participant: opts.participant, fromMe: opts.fromMe },
     messageTimestamp: opts.ts ?? 1_700_000_000,
     // no `message` field — envelope-only
   };
@@ -58,12 +58,17 @@ describe('processHistoryBatch', () => {
     const stats = processHistoryBatch(db, [textMsg({ id: 'MSG1', chat: 'alice@s.whatsapp.net', text: 'hello' })]);
     expect(stats).toMatchObject({ inserted: 1, upgraded: 0, placeholders: 0, skipped: 0 });
 
-    const row = db.raw.prepare('SELECT content, content_type FROM messages WHERE message_id=?').get('MSG1') as {
+    const row = db.raw.prepare('SELECT content, content_type, raw_message FROM messages WHERE message_id=?').get('MSG1') as {
       content: string;
       content_type: string;
+      raw_message: string;
     };
     expect(row.content).toBe('hello');
     expect(row.content_type).toBe('text');
+    expect(JSON.parse(row.raw_message)).toMatchObject({
+      key: { id: 'MSG1', remoteJid: 'alice@s.whatsapp.net' },
+      message: { conversation: 'hello' },
+    });
   });
 
   it('upgrades a prior placeholder row in place when a body arrives later', () => {
@@ -148,6 +153,33 @@ describe('processHistoryBatch', () => {
     expect(row.sender_jid).toBe('alice@s.whatsapp.net');
   });
 
+  it('persists sender names/fromMe flags and no-ops duplicate envelope placeholders', () => {
+    const first = processHistoryBatch(db, [
+      textMsg({
+        id: 'MSG_FROM_ME_BODY',
+        chat: 'alice@s.whatsapp.net',
+        from: 'Lucas',
+        text: 'sent body',
+        fromMe: true,
+      }),
+      envelopeOnlyMsg({ id: 'MSG_FROM_ME_ENV', chat: 'alice@s.whatsapp.net', fromMe: true }),
+    ]);
+    expect(first).toMatchObject({ inserted: 1, placeholders: 1, skipped: 0 });
+
+    const duplicate = processHistoryBatch(db, [
+      envelopeOnlyMsg({ id: 'MSG_FROM_ME_ENV', chat: 'alice@s.whatsapp.net', fromMe: true }),
+    ]);
+    expect(duplicate).toMatchObject({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 });
+
+    const rows = db.raw
+      .prepare("SELECT message_id, sender_name, content_type, is_from_me FROM messages WHERE message_id LIKE 'MSG_FROM_ME_%' ORDER BY message_id")
+      .all() as Array<{ message_id: string; sender_name: string | null; content_type: string; is_from_me: number }>;
+    expect(rows).toEqual([
+      { message_id: 'MSG_FROM_ME_BODY', sender_name: 'Lucas', content_type: 'text', is_from_me: 1 },
+      { message_id: 'MSG_FROM_ME_ENV', sender_name: null, content_type: 'history', is_from_me: 1 },
+    ]);
+  });
+
   it('skips messages with missing key.id or key.remoteJid without throwing', () => {
     const stats = processHistoryBatch(db, [
       { key: { id: 'MSG6' }, messageTimestamp: 1 }, // no remoteJid
@@ -179,6 +211,76 @@ describe('processHistoryBatch', () => {
     const placeholderCount = (db.raw.prepare("SELECT COUNT(*) as c FROM messages WHERE content_type='history'").get() as { c: number }).c;
     expect(placeholderCount).toBe(0);
     expect(stats.placeholders).toBe(0);
+  });
+
+  it('skips when a hostile message getter disappears before parser reads it', () => {
+    const log = { debug: vi.fn() };
+    let messageReads = 0;
+    const unstable: HistoryInput = {
+      key: { id: 'MSG_GETTER_NULL', remoteJid: 'alice@s.whatsapp.net' },
+      messageTimestamp: 1,
+      get message() {
+        messageReads++;
+        return messageReads === 1 ? { conversation: 'present for hasBody' } : null;
+      },
+    };
+
+    const stats = processHistoryBatch(db, [unstable], log as any);
+
+    expect(stats).toMatchObject({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 1 });
+    expect(log.debug).toHaveBeenCalledWith(
+      { msgId: 'MSG_GETTER_NULL' },
+      'historyMessages: parseIncomingMessage returned null for message with body',
+    );
+    const count = (db.raw.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  it('logs when an unstable key id leaves a placeholder stuck behind a live row conflict', () => {
+    const log = { warn: vi.fn() };
+    processHistoryBatch(db, [envelopeOnlyMsg({ id: 'PLACEHOLDER_STUCK', chat: 'alice@s.whatsapp.net' })]);
+    storeMessageIfNew(db, {
+      chatJid: 'alice@s.whatsapp.net',
+      conversationKey: 'alice_at_s.whatsapp.net',
+      senderJid: 'alice@s.whatsapp.net',
+      senderName: 'Alice',
+      messageId: 'LIVE_CONFLICT',
+      content: 'live body',
+      contentText: null,
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1_700_000_100,
+      quotedMessageId: null,
+      rawMessage: null,
+    });
+
+    let idReads = 0;
+    const unstable: HistoryInput = {
+      key: {
+        remoteJid: 'alice@s.whatsapp.net',
+        get id() {
+          idReads++;
+          return idReads === 1 ? 'PLACEHOLDER_STUCK' : 'LIVE_CONFLICT';
+        },
+      },
+      messageTimestamp: 1_700_000_200,
+      message: { conversation: 'would target live row' },
+    } as HistoryInput;
+
+    const stats = processHistoryBatch(db, [unstable], log as any);
+
+    expect(stats).toMatchObject({ inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 });
+    expect(log.warn).toHaveBeenCalledWith(
+      { msgId: 'PLACEHOLDER_STUCK', parsedMessageId: 'LIVE_CONFLICT' },
+      'historyMessages: placeholder upgrade unexpectedly did not fire',
+    );
+    const rows = db.raw
+      .prepare("SELECT message_id, content, content_type FROM messages WHERE message_id IN ('PLACEHOLDER_STUCK', 'LIVE_CONFLICT') ORDER BY message_id")
+      .all() as Array<{ message_id: string; content: string | null; content_type: string }>;
+    expect(rows).toEqual([
+      { message_id: 'LIVE_CONFLICT', content: 'live body', content_type: 'text' },
+      { message_id: 'PLACEHOLDER_STUCK', content: null, content_type: 'history' },
+    ]);
   });
 
   it('processes a mixed batch atomically (transaction rollback is a safety net only)', () => {
@@ -275,5 +377,61 @@ describe('processHistoryBatch', () => {
     const parsed = JSON.parse(row.raw_message) as { message: { imageMessage: { mediaKey: { $b64: string } } } };
     const recovered = Buffer.from(parsed.message.imageMessage.mediaKey.$b64, 'base64');
     expect(Array.from(recovered)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('stores a sentinel and logs when raw_message serialization fails', () => {
+    const log = { warn: vi.fn() };
+    const cyclic = textMsg({
+      id: 'MSG_CYCLIC',
+      chat: 'alice@s.whatsapp.net',
+      text: 'body survives',
+    }) as HistoryInput & { self?: unknown };
+    cyclic.self = cyclic;
+
+    const stats = processHistoryBatch(db, [cyclic], log as any);
+    expect(stats).toMatchObject({ inserted: 1, skipped: 0 });
+
+    const row = db.raw.prepare('SELECT content, raw_message FROM messages WHERE message_id=?').get('MSG_CYCLIC') as {
+      content: string;
+      raw_message: string;
+    };
+    expect(row.content).toBe('body survives');
+    expect(JSON.parse(row.raw_message)).toEqual({ $raw_message_error: 'stringify_failed' });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), msgId: 'MSG_CYCLIC' }),
+      'historyMessages: raw_message stringify failed, storing sentinel',
+    );
+  });
+
+  it('skips one message on statement failure while committing surrounding successes', () => {
+    const log = { error: vi.fn() };
+    db.raw.exec(`
+      CREATE TRIGGER fail_one_history_insert
+      BEFORE INSERT ON messages
+      WHEN NEW.message_id = 'FAIL_HISTORY'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced history insert failure');
+      END
+    `);
+
+    const stats = processHistoryBatch(db, [
+      textMsg({ id: 'OK_BEFORE_FAIL', chat: 'alice@s.whatsapp.net', text: 'before' }),
+      textMsg({ id: 'FAIL_HISTORY', chat: 'alice@s.whatsapp.net', text: 'bad' }),
+      envelopeOnlyMsg({ id: 'OK_AFTER_FAIL', chat: 'group@g.us', participant: 'bob@s.whatsapp.net' }),
+    ], log as any);
+
+    expect(stats).toMatchObject({ inserted: 1, upgraded: 0, placeholders: 1, skipped: 1 });
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'historyMessages: failed to store message',
+    );
+
+    const rows = db.raw
+      .prepare("SELECT message_id, content_type FROM messages WHERE message_id LIKE '%_FAIL' OR message_id LIKE 'FAIL_%' ORDER BY message_id")
+      .all() as Array<{ message_id: string; content_type: string }>;
+    expect(rows).toEqual([
+      { message_id: 'OK_AFTER_FAIL', content_type: 'history' },
+      { message_id: 'OK_BEFORE_FAIL', content_type: 'text' },
+    ]);
   });
 });

@@ -84,6 +84,30 @@ describe('elevenlabs TTS provider', () => {
     await expect(synthesizeSpeech('Hello')).rejects.toThrow();
   });
 
+  it('retries transient API failures and falls back to audio/mpeg when content type is missing', async () => {
+    const audioBuffer = new Uint8Array([1, 2, 3, 4, 5]).buffer;
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        text: async () => { throw new Error('body unavailable'); },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: async () => audioBuffer,
+      });
+
+    const result = await synthesizeSpeech('retry me');
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.buffer).toEqual(Buffer.from(audioBuffer));
+    expect(result.mimeType).toBe('audio/mpeg');
+    expect(result.duration).toBe(1);
+  });
+
   it('trips circuit breaker after 5 consecutive failures', async () => {
     const makeFailure = () => ({
       ok: false,
