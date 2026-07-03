@@ -37,7 +37,9 @@ export type ApiModelAccessProbeResult =
   | { status: 'unknown'; reason?: string };
 
 export interface PrimaryModelProbeAdapters {
-  probeBinaryModel?: (target: { provider: string; model: string }) => Promise<BinaryModelProbeResult>;
+  // model: null = probe the CLI's own default model (claude-cli only) — a
+  // model-less instance must still be probeable or recovery can never pass.
+  probeBinaryModel?: (target: { provider: string; model: string | null }) => Promise<BinaryModelProbeResult>;
   // Despite the legacy name, this must exercise a generation-class API path:
   // catalog/list-model checks can pass while quota-limited turns still fail.
   probeApiModelAccess?: (target: { provider: 'openai-api' | 'anthropic-api'; model: string }) => Promise<ApiModelAccessProbeResult>;
@@ -58,7 +60,10 @@ export async function probePrimaryModelUsability(
 ): Promise<PrimaryModelUsabilityResult> {
   const provider = target.provider;
   const model = normalizedModel(target.model);
-  if (model === null) {
+  // claude-cli resolves its own default model, so a null model is probeable —
+  // short-circuiting here stranded model-less instances in permanent fallback
+  // (recovery probe could never return usable — observed in production as a permanently extending fallback window).
+  if (model === null && provider !== 'claude-cli') {
     return result(target, null, 'unknown', 'model-not-configured');
   }
 
@@ -74,6 +79,12 @@ export async function probePrimaryModelUsability(
   }
 
   if (provider === 'openai-api' || provider === 'anthropic-api') {
+    if (model === null) {
+      // Unreachable (the non-claude null-model case returned above) — kept as a
+      // real branch so the compiler narrows without a cast and a future reorder
+      // of the early return cannot silently send null into the API probe.
+      return result(target, null, 'unknown', 'model-not-configured');
+    }
     if (!adapters.probeApiModelAccess) {
       return result(target, model, 'unknown', 'api-model-probe-unavailable');
     }
@@ -88,7 +99,7 @@ export async function probePrimaryModelUsability(
 
 function mapBinaryModelProbe(
   target: PrimaryModelProbeTarget,
-  model: string,
+  model: string | null,
   probe: BinaryModelProbeResult,
 ): PrimaryModelUsabilityResult {
   switch (probe.status) {
@@ -197,7 +208,8 @@ async function withTimeout<T>(
  * status is.
  */
 export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
-  if (result.model === null) return false;
+  // model === null no longer implies not-probed: claude-cli default-model probes
+  // carry null and their real failures (e.g. credential-unavailable) must alert.
   if (result.status === 'unknown') {
     return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
   }

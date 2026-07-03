@@ -451,3 +451,33 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual(expected);
   });
 });
+
+describe('claude-cli default-model probe command (fleet recovery-stall fix)', () => {
+  it('omits --model when the instance has no configured model', async () => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => 'claude',
+      probeBinaryCommand,
+    });
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: null }),
+    ).resolves.toEqual({ status: 'ok' });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).not.toContain('--model');
+    expect(args[0]).toBe('-p');
+  });
+
+  it('keeps --model when a model is configured', async () => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => 'claude',
+      probeBinaryCommand,
+    });
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).toContain('--model');
+    expect(args).toContain('configured-primary');
+  });
+});

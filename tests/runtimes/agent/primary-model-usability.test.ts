@@ -162,7 +162,7 @@ describe('probePrimaryModelUsability', () => {
       probePrimaryModelUsability({ provider: 'unknown-provider', model: 'primary-model-a' }, adapters),
     ).resolves.toMatchObject({ status: 'unknown', reason: 'unsupported-provider' });
     await expect(
-      probePrimaryModelUsability({ provider: 'claude-cli', model: '   ' }, adapters),
+      probePrimaryModelUsability({ provider: 'opencode-cli', model: '   ' }, adapters),
     ).resolves.toMatchObject({ status: 'unknown', reason: 'model-not-configured' });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
     expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
@@ -343,22 +343,32 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
     });
   });
 
-  it('treats an undefined model as not-configured for binary providers', async () => {
+  it('treats an undefined model as not-configured for opencode (claude-cli probes its default)', async () => {
     const adapters: PrimaryModelProbeAdapters = {
       probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
     };
 
     const result = await probePrimaryModelUsability(
-      { provider: 'claude-cli', model: undefined },
+      { provider: 'opencode-cli', model: undefined },
       adapters,
     );
     expect(result).toEqual({
       status: 'unknown',
-      provider: 'claude-cli',
+      provider: 'opencode-cli',
       model: null,
       reason: 'model-not-configured',
     });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
+
+    // claude-cli with the same undefined model DOES probe (default-model fix);
+    // with no binary adapter available it degrades to the adapter-missing reason.
+    const claude = await probePrimaryModelUsability({ provider: 'claude-cli', model: undefined }, {});
+    expect(claude).toEqual({
+      status: 'unknown',
+      provider: 'claude-cli',
+      model: null,
+      reason: 'binary-model-probe-unavailable',
+    });
   });
 
   it('treats an explicit null model as not-configured for api providers', async () => {
@@ -593,5 +603,48 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
       };
       expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
     });
+  });
+});
+
+describe('claude-cli default-model probing (fleet recovery-stall fix)', () => {
+  // A claude-cli instance with no configured model previously short-circuited every
+  // usability/recovery probe to unknown/model-not-configured — probePrimaryProviderRecovered
+  // could then never return true, extending the fallback window forever on a healthy,
+  // logged-in account (observed in production as a monotonically extending window). The CLI has a default
+  // model; probe with it.
+  it('probes claude-cli with a null model instead of short-circuiting', async () => {
+    const probeBinaryModel = vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      { probeBinaryModel },
+    );
+    expect(probeBinaryModel).toHaveBeenCalledWith({ provider: 'claude-cli', model: null });
+    expect(result).toEqual({ status: 'usable', provider: 'claude-cli', model: null });
+  });
+
+  it('probes claude-cli with a blank model the same way (normalizes to null)', async () => {
+    const probeBinaryModel = vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'credential_unavailable' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: '   ' },
+      { probeBinaryModel },
+    );
+    expect(result).toMatchObject({ status: 'credential-unavailable', model: null });
+  });
+
+  it('still short-circuits opencode-cli and api providers without a model', async () => {
+    const probeBinaryModel = vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' }));
+    await expect(
+      probePrimaryModelUsability({ provider: 'opencode-cli', model: null }, { probeBinaryModel }),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'model-not-configured' });
+    expect(probeBinaryModel).not.toHaveBeenCalled();
+  });
+
+  it('alerts on a real failure even when the probed model was the CLI default (null)', () => {
+    const result: PrimaryModelUsabilityResult = {
+      status: 'credential-unavailable',
+      provider: 'claude-cli',
+      model: null,
+    };
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
   });
 });
