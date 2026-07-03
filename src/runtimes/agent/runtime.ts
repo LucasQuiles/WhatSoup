@@ -129,6 +129,7 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
@@ -2578,6 +2579,14 @@ export class AgentRuntime implements Runtime {
       }));
     }
 
+    // Heal the claude file-store credential from the keychain BEFORE the first
+    // turn can run, so a keychain-only refresh (native login) can't false-arm
+    // the provider fallback on turn 1 (the recovery probe path heals for the
+    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
+    // the file store is already current. Fail-open by contract.
+    if (this.agentProvider === 'claude-cli') {
+      ensureClaudeFileStoreCredential();
+    }
     this.schedulePrimaryModelUsabilityProbe('startup');
     this.startHealthStatsTimer();
     this.workspaceSweeper.start();

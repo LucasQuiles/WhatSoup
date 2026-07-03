@@ -79,6 +79,22 @@ describe('createPrimaryModelProbeAdapters', () => {
     );
   });
 
+  it('runs the file-store credential heal before a claude-cli probe, but not for opencode-cli', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-file-store-current' as const }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'claude'),
+      probeBinaryCommand,
+      ensureClaudeFileStoreCredential,
+    });
+
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+    expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(1);
+
+    await adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'minimax/MiniMax-M3' });
+    expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(1); // unchanged — not called for opencode
+  });
+
   it('maps the real Claude CLI selected-model rejection through the shared binary status contract', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),
