@@ -4,6 +4,7 @@ import { WhatSoupError } from '../../../src/errors.ts';
 import {
   classifyAgentFailure,
   classifyProviderFailure,
+  classifyStreamedProviderFailure,
   isFallbackEligibleForFailureClass,
   isExpectedProviderShutdown,
   isPromptTooLongMessage,
@@ -121,6 +122,94 @@ describe('agent failure taxonomy detectors', () => {
     for (const kind of ['context-overflow', 'policy-block', 'transient-network'] as const) {
       expect(providerFailureArmsFallback(kind)).toBe(false);
     }
+  });
+});
+
+describe('classifyStreamedProviderFailure (QR-209 streaming-channel refinement)', () => {
+  // BANNER — the text IS the error: short and either usage-limit (own prose guards)
+  // or starting with a curated error opener. These stay suppressible.
+  it.each([
+    ["You're out of extra usage. Claude will be available at 8pm.", 'usage-limit'],
+    ["You've hit your weekly limit. Resets at 9pm.", 'usage-limit'],
+    ['_Rate limited - please wait a moment and try again._', 'rate-limit'],
+    // Real claude-cli 401 body (mini1/ana-bot, 2026-06-22) — starts with the error.
+    ['Failed to authenticate. API Error: 401 Invalid authentication credentials', 'auth-required'],
+    ["There's an issue with the selected model (m). It may not exist or you may not have access to it.", 'model-unavailable'],
+    ['API Error: The socket connection was closed unexpectedly.', 'transient-network'],
+  ] as const)('BANNER: %j → suppress (kind %j)', (message, kind) => {
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind, confidence: 'banner' });
+  });
+
+  // AMBIENT — matched a provider-failure token but is prose ABOUT an error. QR-209:
+  // these were silently dropped; now they must classify 'ambient' so the runtime
+  // DELIVERS them.
+  it('AMBIENT: genuine auth-topic reply (the QR-209 defect) is delivered, not suppressed', () => {
+    // Same string the permissive detector still classifies auth-required at :68 —
+    // this pair is the QR-209 contract: keep permissive on infra channels, deliver
+    // on the streaming channel.
+    const prose = 'OAuth token expired; reconnect the provider account.';
+    expect(isProviderAuthRequiredMessage(prose)).toBe(true); // infra channel unchanged
+    expect(classifyStreamedProviderFailure(prose)).toEqual({ kind: 'auth-required', confidence: 'ambient' });
+  });
+
+  it('AMBIENT: mini27-shaped conversational reply about an expired OAuth token is delivered', () => {
+    // Shape of the live 2026-07-03 mini27/loops replies that were dropped: a
+    // multi-sentence answer that discusses (does not emit) the auth error.
+    const reply =
+      'Yes — it looks like the OAuth token expired, so the provider dropped the session. ' +
+      "Let's reconnect the account and re-run login to restore access.";
+    const result = classifyStreamedProviderFailure(reply);
+    expect(result).not.toBeNull();
+    expect(result?.confidence).toBe('ambient');
+  });
+
+  it('AMBIENT: long prose containing an auth token mid-sentence is delivered (length bound)', () => {
+    const longProse =
+      'When a provider session ends because authentication required a fresh login, we surface a ' +
+      'gentle notice and arm the fallback provider so the conversation continues without the user ' +
+      'having to notice the swap or re-send their most recent message to the assistant again here. ' +
+      'The point is that a calm sentence discussing the auth flow must never be mistaken for the ' +
+      'raw error banner and silently discarded from the reply stream.';
+    expect(longProse.length).toBeGreaterThan(300);
+    const result = classifyStreamedProviderFailure(longProse);
+    expect(result).not.toBeNull();
+    expect(result?.confidence).toBe('ambient');
+  });
+
+  // NULL — no provider-failure match at all: delivered silently.
+  it.each([
+    ['Please document how usage limit and quota exceeded errors should be handled.'],
+    ['ordinary provider discussion'],
+    [''],
+  ] as const)('NULL: %j → deliver (no classification)', (message) => {
+    expect(classifyStreamedProviderFailure(message)).toBeNull();
+  });
+
+  it('strips leading markdown/quote/whitespace wrappers before matching an opener', () => {
+    expect(classifyStreamedProviderFailure('   Failed to authenticate. API Error: 401')?.confidence).toBe('banner');
+    expect(classifyStreamedProviderFailure('> Error: service temporarily unavailable')?.confidence).toBe('banner');
+  });
+
+  it('enforces the 300-char banner length bound', () => {
+    const base = "You're out of extra usage. Claude will be available at 8pm. ";
+    const at300 = base.padEnd(300, 'x');
+    const at301 = base.padEnd(301, 'x');
+    expect(at300).toHaveLength(300);
+    expect(at301).toHaveLength(301);
+    expect(classifyStreamedProviderFailure(at300)).toEqual({ kind: 'usage-limit', confidence: 'banner' });
+    // Same usage-limit content, one char over the bound → delivered.
+    expect(classifyStreamedProviderFailure(at301)?.confidence).toBe('ambient');
+  });
+
+  it('Cloudflare-style challenge text follows the general rule (delivered, no special-case)', () => {
+    // Unknown (a) from the QR-209 register: a "verify you are human" challenge page
+    // is not a provider-failure banner. Policy: no special-case detector — it either
+    // fails to classify (delivered silently) or classifies but is long/opener-less
+    // (delivered as ambient). Either way it is NOT suppressed.
+    const challenge =
+      'Verify you are human by completing the action below. This helps us confirm the request ' +
+      'is coming from a real person and not an automated system before continuing to the site.';
+    expect(classifyStreamedProviderFailure(challenge)?.confidence).not.toBe('banner');
   });
 });
 

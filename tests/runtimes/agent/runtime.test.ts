@@ -3984,6 +3984,66 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('delivers ambient auth-topic assistant text instead of dropping it (QR-209)', async () => {
+    // The exact defect: a genuine reply that DISCUSSES an expired OAuth token
+    // matched the permissive classifier and was silently dropped. It must now be
+    // delivered (ambient), with a structured warn recording the classification.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'my oauth broke, what do we do?' }));
+
+    const reply = 'Yes — it looks like the OAuth token expired, so we should reconnect the account and re-run login.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
+
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid: 'test@s.whatsapp.net', kind: 'auth-required' }),
+      'delivered assistant_text despite provider-failure classification',
+    );
+  });
+
+  it('delivers ambient auth-topic assistant text on the shared handler too (QR-209)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const chatJid = '15550100003@s.whatsapp.net';
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    await runtime.start();
+    await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'my oauth broke, what do we do?' }));
+
+    const reply = 'Right — the OAuth token expired; let us reconnect the provider account and continue.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
+
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'auth-required' }),
+      'delivered assistant_text despite provider-failure classification',
+    );
+  });
+
+  it('a suppressed streaming banner followed by a clean result does not arm fallback (QR-209 unknown-b)', async () => {
+    // Streaming never arms fallback; the terminal result classifies event.text, and
+    // a successful turn carries text:null — so a suppressed streaming banner cannot
+    // double-fire fallback on a genuine success.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({ type: 'assistant_text', text: "You're out of extra usage. Claude will be available at 8pm." });
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+
+    capturedOnEventRef.current!({ type: 'result', text: null, isError: false });
+
+    expect(runtime.getFallbackState().fallbackReason).toBeNull();
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+  });
+
   it('tool_use event enqueues tool update', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
