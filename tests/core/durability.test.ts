@@ -60,6 +60,33 @@ describe('DurabilityEngine', () => {
       engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
       expect(() => engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent')).toThrow();
     });
+
+    it('markInboundFailed records the given failure_class and keeps terminal_reason=error', () => {
+      const seq = engine.journalInbound('msg-fc-1', 'key-1', 'jid-1', 'agent');
+      engine.markInboundFailed(seq, 'db_error');
+      const row = db.raw.prepare('SELECT * FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.processing_status).toBe('failed');
+      expect(row.failure_class).toBe('db_error');
+      // Contract pin: terminal_reason must stay exactly 'error' (external matcher).
+      expect(row.terminal_reason).toBe('error');
+      expect(row.completed_at).not.toBeNull();
+    });
+
+    it('markInboundFailed with no class defaults failure_class to unknown', () => {
+      const seq = engine.journalInbound('msg-fc-2', 'key-1', 'jid-1', 'agent');
+      engine.markInboundFailed(seq);
+      const row = db.raw.prepare('SELECT failure_class, terminal_reason FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.failure_class).toBe('unknown');
+      expect(row.terminal_reason).toBe('error');
+    });
+
+    it('markInboundFailed coerces an out-of-vocabulary class to unknown', () => {
+      const seq = engine.journalInbound('msg-fc-3', 'key-1', 'jid-1', 'agent');
+      // Cast through unknown: callers are typed, but the DB gate must still hold.
+      engine.markInboundFailed(seq, 'disk_on_fire' as unknown as Parameters<typeof engine.markInboundFailed>[1]);
+      const row = db.raw.prepare('SELECT failure_class FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.failure_class).toBe('unknown');
+    });
   });
 
   describe('outbound_ops', () => {

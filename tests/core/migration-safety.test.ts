@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 35 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 36 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -1095,6 +1095,85 @@ describe('scheduled_messages send-start migration contract', () => {
     }).toThrow();
 
     db.close();
+  });
+
+  it('migration 36 adds a nullable, CHECK-free failure_class column to inbound_events', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 36')
+      .get() as { version: number } | undefined;
+    expect(version?.version).toBe(36);
+
+    const col = (
+      db.raw.prepare("PRAGMA table_info('inbound_events')").all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: string | null;
+      }>
+    ).find((c) => c.name === 'failure_class');
+    expect(col, 'failure_class column should exist').toBeDefined();
+    expect(col!.notnull, 'failure_class must be nullable').toBe(0);
+    expect(col!.dflt_value, 'failure_class must have no default').toBeNull();
+
+    // Deliberately NO schema CHECK — the vocabulary is gated in code, so any
+    // string is accepted at the DB layer and NULL stands for a pre-taxonomy row.
+    const sql = (
+      db.raw
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='inbound_events'")
+        .get() as { sql: string }
+    ).sql;
+    expect(sql).not.toMatch(/failure_class[^,]*CHECK/i);
+
+    expect(() => {
+      db.raw
+        .prepare("INSERT INTO inbound_events (message_id, conversation_key, chat_jid, failure_class) VALUES ('mig36-raw', 'k', 'j', 'not_in_vocab')")
+        .run();
+    }).not.toThrow();
+    const raw = db.raw
+      .prepare("SELECT failure_class FROM inbound_events WHERE message_id = 'mig36-raw'")
+      .get() as { failure_class: string };
+    expect(raw.failure_class).toBe('not_in_vocab');
+
+    db.close();
+  });
+
+  it('migration 36 is idempotent: reopening a DB that already has failure_class does not throw or duplicate the column', () => {
+    const dbPath = tmpFile();
+    try {
+      {
+        const db = new Database(dbPath);
+        db.open();
+        db.close();
+      }
+
+      // Force migration 36 to re-run by dropping its schema_migrations record.
+      {
+        const raw = new DatabaseSync(dbPath);
+        raw.prepare('DELETE FROM schema_migrations WHERE version = 36').run();
+        raw.close();
+      }
+
+      // Reopen: runMigration36 re-runs against a table that already has the
+      // column. The column-existence guard must make it a no-op.
+      const db2 = new Database(dbPath);
+      expect(() => db2.open()).not.toThrow();
+
+      const failureClassCols = (
+        db2.raw.prepare("PRAGMA table_info('inbound_events')").all() as Array<{ name: string }>
+      ).filter((c) => c.name === 'failure_class');
+      expect(failureClassCols).toHaveLength(1);
+
+      const version = db2.raw
+        .prepare('SELECT version FROM schema_migrations WHERE version = 36')
+        .get() as { version: number } | undefined;
+      expect(version?.version).toBe(36);
+
+      db2.close();
+    } finally {
+      cleanup(dbPath);
+    }
   });
 });
 

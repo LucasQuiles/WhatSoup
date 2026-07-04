@@ -21,6 +21,34 @@ describe('Migration v2 — durability tables', () => {
     expect(names).toContain('terminal_reason');
   });
 
+  it('migration 36 adds a nullable failure_class column to inbound_events', () => {
+    const cols = db.raw.prepare("PRAGMA table_info(inbound_events)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const failureClass = cols.find(c => c.name === 'failure_class');
+    expect(failureClass, 'inbound_events.failure_class should exist after migration 36').toBeDefined();
+    // Nullable, no default, no backfill.
+    expect(failureClass!.notnull, 'failure_class must be nullable').toBe(0);
+    expect(failureClass!.dflt_value, 'failure_class must have no column default').toBeNull();
+  });
+
+  it('failure_class has no CHECK constraint (bounded in code, not schema) and accepts NULL + any text', () => {
+    const sql = (db.raw.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='inbound_events'",
+    ).get() as { sql: string }).sql;
+    expect(sql).not.toMatch(/failure_class[^,]*CHECK/i);
+    // A pre-taxonomy row leaves failure_class NULL.
+    db.raw.prepare("INSERT INTO inbound_events (message_id, conversation_key, chat_jid) VALUES ('fc-null', 'k', 'j')").run();
+    const nullRow = db.raw.prepare("SELECT failure_class FROM inbound_events WHERE message_id = 'fc-null'").get() as { failure_class: string | null };
+    expect(nullRow.failure_class).toBeNull();
+    // No schema CHECK: the code layer (coerceInboundFailureClass) is the only gate.
+    expect(() => {
+      db.raw.prepare("INSERT INTO inbound_events (message_id, conversation_key, chat_jid, failure_class) VALUES ('fc-raw', 'k', 'j', 'anything')").run();
+    }).not.toThrow();
+  });
+
   it('creates outbound_ops table with replay_policy column', () => {
     const cols = db.raw.prepare("PRAGMA table_info(outbound_ops)").all() as Array<{ name: string }>;
     const names = cols.map(c => c.name);
