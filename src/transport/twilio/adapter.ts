@@ -28,6 +28,7 @@ import {
 import type { CallRef, VoiceCapableTransport, PlaceCallOptions } from '../contract/voice.ts';
 import { E164_RE, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioVoiceConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
+import { SmsRateLimiter } from './sms-rate-limiter.ts';
 import type { TranscriptDelivery } from './webhook-payloads.ts';
 
 // ---------------------------------------------------------------------------
@@ -151,6 +152,9 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
   private readonly voice: TwilioVoiceConfig;
   private readonly inboundMode: string;
 
+  // Per-destination outbound rate cap (rateLimit.smsPerMinute, QR-068).
+  private readonly smsRateLimiter: SmsRateLimiter;
+
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
 
@@ -194,6 +198,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     this.pollIntervalMs = config.pollIntervalMs;
     this.voice = config.voice ?? DEFAULT_TWILIO_VOICE;
     this.inboundMode = config.inboundMode;
+    this.smsRateLimiter = new SmsRateLimiter(config.rateLimit.smsPerMinute);
 
     this.capabilities = {
       channel: this.channelId,
@@ -318,6 +323,13 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
           : `text length ${text.length} exceeds maxTextLength ${this.capabilities.maxTextLength}`,
       });
     }
+
+    // Rate cap (QR-068): reserve a per-destination send slot AFTER validation
+    // (invalid requests must not consume slots) and BEFORE the port call. A
+    // full window DELAYS the send rather than throwing — bridge and MCP
+    // send_sms callers treat rejection as hard failure; the cap is for cost
+    // control, so queueing preserves their contract.
+    await this.smsRateLimiter.acquire(target.id);
 
     // Build port args: messagingServiceSid preferred over from per types.ts comment
     const sendArgs = this.messagingServiceSid !== undefined
