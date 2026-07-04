@@ -111,7 +111,7 @@ describe('handleGetLineProviderStatus', () => {
     expect(mockedLookup).toHaveBeenCalledWith('openai');
     const body = JSON.parse(res._body);
     expect(body).toEqual({
-      primary: { provider: 'openai-api', model: 'gpt-4o', keyPresent: true },
+      primary: { provider: 'openai-api', model: 'gpt-4o', keyPresent: true, endpointHost: null, apiKeyService: null },
       fallback: {
         provider: null,
         model: null,
@@ -162,7 +162,7 @@ describe('handleGetLineProviderStatus', () => {
     expect(mockedLookup).toHaveBeenCalledWith('prod-openai');
     expect(mockedLookup).not.toHaveBeenCalledWith('openai');
     const body = JSON.parse(res._body);
-    expect(body.primary).toEqual({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true });
+    expect(body.primary).toEqual({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true, endpointHost: null, apiKeyService: 'prod-openai' });
     expect(res._body).not.toContain('prod-openai-key');
   });
 
@@ -177,7 +177,7 @@ describe('handleGetLineProviderStatus', () => {
 
     expect(mockedLookup).toHaveBeenCalledWith('anthropic');
     const body = JSON.parse(res._body);
-    expect(body.primary).toEqual({ provider: 'anthropic-api', model: 'claude-sonnet-4-6', keyPresent: true });
+    expect(body.primary).toEqual({ provider: 'anthropic-api', model: 'claude-sonnet-4-6', keyPresent: true, endpointHost: null, apiKeyService: null });
     expect(res._body).not.toContain('anthropic-secret-value');
   });
 
@@ -193,7 +193,7 @@ describe('handleGetLineProviderStatus', () => {
     expect(mockedLookup).toHaveBeenCalledWith('minimax');
     const body = JSON.parse(res._body);
     expect(res._body).not.toContain('minimax-secret-value');
-    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true });
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true, endpointHost: null, apiKeyService: null });
   });
 
   it('does not 500 when an invalid opencode model value reaches provider-status', async () => {
@@ -207,7 +207,7 @@ describe('handleGetLineProviderStatus', () => {
     expect(res._status).toBe(200);
     expect(mockedLookup).not.toHaveBeenCalled();
     const body = JSON.parse(res._body);
-    expect(body.primary).toEqual({ provider: 'opencode-cli', model: null, keyPresent: null });
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: null, keyPresent: null, endpointHost: null, apiKeyService: null });
   });
 
   it('returns keyPresent=null for native-auth CLI providers without calling lookupCredential', async () => {
@@ -220,7 +220,7 @@ describe('handleGetLineProviderStatus', () => {
 
     expect(mockedLookup).not.toHaveBeenCalled();
     const body = JSON.parse(res._body);
-    expect(body.primary).toEqual({ provider: 'claude-cli', model: null, keyPresent: null });
+    expect(body.primary).toEqual({ provider: 'claude-cli', model: null, keyPresent: null, endpointHost: null, apiKeyService: null });
   });
 
   it('reports an active fallback window from the health snapshot fallbackActiveUntil', async () => {
@@ -488,6 +488,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: 'claude-cli',
       model: expectedModel,
       keyPresent: null,
+      endpointHost: null,
+      apiKeyService: null,
     });
   });
 
@@ -510,6 +512,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: 'openai-api',
       model: 'gpt-4o',
       keyPresent: true,
+      endpointHost: null,
+      apiKeyService: 'prod-openai',
     });
   });
 
@@ -524,6 +528,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: 'claude-cli',
       model: null,
       keyPresent: null,
+      endpointHost: null,
+      apiKeyService: null,
     });
   });
 
@@ -543,6 +549,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: null,
       model: null,
       keyPresent: null,
+      endpointHost: null,
+      apiKeyService: null,
     });
   });
 
@@ -583,6 +591,8 @@ describe('handleGetLineProviderStatus', () => {
       provider: 'openai-api',
       model: 'gpt-4o',
       keyPresent: true,
+      endpointHost: null,
+      apiKeyService: null,
     });
     const {
       effectiveProvider,
