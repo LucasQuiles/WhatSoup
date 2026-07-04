@@ -189,3 +189,17 @@ describe('load validation (fail-safe, mirrors fallback-state-db)', () => {
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
   });
 });
+
+describe('cross-field contract (F12)', () => {
+  it('provider_specific with NULL requested_provider reads back as null', () => {
+    setPreference(db, pref({ intent: 'provider_specific', requestedProvider: 'claude-cli' }));
+    db.raw.prepare('UPDATE chat_model_preference SET requested_provider = NULL').run();
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+
+  it('a non-pin intent carrying a requested_provider reads back as null', () => {
+    setPreference(db, pref({ intent: 'strongest', requestedProvider: null }));
+    db.raw.prepare("UPDATE chat_model_preference SET requested_provider = 'claude-cli'").run();
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
+  });
+});

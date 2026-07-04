@@ -133,6 +133,11 @@ export function getPreference(
   if (typeof row.intent !== 'string' || !INTENTS.has(row.intent)) return null;
   if (typeof row.scope !== 'string' || !SCOPES.has(row.scope)) return null;
   if (row.requested_provider !== null && typeof row.requested_provider !== 'string') return null;
+  // Cross-field contract (F12): requested_provider exists ONLY for
+  // provider_specific — a pin with no provider (or a provider on a
+  // non-pin intent) is out-of-contract garbage, not a preference.
+  if (row.intent === 'provider_specific' && typeof row.requested_provider !== 'string') return null;
+  if (row.intent !== 'provider_specific' && row.requested_provider !== null) return null;
   if (typeof row.updated_at !== 'number') return null;
   if (row.expires_at !== null && typeof row.expires_at !== 'number') return null;
   if (row.pin_strict !== 0 && row.pin_strict !== 1) return null;
