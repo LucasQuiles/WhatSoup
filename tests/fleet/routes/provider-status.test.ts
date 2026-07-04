@@ -195,7 +195,29 @@ describe('handleGetLineProviderStatus', () => {
     expect(mockedLookup).toHaveBeenCalledWith('minimax');
     const body = JSON.parse(res._body);
     expect(res._body).not.toContain('minimax-secret-value');
-    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true, endpointHost: null, apiKeyService: null });
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true, endpointHost: null, apiKeyService: 'minimax' });
+  });
+
+  it('reports the derived opencode-cli service even when an apiKeyService override is configured', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: {
+        provider: 'opencode-cli',
+        model: 'minimax/abab6.5',
+        providerConfig: { baseUrl: 'https://gateway.example.com/v1', apiKeyService: 'prod-minimax' },
+      } }),
+    );
+    mockedLookup.mockReturnValue('minimax-secret-value');
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance()), { name: 'agent-line' });
+
+    // resolveProviderKeyService ignores the override for opencode-cli, so
+    // keyPresent checks and this field reports the model-prefix service; the
+    // generated opencode.json honors the override (QR-221 tracks that split).
+    expect(mockedLookup).toHaveBeenCalledWith('minimax');
+    const body = JSON.parse(res._body);
+    expect(res._body).not.toContain('minimax-secret-value');
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true, endpointHost: 'gateway.example.com', apiKeyService: 'minimax' });
   });
 
   it('does not 500 when an invalid opencode model value reaches provider-status', async () => {

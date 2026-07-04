@@ -744,26 +744,39 @@ export async function handleGetLineProviderStatus(
   // both normalize to null rather than throwing or emitting ''.
   const endpointFieldsFor = (
     provider: string | null,
+    model: string | null,
     config: Record<string, unknown> | undefined,
     consumers: readonly string[],
   ): { endpointHost: string | null; apiKeyService: string | null } => {
-    if (!provider || !consumers.includes(provider) || !config) {
+    if (!provider || !consumers.includes(provider)) {
       return { endpointHost: null, apiKeyService: null };
     }
     let host: string | null = null;
-    const baseUrlRaw = stringValue(config.baseUrl);
+    const baseUrlRaw = config ? stringValue(config.baseUrl) : undefined;
     if (baseUrlRaw) {
       try {
         host = new URL(baseUrlRaw).host || null;
       } catch { /* unparseable on-disk baseUrl — report null */ }
     }
-    return { endpointHost: host, apiKeyService: stringValue(config.apiKeyService) ?? null };
+    // opencode-cli's effective keyring service is derived from the model
+    // prefix (resolveProviderKeyService ignores providerConfig.apiKeyService
+    // for it), so report the SAME service keyPresent checks — the raw config
+    // field is null in the common no-override case. For the API providers the
+    // raw override read is kept deliberately: null preserves the "no override
+    // configured" tri-state that flags BYOK at a glance. (QR-221 corner: with
+    // an explicit override set on an opencode instance, the generated
+    // opencode.json honors the override while the resolver — and therefore
+    // keyPresent and this field — reports the derived service.)
+    const apiKeyService = provider === 'opencode-cli'
+      ? resolveProviderKeyService(provider, model, config)
+      : config ? stringValue(config.apiKeyService) ?? null : null;
+    return { endpointHost: host, apiKeyService };
   };
   const primaryEndpoint = endpointFieldsFor(
-    primaryProvider, providerConfig, ['openai-api', 'anthropic-api', 'opencode-cli'],
+    primaryProvider, primaryModel, providerConfig, ['openai-api', 'anthropic-api', 'opencode-cli'],
   );
   const fallbackEndpoint = endpointFieldsFor(
-    fallbackProvider, fallbackProviderConfig, ['openai-api', 'anthropic-api'],
+    fallbackProvider, fallbackModel, fallbackProviderConfig, ['openai-api', 'anthropic-api'],
   );
 
   jsonResponse(res, 200, {
