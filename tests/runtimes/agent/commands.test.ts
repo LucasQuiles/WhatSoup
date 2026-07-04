@@ -214,3 +214,26 @@ describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
     expect(classifyInput('/reset', NL)).toEqual({ type: 'local', command: 'reset' });
   });
 });
+
+describe('routing aliases — trailing whitespace grammar (R10)', () => {
+  const NL = { routingAliases: true };
+
+  it('a trailing space on a bare alias still classifies local (matches base /status )', () => {
+    expect(classifyInput('/reset ', NL)).toEqual({ type: 'local', command: 'reset' });
+    expect(classifyInput('/why ', NL)).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/model ', NL)).toEqual({ type: 'local', command: 'model' });
+  });
+
+  it('a trailing space after a /model verb still classifies local with the verb as args', () => {
+    expect(classifyInput('/model strongest ', NL)).toEqual({ type: 'local', command: 'model', args: 'strongest' });
+  });
+
+  it('a base local command with a trailing space is unaffected', () => {
+    expect(classifyInput('/status ')).toEqual({ type: 'local', command: 'status' });
+    expect(classifyInput('/new ')).toEqual({ type: 'local', command: 'new' });
+  });
+
+  it('a bare slash with only whitespace still forwards (no command name)', () => {
+    expect(classifyInput('/ ').type).toBe('forwarded');
+  });
+});

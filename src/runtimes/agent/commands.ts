@@ -39,9 +39,13 @@ export function classifyInput(text: string, opts?: { routingAliases?: boolean })
 
   // Extract the command name: the word directly after the leading slash,
   // lowercased. E.g. "/Compact arg" → "compact".
+  // Filter empty split elements so a trailing space (e.g. "/reset ") does not
+  // inflate parts.length and knock a bare routing alias out of its
+  // `parts.length === 1` grammar — matching the base local commands, which key
+  // only on the command name and already tolerate a trailing space (R10).
   const rest = text.slice(1);
-  const parts = rest.split(/\s+/);
-  const commandName = parts[0].toLowerCase();
+  const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+  const commandName = (parts[0] ?? '').toLowerCase();
 
   const routingAlias =
     opts?.routingAliases === true &&
