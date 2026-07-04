@@ -1440,6 +1440,64 @@ describe('lines.ts uncovered-branch coverage', () => {
     }
   });
 
+  it('attributes endpoint fields by CONSUMPTION: CLI primary with orphaned providerConfig reports null, API-sibling fallback reports the inherited endpoint', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      // claude-cli never consumes providerConfig; the openai-api fallback
+      // inherits it at runtime (managed-API-sibling rule). The endpoint must
+      // surface under fallback, NOT primary.
+      const { deps } = providerConfig(configPath, {
+        provider: 'claude-cli',
+        fallbackProvider: 'openai-api',
+        fallbackModel: 'llama-3.3-70b-versatile',
+        providerConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      });
+      mockedLookup.mockImplementation((service: string) =>
+        service === 'groq' ? 'groq-key-present-stub' : null,
+      );
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary.endpointHost).toBeNull();
+      expect(body.primary.apiKeyService).toBeNull();
+      expect(body.fallback.endpointHost).toBe('api.groq.com');
+      expect(body.fallback.apiKeyService).toBe('groq');
+      // keyPresent must resolve via the INHERITED service (groq), not the
+      // openai default — mirrors fallbackProviderConfigFor at runtime.
+      expect(body.fallback.keyPresent).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes unparseable and no-authority on-disk baseUrl values to null without erroring', async () => {
+    // This route reads raw disk JSON with no validator pass — malformed
+    // values are reachable (hand-edited/authOnly-bootstrapped configs).
+    for (const badBaseUrl of ['%%%not a url%%%', 'file:///tmp/endpoint']) {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+      try {
+        const configPath = path.join(tmp, 'config.json');
+        const { deps } = providerConfig(configPath, {
+          provider: 'openai-api',
+          providerConfig: { baseUrl: badBaseUrl, apiKeyService: 'openai', model: 'gpt-4o' },
+        });
+        mockedLookup.mockReturnValue(null);
+        const res = mockRes();
+        await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+        expect(res._status, badBaseUrl + ' must not 500').toBe(200);
+        const body = JSON.parse(res._body);
+        expect(body.primary.endpointHost, badBaseUrl + ' must normalize to null').toBeNull();
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('reports endpointHost/apiKeyService as null when providerConfig has no override', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
     try {

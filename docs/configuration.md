@@ -823,7 +823,7 @@ Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n
 
 When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise.
 
-1. **Install the fallback provider CLI and confirm it is on the service user's PATH.**
+1. **Install the fallback provider CLI and confirm it is on the service user's PATH.** Skip this step for API-type fallback providers (`openai-api`, `anthropic-api` — e.g. the Groq/OpenRouter recipes in [Custom endpoint](#custom-endpoint-providerconfigbaseurl)): they are managed HTTP loops with no CLI binary to install or probe.
 
    For `opencode-cli`:
    ```sh
@@ -887,7 +887,9 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
    ```sh
-   security add-generic-password -s minimax -a "$USER" -w "sk-…"
+   security add-generic-password -s minimax -a "$USER" -w
+   # (bare -w: the command prompts for the value interactively, keeping the
+   # key off argv — out of shell history and momentary `ps` visibility)
    ```
 
    **Route C — Linux GNOME Keyring (`secret-tool`).**

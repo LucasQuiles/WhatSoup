@@ -687,7 +687,16 @@ export async function handleGetLineProviderStatus(
   const configuredFallback = fallbackEntries[0] ?? null;
   const fallbackProvider = configuredFallback?.provider ?? null;
   const fallbackModel = configuredFallback?.model ?? null;
-  const fallbackProviderConfig = fallbackProvider === primaryProvider ? providerConfig : undefined;
+  // Mirror the runtime inheritance rule (fallbackProviderConfigFor,
+  // src/runtimes/agent/fallback-config.ts): a fallback entry shares the
+  // instance providerConfig when it is the SAME provider OR a managed-API
+  // sibling (openai-api / anthropic-api) — not only the same-provider case.
+  const fallbackInherits =
+    fallbackProvider !== null &&
+    (fallbackProvider === primaryProvider ||
+      fallbackProvider === 'openai-api' ||
+      fallbackProvider === 'anthropic-api');
+  const fallbackProviderConfig = fallbackInherits ? providerConfig : undefined;
 
   // Fallback window state from the instance health snapshot (surface C emits
   // instance.fallbackActiveUntil as epoch ms or null).
@@ -722,27 +731,55 @@ export async function handleGetLineProviderStatus(
   // points at, so an operator can confirm a custom-endpoint (BYOK) instance
   // without reading config.json over SSH. Host only — never the full URL
   // (path/query could carry tenant identifiers), never key material.
-  const baseUrlRaw = stringValue(providerConfig?.baseUrl);
-  let endpointHost: string | null = null;
-  if (baseUrlRaw) {
-    try {
-      endpointHost = new URL(baseUrlRaw).host;
-    } catch { /* invalid URL cannot load (validator rejects) — report null */ }
-  }
-  const apiKeyService = stringValue(providerConfig?.apiKeyService) ?? null;
+  // Attribution follows CONSUMPTION, not mere presence: the fields appear
+  // under a role only when that role's provider actually uses providerConfig
+  // (openai-api/anthropic-api read baseUrl+apiKeyService directly;
+  // opencode-cli consumes them as PRIMARY via the generated opencode.json but
+  // has them STRIPPED as a fallback — runtime.ts sessionProviderConfig()).
+  // A CLI primary with an orphaned providerConfig therefore reports null here
+  // even though the raw config carries values.
+  // This route reads raw disk JSON with no validator pass (hand-edited,
+  // pre-validator, or authOnly-bootstrapped configs reach here), so a
+  // malformed baseUrl is possible: URL parse failure and no-authority schemes
+  // both normalize to null rather than throwing or emitting ''.
+  const endpointFieldsFor = (
+    provider: string | null,
+    config: Record<string, unknown> | undefined,
+    consumers: readonly string[],
+  ): { endpointHost: string | null; apiKeyService: string | null } => {
+    if (!provider || !consumers.includes(provider) || !config) {
+      return { endpointHost: null, apiKeyService: null };
+    }
+    let host: string | null = null;
+    const baseUrlRaw = stringValue(config.baseUrl);
+    if (baseUrlRaw) {
+      try {
+        host = new URL(baseUrlRaw).host || null;
+      } catch { /* unparseable on-disk baseUrl — report null */ }
+    }
+    return { endpointHost: host, apiKeyService: stringValue(config.apiKeyService) ?? null };
+  };
+  const primaryEndpoint = endpointFieldsFor(
+    primaryProvider, providerConfig, ['openai-api', 'anthropic-api', 'opencode-cli'],
+  );
+  const fallbackEndpoint = endpointFieldsFor(
+    fallbackProvider, fallbackProviderConfig, ['openai-api', 'anthropic-api'],
+  );
 
   jsonResponse(res, 200, {
     primary: {
       provider: primaryProvider,
       model: primaryModel,
       keyPresent: keyPresentFor(primaryProvider, primaryModel, providerConfig),
-      endpointHost,
-      apiKeyService,
+      endpointHost: primaryEndpoint.endpointHost,
+      apiKeyService: primaryEndpoint.apiKeyService,
     },
     fallback: {
       provider: fallbackProvider,
       model: fallbackModel,
       keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel, fallbackProviderConfig) : null,
+      endpointHost: fallbackEndpoint.endpointHost,
+      apiKeyService: fallbackEndpoint.apiKeyService,
       active,
       activeUntil,
       effectiveProvider: typeof effectiveProviderRaw === 'string' ? effectiveProviderRaw : null,
