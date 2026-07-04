@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "6fa0f434cc26c4b8c80e2e74e50f3907a20641fbc914cc14f242a5df55d218f7",
+      "sha256": "cbe56f4251fddb218e88e3b580fd46cc3fd8153f634c772595738fd5fba6cad4",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -96,7 +96,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "3f421ef34ac64e6b2bb2d9bc0ea0d319cee21497d4f609bc837cb9f8162495df",
+      "sha256": "eb7fc866b074d67406cf3ec9325dab5c202492ac223a1f57f85b09c1aebce21d",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
