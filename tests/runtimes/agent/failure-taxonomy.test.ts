@@ -78,6 +78,15 @@ describe('agent failure taxonomy detectors', () => {
   });
 
   it.each([
+    'Your OAuth token has expired - run claude login to reconnect, then retry.',
+    'Here is how OAuth refresh works once an access token has expired: refresh first, then retry.',
+    'The SSL cert expired last week, but the oauth flow itself is fine.',
+  ])('does not classify ordinary OAuth troubleshooting prose: %j', (message) => {
+    expect(isProviderAuthRequiredMessage(message)).toBe(false);
+    expect(classifyProviderFailure(message)).toBeNull();
+  });
+
+  it.each([
     ['', null],
     ['Prompt is too long: context_length_exceeded', 'context-overflow'],
     ['Quota exceeded; Claude resets at 9pm.', 'usage-limit'],

@@ -3984,6 +3984,29 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('streams ordinary OAuth troubleshooting prose and updates reply activity', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const replyGuarantee = { notifyActivity: vi.fn() };
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hi' }));
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    mockQueue.enqueueStreamingText.mockClear();
+    mockRuntimeLogger.warn.mockClear();
+
+    const text = 'Your OAuth token has expired - run claude login to reconnect, then retry.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text);
+    expect(replyGuarantee.notifyActivity).toHaveBeenCalledWith('test@s.whatsapp.net');
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ textPreview: expect.stringContaining('OAuth token') }),
+      'suppressed provider-failure message from assistant_text',
+    );
+  });
+
   it('tool_use event enqueues tool update', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -4509,6 +4532,28 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'result', text: 'a genuine terminal reply', isError: false });
     await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply'));
+  });
+
+  it('non-error result with OAuth troubleshooting prose is forwarded without auth fallback', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hi' }));
+    mockQueue.enqueueResultText.mockClear();
+    mockSession.shutdown.mockClear();
+    mockRuntimeLogger.warn.mockClear();
+
+    const text = 'Here is how OAuth refresh works once an access token has expired: refresh first, then retry.';
+    capturedOnEventRef.current!({ type: 'result', text, isError: false });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith(text));
+    expect(runtime.getFallbackState().fallbackReason).toBeNull();
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ textPreview: text }),
+      'suppressed provider auth-required message from result — session will be shut down',
+    );
   });
 
   it('model-unavailable assistant_text is suppressed from streaming (single path)', async () => {

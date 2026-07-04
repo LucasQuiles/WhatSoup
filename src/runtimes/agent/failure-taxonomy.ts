@@ -281,7 +281,7 @@ export function isProviderAuthRequiredMessage(text: string): boolean {
     // multi-word auth phrases, safe from the substring false-positive.
     lower.includes('invalid authentication credentials') ||
     lower.includes('failed to authenticate') ||
-    (lower.includes('oauth') && lower.includes('expired'))
+    /\boauth\s+(?:token|credentials?)\s+expired\b|\bexpired\s+oauth\s+(?:token|credentials?)\b/.test(lower)
   );
 }
 
