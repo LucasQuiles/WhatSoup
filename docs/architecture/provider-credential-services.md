@@ -40,11 +40,13 @@ A service is not a provider ID: `nvidia` would be reached as
    the service. If you add a probe, update the URL table and the
    mapped-but-unprobed lock in
    `tests/runtimes/agent/providers/credential-verify.test.ts`.
-4. **Reconcile the hand-maintained doc lists** (nothing forces these; the
-   exact-map lock's comment names them):
+4. **Reconcile the hand-maintained doc lists**:
    - `docs/configuration.md` — the env-var table in "Enabling provider
-     fallback on a new host" and the no-probe service list in the fallback
-     pre-flight prose.
+     fallback on a new host" and the probed/no-probe service lists in the
+     fallback pre-flight prose. These are guard-enforced by
+     `tests/lib/provider-service-doc-sync.test.ts` (runs in the push gate):
+     listed entries must match `SERVICE_ENV_MAP` and the behaviorally derived
+     probe set, so a stale entry fails the gate rather than drifting.
    - `docs/specs/2026-07-03-openai-compatible-byok-providers-design.md` —
      seam table and Blocked/future section (internal, publication-excluded).
 5. **Pilot before fleet use.** The design note's owner-gated pilot gate:
