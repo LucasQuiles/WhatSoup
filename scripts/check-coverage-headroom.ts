@@ -15,10 +15,16 @@ interface CoverageSummary {
   };
 }
 
+// Floors are the hard coverage gate (vitest.config.ts coverage.thresholds:
+// lines 95 / branches 90 / functions 93). This guard is an EARLY WARNING that
+// fires when a metric is within MIN_HEADROOM_POINTS *above* the gate — i.e. before
+// coverage:check would break. Keeping the floors below the hard gate (the previous
+// 88/80/87) made the guard dead: coverage:check already fails below 95/90/93, so a
+// sub-floor warning could never fire first. See QR-audit 2026-07-04.
 const THRESHOLDS = {
-  lines: 88,
-  branches: 80,
-  functions: 87,
+  lines: 95,
+  branches: 90,
+  functions: 93,
 } as const;
 
 const MIN_HEADROOM_POINTS = 2;
@@ -54,9 +60,12 @@ export function checkCoverageHeadroom(cwd = process.cwd()): string[] {
 export function run(cwd = process.cwd()): string[] {
   const findings = checkCoverageHeadroom(cwd);
   if (findings.length > 0) {
-    console.error('coverage headroom guard failed');
-    for (const finding of findings) console.error(finding);
-    process.exitCode = 1;
+    // Early WARNING only — does not fail the build. The hard coverage gate is
+    // coverage:check (vitest thresholds); this guard just flags metrics that have
+    // dropped within MIN_HEADROOM_POINTS of that gate so they can be shored up
+    // before coverage:check breaks. Never sets a non-zero exit code.
+    console.warn('coverage headroom guard: within headroom of the hard gate (warning only)');
+    for (const finding of findings) console.warn(finding);
   } else {
     console.log('coverage headroom guard passed');
   }
