@@ -110,14 +110,20 @@ describe('substrate MCP tools', () => {
   });
 
   it('R1 policy coupling: exactly the admin-gated substrate tools carry sensitive:true', () => {
-    // Guards against a new admin tool shipping without the flag (F12): the
-    // authorized listing count minus the read-only set must equal the
-    // sensitive set, and no read-only tool may be flagged.
-    const gated = new Set(SENSITIVE_TOOLS);
-    const readOnly = new Set(READ_TOOLS);
-    expect(gated.size).toBe(15);
-    for (const name of READ_TOOLS) expect(gated.has(name)).toBe(false);
-    for (const name of SENSITIVE_TOOLS) expect(readOnly.has(name)).toBe(false);
+    // Guards against a new admin tool shipping without the flag (F12). This
+    // reads the LIVE registry (each registered ToolDeclaration's `sensitive`
+    // flag) rather than comparing two hardcoded lists — so stripping the flag
+    // from any tool, or adding a new admin tool without it, fails this test.
+    const registered = (registry as unknown as {
+      tools: Map<string, { sensitive?: boolean }>;
+    }).tools;
+    const flaggedSensitive = new Set(
+      [...registered.entries()].filter(([, t]) => t.sensitive === true).map(([name]) => name),
+    );
+    // The set flagged in code must be EXACTLY the known admin-gated set.
+    expect(flaggedSensitive).toEqual(new Set(SENSITIVE_TOOLS));
+    // And no read-only tool may be flagged.
+    for (const name of READ_TOOLS) expect(flaggedSensitive.has(name)).toBe(false);
   });
 
   it('guest (non-admin actorJid) is rejected on capture_task without existence disclosure (R1)', async () => {

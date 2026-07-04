@@ -111,4 +111,38 @@ describe('R1 sensitive-tool gate', () => {
     registry.setSensitiveToolAuthorizer(() => false);
     expect((await registry.call('harmless_echo', {}, GUEST)).content[0].text).toBe('echo-ok');
   });
+  it('records a denied sensitive-tool attempt in the durability ledger (F07 forensic trail)', async () => {
+    const registry = makeRegistry();
+    registry.setSensitiveToolAuthorizer(() => false); // deny everyone
+    const calls: Array<{ m: string; args: unknown[] }> = [];
+    const durability = {
+      recordToolCall: (...args: unknown[]) => { calls.push({ m: 'record', args }); return 7; },
+      markToolExecuting: (...args: unknown[]) => { calls.push({ m: 'exec', args }); },
+      markToolComplete: (...args: unknown[]) => { calls.push({ m: 'complete', args }); },
+    };
+    (registry as unknown as { setDurability: (d: unknown) => void }).setDurability(durability);
+    const session = { tier: 'global', actorJid: GUEST.actorJid, conversationKey: '15550000009' } as SessionContext;
+    const res = await registry.call('sensitive_probe', {}, session);
+    // Caller still gets the uniform non-disclosing reply...
+    expect(res.content[0].text).toBe('Unknown tool: sensitive_probe');
+    // ...but the attempt is recorded: record -> executing -> complete(error).
+    expect(calls.map((c) => c.m)).toEqual(['record', 'exec', 'complete']);
+    expect(String(calls[0].args[1])).toBe('sensitive_probe'); // toolName
+    expect(String(calls[2].args[1])).toContain('denied'); // completion text
+  });
+
+  it('does NOT durably record when there is no conversationKey (no orphan rows)', async () => {
+    const registry = makeRegistry();
+    registry.setSensitiveToolAuthorizer(() => false);
+    let recorded = 0;
+    const durability = {
+      recordToolCall: () => { recorded++; return 1; },
+      markToolExecuting: () => {},
+      markToolComplete: () => {},
+    };
+    (registry as unknown as { setDurability: (d: unknown) => void }).setDurability(durability);
+    await registry.call('sensitive_probe', {}, GUEST); // GUEST has no conversationKey
+    expect(recorded).toBe(0);
+  });
+
 });
