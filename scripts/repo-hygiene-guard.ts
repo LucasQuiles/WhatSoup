@@ -57,26 +57,41 @@ interface GuardPattern {
 const fixtureFiles = new Set([
   'scripts/anonymize-private-literals.ts',
   'scripts/repo-hygiene-guard.ts',
-  // guard-core hosts the shared operational allowlist (real fleet file
-  // paths + instance identifiers) consumed by both hygiene guards.
-  'scripts/lib/guard-core.ts',
   'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
-  'tests/scripts/publication-guard.test.ts',
   'tests/eslint-rules/categorized-skips.test.ts',
   // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
   // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
-  // Python sides. Real credential leaks remain covered by the separate global
-  // pre-commit git-secret-scanner.
+  // Python sides. NOTE: no external secret scanner backstops this repo (the
+  // repo hooksPath shadows the global git hooks; CI runs none) - keep this
+  // blanket set minimal and prefer the code-scoped
+  // selfReferentialAllowlistFiles mechanism below.
   'tests/fixtures/redaction-parity-corpus.jsonl',
 ]);
 
 // The CAPE agent-runtime probe suite (tools/agent-runtime-probes/) is security/masking tooling:
 // its corpus is intentionally secret-, email-, and path-SHAPED test fixtures. Treat the whole
-// subtree as fixtures for these hygiene SHAPE patterns. Real credential leaks remain covered by the
-// separate global pre-commit git-secret-scanner and the suite's own corpus_guard/sensitive_pattern_loader.
+// subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
+// sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
+// repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
 const isFixtureFile = (filePath: string): boolean =>
   fixtureFiles.has(filePath) || filePath.startsWith('tools/agent-runtime-probes/');
+
+// Files that necessarily contain the operational allowlist's own private-SHAPED
+// literals: the shared allowlist source in lib, and the publication-guard test
+// that exercises those literals. Exempt ONLY the codes their own content
+// legitimately trips - every other pattern class (keys, secrets, phones,
+// tailnet IPs, JIDs) stays fully enforced on them, unlike blanket fixtureFiles
+// membership.
+const selfReferentialAllowlistFiles = new Set([
+  'scripts/lib/guard-core.ts',
+  'tests/scripts/publication-guard.test.ts',
+]);
+const selfReferentialAllowedCodes = new Set([
+  'personal-email',
+  'private-instance-label',
+  'private-host-label',
+]);
 
 const releaseHygieneFiles = [
   'scripts/cutover.sh',
@@ -154,7 +169,7 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
   },
 ];
 
-function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
+export function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
   if (code === 'operator-phone') {
@@ -169,10 +184,19 @@ function isAllowedPatternMatch(filePath: string, code: string, token: string): b
   if (code === 'secret-assignment') {
     return allowedSecretAssignmentValue.test(token);
   }
+  if (selfReferentialAllowlistFiles.has(filePath) && selfReferentialAllowedCodes.has(code)) {
+    return true;
+  }
   // Operational health-profile / fleet-manifest files legitimately reference
   // real systemd template-unit names, which the email-shape regex matches.
   // The shared guard-core helper tolerates the trailing ".service" suffix.
-  if (operationalReleaseHygieneFiles.has(filePath) && isOperationalProtocolToken(token)) {
+  // Code-gated: this bypass exists only for the email and instance-label
+  // shapes those unit names produce, never for key/secret/phone/IP classes.
+  if (
+    (code === 'personal-email' || code === 'private-instance-label')
+    && operationalReleaseHygieneFiles.has(filePath)
+    && isOperationalProtocolToken(token)
+  ) {
     return true;
   }
   return false;
