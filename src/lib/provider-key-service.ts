@@ -12,7 +12,8 @@
 // service below degrades to a presence-only check — the pre-flight returns
 // 'unknown' for them, so fallback_credential_invalid can never fire. Adding a
 // probe endpoint requires per-provider verification; do not assume parity with
-// this map.
+// this map. Full extension checklist (tests that flip, docs to reconcile):
+// docs/architecture/provider-credential-services.md.
 /**
  * Map service names to their conventional env var names.
  *

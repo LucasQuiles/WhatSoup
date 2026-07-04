@@ -788,7 +788,9 @@ confirm one streaming turn and one MCP tool-call turn succeed there. On `429`,
 (`src/runtimes/agent/providers/rate-limit-retry.ts`); a longer wait fails the
 turn into the chain. Decision record and endpoint pilot evidence:
 `docs/specs/2026-07-03-openai-compatible-byok-providers-design.md` (internal,
-publication-excluded).
+publication-excluded). Maintainers extending the service map itself (new
+`apiKeyService` values, probe coverage): see
+[docs/architecture/provider-credential-services.md](architecture/provider-credential-services.md).
 
 **Key resolution and account isolation (QR-104):** with `apiKeyService` set,
 the key resolves service-env-var-first (a process-wide `GROQ_API_KEY` beats a
