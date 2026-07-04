@@ -2944,9 +2944,12 @@ export class AgentRuntime implements Runtime {
           const isProvider = (PROVIDER_IDS as readonly string[]).includes(sub);
           if (!isIntent && !isProvider) {
             // Out-of-contract value: no state change, honest reply (UH-001).
+            // Never echo unbounded user text into a (possibly group) chat:
+            // strip markdown-breaking chars and cap the length (F03).
+            const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
             this.sendDirect(
               chatJid,
-              `_I do not recognize "${sub}". Use /model status to see available routes._`,
+              `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
             );
             break;
           }
