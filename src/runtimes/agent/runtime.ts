@@ -84,8 +84,11 @@ import {
   setPreference,
   clearPreference,
   pruneExpired,
+  type ChatModelPreference,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
+import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
@@ -1445,6 +1448,9 @@ export class AgentRuntime implements Runtime {
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
   // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
   private perChatInboundSeqQueue: Map<string, number[]> = new Map();
+
+  /** Last pin-block notice per conversation (one notice per transition). */
+  private lastPinBlockNotice = new Map<string, string>();
   // Counts pending system-turn results (context injection, continuation) that should
   // not consume from perChatInboundSeqQueue when their result event arrives. The
   // counter invariants (mark / unmark / consumeIfPending / count) live in the
@@ -3003,8 +3009,16 @@ export class AgentRuntime implements Runtime {
             // sticky pins require explicit confirmation and are a later slice.
             expiresAt: now + PREFERENCE_TTL_MS,
           });
+          this.emitRouteEventChecked({
+            event: 'model_preference_set',
+            conversationKey: toConversationKey(chatJid),
+            provider: requestedProvider ?? `intent:${intent}`,
+            modelRef: null,
+            source: 'user',
+            reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
+          });
           const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
-          this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h)._`);
+          this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
           break;
         }
 
@@ -5509,6 +5523,99 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Per-spawn route resolution (slice-2 B2). Preferences are an INPUT to the
+   * pure resolveRoute core, never an override of fallback/health state; the
+   * decision applies to the session being spawned (provider/model stay
+   * per-session and read-only).
+   */
+  private resolveRouteForTurn(
+    chatJid: string,
+    actorJid?: string,
+  ): RouteDecision & { pinnedProvider: string | null } {
+    let pref: ChatModelPreference | null = null;
+    if (actorJid) {
+      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
+      pref = getPreference(this.db, chatKey, senderKey);
+    }
+    const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
+    const decision = resolveRoute({
+      agentProvider: this.agentProvider,
+      effectiveModel: this.effectiveModel,
+      fallbackEntry: this.effectiveFallbackEntry,
+      pref,
+      pinnedProviderEligible: pinned !== null && this.routablePinTargets().includes(pinned),
+      tierMap: config.nlRoutingTiers,
+    });
+    return { ...decision, pinnedProvider: pinned };
+  }
+
+  /**
+   * Provider config for a route-decided session: same inheritance rules as
+   * the fallback path (fallbackProviderConfigFor), including the opencode
+   * strip of primary-specific baseUrl/apiKeyService when routing away from
+   * the primary provider.
+   */
+  private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
+    if (route.source !== 'preference' || route.provider === this.agentProvider) {
+      return this.sessionProviderConfig();
+    }
+    if (route.provider === 'opencode-cli') {
+      if (!this.agentProviderConfig) return undefined;
+      const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
+      return rest;
+    }
+    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig);
+  }
+
+  /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */
+  private noteRouteAtSpawn(
+    chatJid: string,
+    conversationKey: string,
+    route: RouteDecision & { pinnedProvider: string | null },
+  ): void {
+    if (route.source === 'pin_blocked_default' && route.pinnedProvider) {
+      if (this.lastPinBlockNotice.get(conversationKey) !== route.pinnedProvider) {
+        this.lastPinBlockNotice.set(conversationKey, route.pinnedProvider);
+        // Strict pins never silently fall back: the block is VISIBLE and the
+        // pin survives (the user clears it, we never do).
+        this.sendDirect(
+          chatJid,
+          `_Your pinned ${route.pinnedProvider} isn't available right now. Using the default route — your pin stays set; /reset to clear it._`,
+        );
+      }
+      this.emitRouteEventChecked({
+        event: 'user_pin_unreachable',
+        conversationKey,
+        provider: route.provider,
+        modelRef: route.model ?? null,
+        source: 'default',
+        reasonCode: route.reasonCode,
+      });
+      return;
+    }
+    this.lastPinBlockNotice.delete(conversationKey);
+    if (route.source !== 'default') {
+      this.emitRouteEventChecked({
+        event: 'runtime_selected',
+        conversationKey,
+        provider: route.provider,
+        modelRef: route.model ?? null,
+        source: route.source === 'fallback' ? 'auto_fallback' : route.source === 'preference' ? 'user' : 'default',
+        reasonCode: route.reasonCode,
+      });
+    }
+  }
+
+  private emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance'>): void {
+    if (!config.nlRouting) return;
+    const dir =
+      config.nlRoutingEventsDir ?? join(homedir(), '.config', 'whatsoup', 'instances', this.instanceName);
+    emitRouteEvent(dir, { ts: Date.now(), instance: this.instanceName, ...ev }, (m) =>
+      log.warn({ instance: this.instanceName }, m),
+    );
+  }
+
+  /**
    * Providers this instance can actually route to: the configured primary
    * plus the configured fallback chain, minus entries whose key service
    * resolves but has no credential (same probe the fallback selector uses).
@@ -5535,6 +5642,14 @@ export class AgentRuntime implements Runtime {
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
   private clearRoutePreference(chatJid: string, chatKey: string, senderKey: string): void {
     clearPreference(this.db, chatKey, senderKey);
+    this.emitRouteEventChecked({
+      event: 'model_preference_cleared',
+      conversationKey: toConversationKey(chatJid),
+      provider: this.agentProvider,
+      modelRef: null,
+      source: 'default',
+      reasonCode: 'user_reset',
+    });
     this.sendDirect(chatJid, '_Back to the default route._');
   }
 
@@ -5571,7 +5686,7 @@ export class AgentRuntime implements Runtime {
         (pref.expiresAt !== null
           ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
           : '') +
-        ' — recorded; routing wiring lands in the next slice'
+        ' — steers new sessions'
       : 'Preference: none';
     const fallbackLine = this.isFallbackWindowActive
       ? `Fallback: active — new sessions route via ${nextProvider}`
@@ -5608,7 +5723,7 @@ export class AgentRuntime implements Runtime {
     const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
     const pref = getPreference(this.db, chatKey, senderKey);
     const prefNote = pref
-      ? '; your preference is recorded and applies once routing wiring is enabled'
+      ? '; your preference steers new sessions'
       : '';
     return `_Route: ${provider} (${reason})${prefNote}. No delegation; routing never changes what I am allowed to do._`;
   }
@@ -7338,6 +7453,10 @@ export class AgentRuntime implements Runtime {
     mcpSocketPath?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
+    // Slice-2 routing wiring (flag-gated): preferences steer the session being
+    // spawned; flag off keeps the exact base expressions below.
+    const route = config.nlRouting ? this.resolveRouteForTurn(opts.chatJid, opts.actorJid) : null;
+    if (route) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
@@ -7369,16 +7488,16 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: this.effectiveModel,
+      model: route ? route.model : this.effectiveModel,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: this.effectiveProvider,
-      providerConfig: this.sessionProviderConfig(),
+      provider: route ? route.provider : this.effectiveProvider,
+      providerConfig: route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig(),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, this.effectiveProvider),
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
     });
     if (this.durability) {
       session.setDurability(this.durability);

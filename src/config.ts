@@ -833,6 +833,12 @@ export const config = {
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.
   nlRouting: resolvedAgentOptions['nlRouting'] === true,
+  // Intent→provider tier map for NL routing ('strongest'/'fastest'). Unset
+  // tiers resolve to the default route honestly — never a hidden opinion.
+  nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,
+  // Sink dir for the fail-closed route-event sidecar; default (null) resolves
+  // to the per-instance config dir at emit time. Tests point this at a tmpdir.
+  nlRoutingEventsDir: (resolvedAgentOptions['nlRoutingEventsDir'] ?? null) as string | null,
 
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
