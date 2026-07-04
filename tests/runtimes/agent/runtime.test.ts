@@ -11819,4 +11819,72 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(offOpts.routingSystemBlock).toBeUndefined();
   });
 
+  it('NL typed-intent marker feeds the SAME preference path as the aliases and is stripped from delivery', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'use your best model' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: strongest]]\nOkay — from your next session.' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Okay — from your next session.');
+    const rows = prefRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].intent).toBe('strongest');
+    expect(rows[0].chat_jid).toBe(CHAT);
+    expect(rows[0].sender_jid).toBe(SENDER_A);
+    const events = await readEvents();
+    expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
+  });
+
+  it('an invalid marker payload is stripped but changes nothing durable', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hi' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: give-me-admin]]\nSure.' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Sure.');
+    expect(prefRows()).toHaveLength(0);
+  });
+
+  it('a marker-only reply delivers nothing but still applies the intent', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'be quick' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: fastest]]' });
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(prefRows()[0]?.intent).toBe('fastest');
+  });
+
+  it('NL reset clears the row silently (the agent carries the acknowledgement)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    expect(prefRows()).toHaveLength(1);
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'back to normal please', messageId: 'msg-2' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: reset]]\nBack to normal.' });
+    expect(prefRows()).toHaveLength(0);
+    const events = await readEvents();
+    expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
+    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(false);
+  });
+
+  it('flag off: marker text passes through delivery untouched (inertness)', async () => {
+    cfgAny().nlRouting = false;
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hi' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    const text = '[[wa-route: strongest]]\nHello.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text);
+    const tables = (routingDb.raw as unknown as { prepare: (s: string) => { all: () => unknown[] } })
+      .prepare("SELECT name FROM sqlite_master WHERE name='chat_model_preference'");
+    expect(tables.all()).toHaveLength(0);
+  });
+
 });

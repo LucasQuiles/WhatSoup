@@ -85,11 +85,12 @@ import {
   clearPreference,
   pruneExpired,
   type ChatModelPreference,
+  type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
 import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
-import { buildRoutingPromptContract } from './route-intent.ts';
+import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
@@ -2939,10 +2940,7 @@ export class AgentRuntime implements Runtime {
           // per-sender REASONING preference and renders route visibility —
           // never tool, mutation, or authority changes (capability-preserved
           // routing). Reachable only when agentOptions.nlRouting is true (the
-          // classifier gates on the same flag). NOTE: resolution wiring
-          // (preferences steering the provider chosen for a turn) lands in the
-          // next slice; renderRouteStatus distinguishes live route vs recorded
-          // preference until then.
+          // classifier gates on the same flag).
           const sub = (classified.args ?? 'status').trim().toLowerCase();
           const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
           if (sub === '' || sub === 'status') {
@@ -2981,43 +2979,17 @@ export class AgentRuntime implements Runtime {
             );
             break;
           }
-          const now = Date.now();
           const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
           const requestedProvider = isProvider ? sub : null;
-          const existing = getPreference(this.db, chatKey, senderKey, now);
-          if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
-            // Re-confirmation refreshes the TTL (F08) — "already set" must stay
-            // true for a full window after the user re-asserts it. Sticky rows
-            // (expiresAt null) are never demoted to ephemeral by a repeat.
-            if (existing.expiresAt !== null) {
-              setPreference(this.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
-              this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
-            } else {
-              this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
-            }
+          const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
+          if (outcome === 'refreshed') {
+            this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
             break;
           }
-          setPreference(this.db, {
-            chatJid: chatKey,
-            senderJid: senderKey,
-            intent,
-            requestedProvider,
-            scope: 'this_thread',
-            pinStrict: true,
-            fallbackPermitted: false,
-            updatedAt: now,
-            // this_thread preferences are ephemeral by design (24h TTL);
-            // sticky pins require explicit confirmation and are a later slice.
-            expiresAt: now + PREFERENCE_TTL_MS,
-          });
-          this.emitRouteEventChecked({
-            event: 'model_preference_set',
-            conversationKey: toConversationKey(chatJid),
-            provider: requestedProvider ?? `intent:${intent}`,
-            modelRef: null,
-            source: 'user',
-            reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
-          });
+          if (outcome === 'sticky_kept') {
+            this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+            break;
+          }
           const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
           this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
           break;
@@ -4351,7 +4323,17 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(mapKey)) break;
         {
-          const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
+          const rawAssistantText = this.normalizeAssistantTextForDelivery(event, mapKey);
+          if (!rawAssistantText) break;
+          // Slice-3 NL routing: consume typed intent markers before delivery
+          // (flag off → pass-through, byte-identical).
+          const normalizedText = config.nlRouting
+            ? this.consumeRouteIntents(
+                rawAssistantText,
+                queue.targetChatJid,
+                mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid,
+              )
+            : rawAssistantText;
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
           // Two-tier provider-failure gate (QR-209). Fallback is armed on the
@@ -5649,6 +5631,14 @@ export class AgentRuntime implements Runtime {
 
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
   private clearRoutePreference(chatJid: string, chatKey: string, senderKey: string): void {
+    this.clearRoutePreferenceSilent(chatJid, chatKey, senderKey);
+    this.sendDirect(chatJid, '_Back to the default route._');
+  }
+
+  /** Store clear + route event without the reply echo. The NL typed-intent
+   *  path acknowledges through the agent's own reply (prompt contract), so
+   *  a runtime echo on top would double-message. */
+  private clearRoutePreferenceSilent(chatJid: string, chatKey: string, senderKey: string): void {
     clearPreference(this.db, chatKey, senderKey);
     this.emitRouteEventChecked({
       event: 'model_preference_cleared',
@@ -5658,7 +5648,99 @@ export class AgentRuntime implements Runtime {
       source: 'default',
       reasonCode: 'user_reset',
     });
-    this.sendDirect(chatJid, '_Back to the default route._');
+  }
+
+  /**
+   * Shared preference write for the /model aliases AND NL typed intents —
+   * one path, so the two surfaces can never drift (slice-3 contract). An
+   * identical repeat refreshes the TTL (sticky rows are never demoted); a
+   * durable change writes the row and emits exactly one route event.
+   */
+  private recordRoutePreference(
+    chatJid: string,
+    chatKey: string,
+    senderKey: string,
+    intent: PreferenceIntent,
+    requestedProvider: string | null,
+  ): 'set' | 'refreshed' | 'sticky_kept' {
+    const now = Date.now();
+    const existing = getPreference(this.db, chatKey, senderKey, now);
+    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
+      // Re-confirmation refreshes the TTL (F08) — "already set" must stay
+      // true for a full window after the user re-asserts it. Sticky rows
+      // (expiresAt null) are never demoted to ephemeral by a repeat.
+      if (existing.expiresAt !== null) {
+        setPreference(this.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+        return 'refreshed';
+      }
+      return 'sticky_kept';
+    }
+    setPreference(this.db, {
+      chatJid: chatKey,
+      senderJid: senderKey,
+      intent,
+      requestedProvider,
+      scope: 'this_thread',
+      pinStrict: true,
+      fallbackPermitted: false,
+      updatedAt: now,
+      // this_thread preferences are ephemeral by design (24h TTL);
+      // sticky pins require explicit confirmation and are a later slice.
+      expiresAt: now + PREFERENCE_TTL_MS,
+    });
+    this.emitRouteEventChecked({
+      event: 'model_preference_set',
+      conversationKey: toConversationKey(chatJid),
+      provider: requestedProvider ?? `intent:${intent}`,
+      modelRef: null,
+      source: 'user',
+      reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
+    });
+    return 'set';
+  }
+
+  /**
+   * Slice-3 NL typed-intent consumption (call sites are flag-gated): strip
+   * route-intent marker lines from agent output and feed the FIRST strictly-
+   * valid intent into the same per-sender preference path as the /model
+   * aliases. The agent's own reply carries the user-visible acknowledgement
+   * (prompt contract), so the runtime acts silently here. Malformed or
+   * ambiguous marker content changes nothing durable (UH-010); a store
+   * failure never blocks delivery of the reply (fail-open, same rule as the
+   * spawn-time preference read). Returns the delivery text, or null when
+   * the reply was marker-only and nothing remains to deliver.
+   */
+  private consumeRouteIntents(
+    text: string,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): string | null {
+    const { cleaned, intents, invalid } = extractRouteIntents(text);
+    if (invalid.length > 0) {
+      log.warn({ chatJid: toConversationKey(chatJid), invalid }, 'route-intent marker failed strict validation - no state change');
+    }
+    if (intents.length > 1) {
+      log.warn({ chatJid: toConversationKey(chatJid), count: intents.length }, 'multiple route-intent markers in one reply - acting on the first only');
+    }
+    const intent = intents[0];
+    if (intent) {
+      if (!actorJid) {
+        // No resolvable sender for this turn — record nothing (UH-007).
+        log.warn({ chatJid: toConversationKey(chatJid), intent }, 'route intent without a resolvable sender - no state change');
+      } else {
+        try {
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
+          if (intent === 'reset') {
+            this.clearRoutePreferenceSilent(chatJid, chatKey, senderKey);
+          } else {
+            this.recordRoutePreference(chatJid, chatKey, senderKey, intent, null);
+          }
+        } catch (err) {
+          log.warn({ err, intent, instance: this.instanceName }, 'route-intent apply failed - reply delivered without state change');
+        }
+      }
+    }
+    return cleaned.trim().length === 0 ? null : cleaned;
   }
 
   /**
@@ -8232,7 +8314,17 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         {
-          const normalizedText = this.normalizeAssistantTextForDelivery(event);
+          const rawAssistantText = this.normalizeAssistantTextForDelivery(event);
+          if (!rawAssistantText) break;
+          // Slice-3 NL routing: consume typed intent markers before delivery
+          // (flag off → pass-through, byte-identical).
+          const normalizedText = config.nlRouting
+            ? this.consumeRouteIntents(
+                rawAssistantText,
+                (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
+                this.currentTurnReplayActorJid,
+              )
+            : rawAssistantText;
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming')) {
             this.turnHadVisibleOutput = true;
