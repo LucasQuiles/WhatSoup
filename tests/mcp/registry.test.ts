@@ -726,6 +726,7 @@ describe('registry.ts uncovered-branch coverage', () => {
       'markToolComplete',
     ]);
     expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('"echo": "hi"');
   });
 
   it('records tool_calls under the real conversationKey for a chat-scoped session (unchanged by W6)', async () => {
@@ -744,6 +745,7 @@ describe('registry.ts uncovered-branch coverage', () => {
     expect(recordCall!.args[0]).toBe('15550000002');
     expect(recordCall!.args[1]).toBe('chat_durable');
     expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('"echo": "hi"');
   });
 
   it('skips durability recording entirely when no durability engine is attached (both tiers)', async () => {
@@ -765,6 +767,10 @@ describe('registry.ts uncovered-branch coverage', () => {
 
     expect(globalResult.isError).toBeUndefined();
     expect(chatResult.isError).toBeUndefined();
+    // Both tools still executed and returned their payloads — recording was the
+    // only thing skipped.
+    expect(globalResult.content[0].text).toContain('"echo": "hi"');
+    expect(chatResult.content[0].text).toContain('"echo": "hi"');
   });
 
   it('marks tool complete with the error message when the handler throws an Error', async () => {
