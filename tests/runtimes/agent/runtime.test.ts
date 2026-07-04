@@ -12108,6 +12108,34 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(opts.providerConfig).toEqual({ budget: 5, model: 'primary-model' });
   });
 
+  it('the routing prompt contract names the PINNED provider the session spawned on (R6)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model codex-cli' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; routingSystemBlock?: () => string | null };
+    expect(opts.provider).toBe('codex-cli');
+    // The in-prompt route fact must match the provider the session runs on —
+    // telling a codex-cli agent it is claude-cli contradicts /why.
+    const block = String(opts.routingSystemBlock?.());
+    expect(block).toContain('current provider: codex-cli');
+    expect(block).not.toContain('current provider: claude-cli');
+  });
+
+  it('/model status reports the PINNED provider as the next-session route, not the default (R7)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model codex-cli' }));
+    // No live session yet — status must show the route the NEXT spawn resolves
+    // to (the pin, via resolveRouteForTurn), not the instance default provider.
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', messageId: 'msg-2' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('*Current route:* codex-cli');
+    expect(status).not.toContain('*Current route:* claude-cli');
+  });
+
   it('a configured tier whose provider is NOT credentialed degrades the spawn to the default route (R5 wiring)', async () => {
     // strongest → anthropic-api, but its apiKeyService is absent from every
     // credential source → not routable → the /model strongest spawn must land

@@ -5944,19 +5944,39 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Shared route-view head for the two visibility surfaces (C6): the live
+   * session route, the sender's fail-open preference, AND the route the NEXT
+   * spawn will actually resolve to — computed via resolveRouteForTurn (R7), the
+   * SAME resolution the next session uses, so /model status and /why can never
+   * misreport the next-session provider by reading effectiveProvider (which
+   * reflects only the fallback window and ignores the pin).
+   */
+  private loadRouteView(chatJid: string, senderJid: string): {
+    live: { provider: string; model: string | undefined } | null;
+    pref: ChatModelPreference | null;
+    next: RouteDecision & { pinnedProvider: string | null };
+  } {
+    return {
+      live: this.liveSessionRoute(chatJid),
+      pref: this.loadSenderPreference(chatJid, senderJid),
+      next: this.resolveRouteForTurn(chatJid, senderJid),
+    };
+  }
+
+  /**
    * End-user route status (/model status). Visibility policy (capability-
    * preserved routing): provider, model route, preference, fallback state,
    * delegation state, and authority class only — never tool names, socket
    * paths, pids, account JIDs, or cross-conversation metadata.
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
-    const live = this.liveSessionRoute(chatJid);
-    const nextProvider = this.effectiveProvider || 'unknown-provider';
+    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
+    // Next-session provider/model come from resolveRouteForTurn (R7), so an
+    // eligible pin or tier is reflected here — not the fallback-only
+    // effectiveProvider, which contradicted the "steers new sessions" line.
+    const nextProvider = next.provider || 'unknown-provider';
     const provider = live?.provider ?? nextProvider;
-    const model = (live ? live.model : this.effectiveModel) ?? 'provider default';
-    // Fail-open read (C3/R11): a store error degrades to "no preference"
-    // instead of throwing out of the read-only /model status handler.
-    const pref = this.loadSenderPreference(chatJid, senderJid);
+    const model = (live ? live.model : next.model) ?? 'provider default';
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null
@@ -5987,18 +6007,21 @@ export class AgentRuntime implements Runtime {
 
   /** Compact route receipt (/why): what answered and why, one line. */
   private renderRouteWhy(chatJid: string, senderJid: string): string {
-    const live = this.liveSessionRoute(chatJid);
-    const provider = live?.provider ?? (this.effectiveProvider || 'unknown-provider');
+    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
+    // With no live session, report the provider the NEXT spawn will use (R7)
+    // — the pinned/tier provider, not the fallback-only effectiveProvider.
+    const provider = live?.provider ?? (next.provider || 'unknown-provider');
     const reason = live
-      ? this.isFallbackWindowActive && live.provider !== this.effectiveProvider
+      ? this.isFallbackWindowActive && live.provider !== next.provider
         ? "serving this chat's current session (new sessions use the fallback route)"
         : "serving this chat's current session"
-      : this.isFallbackWindowActive
+      : next.source === 'fallback'
         ? 'a fallback window is active'
-        : 'instance default route';
-    // Fail-open read (C3/R11): a store error degrades to "no preference"
-    // instead of throwing out of the read-only /why handler.
-    const pref = this.loadSenderPreference(chatJid, senderJid);
+        : next.source === 'preference'
+          ? 'your preferred route for the next session'
+          : next.source === 'pin_blocked_default'
+            ? 'your pinned provider is unavailable — using the default route'
+            : 'instance default route';
     const prefNote = pref
       ? '; your preference steers new sessions'
       : '';
@@ -7745,7 +7768,7 @@ export class AgentRuntime implements Runtime {
    * state (slice 3). Evaluated per prompt build so tier/provider facts are
    * current; flag off never reaches this (the opt stays undefined).
    */
-  private buildRoutingContractBlock(): string {
+  private buildRoutingContractBlock(provider: string): string {
     // Fail-open (R13): the routablePinTargets credential probe does I/O and can
     // throw; the routing prompt block must never fail a spawn. Degrade to the
     // always-routable primary rather than propagating out of prompt build.
@@ -7757,7 +7780,10 @@ export class AgentRuntime implements Runtime {
       routableProviders = [this.agentProvider];
     }
     return buildRoutingPromptContract({
-      provider: this.effectiveProvider,
+      // Thread the provider the session actually spawned on (R6), as the
+      // adjacent handoffSystemBlock is — hardcoding effectiveProvider told a
+      // pin/tier-routed agent it was the default provider (contradicting /why).
+      provider,
       tierMap: config.nlRoutingTiers ?? null,
       routableProviders,
     });
@@ -7824,7 +7850,7 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
-      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock() : undefined,
+      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
     });
     if (this.durability) {
       session.setDurability(this.durability);
