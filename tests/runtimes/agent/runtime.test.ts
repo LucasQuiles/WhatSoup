@@ -11926,4 +11926,35 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(switched[0].authority).toBe('advisory_only');
   });
 
+  it('spawn fails OPEN to the default route when the preference store read throws (never drops a turn)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    // Corrupt the store so getPreference throws inside resolveRouteForTurn at spawn.
+    routingDb.raw.exec('DROP TABLE chat_model_preference');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
+    // The turn still ran — a routing-preference read failure must never drop it.
+    expect(capturedSessionManagerOptsRef.current).toBeTruthy();
+    expect(mockSession.sendTurn).toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ instance: 'test' }),
+      'preference read failed - routing on default',
+    );
+  });
+
+  it('an NL marker apply that throws still delivers the reply (fail-open, no state change)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'best model please' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    // Drop the table so recordRoutePreference's store write throws in consumeRouteIntents.
+    routingDb.raw.exec('DROP TABLE chat_model_preference');
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: strongest]]\nDone.' });
+    // Reply is delivered (marker stripped) even though the apply failed.
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Done.');
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'strongest', instance: 'test' }),
+      'route-intent apply failed - reply delivered without state change',
+    );
+  });
+
 });
