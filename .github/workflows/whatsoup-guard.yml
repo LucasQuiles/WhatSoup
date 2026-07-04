@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# Superseded runs on the same ref are safe to drop (PR/push guard, like quality.yml
+# — the opposite of tag-release-gate.yml, which never interrupts a release).
+concurrency:
+  group: whatsoup-guard-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
