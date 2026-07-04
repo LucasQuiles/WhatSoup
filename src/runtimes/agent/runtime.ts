@@ -1472,6 +1472,15 @@ export class AgentRuntime implements Runtime {
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
   private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
+  // R1 streaming marker scan: hold the FIRST line of a turn's assistant text
+  // until it is resolvable (a newline arrived, or it can no longer be a
+  // [[wa-route: …]] marker) so a marker split across token-streamed deltas
+  // never leaks and always registers. null = not scanning (base per-delta
+  // path); '' or a partial line = actively holding. Shared/single mode uses
+  // the scalar, per_chat uses the map; both armed at turn start and flushed at
+  // the terminal 'result', all flag-gated (flag off leaves them untouched).
+  private currentTurnRouteMarkerHold: string | null = null;
+  private perChatRouteMarkerHold: Map<string, string> = new Map();
 
   // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
   // Used to replay a message when session resume fails and the turn was lost.
@@ -1531,6 +1540,7 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
+    this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
@@ -3190,6 +3200,9 @@ export class AgentRuntime implements Runtime {
         this.perChatTurnContentType.set(mapKey, msg.contentType);
         this.perChatTurnText.set(mapKey, '');
         this.perChatAssistantItemText.delete(mapKey);
+        // Arm the R1 first-line marker scan for this turn (flag-gated).
+        if (config.nlRouting) this.perChatRouteMarkerHold.set(mapKey, '');
+        else this.perChatRouteMarkerHold.delete(mapKey);
         await this.sendTurnPerChat(chatJid, text, mapKey, msg.senderJid);
       }
     } else {
@@ -3201,6 +3214,8 @@ export class AgentRuntime implements Runtime {
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
+      // Arm the R1 first-line marker scan for this turn (flag-gated).
+      this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid);
     }
   }
@@ -3237,6 +3252,8 @@ export class AgentRuntime implements Runtime {
     this.bindActiveGlobalMcpConversation(chatJid);
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+    // Arm the R1 first-line marker scan for this shared turn (flag-gated).
+    this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
     this.currentTurnReplayText = prefixedText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
@@ -4338,14 +4355,21 @@ export class AgentRuntime implements Runtime {
           const rawAssistantText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!rawAssistantText) break;
           // Slice-3 NL routing: consume typed intent markers before delivery
-          // (flag off → pass-through, byte-identical).
-          const normalizedText = config.nlRouting
-            ? this.consumeRouteIntents(
-                rawAssistantText,
-                queue.targetChatJid,
-                mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid,
-              )
-            : rawAssistantText;
+          // (flag off → pass-through, byte-identical). Streaming-safe: the
+          // first line is buffered across token deltas so a split marker never
+          // leaks (R1).
+          let normalizedText: string | null;
+          if (config.nlRouting) {
+            const scanActorJid = mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid;
+            const scanKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+            const held = this.perChatRouteMarkerHold.has(scanKey) ? this.perChatRouteMarkerHold.get(scanKey)! : null;
+            const step = this.scanRouteMarkerDelta(held, rawAssistantText, queue.targetChatJid, scanActorJid);
+            if (step.held === null) this.perChatRouteMarkerHold.delete(scanKey);
+            else this.perChatRouteMarkerHold.set(scanKey, step.held);
+            normalizedText = step.deliver;
+          } else {
+            normalizedText = rawAssistantText;
+          }
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
           // Two-tier provider-failure gate (QR-209). Fallback is armed on the
@@ -4455,6 +4479,22 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(mapKey);
+        // R1: flush any held first-line marker buffer for this chat at turn
+        // end — a marker-only / no-newline reply registers its intent here and
+        // delivers whatever remains. No-op when nothing was held.
+        if (config.nlRouting) {
+          const markerScanKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+          const heldMarker = this.perChatRouteMarkerHold.get(markerScanKey);
+          if (heldMarker !== undefined) {
+            this.perChatRouteMarkerHold.delete(markerScanKey);
+            const flushActorJid = mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid;
+            const tail = this.flushRouteMarker(heldMarker, queue.targetChatJid, flushActorJid);
+            if (tail) {
+              queue.enqueueStreamingText(tail);
+              if (mapKey !== undefined) this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + tail);
+            }
+          }
+        }
         const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
@@ -5819,7 +5859,73 @@ export class AgentRuntime implements Runtime {
         }
       }
     }
-    return cleaned.trim().length === 0 ? null : cleaned;
+    // Suppress delivery ONLY when a marker envelope was actually stripped and
+    // nothing meaningful remains (R12) — a whitespace-only reply that carried
+    // no marker must pass through unchanged, exactly as the flag-off path
+    // would deliver it, instead of being silently swallowed.
+    const markerStripped = intents.length > 0 || invalid.length > 0;
+    return markerStripped && cleaned.trim().length === 0 ? null : cleaned;
+  }
+
+  /**
+   * True while `held` could still grow into a `[[wa-route: …]]` envelope line.
+   * Leading spaces/tabs are tolerated (extractRouteIntents trims each line),
+   * but an all-whitespace buffer is NOT a marker precursor — a whitespace-only
+   * reply is a genuine (empty-ish) reply and must not be held.
+   */
+  private routeMarkerStillPossible(held: string): boolean {
+    const t = held.replace(/^[ \t]+/, '');
+    if (t.length === 0) return false;
+    const marker = '[[wa-route:';
+    return marker.startsWith(t) || t.startsWith(marker);
+  }
+
+  /**
+   * One streaming delta of a turn's assistant text (R1). Token-streaming
+   * providers (anthropic-api/openai-api) emit assistant_text one fragment at a
+   * time with no itemId, so a marker line is split across deltas and the
+   * whole-event extractor never matches it — leaking the syntax and dropping
+   * the intent. This buffers the FIRST line until it is resolvable (a newline
+   * arrived, or it can no longer be a marker), runs the SAME extractRouteIntents
+   * on the resolved prefix, then streams the body untouched. `held` is null
+   * when not scanning (turn not armed, or first line already resolved) → base
+   * per-delta extraction, byte-identical to flag-off body handling.
+   */
+  private scanRouteMarkerDelta(
+    held: string | null,
+    text: string,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): { deliver: string | null; held: string | null } {
+    if (held === null) {
+      return { deliver: this.consumeRouteIntents(text, chatJid, actorJid), held: null };
+    }
+    const next = held + text;
+    if (next.includes('\n')) {
+      // First line complete — resolve the whole held buffer with the shared
+      // extractor (whole-block providers land here on their first delta).
+      return { deliver: this.consumeRouteIntents(next, chatJid, actorJid), held: null };
+    }
+    if (this.routeMarkerStillPossible(next)) {
+      return { deliver: null, held: next };
+    }
+    // The first line is plain text — release it and stop scanning this turn.
+    return { deliver: this.consumeRouteIntents(next, chatJid, actorJid), held: null };
+  }
+
+  /**
+   * Resolve a still-held first-line buffer at turn end (R1): a marker-only or
+   * no-newline reply never saw a newline while streaming, so the terminal
+   * 'result' flushes it — registering the intent and delivering whatever
+   * remains. No-op when nothing was held.
+   */
+  private flushRouteMarker(
+    held: string | null,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): string | null {
+    if (held === null || held.length === 0) return null;
+    return this.consumeRouteIntents(held, chatJid, actorJid);
   }
 
   /**
@@ -8434,14 +8540,22 @@ export class AgentRuntime implements Runtime {
           const rawAssistantText = this.normalizeAssistantTextForDelivery(event);
           if (!rawAssistantText) break;
           // Slice-3 NL routing: consume typed intent markers before delivery
-          // (flag off → pass-through, byte-identical).
-          const normalizedText = config.nlRouting
-            ? this.consumeRouteIntents(
-                rawAssistantText,
-                (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
-                this.currentTurnReplayActorJid,
-              )
-            : rawAssistantText;
+          // (flag off → pass-through, byte-identical). Streaming-safe: the
+          // first line is buffered across token deltas so a split marker never
+          // leaks (R1).
+          let normalizedText: string | null;
+          if (config.nlRouting) {
+            const step = this.scanRouteMarkerDelta(
+              this.currentTurnRouteMarkerHold,
+              rawAssistantText,
+              (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
+              this.currentTurnReplayActorJid,
+            );
+            this.currentTurnRouteMarkerHold = step.held;
+            normalizedText = step.deliver;
+          } else {
+            normalizedText = rawAssistantText;
+          }
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming')) {
             this.turnHadVisibleOutput = true;
@@ -8554,6 +8668,23 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+        // R1: flush any held first-line marker buffer at turn end (see the
+        // per-chat handler) — registers a marker-only / no-newline intent and
+        // delivers whatever remains. No-op when nothing was held.
+        if (config.nlRouting && this.currentTurnRouteMarkerHold !== null) {
+          const heldMarker = this.currentTurnRouteMarkerHold;
+          this.currentTurnRouteMarkerHold = null;
+          const tail = this.flushRouteMarker(
+            heldMarker,
+            (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
+            this.currentTurnReplayActorJid,
+          );
+          if (tail) {
+            queue.enqueueStreamingText(tail);
+            this.turnHadVisibleOutput = true;
+            this.currentTurnAssistantText += tail;
+          }
+        }
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();

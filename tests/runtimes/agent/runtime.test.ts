@@ -11855,8 +11855,45 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: fastest]]' });
+    // The marker has no trailing newline, so the streaming-safe scan holds it
+    // until the terminal result (text:null, as the token-streaming providers
+    // emit for a streamed reply) flushes it — registering the intent.
+    capturedOnEventRef.current!({ type: 'result', text: null });
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(prefRows()[0]?.intent).toBe('fastest');
+  });
+
+  it('a marker split across streaming token deltas never leaks and still registers (R1)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'use your best model' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    // anthropic-api / openai-api stream one token fragment at a time with no
+    // itemId, so the [[wa-route: …]] envelope is split across deltas.
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: ' });
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'strongest]]\n' });
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Okay — from your next session.' });
+    const delivered = mockQueue.enqueueStreamingText.mock.calls.map(([t]) => String(t)).join('');
+    expect(delivered).not.toContain('[[wa-route');
+    expect(delivered).not.toContain('strongest]]');
+    expect(delivered).toContain('Okay — from your next session.');
+    const rows = prefRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].intent).toBe('strongest');
+    expect(rows[0].sender_jid).toBe(SENDER_A);
+  });
+
+  it('a whitespace-only streamed reply is delivered under nlRouting, matching flag-off (R12)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hi' }));
+    (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
+    (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    mockQueue.enqueueStreamingText.mockClear();
+    // No marker, whitespace-only: the flag-off path delivers this, so flag-on
+    // must too — it must not be swallowed by the marker-strip suppression.
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '   ' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('   ');
   });
 
   it('NL reset clears the row silently (the agent carries the acknowledgement)', async () => {
