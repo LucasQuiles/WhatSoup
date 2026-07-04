@@ -181,20 +181,27 @@ export class ToolRegistry {
    * construction.
    */
   setSensitiveToolAuthorizer(fn: (session: SessionContext) => boolean): void {
+    if (this.sensitiveAuthorizer) {
+      // Single install site in production; a second install would silently
+      // reassign the admin policy for every sensitive tool. Fail loud.
+      throw new Error('sensitive-tool authorizer already installed');
+    }
     this.sensitiveAuthorizer = fn;
   }
 
   /**
-   * R1 central gate. Fail-closed on every uncertain path: no actorJid,
-   * no installed authorizer, and an authorizer that throws all deny.
-   * Routing, delegation, and fallback never change this result — only
-   * the per-turn actor identity does (capability-preserved routing).
+   * R1 central gate, evaluated per CALL with the turn's actor. Fail-closed
+   * on every uncertain path: no actorJid, no installed authorizer, an
+   * authorizer that throws, and any non-`true` return (a truthy non-boolean
+   * — e.g. a Promise from a mistakenly-async authorizer — must NOT open the
+   * gate). Routing/delegation/fallback never change this result — only the
+   * per-turn actor identity does (capability-preserved routing).
    */
   private sensitiveAllowed(session: SessionContext): boolean {
     if (!session.actorJid) return false;
     if (!this.sensitiveAuthorizer) return false;
     try {
-      return this.sensitiveAuthorizer(session);
+      return this.sensitiveAuthorizer(session) === true;
     } catch (err) {
       log.warn({ err }, 'sensitive-tool authorizer threw - denying (fail-closed)');
       return false;
@@ -239,11 +246,6 @@ export class ToolRegistry {
         continue;
       }
 
-      // R1: sensitive tools are invisible to sessions that cannot call them.
-      if (tool.sensitive && !this.sensitiveAllowed(session)) {
-        continue;
-      }
-
       result.push({
         name: tool.name,
         description: tool.description,
@@ -277,20 +279,31 @@ export class ToolRegistry {
       };
     }
 
-    // --- R1 sensitive-tool gate (central; in-handler admin checks remain
-    // as defense in depth) ---
+    // --- R1 sensitive-tool gate (central, authoritative; in-handler
+    // assertAdmin checks remain as defense in depth) ---
     if (tool.sensitive && !this.sensitiveAllowed(session)) {
-      if (!session.actorJid) {
-        // Internal wiring fault, not an untrusted probe: keep it actionable.
-        return {
-          content: [{ type: 'text', text: `Tool "${name}" is admin-gated and this session has no actorJid — the runtime must populate actorJid from the sender before dispatching admin-gated tools` }],
-          isError: true,
-        };
+      // UNIFORM reply for every denial — missing actorJid (wiring fault) and
+      // unauthorized actor are indistinguishable to the caller, identical to
+      // a nonexistent tool, so call() never becomes an existence oracle for
+      // sensitive names. The diagnosis (which actor, why) lives server-side:
+      // the specific admin-predicate reason is logged inside the authorizer.
+      log.warn(
+        { tool: name, tier: session.tier, actorJid: session.actorJid ?? null },
+        session.actorJid ? 'sensitive tool denied (unauthorized actor)' : 'sensitive tool denied (missing actorJid - runtime wiring fault)',
+      );
+      // Preserve the forensic trail the pre-R1 in-handler denial left in the
+      // durable ledger (F07): a denied attempt is still an attributable event.
+      const denyConvKey = session.conversationKey ?? '';
+      if (this.durability && denyConvKey) {
+        const denyId = this.durability.recordToolCall(
+          denyConvKey,
+          name,
+          JSON.stringify(params),
+          tool.replayPolicy ?? 'unsafe',
+        );
+        this.durability.markToolExecuting(denyId);
+        this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)');
       }
-      // Unauthorized actor: indistinguishable from a tool that does not
-      // exist. Sensitive tool names are never disclosed to unauthorized
-      // callers — listTools hides them, so call must not confirm them.
-      log.warn({ tool: name, tier: session.tier }, 'sensitive tool denied (unauthorized actor)');
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
         isError: true,

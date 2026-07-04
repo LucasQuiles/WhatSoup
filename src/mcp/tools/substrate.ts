@@ -106,7 +106,15 @@ export function isAdminActor(deps: SubstrateDeps, session: SessionContext): bool
   try {
     assertAdmin(deps, session);
     return true;
-  } catch {
+  } catch (err) {
+    // The central gate replies uniformly (non-disclosing) to the caller, so
+    // the specific reason (missing LID mapping, non-WhatsApp transport,
+    // unlisted phone) would otherwise vanish — an admin lockout must stay
+    // diagnosable server-side (F06). Log the actor + cause, deny.
+    log.info(
+      { actorJid: session.actorJid ?? null, reason: err instanceof Error ? err.message : String(err) },
+      'admin predicate denied',
+    );
     return false;
   }
 }
