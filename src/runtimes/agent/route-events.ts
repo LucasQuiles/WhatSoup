@@ -69,7 +69,10 @@ export const ROUTE_EVENTS_MAX_BYTES = 5 * 1024 * 1024;
 
 export function deriveChatScope(conversationKey: string | null): RouteChatScope {
   if (conversationKey === null) return 'instance';
-  return conversationKey.endsWith('@g.us') ? 'group' : 'dm';
+  // The only caller passes a toConversationKey value, and group chats serialize
+  // as "<local>_at_g.us" — NOT "@g.us" — so match that suffix (R9). Checking
+  // "@g.us" mislabeled every group routing decision as a DM in the sidecar.
+  return conversationKey.endsWith('_at_g.us') ? 'group' : 'dm';
 }
 
 function routeEventProblem(ev: ModelRouteEvent): string | null {

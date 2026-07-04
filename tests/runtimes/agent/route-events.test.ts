@@ -17,6 +17,7 @@ import {
   type ModelRouteEvent,
   type RouteEventType,
 } from '../../../src/runtimes/agent/route-events.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 
 function ev(overrides: Partial<ModelRouteEvent> = {}): ModelRouteEvent {
   return {
@@ -154,9 +155,15 @@ describe('emitRouteEvent', () => {
 });
 
 describe('deriveChatScope', () => {
-  it('maps null to instance scope, @g.us to group, everything else to dm', () => {
+  it('maps null to instance, a REAL group conversationKey to group, everything else to dm (R9)', () => {
     expect(deriveChatScope(null)).toBe('instance');
-    expect(deriveChatScope('111222333@g.us')).toBe('group');
+    // Feed the value the runtime actually produces — toConversationKey
+    // serializes a group as "<local>_at_g.us" (never "@g.us"). The prior test
+    // fed a raw "@g.us" JID the runtime never passes, masking the suffix bug.
+    expect(toConversationKey('111222333@g.us')).toBe('111222333_at_g.us');
+    expect(deriveChatScope(toConversationKey('111222333@g.us'))).toBe('group');
+    expect(deriveChatScope('111222333_at_g.us')).toBe('group');
+    expect(deriveChatScope(toConversationKey('15550000001@s.whatsapp.net'))).toBe('dm');
     expect(deriveChatScope('15550000001')).toBe('dm');
   });
 });
