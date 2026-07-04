@@ -54,6 +54,25 @@ describe('verifyFallbackCredential', () => {
     expect(fakeFetch).not.toHaveBeenCalled();
   });
 
+  // 5b. Mapped-but-unprobed services (SERVICE_ENV_MAP entries with no
+  //     PROBE_ENDPOINTS entry) degrade to presence-only checks: 'unknown',
+  //     fetch never called, so fallback_credential_invalid can never fire for
+  //     them. Locked per service so adding a probe entry flips a named test.
+  //     If it flips: prove the endpoint returns 401/403 on a bad key first —
+  //     openrouter serves GET /models publicly (HTTP 200 with an invalid key,
+  //     observed 2026-07-03), so a /models-shaped probe there would be mute
+  //     and fail open forever. See the qualification comment in
+  //     credential-verify.ts.
+  it.each(['glm', 'xai', 'groq', 'mistral', 'openrouter', 'google', 'fireworks-ai', 'togetherai'])(
+    'returns unknown for mapped-but-unprobed service %s without calling fetch',
+    async (service) => {
+      const fakeFetch = makeFetch(200);
+      const result = await verifyFallbackCredential(service, 'any-key', fakeFetch);
+      expect(result).toBe<CredentialVerifyResult>('unknown');
+      expect(fakeFetch).not.toHaveBeenCalled();
+    },
+  );
+
   // 6. Key handling: Authorization header is exactly `Bearer <key>`, URL does
   //    not contain the key, and init.signal is an AbortSignal.
   it('sends Authorization: Bearer <key>, URL does not leak key, signal is AbortSignal', async () => {
