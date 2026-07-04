@@ -86,7 +86,7 @@ import {
   pruneExpired,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
-import { PROVIDER_IDS } from './providers/index.ts';
+import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
 import { createChatResolver } from '../../core/chats-resolver.ts';
@@ -2945,12 +2945,11 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (sub === 'default') {
-            clearPreference(this.db, chatKey, senderKey);
-            this.sendDirect(chatJid, '_Back to the default route._');
+            this.clearRoutePreference(chatJid, chatKey, senderKey);
             break;
           }
           const isIntent = sub === 'strongest' || sub === 'fastest';
-          const isProvider = (PROVIDER_IDS as readonly string[]).includes(sub);
+          const isProvider = isProviderId(sub);
           if (!isIntent && !isProvider) {
             // Out-of-contract value: no state change, honest reply (UH-001).
             // Never echo unbounded user text into a (possibly group) chat:
@@ -3005,8 +3004,7 @@ export class AgentRuntime implements Runtime {
           // Idempotent by construction: clearing an absent row is a no-op and
           // the reply is identical, so a doubled /reset cannot spam or error.
           const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
-          clearPreference(this.db, chatKey, senderKey);
-          this.sendDirect(chatJid, '_Back to the default route._');
+          this.clearRoutePreference(chatJid, chatKey, senderKey);
           break;
         }
 
@@ -5483,6 +5481,12 @@ export class AgentRuntime implements Runtime {
         log.error({ err }, 'sendDirect fallback failed'),
       );
     }
+  }
+
+  /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
+  private clearRoutePreference(chatJid: string, chatKey: string, senderKey: string): void {
+    clearPreference(this.db, chatKey, senderKey);
+    this.sendDirect(chatJid, '_Back to the default route._');
   }
 
   /**
