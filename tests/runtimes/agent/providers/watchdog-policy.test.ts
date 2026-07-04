@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { watchdogHardMsForProvider } from '../../../../src/runtimes/agent/providers/watchdog-policy.ts';
 import { anthropicApiDescriptor } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
 import { openaiApiDescriptor } from '../../../../src/runtimes/agent/providers/openai-api.ts';
-import { claudeDescriptor } from '../../../../src/runtimes/agent/providers/claude.ts';
 
 // L1-F1: armWatchdog historically hardcoded the 30-min module constant for every
 // provider, so API providers (whose descriptors declare a 10-min hard timeout) were
@@ -19,8 +18,7 @@ describe('watchdogHardMsForProvider — honors ProviderDescriptor.defaultWatchdo
     expect(watchdogHardMsForProvider('openai-api')).toBe(600_000);
   });
 
-  it('claude-cli resolves to its descriptor hardMs (30 min — unchanged default)', () => {
-    expect(watchdogHardMsForProvider('claude-cli')).toBe(claudeDescriptor.defaultWatchdog.hardMs);
+  it('claude-cli uses the 30-min default (no descriptor-deviation entry)', () => {
     expect(watchdogHardMsForProvider('claude-cli')).toBe(1_800_000);
   });
 

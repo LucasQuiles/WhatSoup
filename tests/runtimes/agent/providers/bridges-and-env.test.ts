@@ -10,7 +10,6 @@ import {
   convertMcpToolsToOpenAI,
   convertMcpToolsToAnthropic,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
-import { ClaudeProvider } from '../../../../src/runtimes/agent/providers/claude.ts';
 import { buildMcpLaunchCommand } from '../../../../src/core/mcp-launcher.ts';
 
 // ---------------------------------------------------------------------------
@@ -403,90 +402,5 @@ describe('convertMcpToolsToAnthropic', () => {
       description: 'List all chats',
       input_schema: { type: 'object', properties: {} },
     });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Env allowlist — tested via ClaudeProvider.buildEnv()
-// ---------------------------------------------------------------------------
-
-describe('buildEnv (via ClaudeProvider.buildEnv)', () => {
-  const provider = new ClaudeProvider();
-
-  const savedEnv: Record<string, string | undefined> = {};
-
-  beforeEach(() => {
-    // Save and set up a known process.env state
-    const keys = [
-      'PATH', 'HOME', 'USER',
-      'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-      'PINECONE_API_KEY', 'WHATSOUP_HEALTH_TOKEN',
-    ];
-    for (const key of keys) {
-      savedEnv[key] = process.env[key];
-    }
-    process.env.PATH = '/usr/bin:/bin';
-    process.env.HOME = '/home/testuser';
-    process.env.USER = 'testuser';
-    process.env.OPENAI_API_KEY = 'sk-openai-test';
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-secret';
-    process.env.PINECONE_API_KEY = 'pinecone-secret';
-    process.env.WHATSOUP_HEALTH_TOKEN = 'health-secret';
-  });
-
-  afterEach(() => {
-    for (const [key, val] of Object.entries(savedEnv)) {
-      if (val === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = val;
-      }
-    }
-  });
-
-  it('PATH is present', () => {
-    const env = provider.buildEnv();
-    expect(env.PATH).toBe('/usr/bin:/bin');
-  });
-
-  it('HOME is present', () => {
-    const env = provider.buildEnv();
-    expect(env.HOME).toBe('/home/testuser');
-  });
-
-  it('USER is present', () => {
-    const env = provider.buildEnv();
-    expect(env.USER).toBe('testuser');
-  });
-
-  it('OPENAI_API_KEY is included when set', () => {
-    const env = provider.buildEnv();
-    expect(env.OPENAI_API_KEY).toBe('sk-openai-test');
-  });
-
-  it('PINECONE_API_KEY is excluded', () => {
-    const env = provider.buildEnv();
-    expect(Object.keys(env)).not.toContain('PINECONE_API_KEY');
-  });
-
-  it('WHATSOUP_HEALTH_TOKEN is excluded', () => {
-    const env = provider.buildEnv();
-    expect(Object.keys(env)).not.toContain('WHATSOUP_HEALTH_TOKEN');
-  });
-
-  it('ANTHROPIC_API_KEY is excluded', () => {
-    const env = provider.buildEnv();
-    expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY');
-  });
-
-  it('undefined values are stripped from the result', () => {
-    // Remove PATH so it's undefined in process.env, then check it's absent
-    delete process.env.PATH;
-    const env = provider.buildEnv();
-    // The result should not have PATH as a key with value undefined
-    const hasUndefinedValues = Object.values(env).some(v => v === undefined);
-    expect(hasUndefinedValues).toBe(false);
-    // PATH should not appear as a key since it's undefined
-    expect('PATH' in env).toBe(false);
   });
 });
