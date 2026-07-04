@@ -78,6 +78,13 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
+import {
+  ensureChatPreferenceSchema,
+  getPreference,
+  setPreference,
+  clearPreference,
+} from './chat-preference-db.ts';
+import { PROVIDER_IDS } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
 import { createChatResolver } from '../../core/chats-resolver.ts';
@@ -2023,6 +2030,10 @@ export class AgentRuntime implements Runtime {
     ensureHandoffArtifactSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
+    if (config.nlRouting) {
+      // Additive + idempotent; gated so flag-off leaves the DB untouched.
+      ensureChatPreferenceSchema(this.db);
+    }
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
@@ -2805,7 +2816,7 @@ export class AgentRuntime implements Runtime {
     } else {
       this.ensureSessionAndQueueSync(chatJid, undefined, msg.senderJid);
     }
-    const classified = classifyInput(content as string);
+    const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
 
     if (classified.type === 'local') {
       switch (classified.command) {
@@ -2908,6 +2919,75 @@ export class AgentRuntime implements Runtime {
           break;
         }
 
+        case 'model': {
+          // NL-first routing alias (owner-approved design). Records a
+          // per-sender REASONING preference and renders route visibility —
+          // never tool, mutation, or authority changes (capability-preserved
+          // routing). Reachable only when agentOptions.nlRouting is true (the
+          // classifier gates on the same flag). NOTE: resolution wiring
+          // (preferences steering the provider chosen for a turn) lands in the
+          // next slice; renderRouteStatus distinguishes live route vs recorded
+          // preference until then.
+          const sub = (classified.args ?? 'status').trim().toLowerCase();
+          if (sub === '' || sub === 'status') {
+            this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+            break;
+          }
+          if (sub === 'default') {
+            clearPreference(this.db, chatJid, msg.senderJid);
+            this.sendDirect(chatJid, '_Back to the default route._');
+            break;
+          }
+          const isIntent = sub === 'strongest' || sub === 'fastest';
+          const isProvider = (PROVIDER_IDS as readonly string[]).includes(sub);
+          if (!isIntent && !isProvider) {
+            // Out-of-contract value: no state change, honest reply (UH-001).
+            this.sendDirect(
+              chatJid,
+              `_I do not recognize "${sub}". Use /model status to see available routes._`,
+            );
+            break;
+          }
+          const now = Date.now();
+          const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
+          const requestedProvider = isProvider ? sub : null;
+          const existing = getPreference(this.db, chatJid, msg.senderJid, now);
+          if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
+            // Echoes derive from state transitions; an identical repeat is a no-op.
+            this.sendDirect(chatJid, '_Already set — say /reset to go back to the default route._');
+            break;
+          }
+          setPreference(this.db, {
+            chatJid,
+            senderJid: msg.senderJid,
+            intent,
+            requestedProvider,
+            scope: 'this_thread',
+            pinStrict: true,
+            fallbackPermitted: false,
+            updatedAt: now,
+            // this_thread preferences are ephemeral by design (24h TTL);
+            // sticky pins require explicit confirmation and are a later slice.
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+          const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
+          this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h)._`);
+          break;
+        }
+
+        case 'why': {
+          this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
+          break;
+        }
+
+        case 'reset': {
+          // Idempotent by construction: clearing an absent row is a no-op and
+          // the reply is identical, so a doubled /reset cannot spam or error.
+          clearPreference(this.db, chatJid, msg.senderJid);
+          this.sendDirect(chatJid, '_Back to the default route._');
+          break;
+        }
+
         case 'help': {
           const helpText =
             '*/new* — start a fresh session\n' +
@@ -2915,6 +2995,11 @@ export class AgentRuntime implements Runtime {
             '*/sessions* — list all active sessions _(admin)_\n' +
             '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
             '*/help* — show this help\n' +
+            (config.nlRouting
+              ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
+                '*/why* — why this model answered\n' +
+                '*/reset* — back to the default route\n'
+              : '') +
             '_Any other message is forwarded to Claude Code._\n' +
             'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
           this.sendDirect(chatJid, helpText);
@@ -5376,6 +5461,51 @@ export class AgentRuntime implements Runtime {
         log.error({ err }, 'sendDirect fallback failed'),
       );
     }
+  }
+
+  /**
+   * End-user route status (/model status). Visibility policy (capability-
+   * preserved routing): provider, model route, preference, fallback state,
+   * delegation state, and authority class only — never tool names, socket
+   * paths, pids, account JIDs, or cross-conversation metadata.
+   */
+  private renderRouteStatus(chatJid: string, senderJid: string): string {
+    const provider = this.effectiveProvider || 'unknown-provider';
+    const model = this.effectiveFallbackEntry?.model ?? 'provider default';
+    const pref = getPreference(this.db, chatJid, senderJid);
+    const prefLine = pref
+      ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
+        (pref.expiresAt !== null
+          ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
+          : '') +
+        ' — recorded; routing wiring lands in the next slice'
+      : 'Preference: none';
+    const fallbackLine = this.isFallbackWindowActive
+      ? `Fallback: active — routing via ${provider}`
+      : this.agentFallbacks.length > 0
+        ? `Fallback: ${this.agentFallbacks[0]!.provider} if ${this.agentProvider} is unavailable`
+        : 'Fallback: none configured';
+    return (
+      `*Current route:* ${provider}\n` +
+      `Model: ${model}\n` +
+      `${prefLine}\n` +
+      `${fallbackLine}\n` +
+      'Delegation: none\n' +
+      'Authority: advisory; no live actions authorized'
+    );
+  }
+
+  /** Compact route receipt (/why): what answered and why, one line. */
+  private renderRouteWhy(chatJid: string, senderJid: string): string {
+    const provider = this.effectiveProvider || 'unknown-provider';
+    const reason = this.isFallbackWindowActive
+      ? 'a fallback window is active'
+      : 'instance default route';
+    const pref = getPreference(this.db, chatJid, senderJid);
+    const prefNote = pref
+      ? '; your preference is recorded and applies once routing wiring is enabled'
+      : '';
+    return `_Route: ${provider} (${reason})${prefNote}. No delegation; advisory only — no live actions authorized._`;
   }
 
   /**

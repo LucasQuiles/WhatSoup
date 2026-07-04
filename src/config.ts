@@ -829,6 +829,11 @@ const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> 
 const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
 
 export const config = {
+  // NL-first routing aliases + per-sender preference store (owner-approved
+  // PR-plan v2). Default false: flag off keeps behavior byte-identical —
+  // /model,/why,/reset stay forwarded and no preference table is created.
+  nlRouting: resolvedAgentOptions['nlRouting'] === true,
+
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
   instanceType: ((instance?.type as string | undefined) ?? 'chat') as 'passive' | 'chat' | 'agent',
