@@ -2950,6 +2950,19 @@ export class AgentRuntime implements Runtime {
           }
           const isIntent = sub === 'strongest' || sub === 'fastest';
           const isProvider = isProviderId(sub);
+          if (isProvider) {
+            const routable = this.routablePinTargets();
+            if (!routable.includes(sub)) {
+              // A pin this instance cannot honor must fail at SET time (F07):
+              // recording it would force slice-2 resolution into either a
+              // hard-fail or a silent fallback. No row is written.
+              this.sendDirect(
+                chatJid,
+                `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+              );
+              break;
+            }
+          }
           if (!isIntent && !isProvider) {
             // Out-of-contract value: no state change, honest reply (UH-001).
             // Never echo unbounded user text into a (possibly group) chat:
@@ -5493,6 +5506,30 @@ export class AgentRuntime implements Runtime {
         log.error({ err }, 'sendDirect fallback failed'),
       );
     }
+  }
+
+  /**
+   * Providers this instance can actually route to: the configured primary
+   * plus the configured fallback chain, minus entries whose key service
+   * resolves but has no credential (same probe the fallback selector uses).
+   * A pin outside this set could only be honored by silent impersonation —
+   * strict pins never silently fall back — so it is rejected at SET time (F07).
+   */
+  private routablePinTargets(): string[] {
+    const targets: string[] = [];
+    const consider = (provider: string, model?: string): void => {
+      if (targets.includes(provider)) return;
+      const service = resolveProviderKeyService(
+        provider,
+        model,
+        fallbackProviderConfigFor(provider, this.agentProvider, this.agentProviderConfig),
+      );
+      if (service && lookupCredential(service) === null) return;
+      targets.push(provider);
+    };
+    consider(this.agentProvider, this.model);
+    for (const entry of this.agentFallbacks) consider(entry.provider, entry.model);
+    return targets;
   }
 
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
