@@ -871,6 +871,19 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    </dict>
    ```
 
+   **launchd caveat:** generated plists emit only `PATH`/`HOME`/`TMPDIR`
+   (+`WHATSOUP_NODE`) in `EnvironmentVariables` (`buildPlist()`,
+   `src/fleet/platform.ts`) — there is no `EnvironmentFile` equivalent to the
+   systemd units' per-instance `tokens.env`, so a hand-added key in a
+   generated plist is LOST on the next `deploy:launchd.generated`
+   regeneration. On macOS prefer Route B: API-provider keys are read
+   in-process at request time, so the keychain entry alone is sufficient —
+   no plist edit needed. Grant the service user's launchd context access to
+   the item (`security add-generic-password -U …` under that user); keychain
+   reads from a non-GUI launchd session fail when the login keychain is
+   locked, which surfaces as `fallback_credential_missing` / QR-104 env
+   fallback rather than an explicit error.
+
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
    ```sh

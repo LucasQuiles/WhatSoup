@@ -718,11 +718,26 @@ export async function handleGetLineProviderStatus(
     eligible: null,
   }));
 
+  // QR-104-class observability: expose WHICH endpoint/key service the config
+  // points at, so an operator can confirm a custom-endpoint (BYOK) instance
+  // without reading config.json over SSH. Host only — never the full URL
+  // (path/query could carry tenant identifiers), never key material.
+  const baseUrlRaw = stringValue(providerConfig?.baseUrl);
+  let endpointHost: string | null = null;
+  if (baseUrlRaw) {
+    try {
+      endpointHost = new URL(baseUrlRaw).host;
+    } catch { /* invalid URL cannot load (validator rejects) — report null */ }
+  }
+  const apiKeyService = stringValue(providerConfig?.apiKeyService) ?? null;
+
   jsonResponse(res, 200, {
     primary: {
       provider: primaryProvider,
       model: primaryModel,
       keyPresent: keyPresentFor(primaryProvider, primaryModel, providerConfig),
+      endpointHost,
+      apiKeyService,
     },
     fallback: {
       provider: fallbackProvider,

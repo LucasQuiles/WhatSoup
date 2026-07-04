@@ -61,7 +61,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:336` | stable | active | Instance detail + config |
 | `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:335` | stable | active | Stop + cleanup |
 | `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:333` | stable | active | Registration probe |
-| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:334` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:334` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, custom-endpoint visibility (`primary.endpointHost` — host only, `primary.apiKeyService`; both `null` when no `providerConfig` override), fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
 | `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:350` | stable | active | Update `config.json` |
 | `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:351` | stable | active | QR-code SSE stream |
 | `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:348` | stable | active | Restart unit |

@@ -1414,6 +1414,48 @@ describe('lines.ts uncovered-branch coverage', () => {
     }
   });
 
+  it('exposes endpointHost (host only) and apiKeyService for a BYOK custom endpoint', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, {
+        provider: 'openai-api',
+        providerConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+          model: 'llama-3.3-70b-versatile',
+        },
+      });
+      mockedLookup.mockReturnValue(null);
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary.endpointHost).toBe('api.groq.com');
+      expect(body.primary.apiKeyService).toBe('groq');
+      // Host only — the path (which could carry tenant identifiers) must not leak.
+      expect(JSON.stringify(body)).not.toContain('/openai/v1');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports endpointHost/apiKeyService as null when providerConfig has no override', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary.endpointHost).toBeNull();
+      expect(body.primary.apiKeyService).toBeNull();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('reports keyPresent:false for anthropic-api when keyring has no key', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
     try {
