@@ -417,6 +417,7 @@ type ImageCoalescerView = {
   }>;
 };
 import { Database as RealDatabase } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
 
@@ -1991,6 +1992,65 @@ describe('AgentRuntime', () => {
     expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(globalKey)).toBe(false);
     expect(state.autoCompact.consecutiveRapidRearms.has(globalKey)).toBe(false);
     expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(false);
+  });
+
+  // ── W2a: local commands finalize their journaled inbound row ──────────────
+  // A local command (/new, /status, /help, /sessions, /kill-session) never
+  // dispatches an agent turn, so no downstream path completes the journaled
+  // inbound row — without an explicit finalization it stays 'processing' forever
+  // (unbounded growth; retention never reclaims it). The runtime finalizes it at
+  // the top of the local-command block via markInboundSkipped(seq,'local_command'),
+  // BEFORE the switch, so even an admin-denied early return still completes it.
+  describe('local-command inbound finalization (W2a)', () => {
+    it('finalizes the journaled inbound row for a /help local command', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-help', 'k-help', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/help', inboundSeq: seq }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command');
+
+      duraDb.close();
+    });
+
+    it('finalizes the row even when a local command hits an admin-denied early return (/sessions)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions returns
+      // early inside the switch, but the top-of-block finalization already ran.
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-sessions', 'k-sessions', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        content: '/sessions',
+        senderJid: '15550001111@s.whatsapp.net',
+        inboundSeq: seq,
+      }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command');
+
+      duraDb.close();
+    });
   });
 
   it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {

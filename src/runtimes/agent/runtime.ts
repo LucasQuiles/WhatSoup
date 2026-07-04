@@ -2808,6 +2808,13 @@ export class AgentRuntime implements Runtime {
     const classified = classifyInput(content as string);
 
     if (classified.type === 'local') {
+      // Local commands never dispatch a turn, so no downstream path will ever
+      // finalize the journaled inbound row — finalize it here (mirrors the
+      // ingest-side 'admin_command' skip). Placed before the switch so even an
+      // admin-denied early return still completes the row.
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'local_command');
+      }
       switch (classified.command) {
         case 'new':
           // Shared mode: /new is admin-only
