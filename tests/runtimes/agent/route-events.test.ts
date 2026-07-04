@@ -98,6 +98,16 @@ describe('emitRouteEvent', () => {
     expect(existsSync(join(dir, 'route-events.ndjson'))).toBe(false);
   });
 
+  it('rejects an unknown source, an empty instance, and an empty reasonCode — none written', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
+    const warn = vi.fn();
+    emitRouteEvent(dir, ev({ source: 'root' as ModelRouteEvent['source'] }), warn);
+    emitRouteEvent(dir, ev({ instance: '' }), warn);
+    emitRouteEvent(dir, ev({ reasonCode: '' }), warn);
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(existsSync(join(dir, 'route-events.ndjson'))).toBe(false);
+  });
+
   it('rotates the sink to a single .1 generation past the byte cap (bounded retention)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
     const warn = vi.fn();
@@ -122,11 +132,24 @@ describe('emitRouteEvent', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
-  it('the event schema carries route metadata only — no bodies, no sender identities', () => {
-    expect(Object.keys(ev()).sort()).toEqual([
+  it('the WRITTEN event carries route metadata only — no bodies, no sender identities', () => {
+    // Assert on the serialized sidecar line (what actually persists), not the
+    // in-test factory: the emit path must never widen the on-disk shape nor
+    // carry an identity/body field, whatever the interface later gains.
+    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
+    const warn = vi.fn();
+    emitRouteEvent(dir, ev(), warn);
+    const written = JSON.parse(
+      readFileSync(join(dir, 'route-events.ndjson'), 'utf8').trim(),
+    ) as Record<string, unknown>;
+    expect(Object.keys(written).sort()).toEqual([
       'authority', 'chatScope', 'conversationKey', 'event', 'instance',
       'modelRef', 'provider', 'reasonCode', 'source', 'ts', 'userVisible',
     ]);
+    for (const forbidden of ['senderJid', 'sender', 'body', 'text', 'message', 'phone']) {
+      expect(written).not.toHaveProperty(forbidden);
+    }
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -164,6 +187,14 @@ describe('emitDelegationReceipt', () => {
     emitDelegationReceipt(dir, receipt({ reason: 'because' as DelegationReceipt['reason'] }), warn);
     emitDelegationReceipt(dir, receipt({ authority: 'executor' as 'advisory_only' }), warn);
     expect(warn).toHaveBeenCalledTimes(3);
+    expect(existsSync(join(dir, 'delegation-receipts.ndjson'))).toBe(false);
+  });
+
+  it('rejects a receipt with an empty instance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'route-ev-'));
+    const warn = vi.fn();
+    emitDelegationReceipt(dir, receipt({ instance: '' }), warn);
+    expect(warn).toHaveBeenCalledOnce();
     expect(existsSync(join(dir, 'delegation-receipts.ndjson'))).toBe(false);
   });
 });
