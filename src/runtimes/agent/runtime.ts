@@ -2846,6 +2846,11 @@ export class AgentRuntime implements Runtime {
     }
     const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
 
+    // Set only by /model default (R8): the handler clears the route pref
+    // locally and then falls through to forward the raw command so the agent
+    // CLI's own /model default reset still runs. Null for every other command.
+    let forwardAfterLocalCommand: string | null = null;
+
     if (classified.type === 'local') {
       switch (classified.command) {
         case 'new':
@@ -2968,7 +2973,12 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (sub === 'default') {
+            // R8: clear the sender's route override, then forward /model
+            // default to the CLI so its own model reset still runs — do not
+            // shadow that base capability. The forwarded turn owns terminal
+            // inbound durability, so this path must NOT complete it locally.
             this.clearRoutePreference(chatJid, chatKey, senderKey);
+            forwardAfterLocalCommand = content as string;
             break;
           }
           const isIntent = sub === 'strongest' || sub === 'fastest';
@@ -3143,21 +3153,28 @@ export class AgentRuntime implements Runtime {
           break;
         }
       }
-      if (msg.inboundSeq !== undefined) {
-        // Terminal durability completion for ANY locally-handled command (R14).
-        // Local handling never reaches the turn path that completes the inbound
-        // journal, so the row would stay 'processing' and restart recovery would
-        // falsely mark it failed. This covers the routing aliases AND the base
-        // local commands (/new /status /help /sessions /kill-session), closing
-        // the pre-existing stuck-'processing' gap once for all of them instead
-        // of a per-command name-list opt-in.
-        this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
+      if (forwardAfterLocalCommand === null) {
+        if (msg.inboundSeq !== undefined) {
+          // Terminal durability completion for ANY locally-handled command (R14).
+          // Local handling never reaches the turn path that completes the inbound
+          // journal, so the row would stay 'processing' and restart recovery would
+          // falsely mark it failed. This covers the routing aliases AND the base
+          // local commands (/new /status /help /sessions /kill-session), closing
+          // the pre-existing stuck-'processing' gap once for all of them instead
+          // of a per-command name-list opt-in.
+          this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
+        }
+        return;
       }
-      return;
+      // R8 fall-through: /model default cleared the route pref above; forward
+      // the raw command below so the CLI resets its own model. Durability is
+      // completed by the forwarded turn's normal terminal path, not here.
     }
 
-    // forwarded or message — enqueue as turn (shared) or send directly (non-shared)
-    const text = classified.text;
+    // forwarded or message — enqueue as turn (shared) or send directly (non-shared).
+    // forwardAfterLocalCommand is set only by the /model default fall-through (R8);
+    // in every other path here classified is 'forwarded' | 'message'.
+    const text = forwardAfterLocalCommand ?? (classified as { text: string }).text;
 
     if (this.shared) {
       // @check CHK-062 // @traces REQ-012.AC-01

@@ -12071,6 +12071,21 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
   });
 
+  it('/model default clears the route pref AND forwards to the CLI so its own model reset still runs (R8)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    expect(prefRows()).toHaveLength(1);
+    mockSession.sendTurn.mockClear();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
+    // Route override cleared locally...
+    expect(prefRows()).toHaveLength(0);
+    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
+    // ...AND the raw command is forwarded so the agent CLI's own /model default
+    // reset is not shadowed by the local interception (R8).
+    const forwarded = mockSession.sendTurn.mock.calls.map((c) => String(c[0]));
+    expect(forwarded.some((t) => t.includes('/model default'))).toBe(true);
+  });
+
   it('/model status renders on the default route when the preference store read throws (R11)', async () => {
     const { runtime, sentMessages } = makeRoutingRuntime();
     // A store failure on a READ-ONLY status query must degrade, not error.
