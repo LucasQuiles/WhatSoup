@@ -11788,7 +11788,22 @@ describe('NL routing handlers (nlRouting flag)', () => {
     };
     (runtime as unknown as { durability: unknown }).durability = durability;
     await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', inboundSeq: 42 }));
-    expect(durability.completeInbound).toHaveBeenCalledWith(42, 'routing_alias_handled');
+    expect(durability.completeInbound).toHaveBeenCalledWith(42, 'local_command_handled');
+  });
+
+  it('a BASE local command (/status) also terminally completes the inbound journal (R14)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    const durability = {
+      completeInbound: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
+      markInboundFailed: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+    };
+    (runtime as unknown as { durability: unknown }).durability = durability;
+    // Base local commands share the stuck-'processing' gap the aliases had —
+    // R14 completes the journal for every locally-handled command, not a name list.
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/status', inboundSeq: 77 }));
+    expect(durability.completeInbound).toHaveBeenCalledWith(77, 'local_command_handled');
   });
 
   it('/why reports the live session provider once a session is active', async () => {
