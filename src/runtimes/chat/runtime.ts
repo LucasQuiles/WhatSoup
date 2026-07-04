@@ -441,7 +441,7 @@ export class ChatRuntime implements Runtime {
       // (never reaped, later force-failed by preConnectRecovery). The terminal
       // outage send above is unchanged; this is durability bookkeeping only.
       if (this.durability && msg.inboundSeq !== undefined) {
-        this.durability.markInboundFailed(msg.inboundSeq);
+        this.durability.markInboundFailed(msg.inboundSeq, 'provider_failure');
       }
       return;
     }
@@ -494,7 +494,7 @@ export class ChatRuntime implements Runtime {
         this.durability.markMaybeSent(mainOpId, (lastSendErr as Error)?.message ?? 'send_retry_failed');
       }
       if (this.durability && msg.inboundSeq !== undefined) {
-        this.durability.markInboundFailed(msg.inboundSeq);
+        this.durability.markInboundFailed(msg.inboundSeq, 'transport_send_failed');
       }
       // After send exhaustion, try one notification (don't retry this one)
       try {
