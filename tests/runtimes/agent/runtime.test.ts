@@ -12111,7 +12111,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
     // ...AND the raw command is forwarded so the agent CLI's own /model default
     // reset is not shadowed by the local interception (R8).
-    const forwarded = mockSession.sendTurn.mock.calls.map((c) => String(c[0]));
+    const forwarded = (mockSession.sendTurn.mock.calls as unknown as [string][]).map((c) => c[0]);
     expect(forwarded.some((t) => t.includes('/model default'))).toBe(true);
   });
 
