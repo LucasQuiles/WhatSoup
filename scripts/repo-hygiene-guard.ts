@@ -2,7 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { git, normalizeRepoPath } from './lib/guard-core.ts';
+import {
+  git,
+  isOperationalProtocolToken,
+  normalizeRepoPath,
+  operationalReleaseHygieneFiles,
+} from './lib/guard-core.ts';
 
 export { normalizeRepoPath } from './lib/guard-core.ts';
 
@@ -52,8 +57,12 @@ interface GuardPattern {
 const fixtureFiles = new Set([
   'scripts/anonymize-private-literals.ts',
   'scripts/repo-hygiene-guard.ts',
+  // guard-core hosts the shared operational allowlist (real fleet file
+  // paths + instance identifiers) consumed by both hygiene guards.
+  'scripts/lib/guard-core.ts',
   'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
+  'tests/scripts/publication-guard.test.ts',
   'tests/eslint-rules/categorized-skips.test.ts',
   // BEAD-052 redaction-parity corpus: intentionally secret-, email-, and
   // path-SHAPED inputs that exercise the bot-errors redactor on both the TS and
@@ -77,36 +86,8 @@ const releaseHygieneFiles = [
   'src/transport/contract/capabilities.ts',
 ];
 
-const operationalReleaseHygieneFiles = new Set([
-  'scripts/cutover.sh',
-  'scripts/migrate-namespace.sh',
-  'scripts/soak-check.sh',
-  // Health-profile + fleet-manifest operational configs. The daily-health
-  // profile_coverage check matches these entries against the REAL on-disk
-  // instance dir + active launchd service names, so the literal agent-bot
-  // label must appear here to keep the mwlab host covered (issue #1422).
-  'deploy/health-profiles/mwlab.json',
-  'deploy/bot-errors-expected-fleet.json',
-]);
-
 const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
 const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
-
-const operationalProtocolIdentifiers = new Set([
-  'whatsapp-bot@personal',
-  'whatsapp-bot@loops',
-  'whatsapp-bot@besbot',
-  'whatsoup@q',
-  'whatsoup@loops',
-  'whatsoup@besbot',
-  'whatsoup@personal',
-  'whatsoup-personal',
-  'instances/personal/whatsoup.sock',
-  // Agent-bot instance label required verbatim by the daily-health
-  // profile_coverage matcher (issue #1422); allowlisted only for the
-  // operational health-profile + fleet-manifest files above.
-  'mw-bot',
-]);
 
 // SSOT for the fleet private-host labels: the publication detection rule below,
 // and consumers like the bot-errors collector-unit hygiene test, import this.
@@ -188,9 +169,13 @@ function isAllowedPatternMatch(filePath: string, code: string, token: string): b
   if (code === 'secret-assignment') {
     return allowedSecretAssignmentValue.test(token);
   }
-  return code === 'private-instance-label'
-    && operationalReleaseHygieneFiles.has(filePath)
-    && operationalProtocolIdentifiers.has(token);
+  // Operational health-profile / fleet-manifest files legitimately reference
+  // real systemd template-unit names, which the email-shape regex matches.
+  // The shared guard-core helper tolerates the trailing ".service" suffix.
+  if (operationalReleaseHygieneFiles.has(filePath) && isOperationalProtocolToken(token)) {
+    return true;
+  }
+  return false;
 }
 
 const srcConsoleAllowedFiles = new Set([

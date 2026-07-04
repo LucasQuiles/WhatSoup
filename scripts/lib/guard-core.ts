@@ -140,3 +140,43 @@ export function isTextCandidate(filePath: string): boolean {
   if (baseName === 'Dockerfile' || baseName.startsWith('.env')) return true;
   return textExtensions.has(path.extname(normalized));
 }
+
+// Operational release-hygiene allowlist, shared by repo-hygiene-guard and
+// publication-guard. These files describe the REAL fleet (health profiles,
+// expected-fleet manifest, cutover scripts): the daily-health
+// profile_coverage check matches their entries against on-disk instance
+// dirs and live unit names, so the literal labels must appear verbatim
+// (issue #1422).
+export const operationalReleaseHygieneFiles = new Set([
+  'scripts/cutover.sh',
+  'scripts/migrate-namespace.sh',
+  'scripts/soak-check.sh',
+  'deploy/health-profiles/mwlab.json',
+  'deploy/health-profiles/nucles.json',
+  'deploy/bot-errors-expected-fleet.json',
+]);
+
+export const operationalProtocolIdentifiers = new Set([
+  'whatsapp-bot@personal',
+  'whatsapp-bot@loops',
+  'whatsapp-bot@besbot',
+  'whatsoup@q',
+  'whatsoup@loops',
+  'whatsoup@besbot',
+  'whatsoup@personal',
+  'whatsoup-personal',
+  'instances/personal/whatsoup.sock',
+  // Agent-bot instance label required verbatim by the daily-health
+  // profile_coverage matcher (issue #1422).
+  'mw-bot',
+]);
+
+// A systemd template unit renders an allowlisted identifier with a trailing
+// ".service" suffix, which email-shape scanners match. Accept the identifier
+// with or without that suffix.
+export function isOperationalProtocolToken(token: string): boolean {
+  if (operationalProtocolIdentifiers.has(token)) return true;
+  return (
+    token.endsWith('.service') && operationalProtocolIdentifiers.has(token.slice(0, -'.service'.length))
+  );
+}

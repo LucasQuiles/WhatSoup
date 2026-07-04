@@ -387,6 +387,39 @@ Co-Authored-By: Person <person@example.com>
     expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['private-instance-label']);
   });
 
+  it('allows systemd template-unit service names in the nucles health profile and fleet manifest', () => {
+    // Composed so the test source itself carries no email-shaped literal.
+    const qUnit = ['whatsoup@q', 'service'].join('.');
+    const personalUnit = ['whatsoup@personal', 'service'].join('.');
+    const allowedInProfile = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/nucles.json',
+        line: 30,
+        text: `      "service": "${qUnit}",`,
+      },
+      {
+        filePath: 'deploy/health-profiles/nucles.json',
+        line: 38,
+        text: `      "service": "${personalUnit}",`,
+      },
+      {
+        filePath: 'deploy/bot-errors-expected-fleet.json',
+        line: 62,
+        text: `          "service": "${personalUnit}",`,
+      },
+    ]);
+    expect(allowedInProfile).toEqual([]);
+
+    const flaggedElsewhere = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/mini1.json',
+        line: 1,
+        text: `      "service": "${personalUnit}",`,
+      },
+    ]);
+    expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['personal-email', 'private-instance-label']);
+  });
+
   it('allows bare release env var names without hiding private labels', () => {
     const envOnlyIssues = scanContentLines([
       {
