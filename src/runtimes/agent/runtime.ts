@@ -1545,6 +1545,14 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnActorJid.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
+    // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
+    // mapKey: in sandbox mode mapKey already IS the conversationKey
+    // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
+    // JID that must be reduced. Reconcile so teardown reaches these maps and
+    // they cannot grow unbounded (LEAK-15).
+    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    this.lastSpawnRouteProvider.delete(conversationKey);
+    this.lastPinBlockNotice.delete(conversationKey);
     // Drop all auto-compact bookkeeping for this scope (cooldown/last-success/
     // rapid-rearm/measure/boundary + resolve any in-flight waiter + silent timer).
     this.autoCompact.cleanupScope(mapKey);

@@ -649,6 +649,8 @@ type PerChatCleanupRuntimeState = {
   pendingTurnText: Map<string, string>;
   pendingPolls: { questions: Map<string, PendingPollQuestion> };
   resumeFailedHandling: Set<string>;
+  lastSpawnRouteProvider: Map<string, string>;
+  lastPinBlockNotice: Map<string, string>;
   autoCompact: AutoCompactView;
   imageCoalesce: ImageCoalescerView;
 };
@@ -5321,6 +5323,33 @@ describe('AgentRuntime', () => {
     expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
     expect(state.pendingTurnText.get(otherKey)).toBe('replay other');
     expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('cleanupPerChatState removes the conversationKey-keyed route maps (LEAK-15)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = getPerChatCleanupState(runtime);
+
+    // The slice-4 route bookkeeping maps are keyed by conversationKey, not the
+    // raw mapKey: for a canonical JID mapKey ('target@s.whatsapp.net') the
+    // conversationKey is the bare local part ('target'). Teardown must reconcile
+    // the convention or these maps grow unbounded (the LEAK-15 leak).
+    const targetKey = 'target@s.whatsapp.net';
+    const targetConv = 'target';
+    const otherConv = 'other';
+    state.lastSpawnRouteProvider.set(targetConv, 'codex-cli');
+    state.lastSpawnRouteProvider.set(otherConv, 'claude-cli');
+    state.lastPinBlockNotice.set(targetConv, 'gemini-cli');
+    state.lastPinBlockNotice.set(otherConv, 'opencode-cli');
+
+    state.cleanupPerChatState(targetKey);
+
+    expect(state.lastSpawnRouteProvider.has(targetConv)).toBe(false);
+    expect(state.lastPinBlockNotice.has(targetConv)).toBe(false);
+    // A different conversation's bookkeeping is untouched.
+    expect(state.lastSpawnRouteProvider.get(otherConv)).toBe('claude-cli');
+    expect(state.lastPinBlockNotice.get(otherConv)).toBe('opencode-cli');
   });
 
   it('cleanupPerChatState is idempotent for missing keys', () => {
