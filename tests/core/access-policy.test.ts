@@ -513,11 +513,15 @@ describe('edge cases', () => {
 // ---------------------------------------------------------------------------
 
 describe('media implicit mention in known groups', () => {
+  // R4 (#9): media in a PENDING group must NOT implicit-mention. The predicate was
+  // `groupEntry.status !== 'blocked'`, which fired for pending groups too. It is now
+  // `=== 'allowed'`; since an allowed group already returns group_auto_respond earlier,
+  // media in a pending/known-but-not-allowed group falls through to the @mention check.
   it.each(['image', 'sticker', 'video', 'audio'] as const)(
-    '%s in known group triggers implicit mention',
+    '%s in a PENDING group does NOT trigger a response without an @mention',
     (contentType) => {
       const msg = makeMsg({
-        chatJid: KNOWN_GROUP,
+        chatJid: KNOWN_GROUP, // status=pending
         senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
         isGroup: true,
         contentType,
@@ -525,8 +529,8 @@ describe('media implicit mention in known groups', () => {
         mentionedJids: [],
       });
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
-      expect(result.respond).toBe(true);
-      expect(result.reason).toBe('media_implicit_mention');
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('not_mentioned');
     },
   );
 
