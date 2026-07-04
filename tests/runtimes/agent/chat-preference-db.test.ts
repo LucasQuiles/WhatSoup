@@ -176,7 +176,11 @@ describe('load validation (fail-safe, mirrors fallback-state-db)', () => {
   it('a corrupt row reads back as null, never as garbage', () => {
     setPreference(db, pref());
     db.raw
-      .prepare(`UPDATE chat_model_preference SET intent = 42 WHERE chat_jid = ? AND sender_jid = ?`)
+      // BLOB survives TEXT affinity; an integer 42 would be converted to the
+      // TEXT '42' and rejected as out-of-contract, NOT as wrong-typed — the
+      // original assertion passed for the wrong reason (F14; affinity probe
+      // captured in runs/hardening-20260704/a14-affinity-probe.txt).
+      .prepare(`UPDATE chat_model_preference SET intent = x'DEADBEEF' WHERE chat_jid = ? AND sender_jid = ?`)
       .run(CHAT_A, SENDER_A);
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
   });

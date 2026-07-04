@@ -176,16 +176,16 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/Model fastest', NL)).toEqual({ type: 'local', command: 'model', args: 'fastest' });
   });
 
-  it('/route stays forwarded (not part of the 3-alias set)', () => {
-    expect(classifyInput('/route')).toEqual({ type: 'forwarded', text: '/route' });
+  it('/route stays forwarded even with routing aliases ON (not part of the 3-alias set)', () => {
+    expect(classifyInput('/route', NL)).toEqual({ type: 'forwarded', text: '/route' });
   });
 
-  it('/delegate stays forwarded', () => {
-    expect(classifyInput('/delegate review')).toEqual({ type: 'forwarded', text: '/delegate review' });
+  it('/delegate stays forwarded even with routing aliases ON', () => {
+    expect(classifyInput('/delegate review', NL)).toEqual({ type: 'forwarded', text: '/delegate review' });
   });
 
-  it('/runtime stays forwarded (operator surface is a separate PR)', () => {
-    expect(classifyInput('/runtime health')).toEqual({ type: 'forwarded', text: '/runtime health' });
+  it('/runtime stays forwarded even with routing aliases ON (operator surface is a separate PR)', () => {
+    expect(classifyInput('/runtime health', NL)).toEqual({ type: 'forwarded', text: '/runtime health' });
   });
 });
 
