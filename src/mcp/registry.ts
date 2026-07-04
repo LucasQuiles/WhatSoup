@@ -330,10 +330,17 @@ export class ToolRegistry {
     log.debug({ tool: name, tier: session.tier }, 'tool call start');
 
     const replayPolicy = tool.replayPolicy ?? 'unsafe';
-    const conversationKey = session.conversationKey ?? '';
-    const durabilityId = this.durability && conversationKey
+    // Global-tier sessions (operator-agent / primary-line) carry no
+    // conversationKey, so tool telemetry was never recorded for them — only
+    // chat-scoped hosts emitted tool_calls rows. Key those rows under the
+    // reserved '__global__' sentinel (the runtime's GLOBAL_TOOL_SCOPE_KEY). Real
+    // keys derive from JIDs so the sentinel cannot collide, and this adds rows,
+    // not columns, so the content fence is unchanged. Authorization/guard logic
+    // above still keys on session.conversationKey and is unaffected.
+    const durabilityKey = session.conversationKey || (session.tier === 'global' ? '__global__' : '');
+    const durabilityId = this.durability && durabilityKey
       ? this.durability.recordToolCall(
-          conversationKey,
+          durabilityKey,
           name,
           JSON.stringify(effectiveParams),
           replayPolicy,

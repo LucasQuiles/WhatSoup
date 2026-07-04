@@ -683,6 +683,90 @@ describe('registry.ts uncovered-branch coverage', () => {
     expect(result.content[0].text).toContain('hi');
   });
 
+  // --- W6: tool_calls telemetry for global-tier sessions ---
+  //
+  // Global-tier sessions (operator-agent / primary-line) carry no
+  // conversationKey, so before W6 the durability recording gate was falsy and
+  // recordToolCall was never invoked — only chat-scoped hosts emitted tool
+  // telemetry. These lock in the reserved '__global__' sentinel key.
+
+  function recordingDurability(calls: Array<{ method: string; args: unknown[] }>) {
+    return {
+      recordToolCall: (conversationKey: string, toolName: string, input: string, replayPolicy: string) => {
+        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, input, replayPolicy] });
+        return 99;
+      },
+      markToolExecuting: (id: number) => {
+        calls.push({ method: 'markToolExecuting', args: [id] });
+      },
+      markToolComplete: (id: number, result: string) => {
+        calls.push({ method: 'markToolComplete', args: [id, result] });
+      },
+    } as unknown as import('../../src/core/durability.ts').DurabilityEngine;
+  }
+
+  it('records tool_calls under the __global__ sentinel for a global-tier session with no conversationKey', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    registry.setDurability(recordingDurability(calls));
+    registry.register(makeTool({ name: 'global_durable', scope: 'global' }));
+
+    const result = await registry.call(
+      'global_durable',
+      { message: 'hi' },
+      makeSession({ tier: 'global' }), // no conversationKey
+    );
+
+    const recordCall = calls.find((c) => c.method === 'recordToolCall');
+    expect(recordCall).toBeDefined();
+    expect(recordCall!.args[0]).toBe('__global__');
+    expect(recordCall!.args[1]).toBe('global_durable');
+    expect(calls.map((c) => c.method)).toEqual([
+      'recordToolCall',
+      'markToolExecuting',
+      'markToolComplete',
+    ]);
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('records tool_calls under the real conversationKey for a chat-scoped session (unchanged by W6)', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    registry.setDurability(recordingDurability(calls));
+    registry.register(makeTool({ name: 'chat_durable', scope: 'chat' }));
+
+    const result = await registry.call(
+      'chat_durable',
+      { message: 'hi' },
+      chatSession('15550000002', '15550000002@s.whatsapp.net'),
+    );
+
+    const recordCall = calls.find((c) => c.method === 'recordToolCall');
+    expect(recordCall).toBeDefined();
+    expect(recordCall!.args[0]).toBe('15550000002');
+    expect(recordCall!.args[1]).toBe('chat_durable');
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('skips durability recording entirely when no durability engine is attached (both tiers)', async () => {
+    // No setDurability(): the recording gate must short-circuit before touching
+    // markToolExecuting/markToolComplete (which would throw on the absent engine).
+    registry.register(makeTool({ name: 'global_no_dur', scope: 'global' }));
+    registry.register(makeTool({ name: 'chat_no_dur', scope: 'chat' }));
+
+    const globalResult = await registry.call(
+      'global_no_dur',
+      { message: 'hi' },
+      makeSession({ tier: 'global' }), // no conversationKey — sentinel path, still no engine
+    );
+    const chatResult = await registry.call(
+      'chat_no_dur',
+      { message: 'hi' },
+      chatSession('15550000002', '15550000002@s.whatsapp.net'),
+    );
+
+    expect(globalResult.isError).toBeUndefined();
+    expect(chatResult.isError).toBeUndefined();
+  });
+
   it('marks tool complete with the error message when the handler throws an Error', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const fakeDurability = {
