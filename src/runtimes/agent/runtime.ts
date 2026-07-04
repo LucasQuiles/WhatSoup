@@ -5534,8 +5534,14 @@ export class AgentRuntime implements Runtime {
   ): RouteDecision & { pinnedProvider: string | null } {
     let pref: ChatModelPreference | null = null;
     if (actorJid) {
-      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
-      pref = getPreference(this.db, chatKey, senderKey);
+      try {
+        const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
+        pref = getPreference(this.db, chatKey, senderKey);
+      } catch (err) {
+        // A preference-store failure must NEVER fail a turn (UH: pref-store
+        // read failure): degrade to the safe default route and warn.
+        log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
+      }
     }
     const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
     const decision = resolveRoute({
@@ -5623,19 +5629,20 @@ export class AgentRuntime implements Runtime {
    * strict pins never silently fall back — so it is rejected at SET time (F07).
    */
   private routablePinTargets(): string[] {
-    const targets: string[] = [];
-    const consider = (provider: string, model?: string): void => {
-      if (targets.includes(provider)) return;
+    // The primary is unconditionally routable — it is the provider serving
+    // the instance right now; a credential probe must never filter it (an
+    // API-primary instance would otherwise reject pins to its own route).
+    const targets: string[] = [this.agentProvider];
+    for (const entry of this.agentFallbacks) {
+      if (targets.includes(entry.provider)) continue;
       const service = resolveProviderKeyService(
-        provider,
-        model,
-        fallbackProviderConfigFor(provider, this.agentProvider, this.agentProviderConfig),
+        entry.provider,
+        entry.model,
+        fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
       );
-      if (service && lookupCredential(service) === null) return;
-      targets.push(provider);
-    };
-    consider(this.agentProvider, this.model);
-    for (const entry of this.agentFallbacks) consider(entry.provider, entry.model);
+      if (service && lookupCredential(service) === null) continue;
+      targets.push(entry.provider);
+    }
     return targets;
   }
 
