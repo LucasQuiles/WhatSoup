@@ -5467,14 +5467,31 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * The route actually serving this chat right now, from the chat's LIVE
+   * session delegate. The runtime-global effectiveProvider/effectiveModel
+   * getters describe routing for the NEXT session only — existing sessions
+   * keep their per-session provider/model (cf. markActiveFallbackFailed) —
+   * so route visibility must read the live session first.
+   */
+  private liveSessionRoute(chatJid: string): { provider: string; model: string | undefined } | null {
+    const session = this.sessionScope === 'per_chat'
+      ? this.chatSessions.get(this.resolvePerChatMapKey(chatJid))
+      : this.session;
+    if (!session || !session.getStatus().active) return null;
+    return { provider: session.getProviderId(), model: session.getModelRef() };
+  }
+
+  /**
    * End-user route status (/model status). Visibility policy (capability-
    * preserved routing): provider, model route, preference, fallback state,
    * delegation state, and authority class only — never tool names, socket
    * paths, pids, account JIDs, or cross-conversation metadata.
    */
   private renderRouteStatus(chatJid: string, senderJid: string): string {
-    const provider = this.effectiveProvider || 'unknown-provider';
-    const model = this.effectiveFallbackEntry?.model ?? 'provider default';
+    const live = this.liveSessionRoute(chatJid);
+    const nextProvider = this.effectiveProvider || 'unknown-provider';
+    const provider = live?.provider ?? nextProvider;
+    const model = (live ? live.model : this.effectiveModel) ?? 'provider default';
     const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
     const pref = getPreference(this.db, chatKey, senderKey);
     const prefLine = pref
@@ -5485,15 +5502,18 @@ export class AgentRuntime implements Runtime {
         ' — recorded; routing wiring lands in the next slice'
       : 'Preference: none';
     const fallbackLine = this.isFallbackWindowActive
-      ? `Fallback: active — routing via ${provider}`
+      ? `Fallback: active — new sessions route via ${nextProvider}`
       : this.agentFallbacks.length > 0
-        ? `Fallback: ${this.agentFallbacks[0]!.provider} if ${this.agentProvider} is unavailable`
+        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => e.provider).join(' → ')}`
         : 'Fallback: none configured';
+    const nextLine = live && live.provider !== nextProvider
+      ? `\nNext session: ${nextProvider}`
+      : '';
     return (
-      `*Current route:* ${provider}\n` +
+      `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
       `Model: ${model}\n` +
       `${prefLine}\n` +
-      `${fallbackLine}\n` +
+      `${fallbackLine}${nextLine}\n` +
       'Delegation: none\n' +
       'Authority: advisory; no live actions authorized'
     );
@@ -5501,10 +5521,15 @@ export class AgentRuntime implements Runtime {
 
   /** Compact route receipt (/why): what answered and why, one line. */
   private renderRouteWhy(chatJid: string, senderJid: string): string {
-    const provider = this.effectiveProvider || 'unknown-provider';
-    const reason = this.isFallbackWindowActive
-      ? 'a fallback window is active'
-      : 'instance default route';
+    const live = this.liveSessionRoute(chatJid);
+    const provider = live?.provider ?? (this.effectiveProvider || 'unknown-provider');
+    const reason = live
+      ? this.isFallbackWindowActive && live.provider !== this.effectiveProvider
+        ? "serving this chat's current session (new sessions use the fallback route)"
+        : "serving this chat's current session"
+      : this.isFallbackWindowActive
+        ? 'a fallback window is active'
+        : 'instance default route';
     const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
     const pref = getPreference(this.db, chatKey, senderKey);
     const prefNote = pref

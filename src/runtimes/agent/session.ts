@@ -1924,6 +1924,11 @@ export class SessionManager {
     return this.provider;
   }
 
+  /** Model ref this session was spawned with (undefined = provider default). */
+  getModelRef(): string | undefined {
+    return this.model;
+  }
+
   /**
    * Kill child process and mark session.
    * @param suspend - true (default) = suspended (bot shutdown, resumable);
