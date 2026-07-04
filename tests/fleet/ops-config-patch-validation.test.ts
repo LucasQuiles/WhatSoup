@@ -465,4 +465,40 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     expect(persisted.agentOptions.sessionScope).toBe('per_chat');
     expect(persisted).toEqual(original);
   });
+
+  it('persists a valid BYOK providerConfig + fallbacks patch (positive round-trip)', async () => {
+    const agentCwd = makeAgentCwd('rt-byok');
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-byok');
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    fs.writeFileSync(cfg, JSON.stringify({
+      name: 'roundtrip-byok',
+      type: 'agent',
+      accessMode: 'self_only',
+      adminPhones: ['15551230006'],
+      healthPort: 9095,
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    }));
+    const inst = fakeInstance(cfg, { name: 'roundtrip-byok', type: 'agent' });
+
+    const providerConfig = {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    const fallbacks = [{ provider: 'openai-api', model: 'llama-3.3-70b-versatile' }];
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ agentOptions: { provider: 'claude-cli', providerConfig, fallbacks } })),
+      res, makeDeps(inst), { name: 'roundtrip-byok' },
+    );
+    expect(res._status, 'patch must succeed: ' + res._body).toBe(200);
+
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect(persisted.agentOptions.providerConfig).toEqual(providerConfig);
+    expect(persisted.agentOptions.fallbacks).toEqual(fallbacks);
+    // Deep-merge must not clobber untouched agentOptions siblings.
+    expect(persisted.agentOptions.sessionScope).toBe('per_chat');
+    expect(persisted.agentOptions.cwd).toBe(agentCwd);
+  });
 });
