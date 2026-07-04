@@ -450,6 +450,17 @@ function validateAgentOptions(
     );
   }
 
+  // nlRouting: flag-gated NL-first routing aliases + per-sender preference
+  // store. Strictly boolean — config.ts arms it with `=== true`, so a
+  // mistyped "true"/1 would otherwise pass validation and silently leave
+  // the feature off (F11).
+  if (opts['nlRouting'] !== undefined && typeof opts['nlRouting'] !== 'boolean') {
+    return err(
+      'agentOptions.nlRouting',
+      'agentOptions.nlRouting must be a boolean when provided',
+    );
+  }
+
   if (opts['autoCompactInputTokens'] !== undefined) {
     const threshold = opts['autoCompactInputTokens'];
     if (
