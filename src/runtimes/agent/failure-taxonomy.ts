@@ -439,6 +439,102 @@ export function classifyProviderFailure(text: string): ProviderFailureKind | nul
   return null;
 }
 
+/**
+ * Maximum length (characters) for streamed assistant_text to be treated as a
+ * suppressible provider-failure BANNER. Symmetric with the 300-char log preview
+ * at the runtime suppression sites: if the text is larger than what we would log
+ * on suppression, we must not silently destroy it. Every real provider-limit /
+ * auth / server-error banner in the corpus is well under this bound; longer text
+ * is prose ABOUT an error, not the error itself. See QR-209.
+ */
+export const MAX_STREAMED_BANNER_LENGTH = 300;
+
+/**
+ * Curated error-line openers. A streamed assistant_text is a suppressible BANNER
+ * only when — after stripping leading markdown/quote wrappers — it STARTS WITH one
+ * of these, i.e. the text IS the error rather than a sentence mentioning it.
+ * Anchoring at text start (not substring-anywhere) is the same false-positive
+ * guard detectAutoSwitchNotice and the transient/rate-limit/server-error detectors
+ * use (anchor on a known-error token, never ambient prose). Matching is
+ * startsWith-only, no regex over reply text (QR-130/QR-133 ReDoS lesson).
+ */
+const STREAMED_BANNER_OPENERS: readonly string[] = [
+  'api error',
+  'error:',
+  'failed to authenticate',
+  'invalid authentication credentials',
+  'not logged in',
+  'please run /login',
+  'please login',
+  'authentication required',
+  'authentication_error',
+  'invalid_api_key',
+  'invalid api key',
+  'missing api key',
+  'no api key',
+  'rate limited',
+  'service temporarily unavailable',
+  'service error',
+  "there's an issue with the selected model",
+  'prompt is too long',
+  'the socket connection was closed',
+  'socket hang up',
+];
+
+/**
+ * Leading markdown-emphasis / blockquote / whitespace wrappers a CLI banner may
+ * stream with (`_Rate limited …_`, `> Error: …`). Stripped char-by-char (no regex)
+ * before an opener match. Linear in the leading-wrapper run only.
+ */
+const BANNER_WRAPPER_CHARS: ReadonlySet<string> = new Set([' ', '\t', '\n', '\r', '_', '*', '~', '>', '`']);
+
+function startsWithErrorOpener(lowerText: string): boolean {
+  let i = 0;
+  while (i < lowerText.length && BANNER_WRAPPER_CHARS.has(lowerText[i]!)) i++;
+  const stripped = i === 0 ? lowerText : lowerText.slice(i);
+  for (const opener of STREAMED_BANNER_OPENERS) {
+    if (stripped.startsWith(opener)) return true;
+  }
+  return false;
+}
+
+export type StreamedFailureConfidence = 'banner' | 'ambient';
+
+/**
+ * Streaming-channel refinement of {@link classifyProviderFailure} for the
+ * assistant_text event path. The permissive classifier is correct on the infra
+ * channels (result events, stderr crash diagnostics, CLI probe adapters) where the
+ * text IS provider output — but on streamed assistant_text it runs against genuine
+ * assistant prose, so a reply that merely DISCUSSES an expired OAuth token, a usage
+ * limit, etc. matched and was silently dropped (QR-209 — observed suppressing real
+ * replies to a live chat).
+ *
+ * Returns:
+ *   - `null`                          — no provider-failure match → deliver (silent)
+ *   - `{ kind, confidence: 'banner' }` — the text IS the error → safe to suppress
+ *   - `{ kind, confidence: 'ambient' }`— matched but is prose about an error → DELIVER
+ *
+ * BANNER requires the permissive match AND `length <= MAX_STREAMED_BANNER_LENGTH`
+ * AND shape evidence the text is the error itself: `usage-limit` already carries
+ * tested terminal/prose guards (assembler + reset-time), so the length bound
+ * suffices there; every other kind must START WITH a curated error opener. When in
+ * doubt the result is `ambient` — on the streaming channel a false delivery is one
+ * visible message, a false suppression is permanent unrecoverable silence.
+ *
+ * This does NOT change {@link classifyProviderFailure}; the infra channels keep the
+ * permissive behavior.
+ */
+export function classifyStreamedProviderFailure(
+  text: string,
+): { kind: ProviderFailureKind; confidence: StreamedFailureConfidence } | null {
+  const kind = classifyProviderFailure(text);
+  if (kind === null) return null;
+  const isBanner =
+    text.length <= MAX_STREAMED_BANNER_LENGTH &&
+    (kind === 'usage-limit' || startsWithErrorOpener(text.toLowerCase()));
+  return { kind, confidence: isBanner ? 'banner' : 'ambient' };
+}
+
 const FALLBACK_PROVIDER_FAILURE_KINDS: ReadonlySet<ProviderFailureKind> = new Set<ProviderFailureKind>([
   'usage-limit',
   'rate-limit',

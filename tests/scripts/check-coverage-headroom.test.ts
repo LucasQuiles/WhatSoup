@@ -20,25 +20,27 @@ afterEach(() => {
 });
 
 describe('coverage headroom guard', () => {
+  // Floors are the hard gate (lines 95 / branches 90 / functions 93); the guard
+  // warns within MIN_HEADROOM_POINTS (2) above each floor.
   it('passes when every enforced metric has at least two points of headroom', () => {
     const root = makeSummary({
-      lines: { pct: 90.1 },
-      branches: { pct: 82.1 },
-      functions: { pct: 89.1 },
+      lines: { pct: 97.1 },
+      branches: { pct: 92.1 },
+      functions: { pct: 95.1 },
     });
 
     expect(checkCoverageHeadroom(root)).toEqual([]);
   });
 
-  it('fails when any enforced metric is too close to its threshold', () => {
+  it('reports a finding when any enforced metric is too close to its threshold', () => {
     const root = makeSummary({
-      lines: { pct: 89.9 },
-      branches: { pct: 82.1 },
-      functions: { pct: 89.1 },
+      lines: { pct: 96.9 },
+      branches: { pct: 92.1 },
+      functions: { pct: 95.1 },
     });
 
     expect(checkCoverageHeadroom(root)).toEqual([
-      'lines: pct=89.90 threshold=88 headroom=1.90 < 2',
+      'lines: pct=96.90 threshold=95 headroom=1.90 < 2',
     ]);
   });
 });
