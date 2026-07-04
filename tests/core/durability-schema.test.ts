@@ -24,14 +24,15 @@ describe('Migration v2 — durability tables', () => {
   it('migration 36 adds a nullable failure_class column to inbound_events', () => {
     const cols = db.raw.prepare("PRAGMA table_info(inbound_events)").all() as Array<{
       name: string;
+      type: string;
       notnull: number;
       dflt_value: string | null;
     }>;
     const failureClass = cols.find(c => c.name === 'failure_class');
-    expect(failureClass, 'inbound_events.failure_class should exist after migration 36').toBeDefined();
-    // Nullable, no default, no backfill.
-    expect(failureClass!.notnull, 'failure_class must be nullable').toBe(0);
+    expect(failureClass?.type, 'inbound_events.failure_class should exist after migration 36 as TEXT').toBe('TEXT');
+    // No default, no backfill; nullable (notnull=0).
     expect(failureClass!.dflt_value, 'failure_class must have no column default').toBeNull();
+    expect(failureClass!.notnull, 'failure_class must be nullable').toBe(0);
   });
 
   it('failure_class has no CHECK constraint (bounded in code, not schema) and accepts NULL + any text', () => {
