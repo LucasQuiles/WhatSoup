@@ -12019,6 +12019,42 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
   });
 
+  it('/model status renders on the default route when the preference store read throws (R11)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    // A store failure on a READ-ONLY status query must degrade, not error.
+    routingDb.raw.exec('DROP TABLE chat_model_preference');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const replies = allReplies(sentMessages);
+    expect(replies.some((t) => t.includes('*Current route:*'))).toBe(true);
+    expect(replies.some((t) => t.includes('Preference: none'))).toBe(true);
+    expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
+  });
+
+  it('/why renders on the default route when the preference store read throws (R11)', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    routingDb.raw.exec('DROP TABLE chat_model_preference');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why' }));
+    const replies = allReplies(sentMessages);
+    expect(replies.some((t) => t.includes('Route:'))).toBe(true);
+    expect(replies.some((t) => t.includes('Something went wrong'))).toBe(false);
+  });
+
+  it('spawn fails OPEN to the default route when the pin-eligibility probe throws (R13)', async () => {
+    const { runtime } = makeRoutingRuntime();
+    // routablePinTargets does keyring I/O and was called OUTSIDE the pref-read
+    // guard — a probe throw must degrade to the default route, never drop the turn.
+    (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => {
+      throw new Error('probe boom');
+    };
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
+    expect(capturedSessionManagerOptsRef.current).toBeTruthy();
+    expect(mockSession.sendTurn).toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ instance: 'test' }),
+      'route resolution failed - routing on default',
+    );
+  });
+
   it('a pinned codex-cli session inherits the primary providerConfig incl. budget cap (R2)', async () => {
     // codex-cli is native-auth (no key service) → routable; it is neither the
     // primary nor an API sibling, so fallbackProviderConfigFor returns

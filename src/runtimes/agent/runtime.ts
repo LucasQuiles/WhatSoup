@@ -2947,7 +2947,13 @@ export class AgentRuntime implements Runtime {
           const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
           if (sub === '' || sub === 'status') {
             // Opportunistic retention sweep on read (F13); also runs at init.
-            pruneExpired(this.db);
+            // Fail-open (R11): a store error on the sweep must not throw out of
+            // this read-only handler — status still renders on the default route.
+            try {
+              pruneExpired(this.db);
+            } catch (err) {
+              log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
+            }
             this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
             break;
           }
@@ -5521,36 +5527,59 @@ export class AgentRuntime implements Runtime {
     chatJid: string,
     actorJid?: string,
   ): RouteDecision & { pinnedProvider: string | null } {
-    let pref: ChatModelPreference | null = null;
-    if (actorJid) {
-      try {
-        const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
-        pref = getPreference(this.db, chatKey, senderKey);
-      } catch (err) {
-        // A preference-store failure must NEVER fail a turn (UH: pref-store
-        // read failure): degrade to the safe default route and warn.
-        log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
-      }
+    // Fail-open over the WHOLE resolution (R13): the preference read AND the
+    // routablePinTargets credential probe both do I/O that can throw. A
+    // resolution failure must degrade to the default route and NEVER drop a
+    // turn — so the pin probe is inside this guard, not just the pref read.
+    try {
+      const pref = actorJid ? this.loadSenderPreference(chatJid, actorJid) : null;
+      const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
+      // The tier provider this pref maps to (if any) is probed for routability
+      // the same way a pin is — an ineligible tier degrades to the default
+      // route (R5), never a keyless session. One probe, reused for both (C5).
+      const tierProvider =
+        pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
+        : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
+        : undefined;
+      const routable = this.routablePinTargets();
+      const decision = resolveRoute({
+        agentProvider: this.agentProvider,
+        effectiveModel: this.effectiveModel,
+        fallbackEntry: this.effectiveFallbackEntry,
+        pref,
+        pinnedProviderEligible: pinned !== null && routable.includes(pinned),
+        tierMap: config.nlRoutingTiers,
+        tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
+      });
+      return { ...decision, pinnedProvider: pinned };
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
+      return {
+        provider: this.agentProvider,
+        model: this.effectiveModel,
+        source: 'default',
+        reasonCode: 'route_resolution_failed',
+        pinnedProvider: null,
+      };
     }
-    const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
-    // The tier provider this pref maps to (if any) is probed for routability
-    // the same way a pin is — an ineligible tier degrades to the default route
-    // (R5), never a keyless session. One probe, reused for both checks (C5).
-    const tierProvider =
-      pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
-      : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
-      : undefined;
-    const routable = this.routablePinTargets();
-    const decision = resolveRoute({
-      agentProvider: this.agentProvider,
-      effectiveModel: this.effectiveModel,
-      fallbackEntry: this.effectiveFallbackEntry,
-      pref,
-      pinnedProviderEligible: pinned !== null && routable.includes(pinned),
-      tierMap: config.nlRoutingTiers,
-      tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
-    });
-    return { ...decision, pinnedProvider: pinned };
+  }
+
+  /**
+   * Canonical-keyed preference read with fail-open (C3): owns key derivation
+   * (preferenceKeys) AND the fail-open contract, so every reader — the spawn
+   * path, /model status, and /why — degrades identically on a store error
+   * (warn + treat as no preference) instead of one path throwing out of a
+   * read-only command. A preference read failure must never surface as an
+   * error or drop a turn.
+   */
+  private loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null {
+    try {
+      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
+      return getPreference(this.db, chatKey, senderKey);
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
+      return null;
+    }
   }
 
   /**
@@ -5819,8 +5848,9 @@ export class AgentRuntime implements Runtime {
     const nextProvider = this.effectiveProvider || 'unknown-provider';
     const provider = live?.provider ?? nextProvider;
     const model = (live ? live.model : this.effectiveModel) ?? 'provider default';
-    const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
-    const pref = getPreference(this.db, chatKey, senderKey);
+    // Fail-open read (C3/R11): a store error degrades to "no preference"
+    // instead of throwing out of the read-only /model status handler.
+    const pref = this.loadSenderPreference(chatJid, senderJid);
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null
@@ -5860,8 +5890,9 @@ export class AgentRuntime implements Runtime {
       : this.isFallbackWindowActive
         ? 'a fallback window is active'
         : 'instance default route';
-    const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
-    const pref = getPreference(this.db, chatKey, senderKey);
+    // Fail-open read (C3/R11): a store error degrades to "no preference"
+    // instead of throwing out of the read-only /why handler.
+    const pref = this.loadSenderPreference(chatJid, senderJid);
     const prefNote = pref
       ? '; your preference steers new sessions'
       : '';
@@ -7609,10 +7640,20 @@ export class AgentRuntime implements Runtime {
    * current; flag off never reaches this (the opt stays undefined).
    */
   private buildRoutingContractBlock(): string {
+    // Fail-open (R13): the routablePinTargets credential probe does I/O and can
+    // throw; the routing prompt block must never fail a spawn. Degrade to the
+    // always-routable primary rather than propagating out of prompt build.
+    let routableProviders: string[];
+    try {
+      routableProviders = this.routablePinTargets();
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'routable-pin probe failed building routing contract - listing primary only');
+      routableProviders = [this.agentProvider];
+    }
     return buildRoutingPromptContract({
       provider: this.effectiveProvider,
       tierMap: config.nlRoutingTiers ?? null,
-      routableProviders: this.routablePinTargets(),
+      routableProviders,
     });
   }
 
