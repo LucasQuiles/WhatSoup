@@ -337,6 +337,22 @@ describe('validateInstanceConfig — providerConfig.apiKeyService', () => {
     expect(err?.message).toContain('deepseek');
   });
 
+  it('rejects the BYOK-blocked services nvidia and cerebras until they enter SERVICE_ENV_MAP', () => {
+    // Deliberate coupling: the BYOK design note
+    // (docs/specs/2026-07-03-openai-compatible-byok-providers-design.md)
+    // documents nvidia/cerebras as blocked pending service-map entries and
+    // probe qualification. If this flips because you mapped the service,
+    // update that note's Blocked/future section and the
+    // docs/configuration.md service lists in the same PR.
+    for (const service of ['nvidia', 'cerebras']) {
+      const err = validateInstanceConfig(opencodeEndpoint(service), createCtx);
+      expect(err?.field, `${service} must stay rejected until mapped`).toBe(
+        'agentOptions.providerConfig.apiKeyService',
+      );
+      expect(err?.message).toContain(service);
+    }
+  });
+
   it('rejects apiKeyService without baseUrl (the key service would be inert)', () => {
     const err = validateInstanceConfig(
       agentRaw({ provider: 'opencode-cli', providerConfig: { apiKeyService: 'minimax' } }),
