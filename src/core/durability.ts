@@ -9,6 +9,7 @@ import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { withTransaction } from './db-tx.ts';
 import { config } from '../config.ts';
 
 const log = createChildLogger('durability');
@@ -85,6 +86,13 @@ export interface RecoveryStats {
   toolCallsReplayed: number;
   toolCallsQuarantined: number;
   sessionsRestored: number;
+}
+
+/** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
+export interface StuckInboundSweepResult {
+  completedEchoed: number;
+  completedTurnDone: number;
+  failedStale: number;
 }
 
 export interface SessionCheckpointFields {
@@ -164,6 +172,9 @@ type DurabilityStatements = {
   getProcessingInboundEvents: PreparedStatement;
   getTurnDoneInboundEvents: PreparedStatement;
   getTerminalOutboundForInbound: PreparedStatement;
+  getOpenInboundWithEchoedTerminal: PreparedStatement;
+  getStaleTurnDoneNoSuccess: PreparedStatement;
+  getStaleOpenNoSuccess: PreparedStatement;
   getStaleSubmitted: PreparedStatement;
   getMessageByWaMessageId: PreparedStatement;
   resetMaybeSentWithWaToPending: PreparedStatement;
@@ -313,6 +324,43 @@ export class DurabilityEngine {
         `SELECT id, status FROM outbound_ops
          WHERE source_inbound_seq = ? AND is_terminal = 1
            AND status NOT IN ('quarantined', 'failed_permanent')`,
+      ),
+      // W2 stuck-inbound reconciler buckets. Open set is ('pending','processing',
+      // 'turn_done') — there is no 'queued' state. An echoed terminal op is the
+      // delivery-confirmed success signal (mirrors getTerminalOutboundForInbound's
+      // exclusion of quarantined/failed_permanent by matching status='echoed'
+      // directly). Each bounded to 200 rows so a large backlog drains over several
+      // sweeps rather than in one long transaction.
+      getOpenInboundWithEchoedTerminal: prepare(
+        `SELECT DISTINCT i.seq AS seq
+         FROM inbound_events i
+         JOIN outbound_ops o
+           ON o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
+         WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+           AND i.received_at < datetime('now', '-5 minutes')
+         LIMIT 200`,
+      ),
+      getStaleTurnDoneNoSuccess: prepare(
+        `SELECT i.seq AS seq
+         FROM inbound_events i
+         WHERE i.processing_status = 'turn_done'
+           AND i.received_at < datetime('now', '-24 hours')
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_ops o
+             WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
+           )
+         LIMIT 200`,
+      ),
+      getStaleOpenNoSuccess: prepare(
+        `SELECT i.seq AS seq
+         FROM inbound_events i
+         WHERE i.processing_status IN ('pending', 'processing')
+           AND i.received_at < datetime('now', '-24 hours')
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_ops o
+             WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
+           )
+         LIMIT 200`,
       ),
       getStaleSubmitted: prepare(
         `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
@@ -970,6 +1018,57 @@ export class DurabilityEngine {
       log.warn({ count }, 'sweepStaleSubmitted: promoted stale submitted ops');
     }
     return count;
+  }
+
+  /**
+   * Periodic reconciler for inbound rows stranded in a non-terminal
+   * processing_status WHILE the process is live (preConnectRecovery only runs at
+   * startup). Without this a stranded row never reaches complete/failed and
+   * retention never reclaims it → unbounded growth. Three buckets:
+   *
+   *   1. open (pending/processing/turn_done) with an echoed terminal op, older
+   *      than 5 min → complete, 'recovered_response_sent' (delivery confirmed but
+   *      the completion step was missed — the QR-102 strand, seen live not just
+   *      across crashes).
+   *   2. turn_done older than 24h with no echoed terminal op → complete,
+   *      'recovered_turn_done' (a no-reply turn that finished but never finalized).
+   *   3. pending/processing older than 24h with no echoed terminal op → failed
+   *      (terminal_reason='error') — the turn silently died with no delivered reply.
+   *
+   * The whole sweep runs in one transaction. It uses completeInbound /
+   * markInboundComplete / markInboundFailed (never completeTurn, which opens its
+   * own BEGIN IMMEDIATE). continuity_candidate_* columns are left untouched.
+   */
+  sweepStuckInbound(): StuckInboundSweepResult {
+    return withTransaction(this.db, () => {
+      let completedEchoed = 0;
+      let completedTurnDone = 0;
+      let failedStale = 0;
+
+      const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
+      for (const row of echoed) {
+        this.completeInbound(row.seq, 'recovered_response_sent');
+        completedEchoed += 1;
+      }
+
+      const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
+      for (const row of turnDone) {
+        this.markInboundComplete(row.seq, 'recovered_turn_done');
+        completedTurnDone += 1;
+      }
+
+      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
+      for (const row of staleOpen) {
+        this.markInboundFailed(row.seq);
+        failedStale += 1;
+      }
+
+      const result: StuckInboundSweepResult = { completedEchoed, completedTurnDone, failedStale };
+      if (completedEchoed > 0 || completedTurnDone > 0 || failedStale > 0) {
+        log.info(result, 'sweepStuckInbound: finalized stuck inbound rows');
+      }
+      return result;
+    });
   }
 
   getHealthStats(): { pendingOutbound: number; quarantinedOutbound: number; lastRecoveryAt: string | null } {
