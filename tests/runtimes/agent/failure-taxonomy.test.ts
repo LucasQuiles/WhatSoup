@@ -79,6 +79,19 @@ describe('agent failure taxonomy detectors', () => {
   });
 
   it.each([
+    'Your OAuth token has expired - run claude login to reconnect, then retry.',
+    'Here is how OAuth refresh works once an access token has expired: refresh first, then retry.',
+    'The SSL cert expired last week, but the oauth flow itself is fine.',
+  ])('OAuth troubleshooting prose stays ambient on the streaming channel, never banner: %j', (message) => {
+    // The permissive detector intentionally still matches these (oauth+expired) —
+    // that stays correct for the infra channels (result/stderr/probe). The
+    // streaming refinement must land them AMBIENT (delivered), never banner
+    // (suppressed) — delivering prose about an auth error is the QR-209 contract.
+    expect(isProviderAuthRequiredMessage(message)).toBe(true);
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'auth-required', confidence: 'ambient' });
+  });
+
+  it.each([
     ['', null],
     ['Prompt is too long: context_length_exceeded', 'context-overflow'],
     ['Quota exceeded; Claude resets at 9pm.', 'usage-limit'],
