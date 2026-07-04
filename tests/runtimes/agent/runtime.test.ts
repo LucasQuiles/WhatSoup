@@ -11554,3 +11554,249 @@ describe('AgentRuntime', () => {
     });
   });
 });
+
+// ─── NL routing handler matrix (slices 1.5 + 2; review gap F14/B4) ───────────
+// Integration coverage for the /model //why //reset handlers and the spawn
+// steering wiring, on a REAL sqlite store (in-memory) behind the runtime,
+// with the file's SessionManager/queue/config mocks. Appended last in this
+// file; mockConfig routing keys are restored in afterEach.
+describe('NL routing handlers (nlRouting flag)', () => {
+  const CHAT = '15550000100@s.whatsapp.net';
+  const GROUP = '111222333@g.us';
+  const SENDER_A = '15550000111@s.whatsapp.net';
+  const SENDER_B = '15550000222@s.whatsapp.net';
+  const SENDER_A_LID = '11111110000042@lid';
+
+  let routingDb: Database;
+  let routingDbPath: string;
+  let eventsDir: string;
+  let ensurePrefSchema: ((db: Database) => void) | null = null;
+
+  function cfgAny(): Record<string, unknown> {
+    return mockConfig as unknown as Record<string, unknown>;
+  }
+
+  beforeEach(async () => {
+    // REAL store DB: the full schema via Database.open() (migrations), so the
+    // constructor's genuine SQL (outbound_sends writer, lid_mappings, the
+    // flag-gated preference schema) runs for real instead of against stubs.
+    const { Database: RealDatabase } = await import('../../../src/core/database.ts');
+    const os = await import('node:os');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const crypto = await import('node:crypto');
+    routingDbPath = path.join(os.tmpdir(), `routing-h-${crypto.randomBytes(6).toString('hex')}.db`);
+    const real = new RealDatabase(routingDbPath);
+    real.open();
+    routingDb = real as unknown as Database;
+    const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+    ensurePrefSchema = prefMod.ensureChatPreferenceSchema;
+    eventsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'route-ev-'));
+    cfgAny().nlRouting = true;
+    cfgAny().nlRoutingEventsDir = eventsDir;
+    // The runtime reads its provider from config (config.agentProvider), which
+    // the file-wide mockConfig does not set — routing needs a real primary.
+    cfgAny().agentProvider = 'claude-cli';
+    capturedSessionManagerOptsRef.current = null;
+    mockQueue.enqueueText.mockClear();
+    mockSession.sendTurn.mockClear();
+    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    (mockSession as unknown as Record<string, unknown>).getModelRef = vi.fn(() => undefined);
+  });
+
+  afterEach(async () => {
+    delete cfgAny().nlRouting;
+    delete cfgAny().nlRoutingTiers;
+    delete cfgAny().nlRoutingEventsDir;
+    delete cfgAny().agentFallbacks;
+    delete cfgAny().agentProvider;
+    vi.useRealTimers();
+    const fs = await import('node:fs');
+    (routingDb as unknown as { close: () => void }).close();
+    for (const suffix of ['', '-wal', '-shm']) {
+      if (fs.existsSync(routingDbPath + suffix)) fs.unlinkSync(routingDbPath + suffix);
+    }
+  });
+
+  function makeRoutingRuntime(): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(routingDb, messenger, 'test', {});
+    // Mirror the flag-gated schema init that runtime.start() performs in
+    // production (tests do not call start(); its other side effects are
+    // out of scope here).
+    if (cfgAny().nlRouting === true) ensurePrefSchema?.(routingDb);
+    return { runtime, sentMessages };
+  }
+
+  function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
+    return [
+      ...sentMessages.map((s) => s.text),
+      ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
+    ];
+  }
+
+  function prefRows(): Array<Record<string, unknown>> {
+    return (routingDb.raw as unknown as { prepare: (s: string) => { all: () => Array<Record<string, unknown>> } })
+      .prepare('SELECT * FROM chat_model_preference').all();
+  }
+
+  async function readEvents(): Promise<Array<Record<string, unknown>>> {
+    // node:fs is partially mocked file-wide (readFileSync is stubbed);
+    // node:fs/promises is NOT mocked, so reads go to the real file that the
+    // sidecar's (real) appendFileSync wrote.
+    const fsp = await import('node:fs/promises');
+    const path = await import('node:path');
+    const file = path.join(eventsDir, 'route-events.ndjson');
+    try {
+      const raw = await fsp.readFile(file, 'utf8');
+      return raw.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    } catch {
+      return [];
+    }
+  }
+
+  it('flag off: no preference table is created and /model forwards to the session', async () => {
+    cfgAny().nlRouting = false;
+    const { runtime } = makeRoutingRuntime();
+    const tables = (routingDb.raw as unknown as { prepare: (s: string) => { all: () => unknown[] } })
+      .prepare("SELECT name FROM sqlite_master WHERE name='chat_model_preference'");
+    expect(tables.all()).toHaveLength(0);
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    expect(tables.all()).toHaveLength(0);
+    expect(mockSession.sendTurn).toHaveBeenCalled();
+  });
+
+  it('writes the preference row under CANONICAL keys when the sender presents as @lid', async () => {
+    (routingDb.raw as unknown as { prepare: (s: string) => { run: (...a: unknown[]) => unknown } })
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110000042', SENDER_A);
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A_LID, content: '/model strongest' }));
+    const rows = prefRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].chat_jid).toBe(CHAT);
+    expect(rows[0].sender_jid).toBe(SENDER_A);
+    expect(allReplies(sentMessages).join('\n')).toContain('Okay — preferring my strongest model');
+    const events = await readEvents();
+    expect(events.some((e) => e.event === 'model_preference_set' && e.reasonCode === 'intent_strongest_set')).toBe(true);
+  });
+
+  it('/model status renders the recorded preference and the honest authority line', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status' }));
+    const status = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(status).toBeDefined();
+    expect(status).toContain('Preference: strongest for you in this chat');
+    expect(status).toContain('steers new sessions');
+    expect(status).toContain('Authority: routing never changes what I am allowed to do');
+    expect(status).not.toContain('no live actions authorized');
+  });
+
+  it('an identical repeat EXTENDS the TTL instead of a misleading no-op', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_800_000_000_000);
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model fastest' }));
+    const first = prefRows()[0].expires_at as number;
+    expect(first).toBe(1_800_000_000_000 + 24 * 60 * 60 * 1000);
+    vi.setSystemTime(1_800_000_000_000 + 60 * 60 * 1000);
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model fastest', messageId: 'msg-2' }));
+    const second = prefRows()[0].expires_at as number;
+    expect(second).toBe(1_800_000_000_000 + 60 * 60 * 1000 + 24 * 60 * 60 * 1000);
+    expect(allReplies(sentMessages).join('\n')).toContain('Already set — extended for another 24h');
+  });
+
+  it('/reset is idempotent: same reply twice, row gone', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/reset', messageId: 'msg-2' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/reset', messageId: 'msg-3' }));
+    expect(prefRows()).toHaveLength(0);
+    const resets = allReplies(sentMessages).filter((t) => t.includes('Back to the default route'));
+    expect(resets).toHaveLength(2);
+    const events = await readEvents();
+    expect(events.filter((e) => e.event === 'model_preference_cleared')).toHaveLength(2);
+  });
+
+  it('rejects a pin the instance cannot route to — honest copy, NO row written', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model opencode-cli' }));
+    expect(prefRows()).toHaveLength(0);
+    const reply = allReplies(sentMessages).join('\n');
+    expect(reply).toContain("opencode-cli isn't available on this instance");
+    expect(reply).toContain('Available: claude-cli');
+  });
+
+  it('a routable pin steers the NEXT session spawn (provider + provider-default model)', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    // Steering is spawn-scoped by design (provider/model are per-session and
+    // read-only; the /model echo says "applies from your next session").
+    // Single-scope /new restarts the session IN PLACE, so use a fresh runtime
+    // on the same db — the restart/new-process spawn path.
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model codex-cli' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; model?: string } | null;
+    expect(opts).not.toBeNull();
+    expect(opts?.provider).toBe('codex-cli');
+    expect(opts?.model).toBeUndefined();
+    const events = await readEvents();
+    expect(events.some((e) => e.event === 'runtime_selected' && e.source === 'user' && e.reasonCode === 'user_pin')).toBe(true);
+  });
+
+  it('group preferences are per-sender: A sets, B is unaffected', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model strongest' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_B, isGroup: true, content: '/model status', messageId: 'msg-2' }));
+    const bStatus = allReplies(sentMessages).find((t) => t.includes('*Current route:*'));
+    expect(bStatus).toContain('Preference: none');
+    const rows = prefRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sender_jid).toBe(SENDER_A);
+  });
+
+  it('a blocked pin gets ONE visible notice per transition, default route, pin survives', async () => {
+    // Pin recorded while routable, then the chain is dropped (new runtime,
+    // same db) — the strict pin must fail VISIBLY, never impersonate.
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model codex-cli' }));
+    cfgAny().agentFallbacks = [];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string } | null;
+    expect(opts?.provider).toBe('claude-cli');
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/new', messageId: 'msg-3' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello again', messageId: 'msg-4' }));
+    const notices = allReplies(sentMessages).filter((t) => t.includes("pinned codex-cli isn't available"));
+    expect(notices).toHaveLength(1);
+    expect(prefRows()).toHaveLength(1);
+    const events = await readEvents();
+    expect(events.filter((e) => e.event === 'user_pin_unreachable').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('locally-handled aliases terminally complete the inbound durability journal', async () => {
+    const { runtime } = makeRoutingRuntime();
+    const durability = {
+      completeInbound: vi.fn(),
+      markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
+      markInboundFailed: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+    };
+    (runtime as unknown as { durability: unknown }).durability = durability;
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model status', inboundSeq: 42 }));
+    expect(durability.completeInbound).toHaveBeenCalledWith(42, 'routing_alias_handled');
+  });
+
+  it('/why reports the live session provider once a session is active', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's', startedAt: new Date().toISOString(), messageCount: 1, lastMessageAt: null });
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/why', messageId: 'msg-2' }));
+    const why = allReplies(sentMessages).find((t) => t.includes('Route:'));
+    expect(why).toContain("serving this chat's current session");
+    expect(why).toContain('routing never changes what I am allowed to do');
+  });
+});
