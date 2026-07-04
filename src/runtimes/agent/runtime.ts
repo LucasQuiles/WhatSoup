@@ -7045,10 +7045,6 @@ export class AgentRuntime implements Runtime {
       if (!artifact) return null;
       return buildHandoffPrelude({
         artifact,
-        recentMessages: [],
-        verbatimN: 0,
-        isFirstStandInTurn: true,
-        backupContextWindow: 'unknown',
         now: Date.now(),
         staleAfterMs: HANDOFF_STALE_MS,
         // PII-hardened handoff redactor: provider-preview sanitizer (Bearer /
