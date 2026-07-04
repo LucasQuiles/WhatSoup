@@ -2974,6 +2974,10 @@ export class AgentRuntime implements Runtime {
             // Out-of-contract value: no state change, honest reply (UH-001).
             // Never echo unbounded user text into a (possibly group) chat:
             // strip markdown-breaking chars and cap the length (F03).
+            // Defense-in-depth: unreachable while classifyInput admits only the
+            // recognized /model grammar (bare | verb | provider-id), so a
+            // non-verb/non-provider `sub` never arrives here. Kept as a
+            // fail-safe against any future widening of that grammar (F03).
             const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
             this.sendDirect(
               chatJid,

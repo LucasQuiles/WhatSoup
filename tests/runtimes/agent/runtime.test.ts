@@ -11610,6 +11610,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     delete cfgAny().nlRoutingEventsDir;
     delete cfgAny().agentFallbacks;
     delete cfgAny().agentProvider;
+    delete cfgAny().agentProviderConfig;
     vi.useRealTimers();
     const fs = await import('node:fs');
     (routingDb as unknown as { close: () => void }).close();
@@ -11955,6 +11956,67 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect.objectContaining({ intent: 'strongest', instance: 'test' }),
       'route-intent apply failed - reply delivered without state change',
     );
+  });
+
+  it('an uncredentialed fallback is NOT pinnable — routablePinTargets skips it, /model rejects, no row (F07)', async () => {
+    // Determinism: resolveProviderKeyService returns the config apiKeyService for
+    // anthropic-api; a random name is absent from SERVICE_ENV_MAP (no env read),
+    // the keyring, the file store, and opencode auth, so lookupCredential returns
+    // null with no keychain dependency — the fallback is filtered from routable
+    // pins and a strict pin to it must fail at SET time rather than impersonate.
+    const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+    cfgAny().agentProviderConfig = { apiKeyService: absentService };
+    cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model anthropic-api' }));
+    expect(prefRows()).toHaveLength(0);
+    const reply = allReplies(sentMessages).join('\n');
+    expect(reply).toContain("anthropic-api isn't available on this instance");
+    // Only the always-routable primary is offered; the uncredentialed fallback is absent.
+    expect(reply).toContain('Available: claude-cli.');
+  });
+
+  it('an identical repeat of a STICKY pin is kept, never silently demoted to a 24h TTL', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    // Seed a sticky (expires_at NULL) strongest pin directly, then re-assert it.
+    routingDb.raw
+      .prepare(`INSERT INTO chat_model_preference
+        (chat_jid, sender_jid, intent, requested_provider, scope, pin_strict, fallback_permitted, updated_at, expires_at)
+        VALUES (?, ?, 'strongest', NULL, 'sticky', 1, 0, ?, NULL)`)
+      .run(CHAT, SENDER_A, Date.now());
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    expect(allReplies(sentMessages).some((t) => t.includes('Already set (sticky)'))).toBe(true);
+    const rows = prefRows();
+    expect(rows).toHaveLength(1);
+    // The sticky row survives untouched — a repeat must not demote it to ephemeral.
+    expect(rows[0].expires_at).toBeNull();
+    expect(rows[0].scope).toBe('sticky');
+  });
+
+  it('a routable opencode-cli pin strips primary baseUrl/apiKeyService from the spawned provider config', async () => {
+    // opencode-cli fallback with NO model → resolveProviderKeyService returns a
+    // null service → not credential-filtered → routable.
+    cfgAny().agentProviderConfig = { baseUrl: 'https://primary.example', apiKeyService: 'anthropic', extraOpt: 'kept' };
+    cfgAny().agentFallbacks = [{ provider: 'opencode-cli' }];
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model opencode-cli' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; providerConfig?: Record<string, unknown> };
+    expect(opts.provider).toBe('opencode-cli');
+    // baseUrl + apiKeyService (primary-specific) removed; other keys preserved.
+    expect(opts.providerConfig).toEqual({ extraOpt: 'kept' });
+  });
+
+  it('/model default clears the preference via the same path as /reset', async () => {
+    const { runtime, sentMessages } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    expect(prefRows()).toHaveLength(1);
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model default', messageId: 'msg-2' }));
+    expect(prefRows()).toHaveLength(0);
+    expect(allReplies(sentMessages).some((t) => t.includes('Back to the default route'))).toBe(true);
+    const events = await readEvents();
+    expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
   });
 
 });
