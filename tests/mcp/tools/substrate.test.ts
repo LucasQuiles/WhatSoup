@@ -105,8 +105,12 @@ describe('substrate MCP tools', () => {
     (dd as unknown as { sensitiveAuthorizer: (s: SessionContext) => boolean }).sensitiveAuthorizer = () => true;
     const res = await dd.call('capture_task', { title: 'x' }, guestSession);
     expect(res.isError).toBe(true);
-    // Reaches the handler; assertAdmin's descriptive message surfaces.
-    expect(res.content[0].text).toMatch(/admin/i);
+    // Reaches the handler: the exact in-handler assertAdmin message surfaces
+    // (wrapped by registry.call), distinct from the central gate's uniform
+    // 'Unknown tool' reply — proves the retained layer, not just any error.
+    expect(res.content[0].text).toBe(
+      'Tool "capture_task" failed: admin-only tool: caller phone "guest-user" is not on the instance admin list',
+    );
   });
 
   it('R1 policy coupling: exactly the admin-gated substrate tools carry sensitive:true', () => {
