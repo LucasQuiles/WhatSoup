@@ -5587,7 +5587,10 @@ export class AgentRuntime implements Runtime {
       `${prefLine}\n` +
       `${fallbackLine}${nextLine}\n` +
       'Delegation: none\n' +
-      'Authority: advisory; no live actions authorized'
+      // Capability-preserved phrasing, true on EVERY instance (F10): this
+      // surface must not claim the bot can or cannot act — only that
+      // routing choices never change what it may do.
+      'Authority: routing never changes what I am allowed to do'
     );
   }
 
@@ -5607,7 +5610,7 @@ export class AgentRuntime implements Runtime {
     const prefNote = pref
       ? '; your preference is recorded and applies once routing wiring is enabled'
       : '';
-    return `_Route: ${provider} (${reason})${prefNote}. No delegation; advisory only — no live actions authorized._`;
+    return `_Route: ${provider} (${reason})${prefNote}. No delegation; routing never changes what I am allowed to do._`;
   }
 
   /**
