@@ -15,12 +15,15 @@ import type { Database } from '../../core/database.ts';
  * are both ignored on read and DELETED by pruneExpired.
  */
 
-export type PreferenceIntent =
-  | 'auto'
-  | 'fastest'
-  | 'strongest'
-  | 'safe_read_only'
-  | 'provider_specific';
+const PREFERENCE_INTENTS = [
+  'auto',
+  'fastest',
+  'strongest',
+  'safe_read_only',
+  'provider_specific',
+] as const;
+// Union + validator Set derive from ONE source (C2) so they cannot drift.
+export type PreferenceIntent = (typeof PREFERENCE_INTENTS)[number];
 
 export type PreferenceScope = 'this_thread' | 'sticky';
 
@@ -40,13 +43,7 @@ export interface ChatModelPreference {
   expiresAt: number | null;
 }
 
-const INTENTS: ReadonlySet<string> = new Set([
-  'auto',
-  'fastest',
-  'strongest',
-  'safe_read_only',
-  'provider_specific',
-]);
+const INTENTS: ReadonlySet<string> = new Set<string>(PREFERENCE_INTENTS);
 const SCOPES: ReadonlySet<string> = new Set(['this_thread', 'sticky']);
 
 /** Ensure the per-sender preference table exists. Idempotent. */

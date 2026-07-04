@@ -12,14 +12,11 @@
  * preserved routing).
  */
 
-export type RouteIntentClass = 'strongest' | 'fastest' | 'safe_read_only' | 'reset';
+const ROUTE_INTENT_CLASSES = ['strongest', 'fastest', 'safe_read_only', 'reset'] as const;
+// Union + validator Set derive from ONE source (C2) so they cannot drift.
+export type RouteIntentClass = (typeof ROUTE_INTENT_CLASSES)[number];
 
-const INTENT_CLASSES: ReadonlySet<string> = new Set([
-  'strongest',
-  'fastest',
-  'safe_read_only',
-  'reset',
-]);
+const INTENT_CLASSES: ReadonlySet<string> = new Set<string>(ROUTE_INTENT_CLASSES);
 
 /**
  * A line is a marker ENVELOPE iff, after trimming, it is exactly

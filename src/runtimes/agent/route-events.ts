@@ -17,17 +17,21 @@ import { join } from 'node:path';
  * never triggers: consumers must not treat a line as an authorization.
  */
 
-export type RouteEventType =
-  | 'runtime_selected'
-  | 'runtime_switched'
-  | 'model_preference_set'
-  | 'model_preference_cleared'
-  | 'auto_fallback_started'
-  | 'auto_fallback_cleared'
-  | 'user_pin_unreachable'
-  | 'delegation_started'
-  | 'delegation_finished'
-  | 'approval_required';
+const ROUTE_EVENT_TYPES = [
+  'runtime_selected',
+  'runtime_switched',
+  'model_preference_set',
+  'model_preference_cleared',
+  'auto_fallback_started',
+  'auto_fallback_cleared',
+  'user_pin_unreachable',
+  'delegation_started',
+  'delegation_finished',
+  'approval_required',
+] as const;
+// Union + validator Set derive from ONE source (C2): adding a member here
+// updates both the type and the runtime guard, so they cannot drift.
+export type RouteEventType = (typeof ROUTE_EVENT_TYPES)[number];
 
 export type RouteChatScope = 'dm' | 'group' | 'instance';
 
@@ -50,18 +54,7 @@ export interface ModelRouteEvent {
   reasonCode: string;
 }
 
-const EVENT_TYPES: ReadonlySet<string> = new Set([
-  'runtime_selected',
-  'runtime_switched',
-  'model_preference_set',
-  'model_preference_cleared',
-  'auto_fallback_started',
-  'auto_fallback_cleared',
-  'user_pin_unreachable',
-  'delegation_started',
-  'delegation_finished',
-  'approval_required',
-]);
+const EVENT_TYPES: ReadonlySet<string> = new Set<string>(ROUTE_EVENT_TYPES);
 const SOURCES: ReadonlySet<string> = new Set(['default', 'user', 'auto_fallback', 'operator']);
 
 /** Size-bounded retention: rotate the sink past this many bytes. */
