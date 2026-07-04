@@ -1,6 +1,6 @@
 # OpenAI-Compatible BYO-Key Providers — Current Surfaces and Operator Guidance
 
-Date: 2026-07-03 · Audited source revision: `c1bb4f15` (all file:line references below are anchored to this commit)
+Date: 2026-07-04 · Audited source revision: `9a38a643` (all file:line references below are anchored to this commit; refreshed from the 2026-07-03 draft)
 
 ## Decision
 
@@ -8,7 +8,7 @@ Date: 2026-07-03 · Audited source revision: `c1bb4f15` (all file:line reference
 
 ## Integration seams (current state)
 
-| Seam | Source (`c1bb4f15`) | Current capability | Operational implication | Blocked/future |
+| Seam | Source (`9a38a643`) | Current capability | Operational implication | Blocked/future |
 |---|---|---|---|---|
 | Agent HTTP provider | `src/runtimes/agent/providers/openai-api.ts:107-110, 290-304, 350-405` | `providerConfig.baseUrl` endpoint override (default `https://api.openai.com/v1`); SSE streaming with tool-call delta accumulation; managed MCP tool loop | Any OpenAI-compatible endpoint works per instance; streaming + tool-call *parity of the remote endpoint* is unproven until piloted | Per-endpoint feature parity needs pilot evidence |
 | API fallback config inheritance | `src/runtimes/agent/fallback-config.ts:19-27` | Fallback entries into `openai-api`/`anthropic-api` inherit the **instance-level** providerConfig | One custom baseUrl per instance; multiple `openai-api` fallback entries all hit the same endpoint | Per-entry providerConfig requires schema/validator/runtime/tests work |
@@ -52,7 +52,7 @@ Multiple `openai-api` fallback entries are valid **because they share the one in
 }
 ```
 
-Operator obligations for OpenRouter with real chat traffic (dated 2026-07-03, [provider-logging docs](https://openrouter.ai/docs/guides/privacy/provider-logging)): disable "allow training providers" in account settings (separate toggles for paid vs free models) — downstream providers have their own data policies; OpenRouter's table flags DeepSeek, NVIDIA, OpenInference, Poolside, Stealth as may-train.
+Operator obligations for OpenRouter with real chat traffic (dated 2026-07-04, [provider-logging docs](https://openrouter.ai/docs/guides/privacy/provider-logging)): disable "allow training providers" in account settings (separate toggles for paid vs free models) — downstream providers have their own data policies; OpenRouter's table flags DeepSeek, NVIDIA, OpenInference, Poolside, Stealth as may-train.
 
 ### OpenCode custom endpoint (by analogy to the existing `glm` pattern)
 
@@ -75,16 +75,16 @@ Operator obligations for OpenRouter with real chat traffic (dated 2026-07-03, [p
 3. **Per-entry providerConfig** (Groq + NVIDIA + OpenRouter in one chain): fallback-entry schema, validator, runtime selection, health surfaces, and tests.
 4. **Chat runtime per-provider baseUrl/key** with Whisper separation.
 
-## Policy lanes (operator guidance, dated 2026-07-03)
+## Policy lanes (operator guidance, dated 2026-07-04)
 
-Verified against primary sources on 2026-07-03; treat as dated guidance, not permanent fact.
+Verified against primary sources on 2026-07-04; treat as dated guidance, not permanent fact.
 
 - **Production chat traffic (third-party personal data):** Groq with Zero Data Retention enabled ([your-data docs](https://console.groq.com/docs/your-data): no training on inputs/outputs, no default retention); Gemini **paid** tier where appropriate; OpenRouter only with no-training routing controls and provider selection discipline.
 - **Dev/test/non-personal data only:** NVIDIA API catalog free tier ([Trial ToS](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf): trial/internal-testing only, production use and personal-information upload barred), Gemini unpaid tier ([terms](https://ai.google.dev/gemini-api/terms): content used for improvement; "do not submit … personal information"), DeepSeek direct, and similar free/bulk lanes.
 
 ## Owner-gated pilot gate
 
-Config shapes in this note were statically validated against `validateInstanceConfig` at `c1bb4f15` on 2026-07-03: both recipes accepted verbatim; `apiKeyService: "nvidia"`, `"whatsoup-groq-q"`, a model-less `openai-api` fallback entry, and `apiKeyService` without `baseUrl` all rejected with the errors described above. That is config-shape evidence only — no live endpoint has been exercised. Before any fleet instance relies on it, one dev agent instance must pass, with results recorded (endpoint, model, service, source revision, date):
+Config shapes in this note were statically validated against `validateInstanceConfig` at `9a38a643` on 2026-07-04: both recipes accepted verbatim; `apiKeyService: "nvidia"`, `"whatsoup-groq-q"`, a model-less `openai-api` fallback entry, and `apiKeyService` without `baseUrl` all rejected with the errors described above. That is config-shape evidence only — no live endpoint has been exercised today. Before any fleet instance relies on it, one dev agent instance must pass, with results recorded (endpoint, model, service, source revision, date):
 
 1. **Static gate:** `validateInstanceConfig` accepts the pilot config; a mutation with `apiKeyService: "nvidia"` is rejected (proves the gate is live).
 2. Intended service credential present — no QR-104 fallback warning in logs.
@@ -95,6 +95,6 @@ Config shapes in this note were statically validated against `validateInstanceCo
 
 ### Observed endpoint behavior (2026-07-03, no credentials, invalid test key)
 
-- Config-load surface driven live: `npm run guard:instance-config -- --root <tree>` accepted both recipes verbatim and rejected the NVIDIA anti-recipe with the SERVICE_ENV_MAP error. The guard also enforces the per-host health-port band `[9090, 9098]` — pilot instance configs must use in-band ports.
+- Config-load surface driven live on 2026-07-03: `npm run guard:instance-config -- --root <tree>` accepted both recipes verbatim and rejected the NVIDIA anti-recipe with the SERVICE_ENV_MAP error. The guard also enforces the per-host health-port band `[9090, 9098]` — pilot instance configs must use in-band ports.
 - `POST chat/completions` with an invalid key → clean HTTP 401 on all three: Groq (`{"error":{...,"code":"invalid_api_key"}}`), OpenRouter (`{"error":{"message":"Missing Authentication header","code":401}}`), NVIDIA (`{"status":401,"title":"Unauthorized"}`). All three would qualify for a future `credential-verify.ts` probe **only via chat/completions**.
 - `GET /models` discriminates keys **only on Groq** (401). OpenRouter and NVIDIA serve `/models` publicly (HTTP 200 with full OpenAI-shape model list even with an invalid key) — a `/models`-style probe there would fail open and never detect a bad key.
