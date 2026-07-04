@@ -131,6 +131,25 @@ export function shouldRespond(
       return { respond: mentioned, reason: mentioned ? 'sibling_mentioned' : 'sibling_bot' };
     }
 
+    // ── R5: strict group-sender gate ──
+    // A single guard, placed AFTER the sibling-bot return (so orchestrator delegation is
+    // unaffected) and BEFORE group_auto_respond / media / @mention, so it covers every group
+    // response path at once. In `allowlisted_only` mode a group message only produces a
+    // response if the SENDER (not just the group) is allowlisted (`entry.status === 'allowed'`,
+    // reusing the per-sender lookup above) or admin. This closes both #4 (an allowed group
+    // auto-responding to a non-allowlisted member) and #20 (an unknown/pending sender
+    // @mention-activating the bot in an un-allowlisted group). Default 'any_member' is a no-op.
+    if (config.groupSenderPolicy === 'allowlisted_only') {
+      // Admin elevation is transport-gated (QR-143), mirroring the self_only admin path:
+      // a spoofable non-WhatsApp-authenticated sender must not clear the admin branch.
+      const senderAllowed = entry?.status === 'allowed'
+        || (isWhatsAppAuthenticatedJid(msg.senderJid) && isAdminPhone(effectivePhone, config.adminPhones));
+      if (!senderAllowed) {
+        log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: group strict mode rejects non-allowlisted sender');
+        return { respond: false, reason: 'strict_group_non_allowlisted', accessStatus: entry?.status ?? 'unknown' };
+      }
+    }
+
     // Check if this group is set to auto-respond (access_list entry with subject_type='group', status='allowed')
     const groupEntry = lookupAccess(db, 'group', msg.chatJid);
     if (groupEntry?.status === 'allowed') {

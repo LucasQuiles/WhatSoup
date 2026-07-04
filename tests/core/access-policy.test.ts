@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -7,6 +7,7 @@ import { shouldRespond } from '../../src/core/access-policy.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
+import { config } from '../../src/config.ts';
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -601,6 +602,79 @@ describe('media implicit mention in known groups', () => {
     const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
     expect(result.respond).toBe(true);
     expect(result.reason).toBe('group_auto_respond');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R5: strict group-sender policy (groupSenderPolicy)
+// ---------------------------------------------------------------------------
+
+describe('R5: strict group-sender policy', () => {
+  const origPolicy = config.groupSenderPolicy;
+  const origAdmins = config.adminPhones;
+  afterEach(() => {
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = origPolicy;
+    (config as unknown as { adminPhones: Set<string> }).adminPhones = origAdmins;
+  });
+  const strict = () => {
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = 'allowlisted_only';
+  };
+
+  it('allowlisted_only DENIES an unknown sender in an ALLOWED group (closes #4 auto-respond-all)', () => {
+    strict();
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${UNKNOWN_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('strict_group_non_allowlisted');
+  });
+
+  it('allowlisted_only DENIES an unknown sender @mentioning the bot in an un-allowlisted group (closes #20)', () => {
+    strict();
+    const msg = makeMsg({ chatJid: MENTION_TEST_GROUP, senderJid: `${UNKNOWN_USER}@s.whatsapp.net`, isGroup: true, mentionedJids: [BOT_JID] });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('strict_group_non_allowlisted');
+  });
+
+  it('allowlisted_only DENIES a pending sender in an allowed group', () => {
+    strict();
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${PENDING_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('strict_group_non_allowlisted');
+  });
+
+  it('allowlisted_only ALLOWS an allowlisted sender in an allowed group', () => {
+    strict();
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${ALLOWED_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(true);
+    expect(result.reason).toBe('group_auto_respond');
+  });
+
+  it('allowlisted_only ALLOWS an admin (not access-listed) sender via the admin check', () => {
+    strict();
+    (config as unknown as { adminPhones: Set<string> }).adminPhones = new Set([UNKNOWN_USER]);
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${UNKNOWN_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(true);
+    expect(result.reason).toBe('group_auto_respond');
+  });
+
+  it('any_member (default) preserves current behavior: unknown sender in an allowed group still responds', () => {
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = 'any_member';
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${UNKNOWN_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(true);
+    expect(result.reason).toBe('group_auto_respond');
+  });
+
+  it('any_member (default): blocked sender is still blocked before the strict gate matters', () => {
+    (config as unknown as { groupSenderPolicy: string }).groupSenderPolicy = 'allowlisted_only';
+    const msg = makeMsg({ chatJid: AUTO_RESPOND_GROUP, senderJid: `${BLOCKED_USER}@s.whatsapp.net`, isGroup: true });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('blocked');
   });
 });
 

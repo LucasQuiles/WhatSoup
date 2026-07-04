@@ -9,7 +9,9 @@ import {
   VALID_TYPES as _VALID_TYPES,
   VALID_ACCESS_MODES as _VALID_ACCESS_MODES,
   VALID_SESSION_SCOPES as _VALID_SESSION_SCOPES,
+  VALID_GROUP_SENDER_POLICIES as _VALID_GROUP_SENDER_POLICIES,
   type AccessMode,
+  type GroupSenderPolicy,
 } from './core/agent-config-validator.ts';
 import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
@@ -21,12 +23,13 @@ import { errorMessage } from './lib/error-message.ts';
 
 export type InstanceType = 'chat' | 'agent' | 'passive';
 export type SessionScope = 'single' | 'shared' | 'per_chat';
-export type { AccessMode };
+export type { AccessMode, GroupSenderPolicy };
 
 // Canonical enum sets live in the shared validator; re-export for back-compat.
 export const VALID_TYPES = _VALID_TYPES;
 export const VALID_ACCESS_MODES = _VALID_ACCESS_MODES;
 export const VALID_SESSION_SCOPES = _VALID_SESSION_SCOPES;
+export const VALID_GROUP_SENDER_POLICIES = _VALID_GROUP_SENDER_POLICIES;
 
 interface AgentOptionsSandbox {
   allowedPaths?: unknown;
@@ -65,6 +68,8 @@ interface InstanceConfig {
   systemPrompt?: string;
   adminPhones: string[];
   accessMode: AccessMode;
+  /** R5: per-sender group response policy. Defaults to 'any_member' (current behavior). */
+  groupSenderPolicy?: GroupSenderPolicy;
   /** Set to false to hide this instance from fleet discovery (no polling, no routing).
    * Defaults to true. Useful for keeping a config on disk while taking it out of rotation. */
   enabled?: boolean;
