@@ -74,9 +74,10 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(calls[0].text).toContain('Watch fired');
     expect(calls[0].text).toContain('2 rows');
 
-    const runs = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string; output_json: string }>;
+    const runs = db.raw.prepare(`SELECT status, error_kind, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null; output_summary: string; output_json: string }>;
     expect(runs).toHaveLength(1);
     expect(runs[0].status).toBe('ok');
+    expect(runs[0].error_kind).toBeNull();  // successful dispatch is not a notify_dispatch_failed
     expect(runs[0].output_summary).toContain('2 rows');
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ rowCount: 2, deliveredWaMessageId: 'wa-1' });
 
@@ -809,9 +810,15 @@ describe('TriggerPoller — messenger failure tolerance', () => {
     await expect(poller.tickOnce()).resolves.toBe(1);
     expect(calls).toHaveLength(1);  // attempted
 
-    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
+    const runs = db.raw.prepare(`SELECT status, error_kind, error_message, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string | null; error_message: string | null; output_json: string }>;
+    // The trigger evaluation succeeded, so status stays 'ok' — a fired-but-
+    // undelivered run must NOT be masqueraded as an execute failure.
     expect(runs[0].status).toBe('ok');  // SQL ran fine
     expect(JSON.parse(runs[0].output_json).deliveredWaMessageId).toBeUndefined();  // dispatch failed
+    // ...but the delivery failure is now observable: error_kind marks it so it
+    // is distinguishable in telemetry from a throttled (never-attempted) run.
+    expect(runs[0].error_kind).toBe('notify_dispatch_failed');
+    expect(runs[0].error_message).toBeNull();  // no free-text; kind carries the signal
   });
 });
 
@@ -1708,8 +1715,12 @@ describe('TriggerPoller — notification throttle', () => {
     expect(calls).toHaveLength(1);  // dispatch suppressed
 
     // The trigger_run still records ok+fired, but with the throttled marker.
-    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`).all(t.id) as Array<{ status: string; output_json: string }>;
+    const runs = db.raw.prepare(`SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`).all(t.id) as Array<{ status: string; error_kind: string | null; output_json: string }>;
     expect(runs[0].status).toBe('ok');
+    // A throttled run was never dispatched, so it must NOT be marked
+    // notify_dispatch_failed — that kind is reserved for attempted-and-failed
+    // deliveries. This is the fired-undelivered vs throttled distinction.
+    expect(runs[0].error_kind).toBeNull();
     const parsed = JSON.parse(runs[0].output_json);
     expect(parsed.throttled).toBe(true);
     expect(parsed.throttleRemainingSec).toBeGreaterThan(0);
