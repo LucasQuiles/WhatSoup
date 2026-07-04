@@ -11887,4 +11887,43 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(tables.all()).toHaveLength(0);
   });
 
+  it('fallback window arm/extend/clear emits exactly one started and one cleared event', async () => {
+    cfgAny().agentFallbacks = [{ provider: 'opencode-cli' }];
+    const { runtime } = makeRoutingRuntime();
+    const r = runtime as unknown as {
+      armFallbackWindow: (until: number, reason: string) => boolean;
+      deactivateProviderFallback: (reason: string) => void;
+    };
+    expect(r.armFallbackWindow.call(runtime, Date.now() + 60_000, 'usage-limit')).toBe(true);
+    r.armFallbackWindow.call(runtime, Date.now() + 120_000, 'usage-limit');
+    r.deactivateProviderFallback.call(runtime, 'primary_recovered');
+    const events = await readEvents();
+    const started = events.filter((e) => e.event === 'auto_fallback_started');
+    const cleared = events.filter((e) => e.event === 'auto_fallback_cleared');
+    expect(started).toHaveLength(1);
+    expect(cleared).toHaveLength(1);
+    expect(started[0].provider).toBe('opencode-cli');
+    expect(started[0].conversationKey).toBeNull();
+    expect(started[0].chatScope).toBe('instance');
+    expect(started[0].userVisible).toBe(true);
+    expect(cleared[0].userVisible).toBe(false);
+    expect(cleared[0].reasonCode).toBe('primary_recovered');
+  });
+
+  it('a spawn that lands on a different provider than the previous spawn records runtime_switched', async () => {
+    const { runtime } = makeRoutingRuntime();
+    const note = (provider: string, source: string, reasonCode: string) =>
+      (runtime as unknown as { noteRouteAtSpawn: (c: string, k: string, r: unknown) => void })
+        .noteRouteAtSpawn(CHAT, CHAT, { provider, model: undefined, source, reasonCode, pinnedProvider: null });
+    note('claude-cli', 'default', 'no_preference');
+    note('opencode-cli', 'preference', 'user_pin');
+    const events = await readEvents();
+    expect(events.filter((e) => e.event === 'runtime_selected')).toHaveLength(0);
+    const switched = events.filter((e) => e.event === 'runtime_switched');
+    expect(switched).toHaveLength(1);
+    expect(switched[0].provider).toBe('opencode-cli');
+    expect(switched[0].source).toBe('user');
+    expect(switched[0].authority).toBe('advisory_only');
+  });
+
 });

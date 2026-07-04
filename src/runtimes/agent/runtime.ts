@@ -89,7 +89,7 @@ import {
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
 import { resolveRoute, type RouteDecision } from './route-resolution.ts';
-import { emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
+import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
@@ -1453,6 +1453,8 @@ export class AgentRuntime implements Runtime {
 
   /** Last pin-block notice per conversation (one notice per transition). */
   private lastPinBlockNotice = new Map<string, string>();
+  /** Last spawn provider per conversation — runtime_switched detection (slice 4). */
+  private lastSpawnRouteProvider = new Map<string, string>();
   // Counts pending system-turn results (context injection, continuation) that should
   // not consume from perChatInboundSeqQueue when their result event arrives. The
   // counter invariants (mark / unmark / consumeIfPending / count) live in the
@@ -5562,9 +5564,17 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     route: RouteDecision & { pinnedProvider: string | null },
   ): void {
+    // Route-transition tracking (slice 4): a spawn whose provider differs
+    // from this conversation's previous spawn is a SWITCH, recorded exactly
+    // once whatever moved it (preference, fallback, or back to default).
+    const previousProvider = this.lastSpawnRouteProvider.get(conversationKey);
+    this.lastSpawnRouteProvider.set(conversationKey, route.provider);
+    const switched = previousProvider !== undefined && previousProvider !== route.provider;
     if (route.source === 'pin_blocked_default' && route.pinnedProvider) {
+      let noticeSent = false;
       if (this.lastPinBlockNotice.get(conversationKey) !== route.pinnedProvider) {
         this.lastPinBlockNotice.set(conversationKey, route.pinnedProvider);
+        noticeSent = true;
         // Strict pins never silently fall back: the block is VISIBLE and the
         // pin survives (the user clears it, we never do).
         this.sendDirect(
@@ -5578,29 +5588,39 @@ export class AgentRuntime implements Runtime {
         provider: route.provider,
         modelRef: route.model ?? null,
         source: 'default',
+        userVisible: noticeSent,
         reasonCode: route.reasonCode,
       });
       return;
     }
     this.lastPinBlockNotice.delete(conversationKey);
-    if (route.source !== 'default') {
+    if (switched || route.source !== 'default') {
       this.emitRouteEventChecked({
-        event: 'runtime_selected',
+        event: switched ? 'runtime_switched' : 'runtime_selected',
         conversationKey,
         provider: route.provider,
         modelRef: route.model ?? null,
         source: route.source === 'fallback' ? 'auto_fallback' : route.source === 'preference' ? 'user' : 'default',
+        userVisible: false,
         reasonCode: route.reasonCode,
       });
     }
   }
 
-  private emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance'>): void {
+  private emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void {
     if (!config.nlRouting) return;
     const dir =
       config.nlRoutingEventsDir ?? join(homedir(), '.config', 'whatsoup', 'instances', this.instanceName);
-    emitRouteEvent(dir, { ts: Date.now(), instance: this.instanceName, ...ev }, (m) =>
-      log.warn({ instance: this.instanceName }, m),
+    emitRouteEvent(
+      dir,
+      {
+        ts: Date.now(),
+        instance: this.instanceName,
+        chatScope: deriveChatScope(ev.conversationKey),
+        authority: 'advisory_only',
+        ...ev,
+      },
+      (m) => log.warn({ instance: this.instanceName }, m),
     );
   }
 
@@ -5646,6 +5666,7 @@ export class AgentRuntime implements Runtime {
       provider: this.agentProvider,
       modelRef: null,
       source: 'default',
+      userVisible: true,
       reasonCode: 'user_reset',
     });
   }
@@ -5694,6 +5715,7 @@ export class AgentRuntime implements Runtime {
       provider: requestedProvider ?? `intent:${intent}`,
       modelRef: null,
       source: 'user',
+      userVisible: true,
       reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
     });
     return 'set';
@@ -6416,6 +6438,17 @@ export class AgentRuntime implements Runtime {
     // every restart would re-count and re-alert the activation that already
     // fired before the restart.
     if (firstArm) {
+      // Slice-4 observability: exactly one auto_fallback_started per window
+      // (extensions re-arm the same window; a restore resumes it quietly).
+      this.emitRouteEventChecked({
+        event: 'auto_fallback_started',
+        conversationKey: null,
+        provider: fallbackEntry.provider,
+        modelRef: fallbackEntry.model ?? null,
+        source: 'auto_fallback',
+        userVisible: !opts?.restored,
+        reasonCode: opts?.restored ? `${reason} (restored)` : reason,
+      });
       this.fallbackWindow.armReason = reason;
       // Snapshot the lifetime turn counters at the first arm of every window
       // (the null-guard skips extensions; restores hit it too because the
@@ -6718,6 +6751,18 @@ export class AgentRuntime implements Runtime {
     // Per-window deltas against the arm-time snapshots — the lifetime counters
     // are NOT reset here (getFallbackState keeps reporting process totals).
     const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
+    // Slice-4 observability: one auto_fallback_cleared per window. Recovery
+    // restores QUIETLY — the record is /why-retrievable, not a user notice
+    // (UH-003).
+    this.emitRouteEventChecked({
+      event: 'auto_fallback_cleared',
+      conversationKey: null,
+      provider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
+      modelRef: this.fallbackWindow.activeEntry?.model ?? null,
+      source: 'auto_fallback',
+      userVisible: false,
+      reasonCode: reason,
+    });
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
