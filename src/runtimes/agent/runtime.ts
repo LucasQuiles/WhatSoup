@@ -83,6 +83,7 @@ import {
   getPreference,
   setPreference,
   clearPreference,
+  pruneExpired,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
 import { PROVIDER_IDS } from './providers/index.ts';
@@ -2034,6 +2035,9 @@ export class AgentRuntime implements Runtime {
     if (config.nlRouting) {
       // Additive + idempotent; gated so flag-off leaves the DB untouched.
       ensureChatPreferenceSchema(this.db);
+      // Retention sweep at boot: expired rows are DELETED, not merely
+      // ignored on read (F13) — keeps DB audits honest about live pins.
+      pruneExpired(this.db);
     }
 
     // Write sandbox policy and hook settings when sandbox config is present
@@ -2932,6 +2936,8 @@ export class AgentRuntime implements Runtime {
           const sub = (classified.args ?? 'status').trim().toLowerCase();
           const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
           if (sub === '' || sub === 'status') {
+            // Opportunistic retention sweep on read (F13); also runs at init.
+            pruneExpired(this.db);
             this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
             break;
           }
