@@ -140,3 +140,51 @@ describe('classifyInput', () => {
     });
   });
 });
+
+
+
+describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
+  const NL = { routingAliases: true };
+
+  it('flag OFF (default): /model stays forwarded — byte-identical to today', () => {
+    expect(classifyInput('/model strongest')).toEqual({ type: 'forwarded', text: '/model strongest' });
+    expect(classifyInput('/why')).toEqual({ type: 'forwarded', text: '/why' });
+    expect(classifyInput('/reset')).toEqual({ type: 'forwarded', text: '/reset' });
+  });
+
+  it('flag OFF: existing local commands are unaffected by the opts param', () => {
+    expect(classifyInput('/status', NL)).toEqual({ type: 'local', command: 'status' });
+  });
+
+  it('/model strongest returns local command "model" with args', () => {
+    expect(classifyInput('/model strongest', NL)).toEqual({ type: 'local', command: 'model', args: 'strongest' });
+  });
+
+  it('bare /model returns local command "model" with no args (= status)', () => {
+    expect(classifyInput('/model', NL)).toEqual({ type: 'local', command: 'model' });
+  });
+
+  it('/why returns local command "why"', () => {
+    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  });
+
+  it('/reset returns local command "reset"', () => {
+    expect(classifyInput('/reset', NL)).toEqual({ type: 'local', command: 'reset' });
+  });
+
+  it('/Model (mixed case) is local', () => {
+    expect(classifyInput('/Model fastest', NL)).toEqual({ type: 'local', command: 'model', args: 'fastest' });
+  });
+
+  it('/route stays forwarded (not part of the 3-alias set)', () => {
+    expect(classifyInput('/route')).toEqual({ type: 'forwarded', text: '/route' });
+  });
+
+  it('/delegate stays forwarded', () => {
+    expect(classifyInput('/delegate review')).toEqual({ type: 'forwarded', text: '/delegate review' });
+  });
+
+  it('/runtime stays forwarded (operator surface is a separate PR)', () => {
+    expect(classifyInput('/runtime health')).toEqual({ type: 'forwarded', text: '/runtime health' });
+  });
+});
