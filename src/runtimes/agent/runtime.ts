@@ -84,6 +84,7 @@ import {
   setPreference,
   clearPreference,
 } from './chat-preference-db.ts';
+import { preferenceKeys } from './preference-keys.ts';
 import { PROVIDER_IDS } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
@@ -2929,12 +2930,13 @@ export class AgentRuntime implements Runtime {
           // next slice; renderRouteStatus distinguishes live route vs recorded
           // preference until then.
           const sub = (classified.args ?? 'status').trim().toLowerCase();
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
           if (sub === '' || sub === 'status') {
             this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
             break;
           }
           if (sub === 'default') {
-            clearPreference(this.db, chatJid, msg.senderJid);
+            clearPreference(this.db, chatKey, senderKey);
             this.sendDirect(chatJid, '_Back to the default route._');
             break;
           }
@@ -2951,15 +2953,15 @@ export class AgentRuntime implements Runtime {
           const now = Date.now();
           const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
           const requestedProvider = isProvider ? sub : null;
-          const existing = getPreference(this.db, chatJid, msg.senderJid, now);
+          const existing = getPreference(this.db, chatKey, senderKey, now);
           if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
             // Echoes derive from state transitions; an identical repeat is a no-op.
             this.sendDirect(chatJid, '_Already set — say /reset to go back to the default route._');
             break;
           }
           setPreference(this.db, {
-            chatJid,
-            senderJid: msg.senderJid,
+            chatJid: chatKey,
+            senderJid: senderKey,
             intent,
             requestedProvider,
             scope: 'this_thread',
@@ -2983,7 +2985,8 @@ export class AgentRuntime implements Runtime {
         case 'reset': {
           // Idempotent by construction: clearing an absent row is a no-op and
           // the reply is identical, so a doubled /reset cannot spam or error.
-          clearPreference(this.db, chatJid, msg.senderJid);
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+          clearPreference(this.db, chatKey, senderKey);
           this.sendDirect(chatJid, '_Back to the default route._');
           break;
         }
@@ -5472,7 +5475,8 @@ export class AgentRuntime implements Runtime {
   private renderRouteStatus(chatJid: string, senderJid: string): string {
     const provider = this.effectiveProvider || 'unknown-provider';
     const model = this.effectiveFallbackEntry?.model ?? 'provider default';
-    const pref = getPreference(this.db, chatJid, senderJid);
+    const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
+    const pref = getPreference(this.db, chatKey, senderKey);
     const prefLine = pref
       ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
         (pref.expiresAt !== null
@@ -5501,7 +5505,8 @@ export class AgentRuntime implements Runtime {
     const reason = this.isFallbackWindowActive
       ? 'a fallback window is active'
       : 'instance default route';
-    const pref = getPreference(this.db, chatJid, senderJid);
+    const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
+    const pref = getPreference(this.db, chatKey, senderKey);
     const prefNote = pref
       ? '; your preference is recorded and applies once routing wiring is enabled'
       : '';

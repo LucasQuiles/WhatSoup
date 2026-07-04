@@ -8,7 +8,9 @@ import type { Database } from '../../core/database.ts';
  *
  * Keying is the composite (chat_jid, sender_jid) — never chat-wide — so one
  * group member's preference can never bleed onto another sender in the same
- * chat. Rows are ephemeral by default: `expires_at` is set for this_thread
+ * chat. The store itself is key-agnostic: callers MUST pass the canonical
+ * keys from preference-keys.ts (conversation identity + normalized sender),
+ * never raw wire JIDs, which alias under LID↔PN resolution. Rows are ephemeral by default: `expires_at` is set for this_thread
  * scope and NULL only for sticky (explicit-confirmation) pins; expired rows
  * are both ignored on read and DELETED by pruneExpired.
  */
