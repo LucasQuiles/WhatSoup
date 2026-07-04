@@ -38,6 +38,7 @@ function inputs(overrides: Partial<RouteInputs> = {}): RouteInputs {
     pref: null,
     pinnedProviderEligible: false,
     tierMap: null,
+    tierProviderEligible: false,
     ...overrides,
   };
 }
@@ -100,6 +101,7 @@ describe('resolveRoute precedence', () => {
     const d = resolveRoute(inputs({
       pref: pref({ intent: 'strongest' }),
       tierMap: { strongest: 'anthropic-api' },
+      tierProviderEligible: true,
     }));
     expect(d).toEqual({
       provider: 'anthropic-api',
@@ -113,9 +115,48 @@ describe('resolveRoute precedence', () => {
     const d = resolveRoute(inputs({
       pref: pref({ intent: 'fastest' }),
       tierMap: { strongest: 'anthropic-api', fastest: 'opencode-cli' },
+      tierProviderEligible: true,
     }));
     expect(d.provider).toBe('opencode-cli');
     expect(d.reasonCode).toBe('intent_fastest');
+  });
+
+  it('a configured tier whose provider is NOT routable degrades to the default route honestly (R5)', () => {
+    // The tier IS configured, but the instance cannot route to that provider
+    // (no credential / not in the fallback chain). Strict-degrade doctrine:
+    // never spawn a keyless session — fall back to the default route visibly.
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'strongest' }),
+      tierMap: { strongest: 'anthropic-api' },
+      tierProviderEligible: false,
+    }));
+    expect(d.provider).toBe('claude-cli');
+    expect(d.provider).not.toBe('anthropic-api');
+    expect(d.model).toBe('opus-4-8');
+    expect(d.source).toBe('tier_unconfigured_default');
+    expect(d.reasonCode).toBe('intent_strongest_unreachable');
+  });
+
+  it('an eligible pin to the instance PRIMARY keeps the operator-configured model (R3)', () => {
+    // Pinning your own primary must not discard agentOptions.model — only a
+    // genuine provider change drops to the provider-default model.
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'claude-cli' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.provider).toBe('claude-cli');
+    expect(d.model).toBe('opus-4-8');
+    expect(d.source).toBe('preference');
+    expect(d.reasonCode).toBe('user_pin');
+  });
+
+  it('an eligible pin to a DIFFERENT provider still drops to the provider-default model (R3)', () => {
+    const d = resolveRoute(inputs({
+      pref: pref({ intent: 'provider_specific', requestedProvider: 'codex-cli' }),
+      pinnedProviderEligible: true,
+    }));
+    expect(d.provider).toBe('codex-cli');
+    expect(d.model).toBeUndefined();
   });
 
   it('an unconfigured tier resolves to the default route with an HONEST distinct source', () => {

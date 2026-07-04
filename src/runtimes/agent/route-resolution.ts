@@ -27,6 +27,11 @@ export interface RouteInputs {
   pinnedProviderEligible: boolean;
   /** Instance-config intent→provider map; null = unconfigured. */
   tierMap: { strongest?: string; fastest?: string } | null;
+  /** Instance-routable probe result for the tier provider this pref maps to
+   *  (same F07 probe as the pin). A configured tier whose provider is not
+   *  routable must degrade to the default route, never spawn a keyless
+   *  session — the strict-pin doctrine applies to tier intents too. */
+  tierProviderEligible: boolean;
 }
 
 export interface RouteDecision {
@@ -58,7 +63,9 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
     if (i.pinnedProviderEligible) {
       return {
         provider: i.pref.requestedProvider,
-        model: undefined,
+        // Pinning the instance's own primary keeps the operator-configured
+        // model; only a genuine provider change drops to the provider default.
+        model: i.pref.requestedProvider === i.agentProvider ? i.effectiveModel : undefined,
         source: 'preference',
         reasonCode: 'user_pin',
       };
@@ -75,11 +82,22 @@ export function resolveRoute(i: RouteInputs): RouteDecision {
     : i.pref.intent === 'fastest' ? i.tierMap?.fastest
     : undefined;
   if (tier) {
+    if (i.tierProviderEligible) {
+      return {
+        provider: tier,
+        model: undefined,
+        source: 'preference',
+        reasonCode: `intent_${i.pref.intent}`,
+      };
+    }
+    // Tier IS configured but its provider is not routable on this instance —
+    // degrade to the default route honestly (never a keyless session). The
+    // distinct reasonCode lets /why tell "unreachable" from "unconfigured".
     return {
-      provider: tier,
-      model: undefined,
-      source: 'preference',
-      reasonCode: `intent_${i.pref.intent}`,
+      provider: i.agentProvider,
+      model: i.effectiveModel,
+      source: 'tier_unconfigured_default',
+      reasonCode: `intent_${i.pref.intent}_unreachable`,
     };
   }
   return {

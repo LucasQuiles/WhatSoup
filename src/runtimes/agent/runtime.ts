@@ -5533,13 +5533,22 @@ export class AgentRuntime implements Runtime {
       }
     }
     const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
+    // The tier provider this pref maps to (if any) is probed for routability
+    // the same way a pin is — an ineligible tier degrades to the default route
+    // (R5), never a keyless session. One probe, reused for both checks (C5).
+    const tierProvider =
+      pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
+      : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
+      : undefined;
+    const routable = this.routablePinTargets();
     const decision = resolveRoute({
       agentProvider: this.agentProvider,
       effectiveModel: this.effectiveModel,
       fallbackEntry: this.effectiveFallbackEntry,
       pref,
-      pinnedProviderEligible: pinned !== null && this.routablePinTargets().includes(pinned),
+      pinnedProviderEligible: pinned !== null && routable.includes(pinned),
       tierMap: config.nlRoutingTiers,
+      tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
     });
     return { ...decision, pinnedProvider: pinned };
   }
@@ -5559,7 +5568,10 @@ export class AgentRuntime implements Runtime {
       const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
       return rest;
     }
-    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig);
+    // Match the fallback path (effectiveProviderConfig): a provider with no
+    // config of its own inherits the agent's providerConfig — including the
+    // budget cap — instead of spawning with providerConfig=undefined (R2).
+    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
   }
 
   /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */
@@ -5642,15 +5654,27 @@ export class AgentRuntime implements Runtime {
     const targets: string[] = [this.agentProvider];
     for (const entry of this.agentFallbacks) {
       if (targets.includes(entry.provider)) continue;
-      const service = resolveProviderKeyService(
-        entry.provider,
-        entry.model,
-        fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
-      );
-      if (service && lookupCredential(service) === null) continue;
+      if (!this.isEntryCredentialed(entry)) continue;
       targets.push(entry.provider);
     }
     return targets;
+  }
+
+  /**
+   * Single credential-presence predicate for a fallback entry (C4): true when
+   * the entry's key service resolves to a present credential, or when no key
+   * service maps (native-auth CLI). Shared by routablePinTargets (pin
+   * eligibility) and the fallback selector's eligibility loop so the two can
+   * never silently desync — the fallback selector keeps its own service/alert
+   * bookkeeping, but the eligibility DECISION lives here alone.
+   */
+  private isEntryCredentialed(entry: AgentFallbackEntry): boolean {
+    const service = resolveProviderKeyService(
+      entry.provider,
+      entry.model,
+      fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+    );
+    return service ? lookupCredential(service) !== null : true;
   }
 
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
@@ -5891,12 +5915,15 @@ export class AgentRuntime implements Runtime {
       if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
         firstIndependentIndex = i;
       }
+      // Eligibility DECISION comes from the shared predicate (C4) so it can
+      // never desync from pin eligibility; `service` is recomputed only for
+      // the credential-missing alert below (the selector's own concern).
+      const eligible = this.isEntryCredentialed(entry);
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
         fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
       );
-      const eligible = service ? lookupCredential(service) !== null : true;
       state.push({ ...entry, eligible });
       if (eligible && firstEligibleIndex === -1) {
         firstEligibleIndex = i;

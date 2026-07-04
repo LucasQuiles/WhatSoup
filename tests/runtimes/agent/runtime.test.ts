@@ -12019,4 +12019,39 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
   });
 
+  it('a pinned codex-cli session inherits the primary providerConfig incl. budget cap (R2)', async () => {
+    // codex-cli is native-auth (no key service) → routable; it is neither the
+    // primary nor an API sibling, so fallbackProviderConfigFor returns
+    // undefined and the session must inherit agentProviderConfig (budget cap)
+    // rather than spawn with providerConfig=undefined and no cost enforcement.
+    cfgAny().agentProviderConfig = { budget: 5, model: 'primary-model' };
+    cfgAny().agentFallbacks = [{ provider: 'codex-cli' }];
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model codex-cli' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string; providerConfig?: Record<string, unknown> };
+    expect(opts.provider).toBe('codex-cli');
+    expect(opts.providerConfig).toEqual({ budget: 5, model: 'primary-model' });
+  });
+
+  it('a configured tier whose provider is NOT credentialed degrades the spawn to the default route (R5 wiring)', async () => {
+    // strongest → anthropic-api, but its apiKeyService is absent from every
+    // credential source → not routable → the /model strongest spawn must land
+    // on the default provider, never a keyless anthropic-api session.
+    const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+    cfgAny().agentProviderConfig = { apiKeyService: absentService };
+    cfgAny().agentFallbacks = [{ provider: 'anthropic-api' }];
+    cfgAny().nlRoutingTiers = { strongest: 'anthropic-api' };
+    const first = makeRoutingRuntime();
+    await sendAndDrain(first.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model strongest' }));
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello there', messageId: 'msg-2' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as { provider?: string };
+    expect(opts.provider).toBe('claude-cli');
+    expect(opts.provider).not.toBe('anthropic-api');
+    const events = await readEvents();
+    expect(events.some((e) => e.reasonCode === 'intent_strongest_unreachable')).toBe(true);
+  });
+
 });
