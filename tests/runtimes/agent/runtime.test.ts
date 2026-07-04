@@ -11799,4 +11799,24 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(why).toContain("serving this chat's current session");
     expect(why).toContain('routing never changes what I am allowed to do');
   });
+  it('injects the NL routing prompt contract at spawn (flag on) and omits it when off', async () => {
+    const { runtime } = makeRoutingRuntime();
+    await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
+    const opts = capturedSessionManagerOptsRef.current as unknown as Record<string, unknown>;
+    expect(opts).toBeTruthy();
+    const block = (opts.routingSystemBlock as (() => string | null) | undefined)?.();
+    expect(block).toBeTruthy();
+    expect(String(block)).toContain('[[wa-route: strongest]]');
+    expect(String(block)).toContain('current provider: claude-cli');
+    expect(String(block)).toContain('owner-gated');
+
+    cfgAny().nlRouting = false;
+    capturedSessionManagerOptsRef.current = null;
+    const second = makeRoutingRuntime();
+    await sendAndDrain(second.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
+    const offOpts = capturedSessionManagerOptsRef.current as unknown as Record<string, unknown>;
+    expect(offOpts).toBeTruthy();
+    expect(offOpts.routingSystemBlock).toBeUndefined();
+  });
+
 });

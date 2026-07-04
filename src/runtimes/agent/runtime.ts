@@ -89,6 +89,7 @@ import {
 import { preferenceKeys } from './preference-keys.ts';
 import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
+import { buildRoutingPromptContract } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
@@ -7445,6 +7446,19 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Compose the flag-gated NL routing prompt contract from live instance
+   * state (slice 3). Evaluated per prompt build so tier/provider facts are
+   * current; flag off never reaches this (the opt stays undefined).
+   */
+  private buildRoutingContractBlock(): string {
+    return buildRoutingPromptContract({
+      provider: this.effectiveProvider,
+      tierMap: config.nlRoutingTiers ?? null,
+      routableProviders: this.routablePinTargets(),
+    });
+  }
+
+  /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
    */
@@ -7505,6 +7519,7 @@ export class AgentRuntime implements Runtime {
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
+      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock() : undefined,
     });
     if (this.durability) {
       session.setDurability(this.durability);
