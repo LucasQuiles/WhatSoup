@@ -15,6 +15,10 @@ let whisperAlerted = false;
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
+  // Bare construction: a process-wide OPENAI_BASE_URL repoints transcription
+  // together with the chat provider (providers/openai.ts) — they cannot be
+  // separated by env alone. See docs/architecture/
+  // provider-credential-services.md, Traps.
   if (!client) client = new OpenAI();
   return client;
 }
