@@ -1060,7 +1060,7 @@ identity model, limitations, and keyring provisioning live in the runbook:
 | `voice.voicemailMaxLengthSec` | integer | no | `120` | Max recording length (`[5, 600]`). |
 | `voice.voicemailGreeting` | string | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
-| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Validated config only — **no rate limiter enforces it yet**. |
+| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Enforced per destination as a sliding one-minute window at the send seam; over-cap sends are **delayed (queued FIFO), never rejected**. |
 
 ### Validation Rules Summary
 
