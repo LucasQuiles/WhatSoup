@@ -239,11 +239,12 @@ jobs:
       - name: Test suite + coverage thresholds
         run: npm run coverage:check -- --pool=forks
 
-      # Early-warning enforcement: fails if lines/branches/functions coverage is
-      # within 2 points of the hard threshold (i.e. >=90/82/89). Reads the
-      # coverage-summary.json the step above just produced (json-summary reporter),
-      # so it adds no extra suite run. Catches coverage drifting toward the floor
-      # before it actually breaches `coverage:check`.
+      # Early WARNING (non-blocking): logs when lines/branches/functions coverage is
+      # within 2 points above the hard gate (floors = 95/90/93, so it warns below
+      # 97/92/95). Reads the coverage-summary.json the step above just produced
+      # (json-summary reporter), so it adds no extra suite run. Flags coverage
+      # drifting toward the floor before it actually breaches `coverage:check` (the
+      # hard gate). Does not fail the build.
       - name: Coverage headroom guard
         run: npm run guard:coverage-headroom
 
