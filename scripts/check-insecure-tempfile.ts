@@ -27,7 +27,11 @@ export interface Finding {
   snippet: string;
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage']);
+// .worktrees holds sibling git-worktree checkouts of OTHER branches; their
+// content is gated by their own pushes. Scanning them makes this checkout's
+// push gate depend on unrelated branch state (observed 2026-07-04: a red-team
+// fixture corpus in a parked worktree blocked an unrelated push with 56 hits).
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', '.worktrees']);
 // Flag both tempfile.mktemp( calls and direct-import form (kind py-mktemp)
 const PY_MKTEMP = /\b(?:tempfile\.mktemp\s*\(|from\s+tempfile\s+import\s+(?:\w+\s*,\s*)*mktemp\b)/;
 // /tmp/<name> as a write/create target: open(...,'w'|'a'|'x') positional or mode=kw,
