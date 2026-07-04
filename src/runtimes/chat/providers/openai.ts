@@ -31,6 +31,14 @@ function toOpenAIMessage(m: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam
 }
 
 export function createOpenAIProvider(): LLMProvider {
+  // Bare construction is deliberate env sensitivity: the SDK reads
+  // OPENAI_API_KEY and OPENAI_BASE_URL from the process environment, and a
+  // process-wide OPENAI_BASE_URL repoints EVERY bare client in this process —
+  // this chat provider AND Whisper transcription (transcription/
+  // openai-whisper.ts). Some runbooks export it process-wide; there is no
+  // per-provider chat endpoint config today (docs/architecture/
+  // provider-credential-services.md, Traps). Locked by
+  // tests/runtimes/chat/providers/openai-env-baseurl.test.ts.
   const client = new OpenAI();
 
   return {

@@ -1,4 +1,6 @@
-import { dirname, resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { scanForInsecureTempfile, type Finding } from '../../scripts/check-insecure-tempfile.ts';
@@ -53,6 +55,21 @@ describe('insecure-tempfile guard', () => {
     const mkdirFindings = f.filter((x) => x.kind === 'sh-mktemp');
     expect(mkdirFindings).toEqual([]);
   });
+  it('does NOT descend into .worktrees sibling checkouts (their branches gate themselves)', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'tempfile-guard-wt-'));
+    try {
+      mkdirSync(join(scratch, '.worktrees', 'parked-branch'), { recursive: true });
+      writeFileSync(join(scratch, '.worktrees', 'parked-branch', 'red.sh'), 'echo hi > /tmp/leak.log\n');
+      writeFileSync(join(scratch, 'flagged.sh'), 'echo hi > /tmp/leak.log\n');
+      const findings = scanForInsecureTempfile(scratch);
+      // Control: the same pattern OUTSIDE .worktrees is still flagged, so the
+      // exclusion is directory-scoped rather than a vacuous no-findings pass.
+      expect(findings.map((f) => f.file)).toEqual(['flagged.sh']);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('excludes guard fixture corpus on full-tree scan (gate-green reachable)', () => {
     // Scanning from the repo root must NOT include the guard's own intentional-
     // violation fixtures — those would make the blocking gate permanently un-greenable.

@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { migrateLegacyMemoryConfig } from '../src/config-memory-migration.ts';
 
 describe('migrateLegacyMemoryConfig', () => {
+  it('preserves agentOptions (providerConfig, fallbacks) untouched while migrating legacy fields', () => {
+    // Migration runs on BOTH fleet CREATE and PATCH paths; it must never
+    // touch provider wiring while moving pinecone/memory legacy fields.
+    const agentOptions = {
+      sessionScope: 'single',
+      provider: 'claude-cli',
+      providerConfig: { baseUrl: 'https://api.groq.com/openai/v1', apiKeyService: 'groq' },
+      fallbacks: [{ provider: 'openai-api', model: 'llama-3.3-70b-versatile' }],
+    };
+    const result = migrateLegacyMemoryConfig({
+      name: 'byok-line',
+      agentOptions,
+      pineconeIndex: 'byok-mind',
+      retentionDays: 45,
+    }, { removeLegacy: true });
+
+    expect(result.config.agentOptions).toEqual(agentOptions);
+    // Control: migration actually ran (legacy field moved), so the
+    // preservation assert above is not a vacuous no-op pass.
+    expect(result.config.pineconeIndex).toBeUndefined();
+    expect((result.config.memory as Record<string, any>).pinecone.index).toBe('byok-mind');
+  });
+
   it('projects legacy memory fields into memory.* and removes flat fields when requested', () => {
     const result = migrateLegacyMemoryConfig({
       name: 'mw-bot',
