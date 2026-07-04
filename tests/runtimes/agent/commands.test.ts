@@ -188,3 +188,29 @@ describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
     expect(classifyInput('/runtime health')).toEqual({ type: 'forwarded', text: '/runtime health' });
   });
 });
+
+describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
+  const NL = { routingAliases: true };
+
+  it('/model with an unrecognized arg forwards (base /model capability preserved)', () => {
+    expect(classifyInput('/model sonnet', NL)).toEqual({ type: 'forwarded', text: '/model sonnet' });
+  });
+
+  it('/model with a compiled-in provider id stays local', () => {
+    expect(classifyInput('/model claude-cli', NL)).toEqual({ type: 'local', command: 'model', args: 'claude-cli' });
+  });
+
+  it('/model with extra words forwards (recognized grammar is exactly one arg)', () => {
+    expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
+  });
+
+  it('arged /why forwards; bare /why stays local', () => {
+    expect(classifyInput('/why because', NL)).toEqual({ type: 'forwarded', text: '/why because' });
+    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  });
+
+  it('arged /reset forwards; bare /reset stays local', () => {
+    expect(classifyInput('/reset everything', NL)).toEqual({ type: 'forwarded', text: '/reset everything' });
+    expect(classifyInput('/reset', NL)).toEqual({ type: 'local', command: 'reset' });
+  });
+});

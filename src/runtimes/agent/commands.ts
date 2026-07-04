@@ -1,4 +1,5 @@
 // src/runtimes/agent/commands.ts
+import { isProviderId } from './providers/index.ts';
 // Classifies incoming user input as a local command, forwarded slash command,
 // or a regular message to be passed through to the agent.
 
@@ -16,11 +17,18 @@ const LOCAL_COMMANDS = new Set(['new', 'status', 'help', 'sessions', 'kill-sessi
  *  and visibility only, never tool/authority changes (capability-preserved). */
 const ROUTING_ALIAS_COMMANDS = new Set(['model', 'why', 'reset']);
 
+/** `/model` sub-verbs owned locally when routing aliases are on. Anything
+ *  else (e.g. `/model sonnet`) falls through to `forwarded` so the base
+ *  capability of driving the agent session's own /model keeps working (F04). */
+const ROUTING_MODEL_VERBS = new Set(['status', 'default', 'strongest', 'fastest']);
+
 /**
  * Classify a user input string.
  *
  * - `/new`, `/status`, `/help` (case-insensitive) → local
- * - `/model`, `/why`, `/reset` → local only when `opts.routingAliases` is true
+ * - `/model`, `/why`, `/reset` → local only when `opts.routingAliases` is true,
+ *   and only for recognized grammar: bare `/model`, `/model <verb|provider-id>`,
+ *   bare `/why`, bare `/reset` — anything else still forwards (F04)
  * - Any other `/…` slash command → forwarded (passed through to Claude Code)
  * - No leading `/` → message
  */
@@ -35,9 +43,18 @@ export function classifyInput(text: string, opts?: { routingAliases?: boolean })
   const parts = rest.split(/\s+/);
   const commandName = parts[0].toLowerCase();
 
-  const isLocal =
-    LOCAL_COMMANDS.has(commandName) ||
-    (opts?.routingAliases === true && ROUTING_ALIAS_COMMANDS.has(commandName));
+  const routingAlias =
+    opts?.routingAliases === true &&
+    ROUTING_ALIAS_COMMANDS.has(commandName) &&
+    // Recognized grammar only — everything else keeps the base forwarded
+    // behavior so no pre-existing capability silently regresses (F04).
+    // Instance-level pin eligibility stays the handler's job (F07).
+    (commandName === 'model'
+      ? parts.length === 1 ||
+        (parts.length === 2 &&
+          (ROUTING_MODEL_VERBS.has(parts[1].toLowerCase()) || isProviderId(parts[1].toLowerCase())))
+      : parts.length === 1);
+  const isLocal = LOCAL_COMMANDS.has(commandName) || routingAlias;
   if (isLocal) {
     const args = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
     return {
