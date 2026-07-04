@@ -22,6 +22,13 @@ const EXPECTED_TOOLS = [
   'regenerate_vault',
 ];
 
+const SENSITIVE_TOOLS = [
+  'create_agent_job', 'create_watch', 'regenerate_vault', 'capture_task', 'capture_observation',
+  'update_bead', 'complete_bead', 'cancel_bead', 'approve_proposal', 'reject_proposal',
+  'pause_trigger', 'extend_trigger', 'add_alias', 'merge_entities', 'forget_observation',
+];
+const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'get_profile', 'list_entities'];
+
 const adminPhone = 'admin-user';
 const adminActor = `${adminPhone}@s.whatsapp.net`;
 const guestActor = 'guest-user@s.whatsapp.net';
@@ -81,16 +88,25 @@ describe('substrate MCP tools', () => {
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
 
-  it('guest (non-admin actorJid) is rejected on capture_task', async () => {
-    const res = await registry.call('capture_task', { title: 'x' }, guestSession);
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+  it('sensitive tools are hidden from non-admin and actor-less sessions (R1)', () => {
+    const guestNames = registry.listTools(guestSession).map(t => t.name);
+    for (const name of SENSITIVE_TOOLS) expect(guestNames).not.toContain(name);
+    for (const name of READ_TOOLS) expect(guestNames).toContain(name);
+    const anonNames = registry.listTools({ tier: 'global' }).map(t => t.name);
+    for (const name of SENSITIVE_TOOLS) expect(anonNames).not.toContain(name);
   });
 
-  it('regenerate_vault is admin gated', async () => {
+  it('guest (non-admin actorJid) is rejected on capture_task without existence disclosure (R1)', async () => {
+    const res = await registry.call('capture_task', { title: 'x' }, guestSession);
+    expect(res.isError).toBe(true);
+    // Central sensitive gate: indistinguishable from a nonexistent tool.
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
+  });
+
+  it('regenerate_vault is admin gated without existence disclosure (R1)', async () => {
     const res = await registry.call('regenerate_vault', {}, guestSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+    expect(res.content[0].text).toBe('Unknown tool: regenerate_vault');
   });
 
   it('missing actorJid is rejected on capture_task with actionable error', async () => {
@@ -117,10 +133,12 @@ describe('substrate MCP tools', () => {
   it('rejects unresolved @lid actorJid (admin gate fails closed on LID miss)', async () => {
     // Raw @lid number with no lid_mappings row — resolvePhoneFromJid returns
     // the LID number as fallback, which is NOT on the admin list → reject.
+    // R1: the central gate denies BEFORE the handler, without existence
+    // disclosure — still fail-closed, earlier.
     const lidSession: SessionContext = { tier: 'global', actorJid: 'missing-lid@lid' };
     const res = await registry.call('capture_task', { title: 'x' }, lidSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/not on the instance admin list/i);
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
   it('fails closed when LID admin resolution throws', async () => {
@@ -141,7 +159,9 @@ describe('substrate MCP tools', () => {
     );
 
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain('caller phone "unresolved"');
+    // R1 central gate: a throwing resolver denies fail-closed without
+    // existence disclosure (the same predicate backs the authorizer).
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
   it('capture_task round-trip', async () => {
@@ -571,7 +591,7 @@ describe('substrate MCP tools', () => {
     }, guestSession);
 
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+    expect(res.content[0].text).toBe('Unknown tool: add_alias');
   });
 
   it('forget_observation reprojects the affected entity profile', async () => {

@@ -60,6 +60,15 @@ export interface ToolDeclaration {
    * never silently ships a partial toolset.
    */
   core?: boolean;
+  /**
+   * Marks a tool as sensitive (R1 declarative gate). Sensitive tools are
+   * hidden from listTools and denied at call time unless the session
+   * passes the registry's installed sensitive-tool authorizer (the
+   * per-turn actorJid admin predicate). Fail-closed: no actorJid, no
+   * authorizer, or an authorizer error all deny. The flag ADDS a central
+   * gate; in-handler checks remain as defense in depth.
+   */
+  sensitive?: boolean;
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
 }
 

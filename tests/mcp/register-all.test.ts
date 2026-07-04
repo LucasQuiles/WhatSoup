@@ -14,6 +14,14 @@ import type { ToolDeclaration } from '../../src/mcp/types.ts';
 // Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
 // 162 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
 const BASELINE_TOOL_COUNT = 162;
+// R1: 15 substrate tools carry the `sensitive` flag and are hidden from
+// unauthorized sessions. Registration counting therefore needs an
+// authorized audit view — the flag filters VISIBILITY, not registration.
+const SENSITIVE_TOOL_COUNT = 15;
+function auditListTools(registry: ToolRegistry) {
+  registry.setSensitiveToolAuthorizer(() => true);
+  return registry.listTools({ tier: 'global', actorJid: 'audit@s.whatsapp.net' });
+}
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses
@@ -34,6 +42,16 @@ describe('registerAllTools', () => {
     vi.restoreAllMocks();
   });
 
+  it('R1: unauthorized sessions see the baseline minus the sensitive substrate tools', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    registerAllTools(registry, makeConnection(), db);
+    // Actor-less view: every sensitive tool is invisible (fail-closed).
+    expect(registry.listTools({ tier: 'global' }).length).toBe(BASELINE_TOOL_COUNT - SENSITIVE_TOOL_COUNT);
+    db.raw.close();
+  });
+
   it('registers the exact baseline tool count on a non-Pinecone build', () => {
     const db = new Database(':memory:');
     db.open();
@@ -42,7 +60,7 @@ describe('registerAllTools', () => {
 
     registerAllTools(registry, connection, db);
 
-    const tools = registry.listTools({ tier: 'global' });
+    const tools = auditListTools(registry);
     // Exact count, not a loose lower-bound — a silently-dropped module must surface here.
     expect(tools.length).toBe(BASELINE_TOOL_COUNT);
 
@@ -57,7 +75,7 @@ describe('registerAllTools', () => {
 
     registerAllTools(registry, connection, db);
 
-    const tools = registry.listTools({ tier: 'global' });
+    const tools = auditListTools(registry);
     const names = new Set(tools.map((t) => t.name));
 
     // Critical tools — if any of these are missing the harness is unusable.
@@ -126,7 +144,7 @@ describe('registerAllTools', () => {
     try {
       expect(() => registerAllTools(registry, connection, db)).not.toThrow();
       // Core tools still registered.
-      const tools = registry.listTools({ tier: 'global' });
+      const tools = auditListTools(registry);
       expect(tools.some((t) => t.name === 'send_message')).toBe(true);
       // Knowledge tool absent because optional module threw.
       expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
@@ -144,7 +162,7 @@ describe('registerAllTools', () => {
 
     registerAllTools(registry, connection, db);
 
-    const tools = registry.listTools({ tier: 'global' });
+    const tools = auditListTools(registry);
     const names = tools.map((t) => t.name);
     const uniqueNames = new Set(names);
     expect(uniqueNames.size).toBe(names.length);
@@ -264,7 +282,7 @@ describe('registerAllTools', () => {
     (cfgMod.config as { profiles?: unknown }).profiles = undefined; // line 78 `?? {}` fallback
     try {
       expect(() => registerAllTools(registry, connection, db)).not.toThrow();
-      expect(registry.listTools({ tier: 'global' }).length).toBe(BASELINE_TOOL_COUNT);
+      expect(auditListTools(registry).length).toBe(BASELINE_TOOL_COUNT);
     } finally {
       (cfgMod.config as { profiles?: unknown }).profiles = original;
       db.raw.close();
@@ -302,7 +320,7 @@ describe('registerAllTools', () => {
     };
     try {
       registerAllTools(registry, connection, db);
-      const tools = registry.listTools({ tier: 'global' });
+      const tools = auditListTools(registry);
       expect(tools.some((t) => t.name === 'knowledge_search')).toBe(true);
       expect(tools.length).toBe(BASELINE_TOOL_COUNT + 1);
     } finally {
@@ -325,7 +343,7 @@ describe('registerAllTools', () => {
     };
     try {
       registerAllTools(registry, connection, db);
-      const tools = registry.listTools({ tier: 'global' });
+      const tools = auditListTools(registry);
       expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
       expect(tools.length).toBe(BASELINE_TOOL_COUNT);
     } finally {
@@ -348,7 +366,7 @@ describe('registerAllTools', () => {
     };
     try {
       registerAllTools(registry, connection, db, { enableKnowledgeSearch: false });
-      const tools = registry.listTools({ tier: 'global' });
+      const tools = auditListTools(registry);
       expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
       expect(tools.length).toBe(BASELINE_TOOL_COUNT);
     } finally {
@@ -446,7 +464,7 @@ describe('registerAllTools', () => {
     (cfgMod.config as { pineconeAllowedIndexes?: string[] }).pineconeAllowedIndexes = ['legacy-index']; // inner ternary true
     try {
       registerAllTools(registry, connection, db);
-      expect(registry.listTools({ tier: 'global' }).some((t) => t.name === 'knowledge_search')).toBe(true);
+      expect(auditListTools(registry).some((t) => t.name === 'knowledge_search')).toBe(true);
     } finally {
       (cfgMod.config as { memory?: unknown }).memory = originalMem;
       (cfgMod.config as { pineconeAllowedIndexes?: string[] }).pineconeAllowedIndexes = originalTop;

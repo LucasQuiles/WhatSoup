@@ -167,10 +167,38 @@ function buildListSchema(
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDeclaration>();
   private durability: DurabilityEngine | undefined;
+  private sensitiveAuthorizer: ((session: SessionContext) => boolean) | null = null;
 
   /** Attach a DurabilityEngine to record tool calls. */
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
+  }
+
+  /**
+   * Install the instance's admin predicate for `sensitive`-flagged tools
+   * (R1). Until installed, sensitive tools deny everything — a registry
+   * carrying sensitive tools without an authorizer is fail-closed by
+   * construction.
+   */
+  setSensitiveToolAuthorizer(fn: (session: SessionContext) => boolean): void {
+    this.sensitiveAuthorizer = fn;
+  }
+
+  /**
+   * R1 central gate. Fail-closed on every uncertain path: no actorJid,
+   * no installed authorizer, and an authorizer that throws all deny.
+   * Routing, delegation, and fallback never change this result — only
+   * the per-turn actor identity does (capability-preserved routing).
+   */
+  private sensitiveAllowed(session: SessionContext): boolean {
+    if (!session.actorJid) return false;
+    if (!this.sensitiveAuthorizer) return false;
+    try {
+      return this.sensitiveAuthorizer(session);
+    } catch (err) {
+      log.warn({ err }, 'sensitive-tool authorizer threw - denying (fail-closed)');
+      return false;
+    }
   }
 
   /** Return names of all tools declared with scope: 'chat'. */
@@ -211,6 +239,11 @@ export class ToolRegistry {
         continue;
       }
 
+      // R1: sensitive tools are invisible to sessions that cannot call them.
+      if (tool.sensitive && !this.sensitiveAllowed(session)) {
+        continue;
+      }
+
       result.push({
         name: tool.name,
         description: tool.description,
@@ -238,6 +271,26 @@ export class ToolRegistry {
   ): Promise<ToolCallResult> {
     const tool = this.tools.get(name);
     if (!tool) {
+      return {
+        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+        isError: true,
+      };
+    }
+
+    // --- R1 sensitive-tool gate (central; in-handler admin checks remain
+    // as defense in depth) ---
+    if (tool.sensitive && !this.sensitiveAllowed(session)) {
+      if (!session.actorJid) {
+        // Internal wiring fault, not an untrusted probe: keep it actionable.
+        return {
+          content: [{ type: 'text', text: `Tool "${name}" is admin-gated and this session has no actorJid — the runtime must populate actorJid from the sender before dispatching admin-gated tools` }],
+          isError: true,
+        };
+      }
+      // Unauthorized actor: indistinguishable from a tool that does not
+      // exist. Sensitive tool names are never disclosed to unauthorized
+      // callers — listTools hides them, so call must not confirm them.
+      log.warn({ tool: name, tier: session.tier }, 'sensitive tool denied (unauthorized actor)');
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
         isError: true,
