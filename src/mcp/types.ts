@@ -61,12 +61,14 @@ export interface ToolDeclaration {
    */
   core?: boolean;
   /**
-   * Marks a tool as sensitive (R1 declarative gate). Sensitive tools are
-   * hidden from listTools and denied at call time unless the session
-   * passes the registry's installed sensitive-tool authorizer (the
-   * per-turn actorJid admin predicate). Fail-closed: no actorJid, no
-   * authorizer, or an authorizer error all deny. The flag ADDS a central
-   * gate; in-handler checks remain as defense in depth.
+   * Marks a tool as sensitive (R1 declarative gate). The gate is
+   * call-time-authoritative: sensitive tools REMAIN visible in listTools
+   * (listing is not a security boundary), and every invocation is denied
+   * unless the session passes the registry's installed sensitive-tool
+   * authorizer (the per-turn actorJid admin predicate). Fail-closed: no
+   * actorJid, no authorizer, or an authorizer error all deny. The flag ADDS
+   * a central gate; in-handler checks remain as defense in depth. (See
+   * docs/tools.md for the authoritative model.)
    */
   sensitive?: boolean;
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
