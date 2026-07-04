@@ -536,6 +536,9 @@ export {
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
+/** TTL for this_thread route preferences (echoed in user copy as "24h"). */
+const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+
 function providerDisplayName(provider: string): string {
   switch (provider) {
     case 'claude-cli': return 'Claude';
@@ -2964,8 +2967,15 @@ export class AgentRuntime implements Runtime {
           const requestedProvider = isProvider ? sub : null;
           const existing = getPreference(this.db, chatKey, senderKey, now);
           if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
-            // Echoes derive from state transitions; an identical repeat is a no-op.
-            this.sendDirect(chatJid, '_Already set — say /reset to go back to the default route._');
+            // Re-confirmation refreshes the TTL (F08) — "already set" must stay
+            // true for a full window after the user re-asserts it. Sticky rows
+            // (expiresAt null) are never demoted to ephemeral by a repeat.
+            if (existing.expiresAt !== null) {
+              setPreference(this.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+              this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+            } else {
+              this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+            }
             break;
           }
           setPreference(this.db, {
@@ -2979,7 +2989,7 @@ export class AgentRuntime implements Runtime {
             updatedAt: now,
             // this_thread preferences are ephemeral by design (24h TTL);
             // sticky pins require explicit confirmation and are a later slice.
-            expiresAt: now + 24 * 60 * 60 * 1000,
+            expiresAt: now + PREFERENCE_TTL_MS,
           });
           const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
           this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h)._`);
