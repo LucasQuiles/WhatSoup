@@ -670,7 +670,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 
 Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. CLI model probes have a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
 
-Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` query the authenticated models endpoint using `providerConfig.apiKeyService` when set. This probe makes the startup surface explicit about account/model access.
+Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access.
 
 Agent `/health` also exposes a top-level `turn_capability` block derived from runtime state: `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`. `model_usable` is `true` after a successful primary model probe, `false` after a configured primary model usability failure that requires operator attention, and `null` when no definitive probe result exists yet. A failed user turn records only the failure class (for example `model-unavailable` or `unknown-terminal`) and a timestamp; raw provider stderr/stdout is not surfaced. Top-level `/health.status` becomes `degraded` when the agent runtime reports degraded health, when `model_usable` is `false`, or when a user turn has a recorded error with no later successful user turn. A later successful user turn clears `last_turn_error_class` and `last_turn_error_at`.
 
@@ -741,6 +741,71 @@ platform keyring, `src/lib/keyring.ts`) into the session child's environment
 so the interpolation resolves at spawn time. `apiKeyService` must name a
 known keyring service and requires `baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
+
+**Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
+`baseUrl` directly as the endpoint of the managed HTTP loop (default
+`https://api.openai.com/v1` for `openai-api`), so any OpenAI-compatible
+endpoint can serve an instance. `providerConfig` is instance-scoped and
+API-type fallback entries inherit it (`src/runtimes/agent/fallback-config.ts`):
+every `openai-api` entry in a chain hits the same `baseUrl` — one custom
+endpoint per instance. A Groq fallback rung, end to end (provision the key
+under service `groq` per
+[Enabling provider fallback on a new host](#enabling-provider-fallback-on-a-new-host)):
+
+```jsonc
+"agentOptions": {
+  "provider": "claude-cli",
+  "fallbacks": [
+    { "provider": "openai-api", "model": "llama-3.3-70b-versatile" }  // model REQUIRED for API entries
+  ],
+  "providerConfig": {
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "apiKeyService": "groq"
+  }
+}
+```
+
+An aggregator that routes per model id can still serve several models through
+the one inherited `baseUrl` — e.g. OpenRouter:
+
+```jsonc
+"fallbacks": [
+  { "provider": "openai-api", "model": "meta-llama/llama-3.3-70b-instruct" },
+  { "provider": "openai-api", "model": "qwen/qwen-2.5-72b-instruct" }
+],
+"providerConfig": {
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "apiKeyService": "openrouter"
+}
+```
+
+What this does **not** enable: two different custom endpoints (e.g. Groq and
+OpenRouter) in one chain — that needs per-entry `providerConfig`, which is
+future code work. Endpoint parity is the operator's to prove: before relying
+on a new endpoint, force a canary window (`FALLBACK ON 5m`, step 5 below) and
+confirm one streaming turn and one MCP tool-call turn succeed there. On `429`,
+`Retry-After` is honored only up to 10 seconds
+(`src/runtimes/agent/providers/rate-limit-retry.ts`); a longer wait fails the
+turn into the chain. Decision record and endpoint pilot evidence:
+`docs/specs/2026-07-03-openai-compatible-byok-providers-design.md` (internal,
+publication-excluded). Maintainers extending the service map itself (new
+`apiKeyService` values, probe coverage): see
+[docs/architecture/provider-credential-services.md](architecture/provider-credential-services.md).
+
+**Key resolution and account isolation (QR-104):** with `apiKeyService` set,
+the key resolves service-env-var-first (a process-wide `GROQ_API_KEY` beats a
+keychain `groq` entry — `lookupCredential`, `src/lib/keyring.ts`), and when
+the service yields nothing at all the API providers take one final hop to
+their provider-family default — `OPENAI_API_KEY` for `openai-api`,
+`ANTHROPIC_API_KEY` for `anthropic-api`
+(`src/runtimes/agent/providers/api-key-resolver.ts`). That last hop can
+silently run a custom-endpoint instance on the wrong account's key, so it is
+logged: `apiKeyService configured but keyring lookup missed — falling back to
+env var; verify account isolation` (QR-104). During a pilot, treat that line
+as a failed isolation check, not noise. The fleet credentials routes
+(`PUT`/`DELETE`/`POST …/verify` on `/api/credentials/:service`) return
+`envShadowed: true` whenever a process-wide env var is masking the stored
+keyring entry.
 
 #### Provider fallback behavior
 
@@ -838,12 +903,17 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
      ]
    }
    ```
+   To point `openai-api` entries at a custom OpenAI-compatible endpoint
+   (Groq, OpenRouter, …), add the instance-level `providerConfig` block — see
+   [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for the worked
+   recipes and the one-endpoint-per-instance constraint.
 
 4. **Restart the instance** so the runtime loads the new config and arms any previously-persisted fallback window with the new pre-flight checks active.
 
 5. **Verify.** From an admin WhatsApp DM:
    - `FALLBACK STATUS` — confirms the current window state and configured provider/model.
    - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `effectiveProvider` (flips to the fallback while the window is active), `fallbackTurnsServed`, and related fields.
+   - For a custom `baseUrl` endpoint, use the canary window to confirm one streaming reply **and** one MCP tool-call turn — remote-endpoint parity for both is unproven until exercised. Remember that `groq`/`openrouter` keys get a presence-only pre-flight (no validity probe), so an invalid key first surfaces here, and watch the logs for the QR-104 isolation warning (see [Custom endpoint](#custom-endpoint-providerconfigbaseurl)).
    - Watch for the four arm-time alert sources: `fallback_binary_missing` (binary absent), `fallback_credential_missing` (key absent from keyring/env), `fallback_credential_invalid` (key rejected by provider API), `fallback_model_unknown` (model id absent from the provider catalog — usually a casing mismatch; the alert suggests the catalog's exact casing when one matches case-insensitively). These pre-flight probes run when a window first arms and when a restart restores a persisted window — never on extensions of an already-active window, so per-turn usage-limit extensions cannot storm the probes or the alerts. Any of these surfaces via the BOT_ERRORS alert pipeline within seconds of window activation. Further runtime (not pre-flight) sources exist: the transition alerts `provider_fallback_activated` (once per window, on the first arm — not re-raised when a restart restores the persisted window), `provider_fallback_restored` (each time a restart restores a persisted window — never counted as an activation), `provider_fallback_reverted` (once per window, on deactivation, with that window's turn counts and duration), and `provider_fallback_replayed` (once per activation, after the replay completes — a failed replay raises only `runtime_provider_fallback_replay_failed`); and `fallback_recovery_stalled`, fired once per stall episode when an `auth-required` window has extended through `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed primary recovery probes.
 
 #### Session Scopes

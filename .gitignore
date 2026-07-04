@@ -36,6 +36,8 @@ docs/handoff-*.md
 HANDOFF-*.md
 docs/project-status-*.md
 docs/audit-*.md
+docs/audits/
+raw/
 tmp/
 
 # Per-chat workspaces (generated at runtime)

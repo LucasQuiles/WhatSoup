@@ -8,6 +8,7 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
+  classifyStreamedProviderFailure,
   detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
 } from './failure-taxonomy.ts';
@@ -1676,6 +1677,43 @@ export class AgentRuntime implements Runtime {
     if (event.text === prior) return null;
     if (event.text.startsWith(prior)) return event.text.slice(prior.length);
     return event.text;
+  }
+
+  /**
+   * Two-tier gate for provider-failure text that streamed as assistant_text (QR-209).
+   * The permissive `classifyProviderFailure` suppression used to drop ANY match,
+   * silently discarding genuine replies that merely discussed an auth/limit error
+   * (observed live: replies about an expired OAuth token dropped to silence). Now
+   * only BANNER-confident matches (the text IS the error — short + error-opener /
+   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are
+   * DELIVERED. Fallback is still armed only on the terminal 'result' event, never
+   * here. Shared by both assistant_text handlers so their suppression policy can't
+   * drift. Returns true = suppress (caller must `break`), false = deliver.
+   */
+  private suppressStreamedProviderFailure(normalizedText: string, chatJid: string | null): boolean {
+    const classification = classifyStreamedProviderFailure(normalizedText);
+    if (classification === null) return false;
+    if (classification.confidence === 'banner') {
+      log.warn(
+        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, 300) },
+        'suppressed provider-failure message from assistant_text',
+      );
+      return true;
+    }
+    // Ambient: matched a provider-failure token but is prose about an error, not the
+    // error itself. Deliver it — dropping it is the QR-209 silent-reply defect. Log
+    // (structured) so the fleet can spot a novel banner shape that should become a
+    // suppressible opener instead.
+    log.warn(
+      {
+        chatJid,
+        kind: classification.kind,
+        textLength: normalizedText.length,
+        textPreview: normalizedText.slice(0, 300),
+      },
+      'delivered assistant_text despite provider-failure classification',
+    );
+    return false;
   }
 
   // ─── Control session (self-healing repair) ────────────────────────────────
@@ -4171,19 +4209,13 @@ export class AgentRuntime implements Runtime {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
-          // Suppress usage-limit messages — don't flood WhatsApp with them.
-          // Fallback activation is intentionally NOT triggered here: it is
-          // deferred to the 'result' event. Activating on streaming text would
-          // race the usage-limit session kill/respawn (the result path also
-          // shuts the session down), so we only observe + suppress here.
-          // Suppress any KNOWN provider-failure string that streamed as assistant text.
-          // Fallback is armed on the terminal 'result' event, not here. Text that does
-          // NOT match a known failure pattern is genuine assistant output — pass it through
-          // (never default-deny streaming, or real replies would be dropped).
-          if (classifyProviderFailure(normalizedText) !== null) {
-            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
-            break;
-          }
+          // Two-tier provider-failure gate (QR-209). Fallback is armed on the
+          // terminal 'result' event, never here (activating on streaming text would
+          // race the usage-limit session kill/respawn). Only BANNER-confident text
+          // (the error itself) is suppressed; AMBIENT prose about an error, and text
+          // matching no failure pattern, are delivered — dropping them is the QR-209
+          // silent-reply defect. See suppressStreamedProviderFailure.
+          if (this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid)) break;
           queue.enqueueStreamingText(normalizedText);
           // Reply-guarantee: visible output reached the user, so reset the
           // silence window for this chat. The "still working" fallback then
@@ -7045,10 +7077,6 @@ export class AgentRuntime implements Runtime {
       if (!artifact) return null;
       return buildHandoffPrelude({
         artifact,
-        recentMessages: [],
-        verbatimN: 0,
-        isFirstStandInTurn: true,
-        backupContextWindow: 'unknown',
         now: Date.now(),
         staleAfterMs: HANDOFF_STALE_MS,
         // PII-hardened handoff redactor: provider-preview sanitizer (Bearer /
@@ -7834,17 +7862,12 @@ export class AgentRuntime implements Runtime {
             this.turnHadVisibleOutput = true;
             break;
           }
-          // Suppress usage-limit messages — don't flood WhatsApp with them.
-          // Fallback activation is intentionally NOT triggered here: it is
-          // deferred to the 'result' event. Activating on streaming text would
-          // race the usage-limit session kill/respawn (the result path also
-          // shuts the session down), so we only observe + suppress here.
-          // Suppress any KNOWN provider-failure string streamed as assistant text; fallback
-          // is armed on the terminal 'result' event. Non-matching text is genuine output.
-          if (classifyProviderFailure(normalizedText) !== null) {
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
-            break;
-          }
+          // Two-tier provider-failure gate (QR-209) — same policy as the per-chat
+          // handler. Fallback is armed on the terminal 'result' event, not here.
+          // Only BANNER-confident text (the error itself) is suppressed; AMBIENT
+          // prose about an error is delivered, so genuine replies are never silently
+          // dropped. See suppressStreamedProviderFailure.
+          if (this.suppressStreamedProviderFailure(normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid)) break;
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;
           // Reply-guarantee: visible output reached the user — reset the silence
