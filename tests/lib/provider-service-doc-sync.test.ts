@@ -53,7 +53,10 @@ describe('docs/configuration.md provider service lists stay true to the code', (
     const rows: Array<[string, string]> = [];
     for (let i = headerIdx + 2; i < lines.length && lines[i].trim().startsWith('|'); i++) {
       const m = /^\s*\|\s*\x60([a-z0-9_-]+)\x60\s*\|\s*\x60([A-Z0-9_]+)\x60\s*\|\s*$/.exec(lines[i]);
-      if (m) rows.push([m[1], m[2]]);
+      // A body row that fails to parse would otherwise be silently skipped
+      // and escape verification while the row floor stays satisfied.
+      expect(m, 'unparseable env-var table row, fix format or parser: ' + lines[i]).not.toBeNull();
+      rows.push([m![1], m![2]]);
     }
     expect(rows.length, 'parser floor: table must yield rows').toBeGreaterThanOrEqual(8);
 
