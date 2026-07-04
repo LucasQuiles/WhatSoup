@@ -3121,6 +3121,18 @@ export class AgentRuntime implements Runtime {
           break;
         }
       }
+      if (
+        (classified.command === 'model' || classified.command === 'why' || classified.command === 'reset') &&
+        msg.inboundSeq !== undefined
+      ) {
+        // Terminal durability completion for locally-handled routing aliases
+        // (F05): local handling never reaches the turn path that completes
+        // the inbound journal, so the row would stay 'processing' and restart
+        // recovery would falsely mark it failed. Base local commands
+        // (/new /status /help ...) share this pre-existing behavior — fixing
+        // them is out of scope for this branch (surfaced in review report).
+        this.durability?.completeInbound(msg.inboundSeq, 'routing_alias_handled');
+      }
       return;
     }
 
