@@ -19,6 +19,29 @@ import { errorMessage } from '../lib/error-message.ts';
 const log = createChildLogger('ToolRegistry');
 
 // ---------------------------------------------------------------------------
+// Erasure-sensitive tools — redact durability telemetry at the source
+// ---------------------------------------------------------------------------
+//
+// capture_observation/forget_observation (src/mcp/tools/substrate.ts) model
+// entity_observations as erasable: forget_observation tombstones a row by id,
+// and the whole point of that contract is that the observation's content can
+// be made to disappear on request. If this registry durability-records a
+// tool's full raw arguments verbatim, a forgotten observation's text/metadata
+// would silently outlive its tombstone in tool_calls.tool_input until
+// retention pruning catches up. Tools in this set get a fixed marker instead
+// of their raw params. (add_alias also carries contact PII but has no
+// forget/tombstone counterpart in substrate.ts, so it is deliberately not
+// included here — nothing erases it, so nothing needs the telemetry copy to
+// track an erasure.) Extend this set whenever a new substrate tool captures
+// or forgets personal/erasable data.
+export const ERASURE_SENSITIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'capture_observation',
+  'forget_observation',
+]);
+
+const REDACTED_TOOL_INPUT_MARKER = '[redacted:erasure-sensitive]';
+
+// ---------------------------------------------------------------------------
 // Zod → JSON Schema (minimal, handles the types we use in tool declarations)
 // ---------------------------------------------------------------------------
 
@@ -339,17 +362,33 @@ export class ToolRegistry {
     // so the content fence is unchanged. Authorization/guard logic above still
     // keys on session.conversationKey and is unaffected.
     const durabilityKey = session.conversationKey || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
-    const durabilityId = this.durability && durabilityKey
-      ? this.durability.recordToolCall(
-          durabilityKey,
-          name,
-          JSON.stringify(effectiveParams),
-          replayPolicy,
-        )
-      : undefined;
+
+    // Durability/telemetry writes must never gate the tool call itself.
+    // DurabilityEngine's tool-call methods are raw synchronous node:sqlite
+    // .run() calls with no internal error handling — a throw (SQLITE_BUSY
+    // under lock contention, SQLITE_FULL on disk pressure) must degrade to
+    // "no telemetry recorded", never "tool call failed". This matters most
+    // for the global/operator tier: a DB-unhealthy instance is exactly when
+    // an operator reaches for a recovery tool (self_restart,
+    // resync_app_state) and exactly when these writes are likely to throw.
+    let durabilityId: number | undefined;
+    if (this.durability && durabilityKey) {
+      const toolInput = ERASURE_SENSITIVE_TOOL_NAMES.has(name)
+        ? REDACTED_TOOL_INPUT_MARKER
+        : JSON.stringify(effectiveParams);
+      try {
+        durabilityId = this.durability.recordToolCall(durabilityKey, name, toolInput, replayPolicy);
+      } catch (err) {
+        log.warn({ tool: name, err }, 'durability recordToolCall failed; proceeding without telemetry');
+      }
+    }
 
     if (durabilityId !== undefined) {
-      this.durability!.markToolExecuting(durabilityId);
+      try {
+        this.durability!.markToolExecuting(durabilityId);
+      } catch (err) {
+        log.warn({ tool: name, err }, 'durability markToolExecuting failed; proceeding without telemetry');
+      }
     }
 
     try {
@@ -358,7 +397,11 @@ export class ToolRegistry {
       const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
       log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
       if (durabilityId !== undefined) {
-        this.durability!.markToolComplete(durabilityId, text);
+        try {
+          this.durability!.markToolComplete(durabilityId, text);
+        } catch (err) {
+          log.warn({ tool: name, err }, 'durability markToolComplete failed');
+        }
       }
       return {
         content: [{ type: 'text', text }],
@@ -368,7 +411,11 @@ export class ToolRegistry {
       const message = errorMessage(err);
       log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
       if (durabilityId !== undefined) {
-        this.durability!.markToolComplete(durabilityId, `error: ${message}`);
+        try {
+          this.durability!.markToolComplete(durabilityId, `error: ${message}`);
+        } catch (durabilityErr) {
+          log.warn({ tool: name, err: durabilityErr }, 'durability markToolComplete failed');
+        }
       }
       // Sanitize transport/protocol errors but keep application-level errors readable.
       // Raw stack traces, socket internals, and TLS details must never reach the agent.
