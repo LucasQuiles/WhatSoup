@@ -2017,6 +2017,20 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
+          // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue + the
+          // per-chat socket resource to the canonical key so a LID->phone rekey does
+          // not orphan the in-flight actor or leave the socket keyed by the dead lidKey.
+          // The resolver re-derives mapKey each read, so it follows the canonical key.
+          const execActors = this.perChatExecActorQueue.get(lidKey);
+          if (execActors !== undefined) {
+            this.perChatExecActorQueue.delete(lidKey);
+            this.perChatExecActorQueue.set(canonical, execActors);
+          }
+          const sockRes = this.perChatSocketResources.get(lidKey);
+          if (sockRes !== undefined) {
+            this.perChatSocketResources.delete(lidKey);
+            this.perChatSocketResources.set(canonical, sockRes);
+          }
           // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
           // progress timer + slow/stall setTimeouts that are cleared only by
           // shutdown() keyed on the canonical mapKey — leaving it under lidKey
@@ -3375,6 +3389,12 @@ export class AgentRuntime implements Runtime {
     // the subprocess is currently executing; shifted on that turn's result, cleared
     // on any abnormal termination (Slice-4). per_chat non-sandbox only.
     if (this.usesPerChatActorSocket() && mapKey !== undefined) {
+      // If the session is not active, any pre-existing entries are from a dead
+      // subprocess (a prior turn whose session crashed/resume-failed without an
+      // in-band clear) — drop them so a stale actor cannot survive a subprocess
+      // restart. A fresh subprocess starts with only this turn. (handleResumeFailed
+      // is a no-op for non-sandbox per_chat, so this is the resume-fail coverage.)
+      if (!session.getStatus().active) this.perChatExecActorQueue.delete(mapKey);
       const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
       execQ.push(actorJid);
       this.perChatExecActorQueue.set(mapKey, execQ);
@@ -7867,6 +7887,11 @@ export class AgentRuntime implements Runtime {
       await args.oldSession.shutdown(false);
     }
     if (args.mapKey !== undefined) {
+      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
+      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
+      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
+      // re-pushes via sendTurnPerChat -> sendTurnToSession.
+      this.perChatExecActorQueue.delete(args.mapKey);
       this.chatSessions.delete(args.mapKey);
       this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
       await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
@@ -8476,6 +8501,13 @@ export class AgentRuntime implements Runtime {
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
+    // F-STICKY-ACTOR (QR-247, S-CRASH): a crash discards ALL of the subprocess's
+    // in-flight turns (executing + buffered), so clear the WHOLE executing-actor
+    // queue — NOT shift-one. This runs synchronously in handlePerChatCrash BEFORE
+    // the auto-respawn setTimeout, so the direct-sendTurn continuation hits an empty
+    // queue -> fail-closed deny, and a later user turn cannot append behind a stale
+    // (possibly admin) head and be served that actor = escalation.
+    this.perChatExecActorQueue.delete(mapKey);
     this.clearToolScopeFor(mapKey);
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;

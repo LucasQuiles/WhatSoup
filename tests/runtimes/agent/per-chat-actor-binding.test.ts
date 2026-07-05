@@ -290,3 +290,39 @@ describe('F-STICKY-ACTOR: resolveExecutingActor fail-closed / executing-turn HEA
     expect(resolve()).toBeUndefined();
   });
 });
+
+// ── F-STICKY-ACTOR S-CRASH tests ─────────────────────────────────────────────
+
+describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH, QR-247)', () => {
+  const CHAT = 'group-crash@g.us';
+  const ADMIN = 'admin@s.whatsapp.net';
+  const GUEST = 'guest@s.whatsapp.net';
+  let runtime: AgentRuntime;
+  let mapKey: string;
+
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    chatSessions: Map<string, unknown>;
+    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    handlePerChatCrash(mapKey: string, chatJid: string, info: Record<string, unknown>): void;
+    resolveExecutingActor(c: string): string | undefined;
+  };
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    mapKey = priv().resolvePerChatMapKey(CHAT);
+    // A live session with two in-flight turns: ADMIN executing (HEAD) + GUEST queued behind.
+    priv().chatSessions.set(mapKey, { getStatus: () => ({ active: true }), getDbRowId: () => null });
+    priv().perChatExecActorQueue.set(mapKey, [ADMIN, GUEST]);
+  });
+
+  it('handlePerChatCrash clears ALL in-flight entries (not shift-one) -> post-respawn turn is fail-closed', () => {
+    // A crash discards the whole subprocess; both in-flight turns are gone.
+    priv().handlePerChatCrash(mapKey, CHAT, {}); // info={} -> no auto-respawn timer scheduled
+    expect(priv().perChatExecActorQueue.get(mapKey) ?? []).toEqual([]);
+    // The crashed turn's actor (ADMIN) must NOT survive as HEAD; the continuation /
+    // next turn resolves to undefined -> denied, never stale-authorized as ADMIN.
+    expect(priv().resolveExecutingActor(CHAT)).toBeUndefined();
+  });
+});
