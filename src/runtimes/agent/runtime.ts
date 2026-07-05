@@ -11,6 +11,7 @@ import {
   classifyStreamedProviderFailure,
   detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
+  MAX_STREAMED_BANNER_LENGTH,
 } from './failure-taxonomy.ts';
 import {
   workflowForProviderText,
@@ -1696,7 +1697,7 @@ export class AgentRuntime implements Runtime {
     if (classification === null) return false;
     if (classification.confidence === 'banner') {
       log.warn(
-        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, 300) },
+        { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
         'suppressed provider-failure message from assistant_text',
       );
       return true;
@@ -1710,7 +1711,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         kind: classification.kind,
         textLength: normalizedText.length,
-        textPreview: normalizedText.slice(0, 300),
+        textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
       },
       'delivered assistant_text despite provider-failure classification',
     );
@@ -7078,10 +7079,6 @@ export class AgentRuntime implements Runtime {
       if (!artifact) return null;
       return buildHandoffPrelude({
         artifact,
-        recentMessages: [],
-        verbatimN: 0,
-        isFirstStandInTurn: true,
-        backupContextWindow: 'unknown',
         now: Date.now(),
         staleAfterMs: HANDOFF_STALE_MS,
         // PII-hardened handoff redactor: provider-preview sanitizer (Bearer /

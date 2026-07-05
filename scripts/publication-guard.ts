@@ -9,6 +9,8 @@ import {
   normalizeRepoPath,
   readStagedAddedLines,
   readStagedFileContentResult,
+  isOperationalProtocolToken,
+  operationalReleaseHygieneFiles,
 } from './lib/guard-core.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
@@ -184,12 +186,27 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return args;
 }
 
+// Operational fleet files (health profiles, expected-fleet manifest) carry
+// real systemd template-unit names that the email-shape regex matches. Skip
+// the personal-email rule only when EVERY email-shaped token on the line is
+// an allowlisted operational identifier - a real address alongside a unit
+// name still flags.
+function isOperationalUnitLine(filePath: string, lineText: string, regex: RegExp): boolean {
+  if (!operationalReleaseHygieneFiles.has(normalizeRepoPath(filePath))) return false;
+  const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`;
+  const tokens = lineText.match(new RegExp(regex.source, flags)) ?? [];
+  return tokens.length > 0 && tokens.every((token) => isOperationalProtocolToken(token));
+}
+
 export function scanTextForPrivateLiterals(filePath: string, text: string): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
   text.split(/\r?\n/).forEach((lineText, index) => {
     for (const pattern of privatePatterns) {
       if (pattern.regex.test(lineText)) {
+        if (pattern.code === 'personal-email' && isOperationalUnitLine(filePath, lineText, pattern.regex)) {
+          continue;
+        }
         issues.push({
           severity: 'error',
           code: pattern.code,

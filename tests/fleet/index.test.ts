@@ -557,7 +557,7 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     // INST_A is a chat instance with no agentOptions → primary provider is null
     // and the fallback window is inactive. Asserts both shape and the
     // not-on-fallback default.
-    expect(body.primary).toEqual({ provider: null, model: null, keyPresent: null });
+    expect(body.primary).toEqual({ provider: null, model: null, keyPresent: null, endpointHost: null, apiKeyService: null });
     expect(body.fallback.active).toBe(false);
   });
 

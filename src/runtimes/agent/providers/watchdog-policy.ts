@@ -7,7 +7,7 @@
  * silently given 30 min (L1-F1). This table restores the descriptors' intent.
  *
  * It is deliberately dependency-free (literal data, no provider-module imports) to avoid a
- * `session.ts` ⇄ provider-module import cycle (`claude.ts` imports from `session.ts`). The
+ * `session.ts` ⇄ provider-module import cycle (provider modules import from `session.ts`). The
  * companion test `tests/runtimes/agent/providers/watchdog-policy.test.ts` asserts every entry
  * here equals the corresponding descriptor's `defaultWatchdog.hardMs`, so the table cannot
  * drift from the SSOT.

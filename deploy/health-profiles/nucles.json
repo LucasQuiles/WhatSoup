@@ -22,33 +22,25 @@
   "requiredCredentialFiles": [
     "bot-errors.env",
     "fleet-tokens.json",
-    "instances/primary/tokens.env",
-    "instances/secondary/tokens.env",
-    "instances/automation/tokens.env"
+    "instances/q/tokens.env",
+    "instances/personal/tokens.env"
   ],
   "instances": [
     {
-      "name": "primary",
+      "name": "q",
       "expected": "always_on",
-      "service": "whatsoup-primary.service",
+      "service": "whatsoup@q.service",
       "healthPort": 9092,
-      "primaryPhoneOwner": "instance:primary",
+      "primaryPhoneOwner": "instance:q",
       "expectProviderProbe": true,
       "providerProbeCommand": "/usr/local/bin/claude"
     },
     {
-      "name": "secondary",
+      "name": "personal",
       "expected": "always_on",
-      "service": "whatsoup-secondary.service",
+      "service": "whatsoup@personal.service",
       "healthPort": 9094,
-      "primaryPhoneOwner": "instance:secondary"
-    },
-    {
-      "name": "automation",
-      "expected": "always_on",
-      "service": "whatsoup-automation.service",
-      "healthPort": 9095,
-      "primaryPhoneOwner": "instance:automation"
+      "primaryPhoneOwner": "instance:personal"
     }
   ]
 }

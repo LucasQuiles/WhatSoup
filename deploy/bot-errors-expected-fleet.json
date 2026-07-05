@@ -57,22 +57,16 @@
       "collectorRemote": false,
       "instances": [
         {
-          "name": "primary",
+          "name": "q",
           "expected": "always_on",
-          "service": "whatsoup-primary.service",
+          "service": "whatsoup@q.service",
           "healthPort": 9092
         },
         {
-          "name": "secondary",
+          "name": "personal",
           "expected": "always_on",
-          "service": "whatsoup-secondary.service",
+          "service": "whatsoup@personal.service",
           "healthPort": 9094
-        },
-        {
-          "name": "automation",
-          "expected": "always_on",
-          "service": "whatsoup-automation.service",
-          "healthPort": 9095
         }
       ]
     },

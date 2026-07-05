@@ -6,7 +6,12 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
-import { internalPublicationRoots, isInternalPublicationPath, runPublicationGuard } from '../../scripts/publication-guard.ts';
+import {
+  internalPublicationRoots,
+  isInternalPublicationPath,
+  runPublicationGuard,
+  scanTextForPrivateLiterals,
+} from '../../scripts/publication-guard.ts';
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
@@ -270,5 +275,28 @@ describe('publication audit root list drift pin', () => {
     }
 
     expect(missingPatterns).toEqual([]);
+  });
+});
+
+describe('publication guard operational allowlist', () => {
+  it('allows template-unit tokens only in operational fleet files, never alongside a real address', () => {
+    // Composed so the test source itself carries no email-shaped literal.
+    const personalUnit = ['whatsoup@personal', 'service'].join('.');
+    expect(scanTextForPrivateLiterals('deploy/health-profiles/nucles.json', `"service": "${personalUnit}"`)).toEqual(
+      [],
+    );
+
+    const flaggedElsewhere = scanTextForPrivateLiterals(
+      'deploy/health-profiles/mini1.json',
+      `"service": "${personalUnit}"`,
+    );
+    expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['personal-email']);
+
+    const realAddress = ['operator', 'example.com'].join('@');
+    const mixedLine = scanTextForPrivateLiterals(
+      'deploy/health-profiles/nucles.json',
+      `"service": "${personalUnit}" contact ${realAddress}`,
+    );
+    expect(mixedLine.map((issue) => issue.code)).toEqual(['personal-email']);
   });
 });
