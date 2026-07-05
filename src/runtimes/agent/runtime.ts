@@ -2197,6 +2197,15 @@ export class AgentRuntime implements Runtime {
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
+        // F-STICKY-ACTOR (QR-247): the per-turn actor binding covers claude-cli
+        // per_chat only. A non-claude subprocess provider (or a subprocess fallback)
+        // in non-sandbox per_chat stays on THIS shared global socket, so the
+        // concurrent-sender actor race is NOT closed for it — warn rather than imply fixed.
+        if (this.sessionScope === 'per_chat' && !this.sandboxPerChat
+            && this.effectiveProvider?.endsWith('-cli') && this.effectiveProvider !== 'claude-cli') {
+          log.warn({ provider: this.effectiveProvider, sessionScope: this.sessionScope },
+            'per-chat actor binding inactive for this provider: a non-claude subprocess in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed. Subprocess fallbacks share the same exposure.');
+        }
 
         // Write the whatsoup MCP config to every configured CLI provider target:
         // primary first, then fallback when it uses a distinct config file.
