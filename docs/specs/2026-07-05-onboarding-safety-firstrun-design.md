@@ -193,6 +193,8 @@ matters only in that PR 2's UI copy assumes PR 1's strip exists.
   (`AddLineWizard.tsx:86`).
 - QR-238: credential write allowlist (deepseek/minimax/openai/anthropic) is a
   strict subset of SERVICE_ENV_MAP, and the documented fleet-config extension
-  path (`extraCredentialServices` → `setExtraCredentialServices`) has no
-  production caller — custom services (groq/openrouter) cannot be provisioned
-  via the API at all; doc-vs-code drift in the route's own docstring.
+  path is unwired: `setExtraCredentialServices` is imported in
+  `src/fleet/index.ts:14` but never called anywhere in `src/` (dead import) —
+  custom services (groq/openrouter) cannot be provisioned via the API at all;
+  the route docstring's promised `extraCredentialServices` fleet-config key
+  is doc-vs-code drift.
