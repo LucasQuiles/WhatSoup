@@ -135,6 +135,7 @@ import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor 
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -2863,7 +2864,14 @@ export class AgentRuntime implements Runtime {
     //      synchronous per_chat-without-sandbox path uses the global socket
     //      above and never allocates a per-chat socket, so the `workspaceResources`
     //      lookup here is only reachable under sandboxPerChat=true.
-    this.globalSocketServer?.updateActorJid(msg.senderJid);
+    // F-STICKY-ACTOR (QR-247): for claude-cli per_chat (which uses per-chat sockets),
+    // do NOT broadcast the sender onto the shared global socket — the per-chat socket
+    // resolves the actor per-request from the executing register. single/shared AND
+    // non-claude per_chat still broadcast (they use the global socket; non-claude
+    // per_chat stays on the pre-fix path, validator-warned).
+    if (!this.usesPerChatActorSocket()) {
+      this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid, msg.senderJid);
       const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
@@ -3366,7 +3374,7 @@ export class AgentRuntime implements Runtime {
     // so a pushed entry always corresponds to a turn that will run. HEAD = the turn
     // the subprocess is currently executing; shifted on that turn's result, cleared
     // on any abnormal termination (Slice-4). per_chat non-sandbox only.
-    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && mapKey !== undefined) {
+    if (this.usesPerChatActorSocket() && mapKey !== undefined) {
       const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
       execQ.push(actorJid);
       this.perChatExecActorQueue.set(mapKey, execQ);
@@ -5585,6 +5593,33 @@ export class AgentRuntime implements Runtime {
     if (Buffer.byteLength(full, 'utf8') <= 100) return full;
     const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
     return join(dir, `whatsoup-${h}.sock`);
+  }
+
+  /** F-STICKY-ACTOR (QR-247): true only for the mode this fix covers — claude-cli, per_chat, non-sandbox. Gates the per-chat socket, the exec-queue push, and the global-broadcast skip so other modes are byte-unchanged. */
+  private usesPerChatActorSocket(): boolean {
+    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.effectiveProvider === 'claude-cli';
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-247): create this chat's own MCP socket (tier:'global',
+   * bound to resolveExecutingActor) and write its per-session --mcp-config so the
+   * subprocess talks to it instead of the shared global socket. Returns the socket
+   * + cfg paths for the provider override. Torn down in cleanupPerChatState.
+   */
+  private createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string } {
+    const socketPath = this.derivePerChatSocketPath(chatJid);
+    const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
+    const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
+    writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
+    const socketServer = new WhatSoupSocketServer(
+      socketPath,
+      this.registry,
+      { tier: 'global', allowedRoot: this.cwd ?? homedir() },
+      () => this.resolveExecutingActor(chatJid),
+    );
+    socketServer.start();
+    this.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
+    return { socketPath, cfgPath };
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
@@ -7946,6 +7981,7 @@ export class AgentRuntime implements Runtime {
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
     mcpSocketPath?: string;
+    providerConfigOverride?: Record<string, unknown>;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     // Slice-2 routing wiring (flag-gated): preferences steer the session being
@@ -7987,7 +8023,9 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
       provider: route ? route.provider : this.effectiveProvider,
-      providerConfig: route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig(),
+      providerConfig: opts.providerConfigOverride
+        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
+        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
@@ -8201,10 +8239,20 @@ export class AgentRuntime implements Runtime {
         const toolScopeKey = this.createToolScopeKey(initialMapKey);
         let session!: SessionManager;
         const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        // F-STICKY-ACTOR (QR-247): for claude-cli non-sandbox per_chat, create this
+        // chat's own actor-bound MCP socket + per-session --mcp-config BEFORE the
+        // session so its cfg can be passed as the provider override (session.ts
+        // stays byte-unchanged). Other providers stay on the shared global socket.
+        const perChatSock = this.usesPerChatActorSocket()
+          ? this.createPerChatActorSocket(initialMapKey, chatJid)
+          : undefined;
         session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
           actorJid,
+          ...(perChatSock
+            ? { mcpSocketPath: perChatSock.socketPath, providerConfigOverride: { mcpConfig: [perChatSock.cfgPath], strictMcpConfig: true } }
+            : {}),
           onEvent: (event) => {
             const mapKey = resolveSessionMapKey();
             if (!mapKey) {
@@ -8236,25 +8284,6 @@ export class AgentRuntime implements Runtime {
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
         this.chatSessions.set(initialMapKey, session);
-        // F-STICKY-ACTOR (QR-247): per-chat MCP socket bound to this chat's
-        // executing-actor register (tier:'global' — all sensitive/substrate tools
-        // are scope:'global'; a chat-scoped tier would strip them). Resolver
-        // re-derives mapKey each read (LID-rekey transparent). The subprocess is
-        // pointed at this socket in a later slice (config seam); created here so
-        // lifecycle/teardown land with the session.
-        const perChatSockPath = this.derivePerChatSocketPath(chatJid);
-        const perChatSocket = new WhatSoupSocketServer(
-          perChatSockPath,
-          this.registry,
-          { tier: 'global', allowedRoot: this.cwd ?? homedir() },
-          () => this.resolveExecutingActor(chatJid),
-        );
-        perChatSocket.start();
-        this.perChatSocketResources.set(initialMapKey, {
-          socketServer: perChatSocket,
-          socketPath: perChatSockPath,
-          cfgPath: perChatSockPath.replace(/\.sock$/, '.mcp.json'),
-        });
         const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
         this.chatQueues.set(initialMapKey, perChatQ);
 

@@ -102,6 +102,26 @@ export function generateMcpConfigFile(
 }
 
 /**
+ * F-STICKY-ACTOR (QR-247): generate + write a provider MCP config to an arbitrary
+ * absolute path (0600), reusing generateMcpConfigFile. Used to give a per-chat
+ * claude-cli session its own --mcp-config pointing at its per-chat socket, without
+ * touching the shared cwd .mcp.json. Returns the path written, or null for API
+ * providers that use no config file.
+ */
+export function writeMcpConfigToPath(
+  providerId: string,
+  absPath: string,
+  socketPath: string,
+  proxyScriptPath: string,
+  additionalServers: AdditionalMcpServerConfig[] = [],
+): string | null {
+  const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath, additionalServers);
+  if (generated === null) return null;
+  writePrivateFileSync(absPath, JSON.stringify(generated, null, 2));
+  return absPath;
+}
+
+/**
  * Merge the generated opencode `mcp` block into a possibly-existing
  * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
  * key (model, provider catalog, watcher, …) and every sibling MCP server,
