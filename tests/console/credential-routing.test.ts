@@ -57,6 +57,17 @@ describe('planCredentialWrites — key-to-service routing matrix', () => {
     expect(planCredentialWrites(base({ provider: 'openai-api' }, { openaiKey: '   ' }))).toEqual([]);
   });
 
+  it('ignores a whitespace-only anthropic key (symmetric with the openai trim)', () => {
+    expect(planCredentialWrites(base({ provider: 'anthropic-api' }, { apiKey: '   ' }))).toEqual([]);
+  });
+
+  it('anthropic-api with no explicit apiKeyService defaults to service anthropic', () => {
+    expect(planCredentialWrites(base(
+      { provider: 'anthropic-api' },
+      { apiKey: 'sk-ant-6' },
+    ))).toEqual([{ service: 'anthropic', value: 'sk-ant-6' }]);
+  });
+
   it('skips the anthropic key when auth method is Existing Claude session (oauth), even if a stale key sits in form state', () => {
     expect(planCredentialWrites({
       name: 'w', type: 'agent',
