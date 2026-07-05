@@ -8,7 +8,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
-import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
+import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
@@ -427,10 +427,12 @@ export class OutboundQueue implements IOutboundQueue {
     this.turnHasVisibleText = true;
     // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
     // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
-    // mirrors the chat runtime's unconditional redactInternalArtifacts on the
-    // response. Applied to the assembled text BEFORE splitMessage so a secret is
-    // never split across chunks (boundary-safe).
-    const safe = redactInternalArtifacts(text).text;
+    // mirrors the chat runtime's redactInternalArtifacts on the response. Applied
+    // to the assembled text BEFORE splitMessage so a secret is never split across
+    // chunks (boundary-safe). Audience-scoped: operator-owned internal groups keep
+    // the fleet's coordination vocabulary (paths, hook names, bead `Files:` lists)
+    // and only have secrets/emails masked — client chats get the full scrub.
+    const safe = redactInternalArtifacts(text, resolveOutboundAudience(this.chatJid)).text;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
@@ -465,8 +467,8 @@ export class OutboundQueue implements IOutboundQueue {
     if (!text || text.trim() === '') return;
     // QR-114: redact operator-local internal artifacts on the assembled buffer
     // before splitMessage (boundary-safe), same as enqueueText — the streamed
-    // reply path otherwise reaches the user with zero redaction.
-    const safe = redactInternalArtifacts(text).text;
+    // reply path otherwise reaches the user with zero redaction. Audience-scoped.
+    const safe = redactInternalArtifacts(text, resolveOutboundAudience(this.chatJid)).text;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
