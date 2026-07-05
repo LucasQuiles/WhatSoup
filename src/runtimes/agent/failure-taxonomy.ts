@@ -597,7 +597,12 @@ function startsWithErrorOpener(lowerText: string): boolean {
  * what F1 already changed). CAUTION: because this duplicates rather than reuses
  * those branches, a future edit to either detector's matched substrings should
  * also update the mirrored candidate here, or the shape anchor below silently
- * stops recognizing the new shape.
+ * stops recognizing the new shape. Known gaps as of the 2026-07-04 verify pass:
+ * isUsageLimitMessage's top-level 'out of extra usage', bare 'claude usage
+ * limit', and 'requires usage credits' substrings are NOT mirrored — their bare
+ * reductions classify ambient (over-deliver, the safe direction; no bare
+ * real-corpus occurrence exists in the test corpus, every real form carries a
+ * reset-time cue that anchors via the separate cue path).
  *
  * Only the LENGTH of the longest candidate matters (see MAX_BANNER_SURROUNDING_WORDS);
  * for the two-part compounds (e.g. "out of usage" + an org/admin co-word) the
@@ -714,7 +719,11 @@ export type StreamedFailureConfidence = 'banner' | 'ambient';
  * credit/quota phrase — but round-2 additionally requires each of those to
  * satisfy the SHAPE principle (MAX_BANNER_SURROUNDING_WORDS): the matched
  * evidence must essentially BE the message, not a phrase genuine prose merely
- * embeds. Every other kind must START WITH a curated error opener; the 5 newest
+ * embeds. A curated error opener ALSO anchors usage-limit text, as the same
+ * unconditional fallback every kind gets — that path carries no shape check,
+ * a known inherited gap tracked as QR-224 (a two-topic reply opening with an
+ * unrelated opener token can still suppress). Every other kind must START WITH
+ * a curated error opener; the 5 newest
  * openers (SHAPE_GATED_BANNER_OPENERS) carry that same shape requirement
  * (QR-209b round-2 R1-HIGH-3), while the original 20 stay unconditional once the
  * length bound holds. When in doubt the result is `ambient` — on the streaming
