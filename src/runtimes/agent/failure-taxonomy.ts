@@ -482,6 +482,16 @@ export const MAX_STREAMED_BANNER_LENGTH = 300;
  * round-2 acceptance corpus (bare ground-truth banners vs. genuine conversational
  * prose covering the exact same topic): 10 sits in the only integer gap that
  * admits every required banner case and rejects every required ambient case.
+ *
+ * HEADROOM WARNING (measured at the 2026-07-04 verify pass): the longest real
+ * corpus banner sits at 9 surrounding words against this bound of 10 — one word
+ * of margin. If a provider rewords a banner past the bound it will NOT be
+ * silently destroyed; it fails OPEN to 'ambient': delivered to the user and
+ * logged via the 'delivered assistant_text despite provider-failure
+ * classification' warn. That warn line is the drift tripwire — when it fires on
+ * a raw banner shape, add the new shape to the acceptance corpus in
+ * failure-taxonomy.test.ts and re-derive this bound; do not widen it blind
+ * (every extra word erodes the prose-protection this constant exists for).
  */
 const MAX_BANNER_SURROUNDING_WORDS = 10;
 
