@@ -10,7 +10,7 @@ import {
   ZodObject,
   ZodRecord,
 } from 'zod';
-import { toConversationKey } from '../core/conversation-key.ts';
+import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import { isToolErrorPayload, type ToolDeclaration, type ToolCallResult, type SessionContext } from './types.ts';
@@ -333,11 +333,12 @@ export class ToolRegistry {
     // Global-tier sessions (operator-agent / primary-line) carry no
     // conversationKey, so tool telemetry was never recorded for them — only
     // chat-scoped hosts emitted tool_calls rows. Key those rows under the
-    // reserved '__global__' sentinel (the runtime's GLOBAL_TOOL_SCOPE_KEY). Real
-    // keys derive from JIDs so the sentinel cannot collide, and this adds rows,
-    // not columns, so the content fence is unchanged. Authorization/guard logic
-    // above still keys on session.conversationKey and is unaffected.
-    const durabilityKey = session.conversationKey || (session.tier === 'global' ? '__global__' : '');
+    // reserved GLOBAL_CONVERSATION_KEY sentinel (single-sourced from
+    // conversation-key.ts, where toConversationKey enforces the reservation —
+    // it refuses to mint this key from any JID). This adds rows, not columns,
+    // so the content fence is unchanged. Authorization/guard logic above still
+    // keys on session.conversationKey and is unaffected.
+    const durabilityKey = session.conversationKey || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
     const durabilityId = this.durability && durabilityKey
       ? this.durability.recordToolCall(
           durabilityKey,
