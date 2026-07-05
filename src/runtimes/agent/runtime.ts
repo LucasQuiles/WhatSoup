@@ -887,6 +887,14 @@ export class AgentRuntime implements Runtime {
   private recentProviderFallbackNotices = new Map<string, number>();
   private recentFallbackEmptyTurnAlerts = new Map<string, number>();
   private recentToolFailureAlerts = new Map<string, number>();
+  /**
+   * Dedup for {@link emitNoFallbackReauthNotice} (QR-211), keyed `${chatJid}:auth-required`.
+   * A dedicated map rather than folding into recentProviderFallbackNotices — that
+   * map's keys are 4-part (chatJid:reason:fallbackProvider:fallbackModel) and mean
+   * "already told this chat which backup took over"; this is the opposite case
+   * (no backup took over at all) and needs its own 2-part key shape.
+   */
+  private recentNoFallbackReauthNotices = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -4449,7 +4457,12 @@ export class AgentRuntime implements Runtime {
               conversationKey,
               mapKey,
             });
-            if (!replayScheduled) session?.shutdown();
+            if (!replayScheduled) {
+              // QR-211: no fallback took over — without this, the turn ends in
+              // permanent silence (session shuts down, nothing forwarded to chat).
+              if (!activation) this.emitNoFallbackReauthNotice(queue);
+              session?.shutdown();
+            }
             break;
           }
           if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
@@ -5851,6 +5864,32 @@ export class AgentRuntime implements Runtime {
       : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
   }
 
+  /**
+   * QR-211: user-visible notice for an auth-required terminal result when no
+   * fallback could be activated (not configured, or activation failed) — the
+   * three legacy-ladder / registry-handler auth-required branches otherwise end
+   * in permanent silence: the session shuts down with nothing ever forwarded to
+   * the chat. Generic by design (seam-6: no secrets, no provider internals).
+   *
+   * Owns its own enqueue AND de-dup (unlike usageLimitNotice, a pure string
+   * factory called from a single site) because it is invoked from three
+   * independent call sites and must not spam one notice per turn during a
+   * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
+   * prune→check→set→capDedupeMap idiom, reusing PROVIDER_FALLBACK_NOTICE_DEDUP_MS.
+   */
+  private emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentNoFallbackReauthNotices) {
+      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+        this.recentNoFallbackReauthNotices.delete(key);
+      }
+    }
+    const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
+    if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
+    this.recentNoFallbackReauthNotices.set(noticeKey, now);
+    this.capDedupeMap(this.recentNoFallbackReauthNotices);
+    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+  }
 
   /**
    * Count a completed turn during an active fallback window; alert and enqueue
@@ -6629,8 +6668,11 @@ export class AgentRuntime implements Runtime {
     }
     this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
     if (!replayScheduled) {
-      // Only usage-limit emits a standalone notice when no fallback armed.
+      // usage-limit and auth-required each emit a standalone notice when no
+      // fallback armed (QR-211); rate-limit / model-unavailable stay silent here
+      // — this central path is only reached under WHATSOUP_RESPONSE_REGISTRY_DISPATCH=1.
       if (reason === 'usage-limit' && !activation) queue.enqueueText(this.usageLimitNotice());
+      if (reason === 'auth-required' && !activation) this.emitNoFallbackReauthNotice(queue);
       session?.shutdown();
     }
   }
@@ -8104,7 +8146,12 @@ export class AgentRuntime implements Runtime {
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
-            if (!replayScheduled) this.session?.shutdown();
+            if (!replayScheduled) {
+              // QR-211: no fallback took over — without this, the turn ends in
+              // permanent silence (session shuts down, nothing forwarded to chat).
+              if (!activation) this.emitNoFallbackReauthNotice(queue);
+              this.session?.shutdown();
+            }
             this.singleTurnHadToolActivity = false;
             break;
           }

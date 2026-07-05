@@ -4487,6 +4487,10 @@ describe('AgentRuntime', () => {
       expect(mockSession.shutdown).toHaveBeenCalled();
       expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
       expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+      // QR-211 regression guard: a fallback DID activate here, so the no-fallback
+      // re-auth notice (emitNoFallbackReauthNotice) must NOT also fire — only the
+      // activation notice above ('will not replay it automatically') is sent.
+      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
       expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
     } finally {
@@ -4512,6 +4516,27 @@ describe('AgentRuntime', () => {
     expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+  });
+
+  // QR-211: an auth-required result that cannot arm a fallback (no fallback
+  // configured, or activation failed) used to end in permanent user-visible
+  // silence — the session shuts down with nothing ever forwarded to the chat.
+  it('auth-required result without fallback emits a generic re-auth notice and shuts down (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Authentication required. Sign in to continue.';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    expect(runtime.getFallbackState().fallbackReason).toBeNull();
+    expect(mockSession.shutdown).toHaveBeenCalled();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
   });
 
   it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
@@ -7817,6 +7842,125 @@ describe('AgentRuntime', () => {
     expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
   });
 
+  // QR-211: mirrors the transient-network test above (same handleEventWithContext
+  // harness), but for the per_chat auth-required ladder with no fallback armed —
+  // today this path shuts the session down with nothing ever forwarded to the chat.
+  it('per_chat auth-required result without fallback emits a generic re-auth notice', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    // Unlike the transient-network test above, the auth-required arming branch
+    // runs the full cleanupUsageLimitTurn path (it calls session?.shutdown()),
+    // which touches upsertSessionCheckpoint/completeInbound too — stub all three.
+    (runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+    }).durability = {
+      completeTurn: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+      completeInbound: vi.fn(),
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    const raw = 'Authentication required. Sign in to continue.';
+
+    handleEventWithContext(
+      { type: 'result', text: raw, isError: true },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    // Raw provider text must not be forwarded
+    const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    // Generic re-auth notice is sent instead of permanent silence
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+    expect(session.shutdown).toHaveBeenCalled();
+  });
+
+  // QR-211: the notice must be deduped per (chatJid, 'auth-required') within
+  // PROVIDER_FALLBACK_NOTICE_DEDUP_MS — a sustained auth-required episode across
+  // consecutive turns must not spam the chat with one notice per turn.
+  it('per_chat auth-required no-fallback notice is deduped within the window for the same chat', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+    }).durability = {
+      completeTurn: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+      completeInbound: vi.fn(),
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: unknown,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    const raw = 'Authentication required. Sign in to continue.';
+
+    handleEventWithContext({ type: 'result', text: raw, isError: true }, queue, session, 'conv-111', 17, '111', '111#session');
+    handleEventWithContext({ type: 'result', text: raw, isError: true }, queue, session, 'conv-111', 18, '111', '111#session');
+
+    const noticeCalls = (queue.enqueueText as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('re-authentication'),
+    );
+    expect(noticeCalls).toHaveLength(1);
+    expect(session.shutdown).toHaveBeenCalledTimes(2);
+  });
+
   // Regression guard: under WHATSOUP_RESPONSE_REGISTRY_DISPATCH=1, server-error
   // and transient-network terminal-result texts bridge to registry workflows
   // (provider_server_error / provider_network_error) whose providerKind is null.
@@ -7938,6 +8082,32 @@ describe('AgentRuntime', () => {
       // Turn-capability accounting records the real provider failure class.
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
       expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+    });
+
+    // QR-211: unlike the two tests above (null-providerKind classes), auth-required
+    // has a non-null providerKind and so IS routed into handleProviderFailureResult
+    // by dispatchProviderFailureResult. Its comment used to say only usage-limit
+    // emits a standalone notice when no fallback armed — this proves auth-required
+    // does too, through this same central handler, not just the legacy ladders.
+    it('auth-required result with dispatch enabled and no fallback emits the generic re-auth notice', () => {
+      process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+      const { queue, session, handleEventWithContext } = makePerChatDispatchHarness();
+
+      const raw = 'Authentication required. Sign in to continue.';
+      handleEventWithContext(
+        { type: 'result', text: raw, isError: true },
+        queue,
+        session,
+        'conv-111',
+        17,
+        '111',
+        '111#session',
+      );
+
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+      expect(session.shutdown).toHaveBeenCalled();
+      const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+      expect(forwardedRaw).not.toContain(raw);
     });
   });
 
