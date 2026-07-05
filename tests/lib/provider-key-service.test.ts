@@ -56,6 +56,11 @@ describe('provider key service mapping', () => {
   it('derives opencode service names from model prefixes and leaves non-keyring providers unresolved', () => {
     expect(resolveProviderKeyService('opencode-cli', ' DeepSeek/deepseek-chat ')).toBe('deepseek');
     expect(resolveProviderKeyService('opencode-cli', 'minimax/MiniMax-M2.7', { apiKeyService: 'ignored' })).toBe('minimax');
+    // Documented fail-open: an UNREGISTERED vendor prefix still resolves to a
+    // service name (no SERVICE_ENV_MAP membership check here) — downstream
+    // lookupCredential simply misses. Locked so a future membership check is
+    // a conscious behavior change.
+    expect(resolveProviderKeyService('opencode-cli', 'unknown-vendor/some-model')).toBe('unknown-vendor');
     expect(resolveProviderKeyService('opencode-cli', '')).toBeNull();
     expect(resolveProviderKeyService('claude-cli', 'claude-sonnet')).toBeNull();
     expect(resolveProviderKeyService(null, 'minimax/model')).toBeNull();

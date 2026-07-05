@@ -776,7 +776,7 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });
 
-  it('runtime error marks inbound failed', async () => {
+  it('runtime error marks inbound failed with classified failure_class (plain Error → unknown)', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
     const runtime = makeRuntime();
@@ -791,7 +791,27 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     await runIngest(handler, makeIncomingMessage());
 
     expect(journalSpy).toHaveBeenCalledOnce();
-    expect(failSpy).toHaveBeenCalledWith(11);
+    // A generic runtime error is unattributable → 'unknown'.
+    expect(failSpy).toHaveBeenCalledWith(11, 'unknown');
+  });
+
+  it('runtime SQLITE_FULL error is classified db_error on the failed inbound', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    vi.mocked(runtime.handleMessage).mockRejectedValue(
+      Object.assign(new Error('SQLITE_FULL: database or disk is full'), { code: 'SQLITE_FULL' }),
+    );
+
+    vi.spyOn(durability, 'journalInbound').mockReturnValue(12);
+    const failSpy = vi.spyOn(durability, 'markInboundFailed');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage());
+
+    expect(failSpy).toHaveBeenCalledWith(12, 'db_error');
   });
 
   it('no durability engine — existing behaviour unchanged', async () => {

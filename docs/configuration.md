@@ -826,7 +826,7 @@ Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n
 
 When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise.
 
-1. **Install the fallback provider CLI and confirm it is on the service user's PATH.**
+1. **Install the fallback provider CLI and confirm it is on the service user's PATH.** Skip this step for API-type fallback providers (`openai-api`, `anthropic-api` — e.g. the Groq/OpenRouter recipes in [Custom endpoint](#custom-endpoint-providerconfigbaseurl)): they are managed HTTP loops with no CLI binary to install or probe.
 
    For `opencode-cli`:
    ```sh
@@ -874,10 +874,25 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    </dict>
    ```
 
+   **launchd caveat:** generated plists emit only `PATH`/`HOME`/`TMPDIR`
+   (+`WHATSOUP_NODE`) in `EnvironmentVariables` (`buildPlist()`,
+   `src/fleet/platform.ts`) — there is no `EnvironmentFile` equivalent to the
+   systemd units' per-instance `tokens.env`, so a hand-added key in a
+   generated plist is LOST on the next `deploy:launchd.generated`
+   regeneration. On macOS prefer Route B: API-provider keys are read
+   in-process at request time, so the keychain entry alone is sufficient —
+   no plist edit needed. Grant the service user's launchd context access to
+   the item (`security add-generic-password -U …` under that user); keychain
+   reads from a non-GUI launchd session fail when the login keychain is
+   locked, which surfaces as `fallback_credential_missing` / QR-104 env
+   fallback rather than an explicit error.
+
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
    ```sh
-   security add-generic-password -s minimax -a "$USER" -w "sk-…"
+   security add-generic-password -s minimax -a "$USER" -w
+   # (bare -w: the command prompts for the value interactively, keeping the
+   # key off argv — out of shell history and momentary `ps` visibility)
    ```
 
    **Route C — Linux GNOME Keyring (`secret-tool`).**
@@ -1063,7 +1078,7 @@ identity model, limitations, and keyring provisioning live in the runbook:
 | `voice.voicemailMaxLengthSec` | integer | no | `120` | Max recording length (`[5, 600]`). |
 | `voice.voicemailGreeting` | string | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
-| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Enforced per destination as a sliding one-minute window at the send seam; over-cap sends are **delayed (queued FIFO), never rejected**. |
+| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Enforced per destination as a sliding one-minute window at the send seam; over-cap sends are **delayed (queued FIFO), never rejected**. The cap is in-process, in-memory state only: a restart resets it, and it is **not** shared across multiple processes sending from the same Twilio number — each process enforces its own independent cap, so N processes together allow up to N× the configured rate. Surviving restarts or coordinating across processes would require a persistent store, which is not implemented. |
 
 ### Validation Rules Summary
 
@@ -1263,6 +1278,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 33 | Adds `auth_loss_signal` with active-signal and classifier indexes so auth-loss evidence can be recorded once, resolved after stable authenticated-open dwell, and counted across later recurrences (`runMigration33`) |
 | 34 | Adds nullable `inbound_events` continuity-candidate marker columns (`continuity_candidate_reason`, `continuity_candidate_source`, `continuity_candidate_marked_at`) so restart recovery and runtime fault/disarm branches can tag no-terminal-outbound inbounds before any queue/consumer exists (`runMigration34`) |
 | 35 | Rebuilds `messages_fts_delete` and `messages_fts_update` triggers with an `OLD.deleted_at IS NULL` guard on the FTS `'delete'` command, so a hard-delete or content_text update of a since-soft-deleted row no longer double-deletes the FTS entry (which threw `database disk image is malformed`, crashing retention pruning and transcription updates) — QR-115 (`runMigration35`) |
+| 36 | Adds nullable `inbound_events.failure_class` — a bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on failed rows; vocabulary is gated in code (`src/core/inbound-failure-class.ts`), no CHECK, no default, no backfill (`runMigration36`) |
 
 
 ---
