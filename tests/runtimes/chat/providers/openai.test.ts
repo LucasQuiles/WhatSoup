@@ -308,4 +308,20 @@ describe('OpenAI Provider', () => {
       expect.stringContaining('keyring lookup missed'),
     );
   });
+
+  it('openaiProviderConfig.apiKeyService double-miss (keyring null AND env unset) constructs with apiKey: undefined, not empty string', () => {
+    // OPENAI_API_KEY is already deleted in beforeEach. This is the exact
+    // double-miss the `|| undefined` in openai.ts guards against: resolveApiKey
+    // returns '' here (a visible missing-key condition, no warning per QR-104 —
+    // see tests/lib/api-key-resolver.test.ts), and '' must not reach the SDK as
+    // apiKey: '' (a silent empty Bearer header). It must become undefined so the
+    // SDK re-reads env/throws loudly instead.
+    mockedLookupCredential.mockReturnValue(null);
+    MockOpenAI.mockClear();
+    createOpenAIProvider({ baseUrl: 'https://custom.example.com/v1', apiKeyService: 'custom-openai' });
+    const callArgs = MockOpenAI.mock.calls[0][0] as { baseURL?: string; apiKey?: string };
+    expect(callArgs.baseURL).toBe('https://custom.example.com/v1');
+    expect(callArgs.apiKey).toBeUndefined();
+    expect(mockLog.warn).not.toHaveBeenCalled();
+  });
 });
