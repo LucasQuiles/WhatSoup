@@ -162,6 +162,8 @@ vi.mock('../../../src/core/durability.ts', () => ({
 
 vi.mock('../../../src/core/conversation-key.ts', () => ({
   toConversationKey: vi.fn((jid: string) => jid),
+  // runtime.ts derives its global scope-key constants from this at import time.
+  GLOBAL_CONVERSATION_KEY: '__global__',
 }));
 
 vi.mock('../../../src/core/heal-protocol.ts', () => ({

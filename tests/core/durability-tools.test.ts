@@ -203,7 +203,7 @@ describe('ToolRegistry durability integration', () => {
     expect(row.result).toContain('boom');
   });
 
-  it('does not record tool call when session has no conversationKey', async () => {
+  it('records tool call under the __global__ sentinel when a global-tier session has no conversationKey', async () => {
     registry.register(makeTool({
       name: 'global_tool',
       scope: 'global',
@@ -211,11 +211,14 @@ describe('ToolRegistry durability integration', () => {
       handler: async () => 'ok',
     }));
 
-    const session: SessionContext = { tier: 'global' }; // no conversationKey
+    const session: SessionContext = { tier: 'global' }; // no conversationKey → sentinel
     await registry.call('global_tool', { message: 'hi' }, session);
 
     const rows = db.raw.prepare(`SELECT * FROM tool_calls`).all() as any[];
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].conversation_key).toBe('__global__');
+    expect(rows[0].tool_name).toBe('global_tool');
+    expect(rows[0].status).toBe('complete');
   });
 
   it('does not record tool call when durability is not set', async () => {

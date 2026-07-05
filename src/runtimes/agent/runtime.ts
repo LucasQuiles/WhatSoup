@@ -95,7 +95,7 @@ import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-e
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
-import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
+import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { createChatResolver } from '../../core/chats-resolver.ts';
 import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -193,8 +193,10 @@ const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 100
 const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
 const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
-const GLOBAL_TOOL_SCOPE_KEY = '__global__';
-const GLOBAL_CRASH_SCOPE_KEY = '__global__';
+// Single-sourced from conversation-key.ts so the tool/crash scope keys and the
+// tool_calls telemetry sentinel can never drift apart.
+const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
+const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
