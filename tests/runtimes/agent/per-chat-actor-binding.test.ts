@@ -327,21 +327,18 @@ describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH,
   });
 });
 
-// ── F-STICKY-ACTOR STDIN_WRITE_TIMEOUT strand test ───────────────────────────
+// ── F-STICKY-ACTOR F6: durable per-termination-path mutation tests ────────────
 
-describe('F-STICKY-ACTOR: STDIN_WRITE_TIMEOUT clears the executing-actor queue (QR-247)', () => {
-  const CHAT = 'group-timeout@g.us';
+describe('F-STICKY-ACTOR F6: replayTurnOnFallback clears the exec-queue (QR-247)', () => {
+  const CHAT = 'group-fb@g.us';
   const ADMIN = 'admin@s.whatsapp.net';
+  const GUEST = 'guest@s.whatsapp.net';
   let runtime: AgentRuntime;
   let mapKey: string;
-
   type Priv = {
     resolvePerChatMapKey(c: string): string;
-    chatSessions: Map<string, unknown>;
-    chatQueues: Map<string, unknown>;
     perChatExecActorQueue: Map<string, Array<string | undefined>>;
-    sendTurnToSession(session: unknown, chatJid: string, text: string, mapKey?: string, actorJid?: string): Promise<void>;
-    resolveExecutingActor(c: string): string | undefined;
+    replayTurnOnFallback(args: { chatJid: string; mapKey?: string; replayText: string; actorJid?: string; oldSession: unknown }): Promise<void>;
   };
   const priv = (): Priv => runtime as unknown as Priv;
 
@@ -350,20 +347,87 @@ describe('F-STICKY-ACTOR: STDIN_WRITE_TIMEOUT clears the executing-actor queue (
     mapKey = priv().resolvePerChatMapKey(CHAT);
   });
 
-  it('a timed-out stdin write clears the pushed actor (push-without-shift -> fail-closed, no stale HEAD)', async () => {
-    const sess = {
-      ...mockSession,
-      getStatus: () => ({ active: true, sessionId: 's', pid: 1, startedAt: null, messageCount: 0, lastMessageAt: null }),
-      sendTurn: vi.fn(async () => { throw new Error('STDIN_WRITE_TIMEOUT: agent not reading input'); }),
-    };
-    priv().chatSessions.set(mapKey, sess);
-    priv().chatQueues.set(mapKey, mockQueue);
-
-    // sendTurnToSession pushes ADMIN at dispatch, then sendTurn throws STDIN_WRITE_TIMEOUT.
-    // No result event will ever shift it -> the timeout catch must clear it.
-    await priv().sendTurnToSession(sess, CHAT, 'do an admin thing', mapKey, ADMIN);
-
+  it('clears the whole queue before replaying (mutation target: revert delete -> RED)', async () => {
+    priv().perChatExecActorQueue.set(mapKey, [ADMIN, GUEST]); // stale in-flight on the killed child
+    // Isolate the clear: stub the recreate + replay (they re-push on their own).
+    vi.spyOn(runtime as unknown as { recreatePerChatSessionForFallback: (...a: unknown[]) => void }, 'recreatePerChatSessionForFallback').mockImplementation(() => {});
+    vi.spyOn(runtime as unknown as { sendTurnPerChat: (...a: unknown[]) => Promise<void> }, 'sendTurnPerChat').mockResolvedValue(undefined);
+    await priv().replayTurnOnFallback({ chatJid: CHAT, mapKey, replayText: 'x', actorJid: ADMIN, oldSession: null });
     expect(priv().perChatExecActorQueue.get(mapKey) ?? []).toEqual([]);
-    expect(priv().resolveExecutingActor(CHAT)).toBeUndefined();
+  });
+});
+
+describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entries (QR-247)', () => {
+  const CHAT = 'group-inactive@g.us';
+  const ADMIN = 'admin@s.whatsapp.net';
+  const GUEST = 'guest@s.whatsapp.net';
+  let runtime: AgentRuntime;
+  let mapKey: string;
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    chatSessions: Map<string, unknown>;
+    chatQueues: Map<string, unknown>;
+    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    sendTurnToSession(session: unknown, chatJid: string, text: string, mapKey?: string, actorJid?: string): Promise<void>;
+  };
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    mapKey = priv().resolvePerChatMapKey(CHAT);
+  });
+
+  it('clear-if-inactive drops the dead subprocess entries before pushing the fresh turn (revert -> RED)', async () => {
+    const inactive = {
+      ...mockSession,
+      getStatus: () => ({ active: false, sessionId: null, pid: null, startedAt: null, messageCount: 0, lastMessageAt: null }),
+      spawnSession: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+      sendTurn: vi.fn(async () => {}),
+    };
+    priv().chatSessions.set(mapKey, inactive);
+    priv().chatQueues.set(mapKey, mockQueue);
+    priv().perChatExecActorQueue.set(mapKey, [GUEST]); // stale from a dead subprocess (e.g. resume-fail)
+    await priv().sendTurnToSession(inactive, CHAT, 'admin turn', mapKey, ADMIN);
+    // The stale GUEST is dropped at the push (session inactive) — only the fresh ADMIN turn remains.
+    expect(priv().perChatExecActorQueue.get(mapKey)).toEqual([ADMIN]);
+  });
+});
+
+describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canonical (F4, QR-247)', () => {
+  const ADMIN = 'admin@s.whatsapp.net';
+  const GUEST = 'guest@s.whatsapp.net';
+  let runtime: AgentRuntime;
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    chatSessions: Map<string, unknown>;
+    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    perChatSocketResources: Map<string, unknown>;
+    handleJidAliasChanged(conversationKey: string, newJid: string): void;
+  };
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+  });
+
+  it('migrates exec-queue + socket lidKey -> canonical; nothing left under lidKey (revert migrate -> RED)', () => {
+    const convKey = '15551234567';
+    const lidKey = `${convKey}@lid`;
+    const newJid = `${convKey}@s.whatsapp.net`;
+    const canonical = priv().resolvePerChatMapKey(newJid);
+    // Preconditions for the per_chat rekey branch: a session + in-flight state under lidKey.
+    priv().chatSessions.set(lidKey, { getStatus: () => ({ active: true }), getDbRowId: () => null });
+    priv().perChatExecActorQueue.set(lidKey, [ADMIN, GUEST]);
+    const sockRes = { socketServer: { stop: vi.fn(), updateDeliveryJid: vi.fn() }, socketPath: '/tmp/x.sock', cfgPath: '/tmp/x.mcp.json' };
+    priv().perChatSocketResources.set(lidKey, sockRes);
+
+    priv().handleJidAliasChanged(convKey, newJid);
+
+    // Migrated to canonical; the trailing cleanupPerChatState(lidKey) finds nothing under lidKey.
+    expect(priv().perChatExecActorQueue.get(lidKey)).toBeUndefined();
+    expect(priv().perChatExecActorQueue.get(canonical)).toEqual([ADMIN, GUEST]);
+    expect(priv().perChatSocketResources.get(canonical)).toBe(sockRes);
+    expect(priv().perChatSocketResources.get(lidKey)).toBeUndefined();
   });
 });

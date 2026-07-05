@@ -3473,14 +3473,6 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
-        // F-STICKY-ACTOR (QR-247): the turn was pushed onto the executing-actor
-        // queue at dispatch but its stdin write timed out with NO result -> a
-        // push-without-shift. The session stays 'active' (no crash), so the
-        // clear-if-inactive at the next push does NOT fire and the actor would
-        // strand as HEAD -> next turn wrong-authorized (same class as S-CRASH).
-        // Clear the whole queue fail-closed: the hung subprocess's in-flight turns
-        // are stuck until it recovers or the watchdog crashes it.
-        if (this.usesPerChatActorSocket() && mapKey !== undefined) this.perChatExecActorQueue.delete(mapKey);
         const status = session.getStatus();
         log.warn({
           chatJid,
