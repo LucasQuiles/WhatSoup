@@ -157,6 +157,8 @@ describe('resolveRoute precedence', () => {
     }));
     expect(d.provider).toBe('codex-cli');
     expect(d.model).toBeUndefined();
+    expect(d.source).toBe('preference');
+    expect(d.reasonCode).toBe('user_pin');
   });
 
   it('an unconfigured tier resolves to the default route with an HONEST distinct source', () => {

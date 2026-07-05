@@ -11861,7 +11861,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await sendAndDrain(second.runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'hello' }));
     const offOpts = capturedSessionManagerOptsRef.current as unknown as Record<string, unknown>;
     expect(offOpts).toBeTruthy();
-    expect(offOpts.routingSystemBlock).toBeUndefined();
+    expect(typeof offOpts.routingSystemBlock).toBe('undefined');
   });
 
   it('NL typed-intent marker feeds the SAME preference path as the aliases and is stripped from delivery', async () => {
