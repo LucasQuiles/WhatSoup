@@ -2809,219 +2809,233 @@ export class AgentRuntime implements Runtime {
 
     if (classified.type === 'local') {
       // Local commands never dispatch a turn, so no downstream path will ever
-      // finalize the journaled inbound row — finalize it here (mirrors the
-      // ingest-side 'admin_command' skip). Placed before the switch so even an
-      // admin-denied early return still completes the row.
+      // finalize the journaled inbound row — finalize it here. Placed before the
+      // switch so even an admin-denied early return still completes the row;
+      // the switch below is try/caught so a throwing handler cannot escape to
+      // the turnChain catch-all and re-finalize the row a second time. (The
+      // ingest-side 'admin_command' skip solves the same problem in the other
+      // order: it wraps its handler and marks after.)
       if (this.durability && msg.inboundSeq !== undefined) {
         this.durability.markInboundSkipped(msg.inboundSeq, 'local_command');
       }
-      switch (classified.command) {
-        case 'new':
-          // Shared mode: /new is admin-only
-          if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            // @check CHK-067 // @traces REQ-012.AC-06
-            return;
-          }
-          // Capture session ref before branches may delete it from the map.
-          // In per_chat mode, this.session is NOT reliable (shared field race),
-          // so we look up the correct session from the per-chat maps.
-          const sessionForNew = this.sessionScope === 'per_chat'
-            ? this.chatSessions.get(perChatMapKey!)
-            : this.session;
-          log.info({
-            chatJid,
-            sessionScope: this.sessionScope,
-            shared: this.shared,
-            sandboxPerChat: this.sandboxPerChat,
-          }, 'resetting session and queue for /new');
-          // Abort the old queue — clears timers and typing heartbeat before discarding.
-          // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
-          this.getQueueForChat(chatJid, perChatMapKey)?.abortTurn();
-          if (this.sessionScope !== 'per_chat') {
-            this.cleanupGlobalAutoCompactState();
-          }
-          // Create a fresh queue before spawning so stale output from the old session
-          // can never leak into the new session's delivery channel.
-          if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
-            // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
-            const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
-            this.cleanupPerChatState(workspaceKey);
-            this.chatSessions.delete(workspaceKey);
-            const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
-            this.chatQueues.set(workspaceKey, q1);
-          } else if (this.shared) {
-            const q2 = this.createOutboundQueue(chatJid, '/new shared replacement');
-            this.outboundQueues.set(chatJid, q2);
-          } else if (this.sessionScope === 'per_chat') {
-            // non-sandboxPerChat per_chat: keyed by canonical chat key
-            this.cleanupPerChatState(perChatMapKey!);
-            this.chatSessions.delete(perChatMapKey!);
-            const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
-            this.chatQueues.set(perChatMapKey!, q3);
-          } else {
-            const q4 = this.createOutboundQueue(chatJid, '/new single replacement');
-            this.queue = q4;
-          }
-          // NOTE: sessionForNew was captured before the map delete above. handleNew()
-          // signals the old session to reset. Any async events from the dying session
-          // arrive with the old workspaceKey — handleEventPerChat tolerates missing
-          // queue entries (returns early). The next message triggers ensureSessionAndQueue
-          // which creates a fresh session+queue in the map. This is a narrow window
-          // inherited from the original design, not a regression from the race fix.
-          await sessionForNew?.handleNew();
-          // QR-108: /new is a clean reset, so drop the one-message-handoff latches
-          // for this conversation too — otherwise a standby notice or handoff
-          // artifact stashed before /new leaks into the NEXT reply/prelude (both
-          // tables are keyed by the stable conversation_key, which /new does not
-          // change). Both fns are idempotent no-ops when nothing is pending, and
-          // their own JSDoc already documents "cleared on /new".
-          {
-            const resetKey = toConversationKey(chatJid);
-            clearStandbyNotice(this.db, resetKey);
-            deleteHandoffArtifact(this.db, resetKey);
-          }
-          // Reset turn flag — stale value from the old session must not suppress the
-          // _(no response)_ fallback if the first new-session turn has no visible text.
-          this.turnHadVisibleOutput = false;
-          this.sendDirect(chatJid, '*Starting new session* ✓');
-          break;
-
-        case 'status': {
-          // Look up session from per-chat maps (not the shared field) to avoid race.
-          const sessionForStatus = this.sessionScope === 'per_chat'
-            ? this.chatSessions.get(perChatMapKey!)
-            : this.session;
-          const status = sessionForStatus?.getStatus();
-          let text: string;
-          if (status?.active) {
-            const sessionShort = status.sessionId
-              ? status.sessionId.slice(0, 8) + '...'
-              : 'pending';
-            const started = status.startedAt ? formatAge(status.startedAt) : 'unknown';
-            const lastActivity = status.lastMessageAt
-              ? formatAge(status.lastMessageAt)
-              : 'none';
-            text =
-              '*Session active*\n' +
-              `PID: \`${status.pid ?? 'unknown'}\`\n` +
-              `Session: \`${sessionShort}\`\n` +
-              `Started: ${started}\n` +
-              `Messages: ${status.messageCount}\n` +
-              `Last activity: ${lastActivity}`;
-          } else {
-            text = '_No active session._ Send a message to start one.';
-          }
-          this.sendDirect(chatJid, text);
-          break;
-        }
-
-        case 'help': {
-          const helpText =
-            '*/new* — start a fresh session\n' +
-            '*/status* — show current session status\n' +
-            '*/sessions* — list all active sessions _(admin)_\n' +
-            '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
-            '*/help* — show this help\n' +
-            '_Any other message is forwarded to Claude Code._\n' +
-            'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
-          this.sendDirect(chatJid, helpText);
-          break;
-        }
-
-        case 'sessions': {
-          // Admin-only
-          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            return;
-          }
-          const entries: string[] = [];
-          let idx = 1;
-          if (this.sessionScope === 'per_chat') {
-            for (const [mapKey, sess] of this.chatSessions) {
-              const st = sess.getStatus();
-              if (!st.active) continue;
-              const isGrp = isGroupConversationKey(mapKey);
-              const label = isGrp ? 'Group' : 'DM';
-              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-              const dbRowId = sess.getDbRowId();
-              let tkStr = '0';
-              if (dbRowId !== null) {
-                const tokenRow = this.db.raw.prepare(
-                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                if (tokenRow) {
-                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                }
-              }
-              entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-              idx++;
+      try {
+        switch (classified.command) {
+          case 'new':
+            // Shared mode: /new is admin-only
+            if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              // @check CHK-067 // @traces REQ-012.AC-06
+              return;
             }
-          } else {
-            const st = this.session?.getStatus();
-            if (st?.active) {
-              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-              const dbRowId = this.session?.getDbRowId() ?? null;
-              let tkStr = '0';
-              if (dbRowId !== null) {
-                const tokenRow = this.db.raw.prepare(
-                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                if (tokenRow) {
-                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                }
-              }
-              entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+            // Capture session ref before branches may delete it from the map.
+            // In per_chat mode, this.session is NOT reliable (shared field race),
+            // so we look up the correct session from the per-chat maps.
+            const sessionForNew = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            log.info({
+              chatJid,
+              sessionScope: this.sessionScope,
+              shared: this.shared,
+              sandboxPerChat: this.sandboxPerChat,
+            }, 'resetting session and queue for /new');
+            // Abort the old queue — clears timers and typing heartbeat before discarding.
+            // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
+            this.getQueueForChat(chatJid, perChatMapKey)?.abortTurn();
+            if (this.sessionScope !== 'per_chat') {
+              this.cleanupGlobalAutoCompactState();
             }
-          }
-          const sessionsText = entries.length > 0
-            ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
-            : '_No active sessions._';
-          this.sendDirect(chatJid, sessionsText, true);
-          break;
-        }
+            // Create a fresh queue before spawning so stale output from the old session
+            // can never leak into the new session's delivery channel.
+            if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
+              // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
+              const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+              this.cleanupPerChatState(workspaceKey);
+              this.chatSessions.delete(workspaceKey);
+              const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
+              this.chatQueues.set(workspaceKey, q1);
+            } else if (this.shared) {
+              const q2 = this.createOutboundQueue(chatJid, '/new shared replacement');
+              this.outboundQueues.set(chatJid, q2);
+            } else if (this.sessionScope === 'per_chat') {
+              // non-sandboxPerChat per_chat: keyed by canonical chat key
+              this.cleanupPerChatState(perChatMapKey!);
+              this.chatSessions.delete(perChatMapKey!);
+              const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
+              this.chatQueues.set(perChatMapKey!, q3);
+            } else {
+              const q4 = this.createOutboundQueue(chatJid, '/new single replacement');
+              this.queue = q4;
+            }
+            // NOTE: sessionForNew was captured before the map delete above. handleNew()
+            // signals the old session to reset. Any async events from the dying session
+            // arrive with the old workspaceKey — handleEventPerChat tolerates missing
+            // queue entries (returns early). The next message triggers ensureSessionAndQueue
+            // which creates a fresh session+queue in the map. This is a narrow window
+            // inherited from the original design, not a regression from the race fix.
+            await sessionForNew?.handleNew();
+            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+            // for this conversation too — otherwise a standby notice or handoff
+            // artifact stashed before /new leaks into the NEXT reply/prelude (both
+            // tables are keyed by the stable conversation_key, which /new does not
+            // change). Both fns are idempotent no-ops when nothing is pending, and
+            // their own JSDoc already documents "cleared on /new".
+            {
+              const resetKey = toConversationKey(chatJid);
+              clearStandbyNotice(this.db, resetKey);
+              deleteHandoffArtifact(this.db, resetKey);
+            }
+            // Reset turn flag — stale value from the old session must not suppress the
+            // _(no response)_ fallback if the first new-session turn has no visible text.
+            this.turnHadVisibleOutput = false;
+            this.sendDirect(chatJid, '*Starting new session* ✓');
+            break;
 
-        case 'kill-session': {
-          // Admin-only
-          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            return;
-          }
-          const targetIdx = parseInt(classified.args ?? '', 10);
-          if (isNaN(targetIdx) || targetIdx < 1) {
-            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+          case 'status': {
+            // Look up session from per-chat maps (not the shared field) to avoid race.
+            const sessionForStatus = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            const status = sessionForStatus?.getStatus();
+            let text: string;
+            if (status?.active) {
+              const sessionShort = status.sessionId
+                ? status.sessionId.slice(0, 8) + '...'
+                : 'pending';
+              const started = status.startedAt ? formatAge(status.startedAt) : 'unknown';
+              const lastActivity = status.lastMessageAt
+                ? formatAge(status.lastMessageAt)
+                : 'none';
+              text =
+                '*Session active*\n' +
+                `PID: \`${status.pid ?? 'unknown'}\`\n` +
+                `Session: \`${sessionShort}\`\n` +
+                `Started: ${started}\n` +
+                `Messages: ${status.messageCount}\n` +
+                `Last activity: ${lastActivity}`;
+            } else {
+              text = '_No active session._ Send a message to start one.';
+            }
+            this.sendDirect(chatJid, text);
             break;
           }
-          if (this.sessionScope === 'per_chat') {
-            const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
-            if (targetIdx > activeSessions.length) {
-              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
-              break;
-            }
-            const [mapKey, targetSession] = activeSessions[targetIdx - 1];
-            this.chatQueues.get(mapKey)?.abortTurn();
-            this.chatSessions.delete(mapKey);
-            this.chatQueues.delete(mapKey);
-            this.cleanupPerChatState(mapKey);
-            await targetSession.shutdown(false);
-            const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
-          } else {
-            if (!this.session?.getStatus().active) {
-              this.sendDirect(chatJid, '_No active session to kill._', true);
-              break;
-            }
-            this.getActiveQueue()?.abortTurn();
-            this.operationTracker?.shutdown();
-            this.operationTracker = null;
-            this.cleanupGlobalAutoCompactState();
-            await this.session.shutdown(false);
-            this.session = null;
-            this.queue = null;
-            this.activeChatJid = null;
-            this.sendDirect(chatJid, '_Session killed._', true);
+
+          case 'help': {
+            const helpText =
+              '*/new* — start a fresh session\n' +
+              '*/status* — show current session status\n' +
+              '*/sessions* — list all active sessions _(admin)_\n' +
+              '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
+              '*/help* — show this help\n' +
+            '_Any other message is forwarded to Claude Code._\n' +
+            'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
+            this.sendDirect(chatJid, helpText);
+            break;
           }
-          break;
+
+          case 'sessions': {
+            // Admin-only
+            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              return;
+            }
+            const entries: string[] = [];
+            let idx = 1;
+            if (this.sessionScope === 'per_chat') {
+              for (const [mapKey, sess] of this.chatSessions) {
+                const st = sess.getStatus();
+                if (!st.active) continue;
+                const isGrp = isGroupConversationKey(mapKey);
+                const label = isGrp ? 'Group' : 'DM';
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = sess.getDbRowId();
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                idx++;
+              }
+            } else {
+              const st = this.session?.getStatus();
+              if (st?.active) {
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = this.session?.getDbRowId() ?? null;
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+              }
+            }
+            const sessionsText = entries.length > 0
+              ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
+              : '_No active sessions._';
+            this.sendDirect(chatJid, sessionsText, true);
+            break;
+          }
+
+          case 'kill-session': {
+            // Admin-only
+            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              return;
+            }
+            const targetIdx = parseInt(classified.args ?? '', 10);
+            if (isNaN(targetIdx) || targetIdx < 1) {
+              this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+              break;
+            }
+            if (this.sessionScope === 'per_chat') {
+              const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
+              if (targetIdx > activeSessions.length) {
+                this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
+                break;
+              }
+              const [mapKey, targetSession] = activeSessions[targetIdx - 1];
+              this.chatQueues.get(mapKey)?.abortTurn();
+              this.chatSessions.delete(mapKey);
+              this.chatQueues.delete(mapKey);
+              this.cleanupPerChatState(mapKey);
+              await targetSession.shutdown(false);
+              const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
+              this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
+            } else {
+              if (!this.session?.getStatus().active) {
+                this.sendDirect(chatJid, '_No active session to kill._', true);
+                break;
+              }
+              this.getActiveQueue()?.abortTurn();
+              this.operationTracker?.shutdown();
+              this.operationTracker = null;
+              this.cleanupGlobalAutoCompactState();
+              await this.session.shutdown(false);
+              this.session = null;
+              this.queue = null;
+              this.activeChatJid = null;
+              this.sendDirect(chatJid, '_Session killed._', true);
+            }
+            break;
+          }
         }
+      } catch (err) {
+        // The row above is already terminal (complete/'local_command') and that
+        // stays truthful: the inbound WAS a local command and never owed an agent
+        // turn. Containing the failure here keeps it from reaching the turnChain
+        // catch-all, whose unguarded markInboundFailed would silently re-write the
+        // finalized row as failed/'error' — counting a command-handler fault as an
+        // inbound processing failure.
+        log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
+        this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
       }
       return;
     }

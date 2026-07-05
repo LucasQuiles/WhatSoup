@@ -2051,6 +2051,41 @@ describe('AgentRuntime', () => {
 
       duraDb.close();
     });
+
+    it('a throwing local-command handler does not overwrite the local_command finalization', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      // /new's handleNew() rejects AFTER the top-of-block finalization ran. The
+      // rejection must be contained inside the local-command block — if it
+      // escapes to the turnChain catch-all, its unguarded markInboundFailed
+      // flips the finalized row to failed/'error' (a silent second terminal
+      // write that would count a command-handler fault as an inbound failure).
+      mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
+
+      const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq }));
+
+      expect(mockSession.handleNew).toHaveBeenCalled();
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command');
+      // The user still hears about the failure (local notification via the
+      // outbound queue, not the generic turn-chain one).
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => t.includes('Something went wrong processing that command'))).toBe(true);
+      expect(sentMessages.length).toBe(0);
+
+      duraDb.close();
+    });
   });
 
   it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {

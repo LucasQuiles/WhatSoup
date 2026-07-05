@@ -326,7 +326,10 @@ export class DurabilityEngine {
            AND status NOT IN ('quarantined', 'failed_permanent')`,
       ),
       // W2 stuck-inbound reconciler buckets. Open set is ('pending','processing',
-      // 'turn_done') — there is no 'queued' state. An echoed terminal op is the
+      // 'turn_done'). 'pending' is the schema DEFAULT but journalInbound (the sole
+      // INSERT site) always writes 'processing' explicitly, so no row is ever
+      // actually 'pending' — matched defensively, not because it occurs. There is
+      // no 'queued' state. An echoed terminal op is the
       // delivery-confirmed success signal (mirrors getTerminalOutboundForInbound's
       // exclusion of quarantined/failed_permanent by matching status='echoed'
       // directly). Each bounded to 200 rows so a large backlog drains over several
@@ -338,6 +341,7 @@ export class DurabilityEngine {
            ON o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
          WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
            AND i.received_at < datetime('now', '-5 minutes')
+         ORDER BY i.seq ASC
          LIMIT 200`,
       ),
       getStaleTurnDoneNoSuccess: prepare(
@@ -349,6 +353,7 @@ export class DurabilityEngine {
              SELECT 1 FROM outbound_ops o
              WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
            )
+         ORDER BY i.seq ASC
          LIMIT 200`,
       ),
       getStaleOpenNoSuccess: prepare(
@@ -360,6 +365,7 @@ export class DurabilityEngine {
              SELECT 1 FROM outbound_ops o
              WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
            )
+         ORDER BY i.seq ASC
          LIMIT 200`,
       ),
       getStaleSubmitted: prepare(
