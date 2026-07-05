@@ -67,8 +67,11 @@ describe('Provider ID registry (#447)', () => {
     const files = readdirSync(dir);
 
     // Each canonical ID must correspond to an impl file (api wrapper OR parser).
-    const idToFilePatterns: Record<ProviderId, RegExp[]> = {
-      'claude-cli': [/^claude\.ts$/], // claude.ts is the runtime helper
+    // claude-cli is the exception: it runs through the session.ts default path
+    // and has no dedicated file under providers/ (its unreachable class wrapper
+    // was removed — QR-072), so it maps to null here.
+    const idToFilePatterns: Record<ProviderId, RegExp[] | null> = {
+      'claude-cli': null,
       'codex-cli': [/^codex-parser\.ts$/],
       'gemini-cli': [/^gemini-acp-parser\.ts$/],
       'opencode-cli': [/^opencode-parser\.ts$/],
@@ -78,6 +81,7 @@ describe('Provider ID registry (#447)', () => {
 
     for (const id of PROVIDER_IDS) {
       const patterns = idToFilePatterns[id];
+      if (patterns === null) continue;
       const matched = patterns.some((p) => files.some((f) => p.test(f)));
       expect(matched, `expected an impl file for provider "${id}"`).toBe(true);
     }

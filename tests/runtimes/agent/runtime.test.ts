@@ -1872,7 +1872,8 @@ describe('AgentRuntime', () => {
         expect.stringContaining('messageId=msg-1 chatJid=test@s.whatsapp.net code=SQLITE_FULL'),
       );
       expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
-      expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
+      // The inline-extractor SQLITE_FULL fault classifies to db_error.
+      expect(durability.markInboundFailed).toHaveBeenCalledWith(42, 'db_error');
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
     } finally {
       restoreMemory();
@@ -2034,7 +2035,7 @@ describe('AgentRuntime', () => {
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
     expect((durability as { markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn> }).markContinuityCandidateIfNoTerminalOutbound)
       .toHaveBeenCalledWith(77, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
-    expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77);
+    expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77, 'session_crash');
     expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
     expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.get('test@s.whatsapp.net')).toBe('hello');
     expect((runtime as unknown as { perChatTurnContentType: Map<string, string | null> }).perChatTurnContentType.has('test@s.whatsapp.net')).toBe(false);
@@ -2113,7 +2114,7 @@ describe('AgentRuntime', () => {
 
     expect(durability.markContinuityCandidateIfNoTerminalOutbound)
       .toHaveBeenCalledWith(88, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(88);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(88, 'session_crash');
     expect((runtime as unknown as { currentInboundSeq: number | undefined }).currentInboundSeq).toBeUndefined();
   });
 
@@ -3211,7 +3212,11 @@ describe('AgentRuntime', () => {
         markInboundFailed: vi.fn(),
       };
       mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
-      mockSession.sendTurn.mockRejectedValueOnce(new Error('send failed'));
+      // ETIMEDOUT-coded rejection: pins that the catch classifies the real error
+      // (→ 'timeout') rather than omitting the class (→ bare call) or hardcoding.
+      mockSession.sendTurn.mockRejectedValueOnce(
+        Object.assign(new Error('send failed: ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      );
 
       await runtime.start();
       state.durability = durability;
@@ -3222,7 +3227,7 @@ describe('AgentRuntime', () => {
 
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
       expect(durability.markInboundSkipped).toHaveBeenCalledWith(151, 'coalesced_image');
-      expect(durability.markInboundFailed).toHaveBeenCalledWith(152);
+      expect(durability.markInboundFailed).toHaveBeenCalledWith(152, 'timeout');
       expect(state.imageCoalesce.buffers.has('test@s.whatsapp.net')).toBe(false);
       expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
       expect(state.pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
@@ -3284,7 +3289,7 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.has('startup-fail'), testCase.label).toBe(false);
       expect(state.pendingTurnActorJid.has('startup-fail'), testCase.label).toBe(false);
       expect(replyGuarantee.disarm, testCase.label).toHaveBeenCalledWith(321);
-      expect(durability.markInboundFailed, testCase.label).toHaveBeenCalledWith(321);
+      expect(durability.markInboundFailed, testCase.label).toHaveBeenCalledWith(321, 'session_spawn_failed');
       expect(mockSession.sendTurn, testCase.label).not.toHaveBeenCalled();
       expect(sentMessages, testCase.label).toContainEqual({
         jid: 'startup-fail@s.whatsapp.net',
@@ -3945,7 +3950,8 @@ describe('AgentRuntime', () => {
     await expect(sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 89 }))).resolves.toBeUndefined();
     expect(durability.markContinuityCandidateIfNoTerminalOutbound)
       .toHaveBeenCalledWith(89, 'runtime_fault_no_terminal_outbound', 'runtime_fault_disarm');
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(89);
+    // A generic turn-chain fault is unattributable → 'unknown'.
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(89, 'unknown');
   });
 
   // ─── Event routing ─────────────────────────────────────────────────────────
@@ -5016,7 +5022,7 @@ describe('AgentRuntime', () => {
     });
 
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(77);
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(77);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(77, 'session_crash');
     expect(state.currentInboundSeq).toBeUndefined();
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
@@ -5089,7 +5095,7 @@ describe('AgentRuntime', () => {
     });
 
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(88);
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(88);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(88, 'session_crash');
     expect(state.currentInboundSeq).toBeUndefined();
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),

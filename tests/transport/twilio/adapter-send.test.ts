@@ -1,5 +1,5 @@
 // tests/transport/twilio/adapter-send.test.ts
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
@@ -356,5 +356,73 @@ describe('TwilioSmsAdapter destination validation', () => {
       ).rejects.toBeInstanceOf(ConversationNotFoundError);
     }
     expect(port.sent).toHaveLength(0);
+  });
+});
+
+describe('TwilioSmsAdapter sendText rate cap (QR-068)', () => {
+  const channel = makeChannelId('sms', 'ml-bot');
+  const A = '+15551230001';
+  const B = '+15551230002';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('delays the over-cap send instead of throwing, and sends once the window slides', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ rateLimit: { smsPerMinute: 2 } }), port);
+
+    await adapter.sendText({ channel, id: A }, 'one');
+    await adapter.sendText({ channel, id: A }, 'two');
+    expect(port.sent).toHaveLength(2);
+
+    let settled = false;
+    const third = adapter.sendText({ channel, id: A }, 'three').then((ref) => {
+      settled = true;
+      return ref;
+    });
+
+    // Still inside the window: the throttled send must be pending, not thrown,
+    // and must not have reached the port.
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(settled).toBe(false);
+    expect(port.sent).toHaveLength(2);
+
+    // Window slides — the delayed send goes out and resolves normally.
+    await vi.advanceTimersByTimeAsync(1_100);
+    const ref = await third;
+    expect(settled).toBe(true);
+    expect(port.sent).toHaveLength(3);
+    expect(port.sent[2]!.body).toBe('three');
+    expect(ref.id).toMatch(/^SM/);
+  });
+
+  it('throttles per destination — traffic to one number does not delay another', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ rateLimit: { smsPerMinute: 1 } }), port);
+
+    await adapter.sendText({ channel, id: A }, 'to A');
+    // A is at cap; B must go straight through.
+    await adapter.sendText({ channel, id: B }, 'to B');
+    expect(port.sent).toHaveLength(2);
+    expect(port.sent[1]!.to).toBe(B);
+  });
+
+  it('validation failures throw immediately and do not consume rate-cap slots', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ rateLimit: { smsPerMinute: 1 } }), port);
+
+    // Invalid destination: rejects synchronously-fast (no throttle hold).
+    await expect(
+      adapter.sendText({ channel, id: 'not-a-number' }, 'hi'),
+    ).rejects.toBeInstanceOf(ConversationNotFoundError);
+
+    // The failed validation must not have consumed the single slot.
+    await adapter.sendText({ channel, id: A }, 'first real send');
+    expect(port.sent).toHaveLength(1);
   });
 });
