@@ -1253,3 +1253,48 @@ describe('residual branch coverage — model/pinecone/healthPort/pluginDirs/nume
     expect(result?.message).toBe('tokenBudget must be between 1,000 and 10,000,000');
   });
 });
+
+describe('agentOptions.nlRouting (F11)', () => {
+  it('rejects a non-boolean nlRouting (a string "true" would silently leave the flag off)', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRouting: 'true' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.nlRouting');
+    expect(result?.message).toContain('must be a boolean when provided');
+  });
+
+  it('accepts a boolean nlRouting', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRouting: true } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+});
+
+describe('agentOptions.nlRoutingTiers / nlRoutingEventsDir (slice-2 B2)', () => {
+  it('rejects a non-object nlRoutingTiers', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingTiers: 'strongest' } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.field).toBe('agentOptions.nlRoutingTiers');
+  });
+
+  it('rejects an unknown tier key', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingTiers: { smartest: 'claude-cli' } } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.message).toContain('not a recognized tier');
+  });
+
+  it('rejects a non-string tier value', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingTiers: { strongest: 7 } } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.message).toContain('must be a provider id string');
+  });
+
+  it('rejects a non-string nlRoutingEventsDir', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingEventsDir: 5 } });
+    expect(validateInstanceConfig(raw, ctx('create'))?.field).toBe('agentOptions.nlRoutingEventsDir');
+  });
+
+  it('accepts a valid tier map and events dir', () => {
+    const raw = baseAgent({ agentOptions: {
+      sessionScope: 'single',
+      nlRoutingTiers: { strongest: 'anthropic-api', fastest: 'opencode-cli' },
+      nlRoutingEventsDir: '/tmp/x',
+    } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+});

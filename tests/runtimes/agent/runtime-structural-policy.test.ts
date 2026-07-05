@@ -47,10 +47,13 @@ describe('AgentRuntime structural policy', () => {
       'this.perChatTurnContentType.delete(mapKey);',
       'this.perChatTurnText.delete(mapKey);',
       'this.perChatAssistantItemText.delete(mapKey);',
+      'this.perChatRouteMarkerHold.delete(mapKey);',
       'this.pendingTurnText.delete(mapKey);',
       'this.pendingTurnActorJid.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
       'this.postTurnGate.delete(mapKey);',
+      'this.lastSpawnRouteProvider.delete(conversationKey);',
+      'this.lastPinBlockNotice.delete(conversationKey);',
       'this.autoCompact.cleanupScope(mapKey);',
       'this.operationTrackers.delete(mapKey);',
       'this.deletePendingPollQuestions(mapKey);',
@@ -60,13 +63,15 @@ describe('AgentRuntime structural policy', () => {
       expect(methodBody).toContain(expectedDelete);
     }
 
-    // Three listed entries are not raw `.delete(mapKey)` calls: the crash count
+    // Five listed entries are not raw `.delete(mapKey)` calls: the crash count
     // routes through this.crashes.forget(mapKey) (extracted CrashTracker), the
     // auto-compact bookkeeping (cooldown/last-success/rapid-rearm/measure/boundary
     // + waiter + silent timer) routes through this.autoCompact.cleanupScope(mapKey)
-    // (extracted AutoCompactController), and the pending-poll cleanup goes through
-    // this.deletePendingPollQuestions(mapKey).
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 3);
+    // (extracted AutoCompactController), the pending-poll cleanup goes through
+    // this.deletePendingPollQuestions(mapKey), and the two slice-4 route maps are
+    // keyed by conversationKey (not mapKey), deleting under the reconciled
+    // conversationKey derived from mapKey.
+    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 5);
 
     const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
     expect(pendingHelper).toBeTruthy();

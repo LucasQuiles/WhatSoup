@@ -1632,7 +1632,8 @@ describe('DurabilityEngine integration', () => {
     await drainQueue();
 
     expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'permanent send failure');
-    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99);
+    // Send exhaustion is a transport send failure.
+    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99, 'transport_send_failed');
   });
 
   it('send failure without inboundSeq → markInboundFailed NOT called', async () => {
@@ -1741,8 +1742,9 @@ describe('DurabilityEngine integration', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    // Inbound row closed as failed, not left 'processing'.
-    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(77);
+    // Inbound row closed as failed, not left 'processing'. Total LLM failure
+    // (both providers down) is a provider_failure.
+    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(77, 'provider_failure');
     expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
     expect(vi.mocked(durability.markInboundSkipped)).not.toHaveBeenCalled();
     // The existing terminal failure send is unchanged.

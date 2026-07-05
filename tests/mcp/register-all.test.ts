@@ -34,6 +34,17 @@ describe('registerAllTools', () => {
     vi.restoreAllMocks();
   });
 
+  it('R1: listing is not a gate — sensitive tools are listed to actor-less sessions (enforcement is at call)', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    registerAllTools(registry, makeConnection(), db);
+    // The actor-less baseline is the full count — listing sensitive tools
+    // matches base behavior; the call() gate is the authoritative enforcement.
+    expect(registry.listTools({ tier: 'global' }).length).toBe(BASELINE_TOOL_COUNT);
+    db.raw.close();
+  });
+
   it('registers the exact baseline tool count on a non-Pinecone build', () => {
     const db = new Database(':memory:');
     db.open();
