@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
+  isAllowedPatternMatch,
   isTrackedSensitiveArtifact,
   parseArgs,
   parseCommitAuthorLog,
@@ -385,6 +386,78 @@ Co-Authored-By: Person <person@example.com>
       },
     ]);
     expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['private-instance-label']);
+  });
+
+  it('allows systemd template-unit service names in the nucles health profile and fleet manifest', () => {
+    // Composed so the test source itself carries no email-shaped literal.
+    const qUnit = ['whatsoup@q', 'service'].join('.');
+    const personalUnit = ['whatsoup@personal', 'service'].join('.');
+    const allowedInProfile = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/nucles.json',
+        line: 30,
+        text: `      "service": "${qUnit}",`,
+      },
+      {
+        filePath: 'deploy/health-profiles/nucles.json',
+        line: 38,
+        text: `      "service": "${personalUnit}",`,
+      },
+      {
+        filePath: 'deploy/bot-errors-expected-fleet.json',
+        line: 62,
+        text: `          "service": "${personalUnit}",`,
+      },
+    ]);
+    expect(allowedInProfile).toEqual([]);
+
+    const flaggedElsewhere = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/mini1.json',
+        line: 1,
+        text: `      "service": "${personalUnit}",`,
+      },
+    ]);
+    expect(flaggedElsewhere.map((issue) => issue.code)).toEqual(['personal-email', 'private-instance-label']);
+  });
+
+  it('scopes self-referential allowlist files to label codes and keeps operational files code-gated', () => {
+    // The shared allowlist source may carry its own path + identifier literals...
+    const allowed = scanAddedLines([
+      { filePath: 'scripts/lib/guard-core.ts', line: 10, text: "  'deploy/health-profiles/nucles.json'," },
+      { filePath: 'scripts/lib/guard-core.ts', line: 20, text: "  'whatsoup-personal'," },
+    ]);
+    expect(allowed).toEqual([]);
+
+    // ...but every non-label leak class stays enforced there (regression pin for
+    // the demonstrated blanket-fixtureFiles blind spot).
+    const poisoned = scanAddedLines([
+      {
+        filePath: 'scripts/lib/guard-core.ts',
+        line: 30,
+        text: '// reachable at 100.91.13.7, page +12129580142 if down',
+      },
+    ]);
+    expect(poisoned.map((issue) => issue.code).sort()).toEqual(['operator-phone', 'private-tailnet-ip']);
+
+    // Operational fleet files are code-gated, never blanket-exempt.
+    const operationalPoison = scanAddedLines([
+      {
+        filePath: 'deploy/health-profiles/nucles.json',
+        line: 5,
+        text: '      "note": "reachable at 100.91.13.7",',
+      },
+    ]);
+    expect(operationalPoison.map((issue) => issue.code)).toEqual(['private-tailnet-ip']);
+
+    // Direct pin of the operational-bypass code gate: an allowlisted token never
+    // suppresses a non-label class that reaches the fallback (key/phone/secret
+    // classes return earlier and never reach it; tailnet-ip does).
+    expect(
+      isAllowedPatternMatch('deploy/health-profiles/nucles.json', 'private-tailnet-ip', 'whatsoup@personal'),
+    ).toBe(false);
+    const composedUnit = ['whatsoup@personal', 'service'].join('.');
+    expect(isAllowedPatternMatch('deploy/health-profiles/nucles.json', 'personal-email', composedUnit)).toBe(true);
   });
 
   it('allows bare release env var names without hiding private labels', () => {
