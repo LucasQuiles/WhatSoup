@@ -149,6 +149,20 @@ function hasApproachingLimitWarning(lower: string): boolean {
 }
 
 /**
+ * A concrete machine-generated reset-time cue ("resets at 9pm", "will be
+ * available at 8pm", "come back in 2 hours"). Hoisted to module scope — the SAME
+ * pattern isUsageLimitMessage's terminal branch already tests reply text against,
+ * no NEW regex added (QR-130/133 ReDoS lesson) — so it can be reused as standalone
+ * shape evidence by hasUsageLimitBannerAnchor (QR-209b F1) without re-deriving
+ * isUsageLimitMessage's own compound classification test.
+ */
+const LIMIT_RESET_TIME_PATTERN = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
+
+function hasLimitResetTimeCue(text: string): boolean {
+  return LIMIT_RESET_TIME_PATTERN.test(text);
+}
+
+/**
  * Detect provider usage-limit / quota-exceeded messages that should not be
  * forwarded as normal user-visible agent output.
  */
@@ -178,8 +192,7 @@ export function isUsageLimitMessage(text: string): boolean {
   // warning carrying a reset time does not get classified as terminal.
   if (hasApproachingLimitWarning(lower)) return false;
 
-  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
-  return resetPattern.test(text) && (
+  return hasLimitResetTimeCue(text) && (
     LIMIT_NAME_TOKENS.some((token) => lower.includes(token)) ||
     lower.includes('quota exceeded')
   );
@@ -479,6 +492,16 @@ const STREAMED_BANNER_OPENERS: readonly string[] = [
   'prompt is too long',
   'the socket connection was closed',
   'socket hang up',
+  // QR-209b F2: real server-error corpus opener (isProviderServerErrorMessage
+  // ~:336) plus its raw machine-shape tokens. Underscored tokens never open
+  // genuine assistant prose (nobody starts a reply "api_error is going on…"),
+  // so they are safe unconditional openers, same reasoning as authentication_error
+  // and invalid_api_key above.
+  'we are experiencing high demand for',
+  'overloaded_error',
+  'server_error',
+  'server_unavailable',
+  'api_error',
 ];
 
 /**
@@ -498,6 +521,27 @@ function startsWithErrorOpener(lowerText: string): boolean {
   return false;
 }
 
+/**
+ * ANCHOR for a usage-limit BANNER classification (QR-209b F1). isUsageLimitMessage
+ * matches several bare, unanchored substrings — isProviderCreditBalanceLimitMessage's
+ * "out of usage credits" / "out of usage" + org-or-admin-co-word branches, and the
+ * top-level "out of extra usage" / "claude usage limit" / model-policy-credit-gate
+ * strings — that ordinary billing PROSE can contain without being the raw error line
+ * itself (e.g. "we're out of usage credits for this billing cycle" said
+ * conversationally). Require the SAME terminal-shape evidence already proven out
+ * elsewhere in this file before suppressing: the assembled "hit your X" / "X reached"
+ * phrasing (hasTerminalLimitAssembler), a concrete machine-generated reset-time cue
+ * (hasLimitResetTimeCue), or a curated error opener. Anything else is ambient
+ * (delivered) — deliver-over-destroy is the QR-209 default when in doubt.
+ */
+function hasUsageLimitBannerAnchor(lower: string, text: string): boolean {
+  return (
+    hasTerminalLimitAssembler(lower) ||
+    hasLimitResetTimeCue(text) ||
+    startsWithErrorOpener(lower)
+  );
+}
+
 export type StreamedFailureConfidence = 'banner' | 'ambient';
 
 /**
@@ -515,11 +559,14 @@ export type StreamedFailureConfidence = 'banner' | 'ambient';
  *   - `{ kind, confidence: 'ambient' }`— matched but is prose about an error → DELIVER
  *
  * BANNER requires the permissive match AND `length <= MAX_STREAMED_BANNER_LENGTH`
- * AND shape evidence the text is the error itself: `usage-limit` already carries
- * tested terminal/prose guards (assembler + reset-time), so the length bound
- * suffices there; every other kind must START WITH a curated error opener. When in
- * doubt the result is `ambient` — on the streaming channel a false delivery is one
- * visible message, a false suppression is permanent unrecoverable silence.
+ * AND shape evidence the text is the error itself. `usage-limit` is NOT exempt from
+ * this (QR-209b F1): isUsageLimitMessage has several bare unanchored substring
+ * branches (see hasUsageLimitBannerAnchor), so it accepts a wider anchor set —
+ * assembled terminal-limit phrasing, a concrete reset-time cue, or a curated
+ * opener — instead of the length bound alone. Every other kind must START WITH a
+ * curated error opener. When in doubt the result is `ambient` — on the streaming
+ * channel a false delivery is one visible message, a false suppression is
+ * permanent unrecoverable silence.
  *
  * This does NOT change {@link classifyProviderFailure}; the infra channels keep the
  * permissive behavior.
@@ -529,9 +576,10 @@ export function classifyStreamedProviderFailure(
 ): { kind: ProviderFailureKind; confidence: StreamedFailureConfidence } | null {
   const kind = classifyProviderFailure(text);
   if (kind === null) return null;
+  const lower = text.toLowerCase();
   const isBanner =
     text.length <= MAX_STREAMED_BANNER_LENGTH &&
-    (kind === 'usage-limit' || startsWithErrorOpener(text.toLowerCase()));
+    (kind === 'usage-limit' ? hasUsageLimitBannerAnchor(lower, text) : startsWithErrorOpener(lower));
   return { kind, confidence: isBanner ? 'banner' : 'ambient' };
 }
 

@@ -226,6 +226,87 @@ describe('classifyStreamedProviderFailure (QR-209 streaming-channel refinement)'
   });
 });
 
+describe('classifyStreamedProviderFailure — usage-limit banner requires an anchor (QR-209b F1)', () => {
+  // QR-209b F1: the OLD code exempted the ENTIRE 'usage-limit' kind from the
+  // opener/shape anchor once text.length <= 300, on the false assumption that
+  // isUsageLimitMessage only ever matches anchored terminal shapes. Several of its
+  // true-branches are bare unanchored substrings (isProviderCreditBalanceLimitMessage's
+  // "out of usage credits" / "out of usage" + org-co-word branches, and the top-level
+  // "out of extra usage" / "claude usage limit" strings), so ordinary billing PROSE
+  // that merely discusses a usage cap was silently destroyed. Deliver-over-destroy:
+  // when the anchor is absent, ambient (delivered) is the correct default.
+  it.each([
+    "Yes, we're out of usage credits for this billing cycle, so no more requests will process until next month.",
+    'Good question — once your account is out of usage credits, the provider just queues everything until the next cycle.',
+    "That error means the workspace is out of usage; contact your admin to raise the group's allocation for this month.",
+  ])('unanchored usage-limit prose stays ambient, never banner: %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true); // infra channel unchanged
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'ambient' });
+  });
+
+  // The residual credit/quota branch shapes from the "residual terminal-credit/quota
+  // branch shapes" describe block below (isUsageLimitMessage = true) carry no
+  // assembled "hit your X" phrasing and no concrete reset-time cue — they read as
+  // ordinary prose, not a raw CLI banner. Ambient is the deliver-over-destroy default
+  // when the anchor is absent (a false delivery is one visible message; a false
+  // suppression is permanent unrecoverable silence).
+  it.each([
+    'You are out of usage; please contact your admin.',
+    'Out of usage — your org has no remaining allocation.',
+    'Out of usage because the org is over its cap.',
+    'Out of usage for the group allocation this cycle.',
+    'The provider account balance is too low.',
+    'Provider account balance is insufficient to continue.',
+    'API account balance is exhausted for this billing cycle.',
+    'Model policy only allows a model that needs a usage credit.',
+  ])('residual-branch usage-limit shapes stay ambient (deliver-over-destroy default): %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true);
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'ambient' });
+  });
+
+  it('genuine terminal usage-limit banners with an anchor stay banner', () => {
+    // The assembled "hit your X" phrasing is CLI-emitted verbatim, never prose a
+    // human/assistant would casually write — a real anchor, so this must NOT
+    // regress to ambient just because the usage-limit kind lost its blanket bypass.
+    expect(classifyStreamedProviderFailure("You've hit your weekly limit · resets Jul 7 at 10pm")).toEqual({
+      kind: 'usage-limit',
+      confidence: 'banner',
+    });
+  });
+});
+
+describe('classifyStreamedProviderFailure — STREAMED_BANNER_OPENERS corpus gaps (QR-209b F2)', () => {
+  // QR-209b F2: these machine-shape strings are real corpus tokens (the server-error
+  // detector's own opening phrase, plus the raw error-type tokens it substring-matches
+  // at isProviderServerErrorMessage) that were missing from STREAMED_BANNER_OPENERS, so
+  // a genuine short system banner using one of them leaked to users as 'ambient'
+  // instead of being suppressed. Each is a short raw string here (banner) — the
+  // position-sensitivity (embedded mid-explanation stays ambient) is covered below.
+  it.each([
+    ['We are experiencing high demand for the Opus model right now, please try again shortly.', 'server-error'],
+    ['overloaded_error: the model is temporarily overloaded, please retry.', 'server-error'],
+    ['server_error - please try again in a few minutes.', 'server-error'],
+    ['server_unavailable: retry after a short delay.', 'server-error'],
+    ['api_error: request failed due to an unexpected condition upstream.', 'server-error'],
+  ] as const)('short raw opener %j classifies as BANNER (kind %j)', (message, kind) => {
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind, confidence: 'banner' });
+  });
+
+  // The SAME machine-shape tokens embedded past the start of a long genuine
+  // explanation must NOT be suppressed — startsWith anchoring (not substring-anywhere)
+  // is the whole point of the opener list (QR-209 false-positive guard).
+  it.each([
+    'I checked the status page and unfortunately we are experiencing high demand for the Opus model right now, so there may be a short delay before your request completes; thanks for your patience while capacity recovers.',
+    'When we hit capacity constraints the backend returns an overloaded_error code and the client library should apply exponential backoff before retrying the same request context again.',
+    'Occasionally the upstream provider responds with a generic server_error payload instead of a more specific status, and the retry policy treats that the same as any other transient failure from the backend systems.',
+    'If the health check keeps failing the load balancer marks the node as server_unavailable and stops routing new connections to it until the next successful check passes on that host.',
+    'Whenever the client receives a 5xx from the gateway it logs the raw api_error field alongside the request id so the on-call engineer can correlate it with upstream traces later on.',
+  ])('the same token embedded mid-explanation stays ambient, never banner: %j', (message) => {
+    expect(message.length).toBeLessThanOrEqual(300);
+    expect(classifyStreamedProviderFailure(message)?.confidence).not.toBe('banner');
+  });
+});
+
 describe('classifyAgentFailure', () => {
   it.each([
     {
