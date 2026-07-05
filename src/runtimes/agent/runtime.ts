@@ -4877,6 +4877,14 @@ export class AgentRuntime implements Runtime {
                 this.recordTurnCapabilitySuccess(true);
               } else {
                 this.recordTurnCapabilityFailure(true, 'empty-output');
+                // QR-226: the turnErrorCounts increment above is in-memory only —
+                // without a log line, journal greps are blind to empty-output
+                // turns (an on-call canary once needed manual timestamp
+                // correlation to decode this from raw counters alone).
+                log.warn(
+                  { reason: 'empty-output', chatJid: queue.targetChatJid, mapKey, rowId, turnHadToolWork },
+                  'recorded empty-output turn failure',
+                );
                 armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey);
               }
             }
@@ -9000,6 +9008,18 @@ export class AgentRuntime implements Runtime {
               this.recordTurnCapabilitySuccess(true);
             } else {
               this.recordTurnCapabilityFailure(true, 'empty-output');
+              // QR-226: see the matching log.warn in handleEventWithContext — the
+              // turnErrorCounts increment above is in-memory only, so without a
+              // log line journal greps are blind to empty-output turns here too.
+              log.warn(
+                {
+                  reason: 'empty-output',
+                  chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+                  rowId,
+                  turnHadToolWork,
+                },
+                'recorded empty-output turn failure',
+              );
               armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, this.session, turnHadToolWork, undefined);
             }
           }
