@@ -58,10 +58,30 @@ Console (`AddLineWizard` finish path):
   shared form-state bag).
 - New `api.setCredential(service, key)` → `PUT /api/credentials/:service`
   (existing keyring-backed route) called from the finish flow when a key was
-  entered. Target service: the user's explicit Keyring Service value
-  (`providerConfig.apiKeyService`) when set; otherwise the provider default
-  (`anthropic` for the Anthropic key field, `openai` for the OpenAI field —
-  same defaults as `resolveProviderKeyService`).
+  entered.
+- **Write-allowlist constraint (verified):** the credentials route has its own
+  compile-time closed set `CREDENTIAL_ALLOWLIST` = {deepseek, minimax, openai,
+  anthropic} (`credentials.ts:30-36`); an unknown-but-SERVICE_ENV_MAP-valid
+  service (groq, openrouter, …) returns **404** today. The route's docstring
+  promises operators can extend it via fleet config `extraCredentialServices`,
+  but `setExtraCredentialServices` has only test callers — that path is
+  unwired (registered as QR-238). Therefore the wizard auto-stores ONLY when
+  the target service is in the effective allowlist; for any other service it
+  shows the keychain-CLI instructions toast instead, and the docs state
+  plainly that custom services require CLI/keychain provisioning today.
+  Extending the write contract is deliberately NOT in this cluster (the
+  closed set is a designed security posture; changing it deserves its own
+  review).
+- **Key-to-service routing rule (explicit helper + test matrix, no
+  cross-vendor writes):** the wizard collects up to two keys, and an explicit
+  `apiKeyService` must never receive the wrong vendor's key. Anthropic-key →
+  explicit service ONLY when the configured provider path is `anthropic-api`,
+  else default `anthropic`. OpenAI-key → explicit service ONLY when the
+  provider path is the OpenAI-compatible one (`openai-api`, or opencode's
+  openai-prefixed model), else default `openai`. The helper is pure and
+  unit-tested against the full matrix (both keys × explicit/absent service ×
+  provider paths), locking that a Groq/OpenRouter `apiKeyService` never
+  receives an Anthropic key.
 - On success, optionally call the existing `POST /api/credentials/:service/verify`
   and render the one-probe verdict inline (nice-to-have; drop if it bloats the
   PR).
@@ -70,8 +90,9 @@ Console (`AddLineWizard` finish path):
   the wizard's modal-scoped `createError` and NOT `AlertBanner` (fleet-health
   semantics); do not invent a fourth notification pattern. Message carries the
   keychain-CLI fallback command; the line is still created — honestly keyless —
-  and the wizard says so. Failure modes are real-world only: service-allowlist
-  403, network failure, keyring-locked 503.
+  and the wizard says so. Failure modes are real-world only: 404 unknown
+  credential service (not in the write allowlist), 403 blocklisted service
+  (e.g. the health token), network failure, keyring-locked 503.
 - Auth: RESOLVED as fact (verified at `60c91901`) — `PUT /api/credentials/:service`
   is a plain api-audience route (`audienceForPath`, `src/fleet/index.ts:785-789`
   special-cases only the SSE auth path), and the console's `apiFetch()` already
@@ -87,10 +108,18 @@ Server (defense in depth):
   `PASSTHROUGH_FIELDS` allowlist (`ops.ts:1052-1059`) already excludes the key
   fields; the guard exists so a future allowlist growth can't reopen the leak.
   The live vulnerability is exclusively the PATCH deep-merge path.
-- **Remediation for existing victims:** load/patch-time cleanup of stray
-  plaintext key fields — a NEW sibling migration with the same
-  `{config, changed, removed}` result shape and call pattern as
-  `migrateLegacyMemoryConfig` (`ops.ts:556`), not a literal extension of that
+- **Remediation for existing victims — exact mutation points (verified):**
+  cleanup runs ONLY where config is already written back — the PATCH path
+  (`handleConfigUpdate`, alongside `migrateLegacyMemoryConfig` at
+  `ops.ts:556`) and the CREATE path (`ops.ts:1063`). The config LOAD path
+  (`config.ts:694`) migrates in memory and does NOT write back; this spec
+  adds no loader writeback and no startup sweep (a new writer under the
+  private-config lock is out of proportion here). Honest statement: existing
+  at-rest keys are removed on the NEXT CONFIG WRITE only; until an instance's
+  config is next written, the stray field remains on disk. The advisory
+  therefore covers both rotation and optional manual removal. Implemented as
+  a NEW sibling migration with the same `{config, changed, removed}` result
+  shape as `migrateLegacyMemoryConfig`, not a literal extension of that
   module (it is a field-rename engine; this is a plain drop). Verified safe:
   nothing in `src/` or `console/src` reads the raw config-file key fields.
   The rotate-your-key advisory sentence ships IN PR 1's diff (not deferred to
@@ -162,3 +191,8 @@ matters only in that PR 2's UI copy assumes PR 1's strip exists.
 - QR-237: wizard type labels (Passive/Chat/Agent) never map to the canonical
   four-instance model; Session Scope silently defaults to sandbox
   (`AddLineWizard.tsx:86`).
+- QR-238: credential write allowlist (deepseek/minimax/openai/anthropic) is a
+  strict subset of SERVICE_ENV_MAP, and the documented fleet-config extension
+  path (`extraCredentialServices` → `setExtraCredentialServices`) has no
+  production caller — custom services (groq/openrouter) cannot be provisioned
+  via the API at all; doc-vs-code drift in the route's own docstring.
