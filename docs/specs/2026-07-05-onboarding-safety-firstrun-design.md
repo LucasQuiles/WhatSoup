@@ -65,26 +65,37 @@ Console (`AddLineWizard` finish path):
 - On success, optionally call the existing `POST /api/credentials/:service/verify`
   and render the one-probe verdict inline (nice-to-have; drop if it bloats the
   PR).
-- On failure (403/network), non-blocking banner with the keychain-CLI fallback
-  command; the line is still created — honestly keyless — and the wizard says
-  so.
+- On failure, non-blocking notification via the app-wide `useToast().error(...)`
+  primitive (`console/src/hooks/use-toast.tsx`, wired at `main.tsx:24`) — NOT
+  the wizard's modal-scoped `createError` and NOT `AlertBanner` (fleet-health
+  semantics); do not invent a fourth notification pattern. Message carries the
+  keychain-CLI fallback command; the line is still created — honestly keyless —
+  and the wizard says so. Failure modes are real-world only: service-allowlist
+  403, network failure, keyring-locked 503.
+- Auth: RESOLVED as fact (verified at `60c91901`) — `PUT /api/credentials/:service`
+  is a plain api-audience route (`audienceForPath`, `src/fleet/index.ts:785-789`
+  special-cases only the SSE auth path), and the console's `apiFetch()` already
+  auto-mints an api-audience ticket accepted via the console-session cookie
+  (`index.ts:900-921`). `api.setCredential` is therefore a two-line `apiFetch`
+  addition with zero new auth plumbing.
 
 Server (defense in depth):
-- `handleConfigUpdate`: strip top-level `apiKey`/`openaiKey` (and any
-  credential-shaped strays chosen at plan time) exactly like `settingsJson`.
-- `handleCreateLine`: same strip, defensively (creation currently precedes key
-  entry, but the API is public surface).
+- `handleConfigUpdate`: strip top-level `apiKey`/`openaiKey` by extending the
+  existing `settingsJson` destructure at `ops.ts:554-556` — same idiom, same
+  line.
+- `handleCreateLine`: regression guard only, NOT an active hole — CREATE's
+  `PASSTHROUGH_FIELDS` allowlist (`ops.ts:1052-1059`) already excludes the key
+  fields; the guard exists so a future allowlist growth can't reopen the leak.
+  The live vulnerability is exclusively the PATCH deep-merge path.
 - **Remediation for existing victims:** load/patch-time cleanup of stray
-  plaintext key fields following the `migrateLegacyMemoryConfig` precedent
-  (`ops.ts:556`), so previously-written keys are removed from disk on the next
-  config touch; docs add a rotate-your-key advisory (any key typed into the
-  wizard historically has sat on disk).
-
-Open verification item for the plan: whether the console session's ticket
-audience is authorized for `PUT /api/credentials/:service`, or the route
-demands the raw fleet token. If gated, the wizard degrades to the
-instructions banner instead of silently failing (the strip + honest UI still
-land; only the auto-store is conditional).
+  plaintext key fields — a NEW sibling migration with the same
+  `{config, changed, removed}` result shape and call pattern as
+  `migrateLegacyMemoryConfig` (`ops.ts:556`), not a literal extension of that
+  module (it is a field-rename engine; this is a plain drop). Verified safe:
+  nothing in `src/` or `console/src` reads the raw config-file key fields.
+  The rotate-your-key advisory sentence ships IN PR 1's diff (not deferred to
+  the docs PR) so the silent deletion never lands without its documented
+  advisory.
 
 ## Component 2 — Quick Start unblock
 
@@ -129,7 +140,10 @@ parses the env-var table header and probe-list sentences — additions only).
 ## Rollout
 
 Three small PRs, in order, each independently green: (1) server strip +
-migration + tests (closes the security hole regardless of console pace);
+migration + tests + the rotate-key advisory sentence (closes the security
+hole regardless of console pace; PR 1 alone creates no UX regression — the
+key never authenticated anything, so persisted-dead-plaintext →
+silently-stripped is user-observably identical until PR 2's honest UI);
 (2) console wizard wiring + honest UI; (3) docs (Components 2 + 3 can share
 this PR). Branch-per-PR off current main; normal gate cycle; merge order
 matters only in that PR 2's UI copy assumes PR 1's strip exists.
