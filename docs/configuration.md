@@ -1075,7 +1075,7 @@ identity model, limitations, and keyring provisioning live in the runbook:
 | `voice.voicemailMaxLengthSec` | integer | no | `120` | Max recording length (`[5, 600]`). |
 | `voice.voicemailGreeting` | string | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
-| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Enforced per destination as a sliding one-minute window at the send seam; over-cap sends are **delayed (queued FIFO), never rejected**. |
+| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Enforced per destination as a sliding one-minute window at the send seam; over-cap sends are **delayed (queued FIFO), never rejected**. The cap is in-process, in-memory state only: a restart resets it, and it is **not** shared across multiple processes sending from the same Twilio number — each process enforces its own independent cap, so N processes together allow up to N× the configured rate. Surviving restarts or coordinating across processes would require a persistent store, which is not implemented. |
 
 ### Validation Rules Summary
 
