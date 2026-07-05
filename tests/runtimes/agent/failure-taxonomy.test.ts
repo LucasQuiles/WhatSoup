@@ -339,6 +339,11 @@ describe('classifyStreamedProviderFailure — STREAMED_BANNER_OPENERS corpus gap
   // R1-HIGH-3: additional bare/near-bare openers from the same new corpus that were
   // not yet exercised — a terse system notice (own sentence or two, no discussion)
   // must still classify banner after the shape anchor lands.
+  // NOTE: these 3 cases pass unchanged before AND after the round-2 shape-anchor fix
+  // (intentional retention guards, not new-behavior coverage) — each opener's own
+  // remainder is already short enough that the round-1 draft's unconditional match
+  // and the round-2 shape check agree; new-behavior coverage for these openers is
+  // the "followed by long genuine prose stays ambient" block below.
   it.each([
     ['We are experiencing high demand for the model. Please retry shortly.', 'server-error'],
     ['overloaded_error', 'server-error'],
