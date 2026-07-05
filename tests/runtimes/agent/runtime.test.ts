@@ -418,6 +418,7 @@ type ImageCoalescerView = {
   }>;
 };
 import { Database as RealDatabase } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
 
@@ -1995,6 +1996,120 @@ describe('AgentRuntime', () => {
     expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(globalKey)).toBe(false);
     expect(state.autoCompact.consecutiveRapidRearms.has(globalKey)).toBe(false);
     expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(false);
+  });
+
+  // ── W2a: local commands finalize their journaled inbound row ──────────────
+  // A local command (/new, /status, /help, /sessions, /kill-session) never
+  // dispatches an agent turn, so no downstream path completes the journaled
+  // inbound row — without an explicit finalization it stays 'processing' forever
+  // (unbounded growth; retention never reclaims it). Merged design: the R14
+  // post-switch completion (landed via the NL-routing PR) finalizes the row as
+  // complete/'local_command_handled' when no forward happens, and this PR wraps
+  // the switch in try/catch so a throwing handler cannot escape to the turnChain
+  // catch-all (which would falsely stamp the row failed/'error'); the completion
+  // still runs after the catch. Early-`return` paths inside the switch (e.g.
+  // admin-denied /new) bypass the completion — those rows are reclaimed by this
+  // PR's stuck-inbound sweep as failed/'stale_reclaim' within the sweep window.
+  describe('local-command inbound finalization (W2a)', () => {
+    it('finalizes the journaled inbound row for a /help local command', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-help', 'k-help', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/help', inboundSeq: seq }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+
+      duraDb.close();
+    });
+
+    it('admin-denied early return leaves the row processing; the stuck-inbound sweep reclaims it as stale_reclaim', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions hits a
+      // bare `return` inside the switch, BYPASSING the R14 post-switch completion
+      // (merged-design contract). The row stays 'processing' — and this PR's own
+      // stuck-inbound sweep is the designed reclaim path: after the 24h window it
+      // fails the row with failure_class 'stale_reclaim'. This test pins BOTH
+      // halves of that contract.
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-sessions', 'k-sessions', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        content: '/sessions',
+        senderJid: '15550001111@s.whatsapp.net',
+        inboundSeq: seq,
+      }));
+
+      const before = duraDb.raw.prepare(
+        'SELECT processing_status FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string };
+      expect(before.processing_status).toBe('processing'); // bare return bypassed R14 completion
+
+      // The designed reclaim path: backdate past the sweep window, run the sweep.
+      duraDb.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', '-25 hours') WHERE seq = ?`).run(seq);
+      const sweep = durability.sweepStuckInbound();
+      expect(sweep.failedStale).toBe(1);
+
+      const after = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null; failure_class: string | null };
+      expect(after.processing_status).toBe('failed');
+      expect(after.terminal_reason).toBe('error');
+      expect(after.failure_class).toBe('stale_reclaim');
+
+      duraDb.close();
+    });
+
+    it('a throwing local-command handler does not overwrite the local_command finalization', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      // /new's handleNew() rejects AFTER the top-of-block finalization ran. The
+      // rejection must be contained inside the local-command block — if it
+      // escapes to the turnChain catch-all, its unguarded markInboundFailed
+      // flips the finalized row to failed/'error' (a silent second terminal
+      // write that would count a command-handler fault as an inbound failure).
+      mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
+
+      const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq }));
+
+      expect(mockSession.handleNew).toHaveBeenCalled();
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      // The user still hears about the failure (local notification via the
+      // outbound queue, not the generic turn-chain one).
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => t.includes('Something went wrong processing that command'))).toBe(true);
+      expect(sentMessages.length).toBe(0);
+
+      duraDb.close();
+    });
   });
 
   it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {
