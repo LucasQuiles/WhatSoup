@@ -98,6 +98,7 @@ const ModelAndKeyTabs: FC<{
               value={apiKey}
               onChange={onApiKeyChange}
               placeholder="sk-ant-..."
+              helper="Stored in the OS keyring on finish — never written to config files."
               error={errors.apiKey}
             />
           )}
@@ -129,6 +130,7 @@ const ModelAndKeyTabs: FC<{
             value={openaiKey}
             onChange={onOpenaiKeyChange}
             placeholder="sk-..."
+            helper="Stored in the OS keyring on finish — never written to config files."
             error={errors.openaiKey}
           />
         </div>
