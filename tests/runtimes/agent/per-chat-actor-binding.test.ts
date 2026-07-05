@@ -326,3 +326,44 @@ describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH,
     expect(priv().resolveExecutingActor(CHAT)).toBeUndefined();
   });
 });
+
+// ── F-STICKY-ACTOR STDIN_WRITE_TIMEOUT strand test ───────────────────────────
+
+describe('F-STICKY-ACTOR: STDIN_WRITE_TIMEOUT clears the executing-actor queue (QR-247)', () => {
+  const CHAT = 'group-timeout@g.us';
+  const ADMIN = 'admin@s.whatsapp.net';
+  let runtime: AgentRuntime;
+  let mapKey: string;
+
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    chatSessions: Map<string, unknown>;
+    chatQueues: Map<string, unknown>;
+    perChatExecActorQueue: Map<string, Array<string | undefined>>;
+    sendTurnToSession(session: unknown, chatJid: string, text: string, mapKey?: string, actorJid?: string): Promise<void>;
+    resolveExecutingActor(c: string): string | undefined;
+  };
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    mapKey = priv().resolvePerChatMapKey(CHAT);
+  });
+
+  it('a timed-out stdin write clears the pushed actor (push-without-shift -> fail-closed, no stale HEAD)', async () => {
+    const sess = {
+      ...mockSession,
+      getStatus: () => ({ active: true, sessionId: 's', pid: 1, startedAt: null, messageCount: 0, lastMessageAt: null }),
+      sendTurn: vi.fn(async () => { throw new Error('STDIN_WRITE_TIMEOUT: agent not reading input'); }),
+    };
+    priv().chatSessions.set(mapKey, sess);
+    priv().chatQueues.set(mapKey, mockQueue);
+
+    // sendTurnToSession pushes ADMIN at dispatch, then sendTurn throws STDIN_WRITE_TIMEOUT.
+    // No result event will ever shift it -> the timeout catch must clear it.
+    await priv().sendTurnToSession(sess, CHAT, 'do an admin thing', mapKey, ADMIN);
+
+    expect(priv().perChatExecActorQueue.get(mapKey) ?? []).toEqual([]);
+    expect(priv().resolveExecutingActor(CHAT)).toBeUndefined();
+  });
+});

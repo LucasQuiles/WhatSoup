@@ -3473,6 +3473,14 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
+        // F-STICKY-ACTOR (QR-247): the turn was pushed onto the executing-actor
+        // queue at dispatch but its stdin write timed out with NO result -> a
+        // push-without-shift. The session stays 'active' (no crash), so the
+        // clear-if-inactive at the next push does NOT fire and the actor would
+        // strand as HEAD -> next turn wrong-authorized (same class as S-CRASH).
+        // Clear the whole queue fail-closed: the hung subprocess's in-flight turns
+        // are stuck until it recovers or the watchdog crashes it.
+        if (this.usesPerChatActorSocket() && mapKey !== undefined) this.perChatExecActorQueue.delete(mapKey);
         const status = session.getStatus();
         log.warn({
           chatJid,
@@ -3558,7 +3566,7 @@ export class AgentRuntime implements Runtime {
           advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            this.injectPollAnswers(mapKey, pendingPoll);
+            this.injectPollAnswers(mapKey, pendingPoll, actorJid);
           } else {
             log.info({
               mapKey,
@@ -4412,6 +4420,7 @@ export class AgentRuntime implements Runtime {
   private injectPollAnswers(
     mapKey: string,
     pending: PendingPollQuestion,
+    answererActorJid?: string,
   ): void {
     // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
@@ -4435,7 +4444,7 @@ export class AgentRuntime implements Runtime {
     // Route through sendTurnPerChat for proper lifecycle handling.
     // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
     // pendingPolls.questions from being populated in shared mode.
-    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey).catch((err) => {
+    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey, answererActorJid).catch((err) => {
       log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
     });
 
