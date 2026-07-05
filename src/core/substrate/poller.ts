@@ -1111,11 +1111,16 @@ export class TriggerPoller {
   /**
    * Post-commit: a fired trigger's notification delivery threw. Record it on the
    * run row without disturbing the committed trigger-evaluation result — only
-   * error_kind is set; status and error_message are left untouched.
+   * error_kind is set; status and error_message are left untouched. The
+   * error_kind IS NULL guard is defense-in-depth: today every fired:true outcome
+   * commits error_kind=NULL, but that invariant is spread across every outcome
+   * branch — the guard makes sure a future fired-with-classification outcome
+   * cannot have its execute classification silently replaced by a delivery note.
    */
   private recordNotifyDispatchFailed(runId: number): void {
     this.db.prepare(
-      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed' WHERE id = ?`,
+      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
+       WHERE id = ? AND error_kind IS NULL`,
     ).run(runId);
   }
 

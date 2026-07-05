@@ -820,6 +820,38 @@ describe('TriggerPoller — messenger failure tolerance', () => {
     expect(runs[0].error_kind).toBe('notify_dispatch_failed');
     expect(runs[0].error_message).toBeNull();  // no free-text; kind carries the signal
   });
+
+  it('recordNotifyDispatchFailed never clobbers an existing error_kind classification', () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT 1`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+    const inserted = db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json, error_kind
+       ) VALUES (?, ?, 'failed', ?, ?, 0, 'execute failed', '{}', 1, '{}', 'timeout')`,
+    ).run(t.id, bead.id, 999_999_990, 999_999_991);
+    const runId = Number(inserted.lastInsertRowid);
+
+    // Today every fired:true outcome writes error_kind=NULL in the same
+    // transaction, so the public flow cannot reach this state — the WHERE
+    // guard is defense-in-depth so a future outcome type that fires with a
+    // pre-set error_kind cannot have its classification silently replaced.
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    (poller as unknown as { recordNotifyDispatchFailed(runId: number): void })
+      .recordNotifyDispatchFailed(runId);
+
+    const row = db.raw.prepare(
+      `SELECT error_kind FROM trigger_runs WHERE id = ?`,
+    ).get(runId) as { error_kind: string | null };
+    expect(row.error_kind).toBe('timeout');
+  });
 });
 
 describe('TriggerPoller — poll.pinecone', () => {
