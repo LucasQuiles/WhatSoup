@@ -120,7 +120,7 @@ import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
@@ -1498,6 +1498,12 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
+  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  // oldest-dispatched-unresolved = the turn the subprocess is currently running.
+  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
+  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  private perChatSocketResources: Map<string, { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }> = new Map();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
 
@@ -1555,6 +1561,16 @@ export class AgentRuntime implements Runtime {
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
+    // F-STICKY-ACTOR: clear the executing-actor register (fail-closed) and stop
+    // the per-chat socket. cleanupPerChatState covers idle-eviction, /new,
+    // dead-session, and shutdown-via-cleanup.
+    this.perChatExecActorQueue.delete(mapKey);
+    const sockRes = this.perChatSocketResources.get(mapKey);
+    if (sockRes) {
+      try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
+      try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
+      this.perChatSocketResources.delete(mapKey);
+    }
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
     // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
@@ -5529,6 +5545,20 @@ export class AgentRuntime implements Runtime {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
     }
     return canonicalizeChatJid(chatJid, this.db);
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-245): resolve the actor for a per-chat socket tool call
+   * at read time = the actor of the turn the subprocess is CURRENTLY executing
+   * (queue HEAD). Fail-closed: no live active session or empty queue -> undefined,
+   * which the sensitive-tool gate denies. Non-blocking (sync map/status reads).
+   * Re-derives mapKey each call so it is transparent to LID rekey.
+   */
+  private resolveExecutingActor(chatJid: string): string | undefined {
+    const mapKey = this.resolvePerChatMapKey(chatJid);
+    const session = this.chatSessions.get(mapKey);
+    if (!session || !session.getStatus().active) return undefined;
+    return this.perChatExecActorQueue.get(mapKey)?.[0];
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
