@@ -22,6 +22,13 @@ const EXPECTED_TOOLS = [
   'regenerate_vault',
 ];
 
+const SENSITIVE_TOOLS = [
+  'create_agent_job', 'create_watch', 'regenerate_vault', 'capture_task', 'capture_observation',
+  'update_bead', 'complete_bead', 'cancel_bead', 'approve_proposal', 'reject_proposal',
+  'pause_trigger', 'extend_trigger', 'add_alias', 'merge_entities', 'forget_observation',
+];
+const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'get_profile', 'list_entities'];
+
 const adminPhone = 'admin-user';
 const adminActor = `${adminPhone}@s.whatsapp.net`;
 const guestActor = 'guest-user@s.whatsapp.net';
@@ -81,23 +88,68 @@ describe('substrate MCP tools', () => {
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
 
-  it('guest (non-admin actorJid) is rejected on capture_task', async () => {
+  it('R1: sensitive tools are LISTED (call-gate model) while read-only tools are never flagged sensitive', () => {
+    // Listing is not the gate; every admin + read-only tool is visible.
+    const names = registry.listTools(guestSession).map(t => t.name);
+    for (const name of [...SENSITIVE_TOOLS, ...READ_TOOLS]) expect(names).toContain(name);
+  });
+
+  it('R1 defense in depth: the in-handler assertAdmin still denies a guest even if the central gate is bypassed', async () => {
+    // Install an authorizer that WOULD allow the guest through the central
+    // gate; the retained in-handler assertAdmin must still reject, proving
+    // the defense-in-depth layer is real and not dead code.
+    const dd = new ToolRegistry();
+    registerDefaultTools(dd, db, vaultPath);
+    // The registry install-once guard means registerDefaultTools already set
+    // the real authorizer; a bypassing authorizer is injected directly.
+    (dd as unknown as { sensitiveAuthorizer: (s: SessionContext) => boolean }).sensitiveAuthorizer = () => true;
+    const res = await dd.call('capture_task', { title: 'x' }, guestSession);
+    expect(res.isError).toBe(true);
+    // Reaches the handler: the exact in-handler assertAdmin message surfaces
+    // (wrapped by registry.call), distinct from the central gate's uniform
+    // 'Unknown tool' reply — proves the retained layer, not just any error.
+    expect(res.content[0].text).toBe(
+      'Tool "capture_task" failed: admin-only tool: caller phone "guest-user" is not on the instance admin list',
+    );
+  });
+
+  it('R1 policy coupling: exactly the admin-gated substrate tools carry sensitive:true', () => {
+    // Guards against a new admin tool shipping without the flag (F12). This
+    // reads the LIVE registry (each registered ToolDeclaration's `sensitive`
+    // flag) rather than comparing two hardcoded lists — so stripping the flag
+    // from any tool, or adding a new admin tool without it, fails this test.
+    const registered = (registry as unknown as {
+      tools: Map<string, { sensitive?: boolean }>;
+    }).tools;
+    const flaggedSensitive = new Set(
+      [...registered.entries()].filter(([, t]) => t.sensitive === true).map(([name]) => name),
+    );
+    // The set flagged in code must be EXACTLY the known admin-gated set.
+    expect(flaggedSensitive).toEqual(new Set(SENSITIVE_TOOLS));
+    // And no read-only tool may be flagged.
+    for (const name of READ_TOOLS) expect(flaggedSensitive.has(name)).toBe(false);
+  });
+
+  it('guest (non-admin actorJid) is rejected on capture_task without existence disclosure (R1)', async () => {
     const res = await registry.call('capture_task', { title: 'x' }, guestSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+    // Central sensitive gate: indistinguishable from a nonexistent tool.
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
-  it('regenerate_vault is admin gated', async () => {
+  it('regenerate_vault is admin gated without existence disclosure (R1)', async () => {
     const res = await registry.call('regenerate_vault', {}, guestSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+    expect(res.content[0].text).toBe('Unknown tool: regenerate_vault');
   });
 
-  it('missing actorJid is rejected on capture_task with actionable error', async () => {
+  it('missing actorJid is rejected on capture_task with the uniform non-disclosing reply (R1)', async () => {
     const res = await registry.call('capture_task', { title: 'x' }, { tier: 'global' });
     expect(res.isError).toBe(true);
-    // The error must distinguish "no actorJid" from "wrong actor".
-    expect(res.content[0].text).toMatch(/no actorJid|must populate actorJid/i);
+    // R1: the central gate replies uniformly to avoid an existence oracle;
+    // the 'missing actorJid - runtime wiring fault' diagnosis is logged
+    // server-side rather than returned to the caller.
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
   it('resolves @lid actorJid through lid_mappings for admin check', async () => {
@@ -117,10 +169,12 @@ describe('substrate MCP tools', () => {
   it('rejects unresolved @lid actorJid (admin gate fails closed on LID miss)', async () => {
     // Raw @lid number with no lid_mappings row — resolvePhoneFromJid returns
     // the LID number as fallback, which is NOT on the admin list → reject.
+    // R1: the central gate denies BEFORE the handler, without existence
+    // disclosure — still fail-closed, earlier.
     const lidSession: SessionContext = { tier: 'global', actorJid: 'missing-lid@lid' };
     const res = await registry.call('capture_task', { title: 'x' }, lidSession);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/not on the instance admin list/i);
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
   it('fails closed when LID admin resolution throws', async () => {
@@ -141,7 +195,9 @@ describe('substrate MCP tools', () => {
     );
 
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain('caller phone "unresolved"');
+    // R1 central gate: a throwing resolver denies fail-closed without
+    // existence disclosure (the same predicate backs the authorizer).
+    expect(res.content[0].text).toBe('Unknown tool: capture_task');
   });
 
   it('capture_task round-trip', async () => {
@@ -571,7 +627,7 @@ describe('substrate MCP tools', () => {
     }, guestSession);
 
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/admin/i);
+    expect(res.content[0].text).toBe('Unknown tool: add_alias');
   });
 
   it('forget_observation reprojects the affected entity profile', async () => {
