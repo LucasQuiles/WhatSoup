@@ -123,6 +123,7 @@ import { createBead } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import type { SessionContext } from '../../mcp/types.ts';
@@ -3359,6 +3360,17 @@ export class AgentRuntime implements Runtime {
     // here at the single dispatch chokepoint, independent of the per-path binds.
     this.enforceGlobalConversationBinding(chatJid);
     this.updateSessionActorJid(session, actorJid);
+    // F-STICKY-ACTOR (QR-247): push this turn's actor onto the per-chat executing
+    // register. sendTurnToSession is the single dispatch chokepoint reached only
+    // with a confirmed-live session (past sendTurnPerChat's :3534 spawn-fail drop),
+    // so a pushed entry always corresponds to a turn that will run. HEAD = the turn
+    // the subprocess is currently executing; shifted on that turn's result, cleared
+    // on any abnormal termination (Slice-4). per_chat non-sandbox only.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && mapKey !== undefined) {
+      const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
+      execQ.push(actorJid);
+      this.perChatExecActorQueue.set(mapKey, execQ);
+    }
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
     const mapKeyForChat = this.sandboxPerChat
@@ -3628,6 +3640,10 @@ export class AgentRuntime implements Runtime {
       } else {
         // Consume the seq for this completed user turn
         seqQueue.shift();
+        // F-STICKY-ACTOR (QR-247): advance the executing-actor head in lockstep
+        // with the seq FIFO on a completed user turn (unconditional; NOT the
+        // conditional pendingTurnActorJid.delete below, and NOT completeConsumedPerChatInbound).
+        this.perChatExecActorQueue.get(mapKey)?.shift();
         const fallbackReason = event.text ? fallbackReasonForResultText(event.text) : null;
         // Turn completed successfully with visible output — clear pending replay
         // text. Provider limit/auth/rate failures keep it so the fallback replay
@@ -5559,6 +5575,16 @@ export class AgentRuntime implements Runtime {
     const session = this.chatSessions.get(mapKey);
     if (!session || !session.getStatus().active) return undefined;
     return this.perChatExecActorQueue.get(mapKey)?.[0];
+  }
+
+  /** F-STICKY-ACTOR (QR-247): per-chat socket path under <cwd>/.claude, sha1-shortened if it would exceed the unix sun_path limit. */
+  private derivePerChatSocketPath(chatJid: string): string {
+    const dir = join(this.cwd ?? homedir(), '.claude');
+    const key = toConversationKey(chatJid);
+    const full = join(dir, `whatsoup-${key}.sock`);
+    if (Buffer.byteLength(full, 'utf8') <= 100) return full;
+    const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
+    return join(dir, `whatsoup-${h}.sock`);
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
@@ -8210,6 +8236,25 @@ export class AgentRuntime implements Runtime {
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
         this.chatSessions.set(initialMapKey, session);
+        // F-STICKY-ACTOR (QR-247): per-chat MCP socket bound to this chat's
+        // executing-actor register (tier:'global' — all sensitive/substrate tools
+        // are scope:'global'; a chat-scoped tier would strip them). Resolver
+        // re-derives mapKey each read (LID-rekey transparent). The subprocess is
+        // pointed at this socket in a later slice (config seam); created here so
+        // lifecycle/teardown land with the session.
+        const perChatSockPath = this.derivePerChatSocketPath(chatJid);
+        const perChatSocket = new WhatSoupSocketServer(
+          perChatSockPath,
+          this.registry,
+          { tier: 'global', allowedRoot: this.cwd ?? homedir() },
+          () => this.resolveExecutingActor(chatJid),
+        );
+        perChatSocket.start();
+        this.perChatSocketResources.set(initialMapKey, {
+          socketServer: perChatSocket,
+          socketPath: perChatSockPath,
+          cfgPath: perChatSockPath.replace(/\.sock$/, '.mcp.json'),
+        });
         const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
         this.chatQueues.set(initialMapKey, perChatQ);
 
