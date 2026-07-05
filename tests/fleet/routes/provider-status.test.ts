@@ -213,7 +213,7 @@ describe('handleGetLineProviderStatus', () => {
 
     // resolveProviderKeyService ignores the override for opencode-cli, so
     // keyPresent checks and this field reports the model-prefix service; the
-    // generated opencode.json honors the override (QR-221 tracks that split).
+    // generated opencode.json honors the override (QR-232 tracks that split).
     expect(mockedLookup).toHaveBeenCalledWith('minimax');
     const body = JSON.parse(res._body);
     expect(res._body).not.toContain('minimax-secret-value');

@@ -763,7 +763,7 @@ export async function handleGetLineProviderStatus(
     // for it), so report the SAME service keyPresent checks — the raw config
     // field is null in the common no-override case. For the API providers the
     // raw override read is kept deliberately: null preserves the "no override
-    // configured" tri-state that flags BYOK at a glance. (QR-221 corner: with
+    // configured" tri-state that flags BYOK at a glance. (QR-232 corner: with
     // an explicit override set on an opencode instance, the generated
     // opencode.json honors the override while the resolver — and therefore
     // keyPresent and this field — reports the derived service.)
