@@ -93,8 +93,10 @@ describe('handleConfigUpdate — plaintext provider-key strip', () => {
     const body = JSON.parse(res._body);
     expect(body.apiKey).toBeUndefined();
     expect(body.openaiKey).toBeUndefined();
-    // strong terminal assertion: the raw on-disk bytes carry no key material
-    expect(fs.readFileSync(configPath, 'utf8')).not.toContain('sk-ant-evil');
+    // strong terminal assertion: the raw on-disk bytes carry NEITHER key value
+    const rawDisk = fs.readFileSync(configPath, 'utf8');
+    expect(rawDisk).not.toContain('sk-ant-evil');
+    expect(rawDisk).not.toContain('sk-evil');
   });
 
   it('remediation: a pre-existing on-disk plaintext key is scrubbed by an unrelated PATCH', async () => {
