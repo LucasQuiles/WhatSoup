@@ -450,6 +450,49 @@ function validateAgentOptions(
     );
   }
 
+  // nlRouting: flag-gated NL-first routing aliases + per-sender preference
+  // store. Strictly boolean — config.ts arms it with `=== true`, so a
+  // mistyped "true"/1 would otherwise pass validation and silently leave
+  // the feature off (F11).
+  if (opts['nlRouting'] !== undefined && typeof opts['nlRouting'] !== 'boolean') {
+    return err(
+      'agentOptions.nlRouting',
+      'agentOptions.nlRouting must be a boolean when provided',
+    );
+  }
+
+  // nlRoutingTiers: optional intent→provider map for NL routing.
+  if (opts['nlRoutingTiers'] !== undefined) {
+    const tiers = opts['nlRoutingTiers'];
+    if (typeof tiers !== 'object' || tiers === null || Array.isArray(tiers)) {
+      return err(
+        'agentOptions.nlRoutingTiers',
+        'agentOptions.nlRoutingTiers must be an object when provided',
+      );
+    }
+    for (const [tierKey, tierValue] of Object.entries(tiers as Record<string, unknown>)) {
+      if (tierKey !== 'strongest' && tierKey !== 'fastest') {
+        return err(
+          'agentOptions.nlRoutingTiers',
+          `agentOptions.nlRoutingTiers.${tierKey} is not a recognized tier (strongest|fastest)`,
+        );
+      }
+      if (typeof tierValue !== 'string') {
+        return err(
+          'agentOptions.nlRoutingTiers',
+          `agentOptions.nlRoutingTiers.${tierKey} must be a provider id string`,
+        );
+      }
+    }
+  }
+
+  if (opts['nlRoutingEventsDir'] !== undefined && typeof opts['nlRoutingEventsDir'] !== 'string') {
+    return err(
+      'agentOptions.nlRoutingEventsDir',
+      'agentOptions.nlRoutingEventsDir must be a string when provided',
+    );
+  }
+
   if (opts['autoCompactInputTokens'] !== undefined) {
     const threshold = opts['autoCompactInputTokens'];
     if (

@@ -140,3 +140,100 @@ describe('classifyInput', () => {
     });
   });
 });
+
+
+
+describe('routing aliases (NL-first design, owner-approved PR-plan v2)', () => {
+  const NL = { routingAliases: true };
+
+  it('flag OFF (default): /model stays forwarded — byte-identical to today', () => {
+    expect(classifyInput('/model strongest')).toEqual({ type: 'forwarded', text: '/model strongest' });
+    expect(classifyInput('/why')).toEqual({ type: 'forwarded', text: '/why' });
+    expect(classifyInput('/reset')).toEqual({ type: 'forwarded', text: '/reset' });
+  });
+
+  it('flag OFF: existing local commands are unaffected by the opts param', () => {
+    expect(classifyInput('/status', NL)).toEqual({ type: 'local', command: 'status' });
+  });
+
+  it('/model strongest returns local command "model" with args', () => {
+    expect(classifyInput('/model strongest', NL)).toEqual({ type: 'local', command: 'model', args: 'strongest' });
+  });
+
+  it('bare /model returns local command "model" with no args (= status)', () => {
+    expect(classifyInput('/model', NL)).toEqual({ type: 'local', command: 'model' });
+  });
+
+  it('/why returns local command "why"', () => {
+    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  });
+
+  it('/reset returns local command "reset"', () => {
+    expect(classifyInput('/reset', NL)).toEqual({ type: 'local', command: 'reset' });
+  });
+
+  it('/Model (mixed case) is local', () => {
+    expect(classifyInput('/Model fastest', NL)).toEqual({ type: 'local', command: 'model', args: 'fastest' });
+  });
+
+  it('/route stays forwarded even with routing aliases ON (not part of the 3-alias set)', () => {
+    expect(classifyInput('/route', NL)).toEqual({ type: 'forwarded', text: '/route' });
+  });
+
+  it('/delegate stays forwarded even with routing aliases ON', () => {
+    expect(classifyInput('/delegate review', NL)).toEqual({ type: 'forwarded', text: '/delegate review' });
+  });
+
+  it('/runtime stays forwarded even with routing aliases ON (operator surface is a separate PR)', () => {
+    expect(classifyInput('/runtime health', NL)).toEqual({ type: 'forwarded', text: '/runtime health' });
+  });
+});
+
+describe('routing aliases — forwarded-capability fallthrough (F04)', () => {
+  const NL = { routingAliases: true };
+
+  it('/model with an unrecognized arg forwards (base /model capability preserved)', () => {
+    expect(classifyInput('/model sonnet', NL)).toEqual({ type: 'forwarded', text: '/model sonnet' });
+  });
+
+  it('/model with a compiled-in provider id stays local', () => {
+    expect(classifyInput('/model claude-cli', NL)).toEqual({ type: 'local', command: 'model', args: 'claude-cli' });
+  });
+
+  it('/model with extra words forwards (recognized grammar is exactly one arg)', () => {
+    expect(classifyInput('/model strongest please', NL)).toEqual({ type: 'forwarded', text: '/model strongest please' });
+  });
+
+  it('arged /why forwards; bare /why stays local', () => {
+    expect(classifyInput('/why because', NL)).toEqual({ type: 'forwarded', text: '/why because' });
+    expect(classifyInput('/why', NL)).toEqual({ type: 'local', command: 'why' });
+  });
+
+  it('arged /reset forwards; bare /reset stays local', () => {
+    expect(classifyInput('/reset everything', NL)).toEqual({ type: 'forwarded', text: '/reset everything' });
+    expect(classifyInput('/reset', NL)).toEqual({ type: 'local', command: 'reset' });
+  });
+});
+
+describe('routing aliases — trailing whitespace grammar (R10)', () => {
+  const NL = { routingAliases: true };
+
+  it('a trailing space on a bare alias still classifies local (matches base /status )', () => {
+    expect(classifyInput('/reset ', NL)).toEqual({ type: 'local', command: 'reset' });
+    expect(classifyInput('/why ', NL)).toEqual({ type: 'local', command: 'why' });
+    expect(classifyInput('/model ', NL)).toEqual({ type: 'local', command: 'model' });
+  });
+
+  it('a trailing space after a /model verb still classifies local with the verb as args', () => {
+    expect(classifyInput('/model strongest ', NL)).toEqual({ type: 'local', command: 'model', args: 'strongest' });
+  });
+
+  it('a base local command with a trailing space is unaffected', () => {
+    expect(classifyInput('/status ')).toEqual({ type: 'local', command: 'status' });
+    expect(classifyInput('/new ')).toEqual({ type: 'local', command: 'new' });
+  });
+
+  it('a bare slash with only whitespace still forwards (no command name)', () => {
+    expect(classifyInput('/ ').type).toBe('forwarded');
+  });
+});

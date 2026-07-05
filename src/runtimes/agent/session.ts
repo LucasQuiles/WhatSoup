@@ -117,6 +117,7 @@ export interface SessionManagerOptions {
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
   handoffSystemBlock?: () => string | null;
+  routingSystemBlock?: () => string | null;
 }
 
 /**
@@ -477,6 +478,7 @@ export class SessionManager {
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
+  private readonly routingSystemBlock: (() => string | null) | undefined;
 
   private systemPrompt: string = '';
 
@@ -574,6 +576,7 @@ export class SessionManager {
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
     this.handoffSystemBlock = opts.handoffSystemBlock;
+    this.routingSystemBlock = opts.routingSystemBlock;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -641,6 +644,13 @@ export class SessionManager {
     const handoffBlock = this.handoffSystemBlock?.();
     if (handoffBlock) {
       sources.push(handoffBlock);
+    }
+
+    // NL routing prompt contract (slice 3). The callback is only wired when
+    // agentOptions.nlRouting is on, so flag-off prompts stay byte-identical.
+    const routingBlock = this.routingSystemBlock?.();
+    if (routingBlock) {
+      sources.push(routingBlock);
     }
 
     if (this.configSystemPrompt) {
@@ -1922,6 +1932,11 @@ export class SessionManager {
 
   getProviderId(): string {
     return this.provider;
+  }
+
+  /** Model ref this session was spawned with (undefined = provider default). */
+  getModelRef(): string | undefined {
+    return this.model;
   }
 
   /**
