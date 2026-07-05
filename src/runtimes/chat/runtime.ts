@@ -26,6 +26,7 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import { resolveModelRole } from '../../lib/model-advisor.ts';
 
 const log = createChildLogger('conversation');
 
@@ -275,9 +276,14 @@ export class ChatRuntime implements Runtime {
     };
     window.push(currentMessage);
 
-    // 6. Build the generate request
+    // 6. Build the generate request. Model-role values may be symbolic
+    // (`<vendor>:<family>:latest[-stable]`) — resolve to a concrete ID here,
+    // at point of use. Literals pass through untouched with no network I/O;
+    // symbolic resolution reads the advisor's cached live list and degrades
+    // to the static catalog, never throwing (src/lib/model-advisor.ts).
+    const conversationModel = await resolveModelRole(config.models.conversation);
     const request: GenerateRequest = {
-      model: config.models.conversation,
+      model: conversationModel,
       maxTokens: config.maxTokens,
       systemPrompt,
       messages: window,
@@ -286,7 +292,7 @@ export class ChatRuntime implements Runtime {
     // 7. LLM call with retry + fallback
     let responseText: string | null = null;
     let failureCause: ChatFailureCause | null = null;
-    let modelUsed: string = config.models.conversation;
+    let modelUsed: string = conversationModel;
     let inputTokens = 0;
     let outputTokens = 0;
     let llmDurationMs = 0;
@@ -305,7 +311,7 @@ export class ChatRuntime implements Runtime {
 
     // Primary provider: try once, wait, retry once
     try {
-      log.info({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, elapsed_ms: 0, traceId }, 'llm_attempt');
+      log.info({ step: 'primary', provider: this.primaryProvider.name, model: conversationModel, attempt: 1, elapsed_ms: 0, traceId }, 'llm_attempt');
       const result = await this.primaryProvider.generate(request);
       responseText = result.content;
       inputTokens = result.inputTokens;
@@ -317,7 +323,7 @@ export class ChatRuntime implements Runtime {
       );
       clearAlertSourceChecked(this.botName, 'llm_total_failure');
     } catch (primaryErr) {
-      log.warn({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
+      log.warn({ step: 'primary', provider: this.primaryProvider.name, model: conversationModel, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
 
       // Auth and rate-limit errors won't be fixed by retrying any provider — fast-fail.
       // 400 (bad_request) skips the same-provider retry but still attempts fallback
@@ -331,19 +337,22 @@ export class ChatRuntime implements Runtime {
           this.botName,
           'llm_total_failure',
           `LLM ${primaryErr.code} for ${this.botName} (${this.primaryProvider.name})`,
-          `model=${config.models.conversation} traceId=${traceId} error=${primaryErr.message}`,
+          `model=${conversationModel} traceId=${traceId} error=${primaryErr.message}`,
         );
       } else if (primaryErr instanceof WhatSoupError && primaryErr.code === 'LLM_BAD_REQUEST') {
         // 400 (bad_request): skip same-provider retry (same payload = same error) but
         // attempt fallback provider — a different provider's parser may accept the payload.
         log.warn({ traceId, err: primaryErr, code: primaryErr.code }, 'bad request — skipping retry, trying fallback');
 
-        const fallbackRequest: GenerateRequest = { ...request, model: config.models.fallback };
+        // Resolve the (possibly symbolic) fallback model at point of use —
+        // lazily, so turns that never fall back never pay for it.
+        const fallbackModel = await resolveModelRole(config.models.fallback);
+        const fallbackRequest: GenerateRequest = { ...request, model: fallbackModel };
         try {
-          log.info({ step: 'fallback_on_400', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
+          log.info({ step: 'fallback_on_400', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
-          modelUsed = config.models.fallback;
+          modelUsed = fallbackModel;
           inputTokens = result.inputTokens;
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
@@ -357,7 +366,7 @@ export class ChatRuntime implements Runtime {
             this.botName,
             'llm_total_failure',
             `LLM bad request + fallback failed for ${this.botName}`,
-            `model=${config.models.conversation} traceId=${traceId} error=${primaryErr.message}`,
+            `model=${conversationModel} traceId=${traceId} error=${primaryErr.message}`,
           );
         }
       } else {
@@ -366,7 +375,7 @@ export class ChatRuntime implements Runtime {
       await new Promise((resolve) => setTimeout(resolve, jitteredDelay(config.apiRetryDelayMs, 0)));
 
       try {
-        log.info({ step: 'retry', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
+        log.info({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
         const result = await this.primaryProvider.generate(request);
         responseText = result.content;
         inputTokens = result.inputTokens;
@@ -378,15 +387,17 @@ export class ChatRuntime implements Runtime {
         );
         clearAlertSourceChecked(this.botName, 'llm_total_failure');
       } catch (retryErr) {
-        log.warn({ step: 'retry', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
+        log.warn({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
         log.error({ traceId, err: retryErr }, 'primary provider retry failed — trying fallback');
 
-        const fallbackRequest: GenerateRequest = { ...request, model: config.models.fallback };
+        // Resolve the (possibly symbolic) fallback model at point of use.
+        const fallbackModel = await resolveModelRole(config.models.fallback);
+        const fallbackRequest: GenerateRequest = { ...request, model: fallbackModel };
         try {
-          log.info({ step: 'fallback', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 3, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
+          log.info({ step: 'fallback', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 3, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
-          modelUsed = config.models.fallback;
+          modelUsed = fallbackModel;
           inputTokens = result.inputTokens;
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
@@ -396,7 +407,7 @@ export class ChatRuntime implements Runtime {
           );
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
-          log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
+          log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;

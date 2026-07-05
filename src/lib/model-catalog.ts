@@ -87,7 +87,7 @@ export const MODEL_CATALOG: readonly CatalogEntry[] = Object.freeze([
 // Strip routing/serving suffixes that don't change the model identity:
 // context-window selectors (claude-opus-4-6[1m]), speed variants
 // (claude-opus-4-6-fast), and dated snapshots (claude-haiku-4-5-20251001).
-function stripSuffixes(id: string): string {
+export function stripSuffixes(id: string): string {
   return id
     .replace(/\[[^\]]*\]$/, '')
     .replace(/-fast$/, '')
@@ -155,21 +155,73 @@ function lookupCatalog(id: string): CatalogEntry | undefined {
   return catalogById.get(id) ?? catalogById.get(stripSuffixes(id.trim().toLowerCase()));
 }
 
+// Stability markers that pin an ID to a pre-release line (gpt-5.6-preview,
+// claude-opus-4-9-beta). Stable comparison excludes these — parseModelId puts
+// them in their own family — while `stable: false` admits them by comparing on
+// the base ID's version. Variant PRODUCT lines (-codex, -mini) are NOT markers:
+// they stay excluded from the base family in both modes.
+const STABILITY_MARKER = /-(preview|beta|alpha|experimental|exp|rc\d*|next)(?=$|-)/;
+
+export interface LatestInFamilyOptions {
+  /**
+   * When false, pre-release IDs (…-preview, …-beta, …) whose base parses into
+   * the target family are admitted as candidates; the winning pre-release ID
+   * is returned verbatim in `normalized` so it can be served as-is. On a
+   * version tie a stable ID beats a pre-release one. Default: true (today's
+   * behavior — stable current/legacy only).
+   */
+  stable?: boolean;
+}
+
+// Parse `id` as a candidate for the vendor+family line. Direct parses match
+// exactly; when stable comparison is off, a stability-marked ID whose base
+// parses into the family is admitted with the served ID kept in `normalized`.
+function parseFamilyCandidate(
+  id: string,
+  vendor: ParsedModel['vendor'],
+  family: string,
+  stable: boolean,
+): { parsed: ParsedModel; prerelease: boolean } | null {
+  const direct = parseModelId(id);
+  if (direct && direct.vendor === vendor && direct.family === family) {
+    return { parsed: direct, prerelease: false };
+  }
+  if (stable) return null;
+  const lowered = stripSuffixes(id.trim().toLowerCase());
+  const m = STABILITY_MARKER.exec(lowered);
+  if (!m) return null;
+  const base = parseModelId(lowered.slice(0, m.index) + lowered.slice(m.index + m[0].length));
+  if (!base || base.vendor !== vendor || base.family !== family) return null;
+  return {
+    parsed: { vendor, family, version: base.version, normalized: lowered },
+    prerelease: true,
+  };
+}
+
 /** Newest known model in the same vendor+family line, drawing from the
  * static catalog plus any extra IDs (e.g. live Models-API results). */
 export function latestInFamily(
   parsed: ParsedModel,
   extraKnownIds: readonly string[] = [],
+  options: LatestInFamilyOptions = {},
 ): ParsedModel | null {
+  const stable = options.stable !== false;
   let best: ParsedModel | null = null;
+  let bestPrerelease = false;
   const candidates = [
     ...MODEL_CATALOG.filter((e) => e.status === 'current' || e.status === 'legacy').map((e) => e.id),
     ...extraKnownIds,
   ];
   for (const id of candidates) {
-    const p = parseModelId(id);
-    if (!p || p.vendor !== parsed.vendor || p.family !== parsed.family) continue;
-    if (!best || p.version > best.version) best = p;
+    const cand = parseFamilyCandidate(id, parsed.vendor, parsed.family, stable);
+    if (!cand) continue;
+    const wins = !best
+      || cand.parsed.version > best.version
+      || (cand.parsed.version === best.version && bestPrerelease && !cand.prerelease);
+    if (wins) {
+      best = cand.parsed;
+      bestPrerelease = cand.prerelease;
+    }
   }
   return best;
 }

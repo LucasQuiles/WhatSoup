@@ -197,7 +197,10 @@ if (process.env.INSTANCE_CONFIG) {
 
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
-// Advisory-only and fail-open; never blocks startup. See docs/configuration.md.
+// Advisory-only and fail-open; never blocks startup. Symbolic role values
+// (`<vendor>:<family>:latest[-stable]`) are re-resolved on every tick and the
+// advisory targets the RESOLVED model; the same tick refreshes the live-ID
+// cache used by point-of-use resolution. See docs/configuration.md.
 startModelCurrencyMonitor(config.botName, {
   conversation: config.models.conversation,
   extraction: config.models.extraction,
