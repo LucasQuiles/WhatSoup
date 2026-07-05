@@ -112,3 +112,70 @@ describe('handleConfigUpdate — plaintext provider-key strip', () => {
     expect(JSON.parse(raw).description).toBe('unrelated touch');
   });
 });
+
+describe('handleCreateLine — plaintext provider-key strip guard', () => {
+  let tmpDir: string;
+  const envKeys = ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-pk-create-'));
+    for (const k of envKeys) { saved[k] = process.env[k]; }
+    process.env.HOME = tmpDir;
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, '.config');
+    process.env.XDG_DATA_HOME = path.join(tmpDir, '.local', 'share');
+    process.env.XDG_STATE_HOME = path.join(tmpDir, '.local', 'state');
+  });
+
+  afterEach(() => {
+    for (const k of envKeys) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('CREATE guard: top-level apiKey/openaiKey in the create body never reach disk', async () => {
+    const { handleCreateLine } = await import('../../../src/fleet/routes/ops.ts');
+    // CREATE needs its own deps shape (mirrors ops-create-byok-roundtrip.test.ts's
+    // successDeps()): getInstance must return undefined, not a fixed truthy stub,
+    // or CREATE's uniqueness check 409s before the disk write is ever reached.
+    const createDeps: OpsDeps = {
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+      realtime: { publish: vi.fn() },
+      serviceManager: {
+        enable: vi.fn().mockResolvedValue(undefined),
+        disable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue(undefined),
+        restart: vi.fn().mockResolvedValue(undefined),
+        startFire: vi.fn(),
+      } as any,
+    } as OpsDeps;
+
+    const res = mockRes();
+    const req = mockReq(JSON.stringify({
+      name: 'pk-create', type: 'chat', adminPhones: ['15550000000'],
+      apiKey: 'sk-ant-x1', openaiKey: 'sk-x1',
+    }));
+    (req as any).method = 'POST';
+    await handleCreateLine(req, res, createDeps);
+    // Whatever status CREATE returns in this harness (201, or 4xx/5xx from a
+    // missing collaborator), the SECURITY assertion is disk content:
+    const createdPath = path.join(
+      process.env.XDG_CONFIG_HOME as string, 'whatsoup', 'instances', 'pk-create', 'config.json',
+    );
+    if (fs.existsSync(createdPath)) {
+      const raw = fs.readFileSync(createdPath, 'utf8');
+      expect(raw).not.toContain('sk-ant-x1');
+      expect(raw).not.toContain('sk-x1');
+    } else {
+      // CREATE failed before writing — the guard holds vacuously here; force
+      // the harness to reach the write by fixing deps until the file exists.
+      expect(fs.existsSync(createdPath)).toBe(true);
+    }
+  });
+});

@@ -1064,7 +1064,12 @@ export async function handleCreateLine(
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
   }
-  config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
+  // Regression guard, not an active hole: PASSTHROUGH_FIELDS excludes the
+  // wizard-era plaintext key fields today; this keeps future allowlist
+  // growth from reopening the PATCH-path leak fixed alongside it.
+  config = stripPlaintextProviderKeys(
+    migrateLegacyMemoryConfig(config, { removeLegacy: true }).config,
+  ).clean;
 
   // --- Shared validator: defense-in-depth before writing to disk ---
   // CREATE has already done inline shape checks above; this catches any field
