@@ -90,10 +90,11 @@ describe('handleConfigUpdate — plaintext provider-key strip', () => {
     expect(disk.apiKey).toBeUndefined();
     expect(disk.openaiKey).toBeUndefined();
     expect(disk.description).toBe('kept');
-    expect(fs.readFileSync(configPath, 'utf8')).not.toContain('sk-ant-evil');
     const body = JSON.parse(res._body);
     expect(body.apiKey).toBeUndefined();
     expect(body.openaiKey).toBeUndefined();
+    // strong terminal assertion: the raw on-disk bytes carry no key material
+    expect(fs.readFileSync(configPath, 'utf8')).not.toContain('sk-ant-evil');
   });
 
   it('remediation: a pre-existing on-disk plaintext key is scrubbed by an unrelated PATCH', async () => {
@@ -163,19 +164,16 @@ describe('handleCreateLine — plaintext provider-key strip guard', () => {
     }));
     (req as any).method = 'POST';
     await handleCreateLine(req, res, createDeps);
-    // Whatever status CREATE returns in this harness (201, or 4xx/5xx from a
-    // missing collaborator), the SECURITY assertion is disk content:
+    // The SECURITY assertion is disk content. Assert the write was reached as an
+    // explicit precondition (createDeps mirrors the byte-identical successDeps()
+    // that ops-create-byok-roundtrip.test.ts proves reaches a written config.json),
+    // then assert the typed keys never landed in it.
     const createdPath = path.join(
       process.env.XDG_CONFIG_HOME as string, 'whatsoup', 'instances', 'pk-create', 'config.json',
     );
-    if (fs.existsSync(createdPath)) {
-      const raw = fs.readFileSync(createdPath, 'utf8');
-      expect(raw).not.toContain('sk-ant-x1');
-      expect(raw).not.toContain('sk-x1');
-    } else {
-      // CREATE failed before writing — the guard holds vacuously here; force
-      // the harness to reach the write by fixing deps until the file exists.
-      expect(fs.existsSync(createdPath)).toBe(true);
-    }
+    expect(fs.existsSync(createdPath)).toBe(true); // precondition: CREATE reached the disk write
+    const raw = fs.readFileSync(createdPath, 'utf8');
+    expect(raw).not.toContain('sk-ant-x1');
+    expect(raw).not.toContain('sk-x1');
   });
 });
