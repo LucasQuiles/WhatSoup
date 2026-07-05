@@ -37,6 +37,7 @@ import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
+import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackEntry,
@@ -1645,7 +1646,7 @@ export class AgentRuntime implements Runtime {
           if (seqQueue && idx >= 0) seqQueue.splice(idx, 1);
           if (seqQueue?.length === 0) this.perChatInboundSeqQueue.delete(mapKey);
         }
-        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq);
+        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq, classifyErrorForInbound(err));
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
@@ -2418,7 +2419,7 @@ export class AgentRuntime implements Runtime {
             if (this.durability && this.currentInboundSeq !== undefined) {
               this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
               this.replyGuarantee?.disarm(this.currentInboundSeq);
-              this.durability.markInboundFailed(this.currentInboundSeq);
+              this.durability.markInboundFailed(this.currentInboundSeq, 'session_crash');
               this.currentInboundSeq = undefined;
             }
             if (config.controlPeers.size > 0) {
@@ -2740,7 +2741,7 @@ export class AgentRuntime implements Runtime {
         if (this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
-          this.durability.markInboundFailed(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Propagate so the outer turn-chain handler notifies the user and
         // the fleet supervisor sees the PID enter recovery rather than
@@ -2761,7 +2762,7 @@ export class AgentRuntime implements Runtime {
         if (this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
-          this.durability.markInboundFailed(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Notify user of failure
         this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
@@ -3346,7 +3347,7 @@ export class AgentRuntime implements Runtime {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
           this.markRuntimeFaultContinuityCandidate(failedSeq);
           this.replyGuarantee?.disarm(failedSeq);
-          this.durability.markInboundFailed(failedSeq);
+          this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
         this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
         return;
@@ -7417,7 +7418,7 @@ export class AgentRuntime implements Runtime {
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
             this.replyGuarantee?.disarm(this.currentInboundSeq);
-            this.durability.markInboundFailed(this.currentInboundSeq);
+            this.durability.markInboundFailed(this.currentInboundSeq, 'session_crash');
             this.currentInboundSeq = undefined;
           }
           if (config.controlPeers.size > 0) {
@@ -7475,7 +7476,7 @@ export class AgentRuntime implements Runtime {
     if (this.durability && inboundSeq !== undefined) {
       this.markRuntimeFaultContinuityCandidate(inboundSeq);
       this.replyGuarantee?.disarm(inboundSeq);
-      this.durability.markInboundFailed(inboundSeq);
+      this.durability.markInboundFailed(inboundSeq, 'session_crash');
       seqQueue.shift();
     }
     this.cleanupPerChatCrashTurnState(mapKey);

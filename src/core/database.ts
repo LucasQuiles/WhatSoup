@@ -733,6 +733,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [33, runMigration33],
   [34, runMigration34],
   [35, runMigration35],
+  [36, runMigration36],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -877,6 +878,26 @@ function runMigration34(db: DatabaseSync): void {
 
   if (!names.has('continuity_candidate_marked_at')) {
     db.exec('ALTER TABLE inbound_events ADD COLUMN continuity_candidate_marked_at TEXT');
+  }
+}
+
+// W1: bounded inbound failure taxonomy. Add a nullable, content-free
+// failure_class column so the telemetry miner can split the collapsed
+// terminal_reason='error' rows by driver. Deliberately NO CHECK constraint (the
+// vocabulary is gated in src/core/inbound-failure-class.ts so it can evolve
+// without a migration), NO default, NO backfill, NO index. Pre-taxonomy rows
+// keep failure_class NULL; classified-but-unattributable rows get 'unknown'.
+function runMigration36(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inbound_events'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db
+    .prepare("PRAGMA table_info('inbound_events')")
+    .all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'failure_class')) {
+    db.exec('ALTER TABLE inbound_events ADD COLUMN failure_class TEXT');
   }
 }
 
