@@ -35,6 +35,7 @@ import { systemdUnitName, type ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
+import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts';
 import { errorMessage } from '../../lib/error-message.ts';
@@ -552,8 +553,11 @@ export async function handleConfigUpdate(
       }
 
       // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
+      // and inert plaintext provider keys (wizard-era apiKey/openaiKey — nothing reads them;
+      // stripping here also scrubs legacy on-disk victims on their next config write).
       const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
-      const clean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;
+      const scrubbed = stripPlaintextProviderKeys(mergedCleanRaw).clean;
+      const clean = migrateLegacyMemoryConfig(scrubbed, { removeLegacy: true }).config;
       try {
         writePrivateConfigFileSync(instance.configPath, JSON.stringify(clean, null, 2) + '\n');
       } catch (err) {
