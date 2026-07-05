@@ -226,6 +226,168 @@ describe('classifyStreamedProviderFailure (QR-209 streaming-channel refinement)'
   });
 });
 
+describe('classifyStreamedProviderFailure — usage-limit banner requires an anchor (QR-209b F1)', () => {
+  // QR-209b F1: the OLD code exempted the ENTIRE 'usage-limit' kind from the
+  // opener/shape anchor once text.length <= 300, on the false assumption that
+  // isUsageLimitMessage only ever matches anchored terminal shapes. Several of its
+  // true-branches are bare unanchored substrings (isProviderCreditBalanceLimitMessage's
+  // "out of usage credits" / "out of usage" + org-co-word branches, and the top-level
+  // "out of extra usage" / "claude usage limit" strings), so ordinary billing PROSE
+  // that merely discusses a usage cap was silently destroyed. Deliver-over-destroy:
+  // when the anchor is absent, ambient (delivered) is the correct default.
+  it.each([
+    "Yes, we're out of usage credits for this billing cycle, so no more requests will process until next month.",
+    'Good question — once your account is out of usage credits, the provider just queues everything until the next cycle.',
+    "That error means the workspace is out of usage; contact your admin to raise the group's allocation for this month.",
+  ])('unanchored usage-limit prose stays ambient, never banner: %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true); // infra channel unchanged
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'ambient' });
+  });
+
+  // ROUND-2 CORRECTION (R1-HIGH-1): a review round proved the ORIGINAL assertion
+  // here (ambient) was itself part of the defect this round fixes. These are bare,
+  // terse, CLI-shaped lines — the same "subject + terminal-credit/allocation clause"
+  // shape as the codebase's own ground-truth corpus (see
+  // tests/runtimes/agent/terminal-limit-detection.test.ts:43-45, e.g. "You're out of
+  // usage credits"). With no surrounding prose, the matched evidence essentially IS
+  // the message, so the shape anchor now classifies these banner. This block is
+  // distinct from the untouched, isUsageLimitMessage-only "residual terminal-
+  // credit/quota branch shapes" describe block further down (~line 819) — that one
+  // exercises only the infra-channel detector and stays green, unmodified.
+  it.each([
+    'You are out of usage; please contact your admin.',
+    'Out of usage — your org has no remaining allocation.',
+    'Out of usage because the org is over its cap.',
+    'Out of usage for the group allocation this cycle.',
+    'The provider account balance is too low.',
+    'Provider account balance is insufficient to continue.',
+    'API account balance is exhausted for this billing cycle.',
+    'Model policy only allows a model that needs a usage credit.',
+  ])('residual-branch usage-limit shapes classify as banner (bare CLI-shaped, no surrounding prose): %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true);
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'banner' });
+  });
+
+  // R1-HIGH-1: more bare ground-truth shapes from the same credit/org-allocation
+  // exhaustion family (terminal-limit-detection.test.ts's own ground truth, plus the
+  // structured-token and pre-existing isUsageLimitMessage-only strings from the first
+  // describe block above) that were never exercised against the streaming-channel
+  // classifier before this round. No surrounding prose — the shape anchor must treat
+  // these the same as the residual-branch family above.
+  it.each([
+    "You're out of usage credits",
+    'Your org is out of usage — add funds to continue',
+    'Provider credit balance exhausted.',
+    'API account balance is too low to continue.',
+    'Billing quota exceeded for the provider account.',
+    'insufficient_quota',
+    'billing_error',
+  ])('bare ground-truth credit/quota banners classify as BANNER: %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true);
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'banner' });
+  });
+
+  // R1-HIGH-2: hasLimitResetTimeCue must not act as a standalone anchor — an
+  // incidental clock-time clause anywhere in genuine prose must not re-arm
+  // suppression just because SOME other unanchored branch made isUsageLimitMessage
+  // true. Both examples below carry a real reset-time cue (so the OLD code's bare
+  // `hasLimitResetTimeCue(text)` check alone classified them banner) but read as
+  // ordinary conversational prose once the whole message is considered — the shape
+  // anchor is the fix, not a "cue + limit-name-token" compound (neither example
+  // below contains a LIMIT_NAME_TOKENS substring, so that compound would not
+  // distinguish them from the genuine "Claude will be available at 8pm" banner
+  // shape either — see the shape-anchor implementation comment for why).
+  it.each([
+    "Yes, we're out of usage credits for this billing cycle. It resets at 9pm if that helps you plan.",
+    "We're out of usage credits right now. Just so you know, my calendar resets at 6am tomorrow too.",
+  ])('an incidental reset-time clause in genuine prose stays ambient, never banner: %j', (message) => {
+    expect(isUsageLimitMessage(message)).toBe(true);
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'ambient' });
+  });
+
+  it('genuine terminal usage-limit banners with an anchor stay banner', () => {
+    // The assembled "hit your X" phrasing is CLI-emitted verbatim, never prose a
+    // human/assistant would casually write — a real anchor, so this must NOT
+    // regress to ambient just because the usage-limit kind lost its blanket bypass.
+    // NOTE: this case passes unchanged before AND after the round-2 shape-anchor fix
+    // (intentional retention guard, not new-behavior coverage) — the assembler match
+    // alone already anchors it under both the round-1 and round-2 implementations.
+    expect(classifyStreamedProviderFailure("You've hit your weekly limit · resets Jul 7 at 10pm")).toEqual({
+      kind: 'usage-limit',
+      confidence: 'banner',
+    });
+  });
+});
+
+describe('classifyStreamedProviderFailure — STREAMED_BANNER_OPENERS corpus gaps (QR-209b F2)', () => {
+  // QR-209b F2: these machine-shape strings are real corpus tokens (the server-error
+  // detector's own opening phrase, plus the raw error-type tokens it substring-matches
+  // at isProviderServerErrorMessage) that were missing from STREAMED_BANNER_OPENERS, so
+  // a genuine short system banner using one of them leaked to users as 'ambient'
+  // instead of being suppressed. Each is a short raw string here (banner) — the
+  // position-sensitivity (embedded mid-explanation stays ambient) is covered below.
+  it.each([
+    ['We are experiencing high demand for the Opus model right now, please try again shortly.', 'server-error'],
+    ['overloaded_error: the model is temporarily overloaded, please retry.', 'server-error'],
+    ['server_error - please try again in a few minutes.', 'server-error'],
+    ['server_unavailable: retry after a short delay.', 'server-error'],
+    ['api_error: request failed due to an unexpected condition upstream.', 'server-error'],
+  ] as const)('short raw opener %j classifies as BANNER (kind %j)', (message, kind) => {
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind, confidence: 'banner' });
+  });
+
+  // R1-HIGH-3: additional bare/near-bare openers from the same new corpus that were
+  // not yet exercised — a terse system notice (own sentence or two, no discussion)
+  // must still classify banner after the shape anchor lands.
+  // NOTE: these 3 cases pass unchanged before AND after the round-2 shape-anchor fix
+  // (intentional retention guards, not new-behavior coverage) — each opener's own
+  // remainder is already short enough that the round-1 draft's unconditional match
+  // and the round-2 shape check agree; new-behavior coverage for these openers is
+  // the "followed by long genuine prose stays ambient" block below.
+  it.each([
+    ['We are experiencing high demand for the model. Please retry shortly.', 'server-error'],
+    ['overloaded_error', 'server-error'],
+    ['server_error: upstream 529', 'server-error'],
+  ] as const)('additional bare/near-bare opener %j classifies as BANNER (kind %j)', (message, kind) => {
+    expect(classifyStreamedProviderFailure(message)).toEqual({ kind, confidence: 'banner' });
+  });
+
+  // The SAME machine-shape tokens embedded past the start of a long genuine
+  // explanation must NOT be suppressed — startsWith anchoring (not substring-anywhere)
+  // is the whole point of the opener list (QR-209 false-positive guard).
+  // NOTE: these 5 cases pass unchanged before AND after the round-2 shape-anchor fix
+  // (intentional retention guards, not new-behavior coverage) — the opener never
+  // matches at position 0 here in the first place (position-sensitivity, not shape),
+  // so startsWithErrorOpener already returned false under both implementations.
+  it.each([
+    'I checked the status page and unfortunately we are experiencing high demand for the Opus model right now, so there may be a short delay before your request completes; thanks for your patience while capacity recovers.',
+    'When we hit capacity constraints the backend returns an overloaded_error code and the client library should apply exponential backoff before retrying the same request context again.',
+    'Occasionally the upstream provider responds with a generic server_error payload instead of a more specific status, and the retry policy treats that the same as any other transient failure from the backend systems.',
+    'If the health check keeps failing the load balancer marks the node as server_unavailable and stops routing new connections to it until the next successful check passes on that host.',
+    'Whenever the client receives a 5xx from the gateway it logs the raw api_error field alongside the request id so the on-call engineer can correlate it with upstream traces later on.',
+  ])('the same token embedded mid-explanation stays ambient, never banner: %j', (message) => {
+    expect(message.length).toBeLessThanOrEqual(300);
+    expect(classifyStreamedProviderFailure(message)?.confidence).not.toBe('banner');
+  });
+
+  // R1-HIGH-3: the SAME opener tokens, this time genuinely AT the start of the
+  // message (position-sensitivity alone would classify these banner) but followed
+  // by a long, genuine explanatory remainder — a real new regression the round-1
+  // draft introduced ("nobody starts a reply this way" turned out to be false for
+  // ops-agent log commentary and business-bot customer copy). The shape anchor
+  // (not position alone) is what must keep these ambient.
+  it.each([
+    'server_error entries spiked in the logs right after the deploy, worth a look.',
+    'api_error usually just means the upstream did something unexpected, not always fatal.',
+    'overloaded_error appears in your logs whenever a 529 response comes back from the provider, so treat it as retryable.',
+    'server_unavailable is the label your load balancer assigns when health checks fail.',
+    'We are experiencing high demand for our support line today, so replies might be delayed by a few hours.',
+    'We are experiencing high demand for this promotion, so please be patient while we process your order.',
+  ])('an opener at the true start but followed by long genuine prose stays ambient: %j', (message) => {
+    expect(classifyStreamedProviderFailure(message)?.confidence).not.toBe('banner');
+  });
+});
+
 describe('classifyAgentFailure', () => {
   it.each([
     {

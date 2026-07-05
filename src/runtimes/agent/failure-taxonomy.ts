@@ -149,6 +149,22 @@ function hasApproachingLimitWarning(lower: string): boolean {
 }
 
 /**
+ * A concrete machine-generated reset-time cue ("resets at 9pm", "will be
+ * available at 8pm", "come back at 2pm"). Hoisted to module scope — the SAME
+ * pattern isUsageLimitMessage's terminal branch already tests reply text against,
+ * no NEW regex added (QR-130/133 ReDoS lesson). Reused by hasUsageLimitBannerAnchor
+ * (QR-209b F1) as ONE candidate evidence match feeding the shape anchor below —
+ * never as a standalone anchor on its own (QR-209b round-2 R1-HIGH-2: a bare cue
+ * match, with no bound on how much of the message lies outside it, let an
+ * incidental clock-time clause in genuine prose re-arm suppression).
+ */
+const LIMIT_RESET_TIME_PATTERN = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
+
+function hasLimitResetTimeCue(text: string): boolean {
+  return LIMIT_RESET_TIME_PATTERN.test(text);
+}
+
+/**
  * Detect provider usage-limit / quota-exceeded messages that should not be
  * forwarded as normal user-visible agent output.
  */
@@ -178,8 +194,7 @@ export function isUsageLimitMessage(text: string): boolean {
   // warning carrying a reset time does not get classified as terminal.
   if (hasApproachingLimitWarning(lower)) return false;
 
-  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
-  return resetPattern.test(text) && (
+  return hasLimitResetTimeCue(text) && (
     LIMIT_NAME_TOKENS.some((token) => lower.includes(token)) ||
     lower.includes('quota exceeded')
   );
@@ -450,6 +465,37 @@ export function classifyProviderFailure(text: string): ProviderFailureKind | nul
 export const MAX_STREAMED_BANNER_LENGTH = 300;
 
 /**
+ * Maximum number of WORDS a streamed message may carry OUTSIDE its matched
+ * provider-failure evidence and still count as a suppressible BANNER (QR-209b
+ * round-2 shape principle: a banner is text where the matched evidence
+ * essentially IS the message; genuine prose ABOUT a failure embeds that same
+ * evidence inside a longer message instead). For a single matched span of L
+ * words in a message of N total words, the words outside that span always
+ * number N - L regardless of where the span sits, so callers only need "how
+ * much matched," never "where."
+ *
+ * Measured in WORDS, not characters, deliberately: MAX_STREAMED_BANNER_LENGTH's
+ * own pre-existing boundary test pads a real banner out to exactly 300/301
+ * characters with a single repeated filler character to probe that SEPARATE
+ * length cap — such padding adds no new WORDS, so this bound stays orthogonal to
+ * that length cap rather than fighting it. Calibrated against the full QR-209b
+ * round-2 acceptance corpus (bare ground-truth banners vs. genuine conversational
+ * prose covering the exact same topic): 10 sits in the only integer gap that
+ * admits every required banner case and rejects every required ambient case.
+ *
+ * HEADROOM WARNING (measured at the 2026-07-04 verify pass): the longest real
+ * corpus banner sits at 9 surrounding words against this bound of 10 — one word
+ * of margin. If a provider rewords a banner past the bound it will NOT be
+ * silently destroyed; it fails OPEN to 'ambient': delivered to the user and
+ * logged via the 'delivered assistant_text despite provider-failure
+ * classification' warn. That warn line is the drift tripwire — when it fires on
+ * a raw banner shape, add the new shape to the acceptance corpus in
+ * failure-taxonomy.test.ts and re-derive this bound; do not widen it blind
+ * (every extra word erodes the prose-protection this constant exists for).
+ */
+const MAX_BANNER_SURROUNDING_WORDS = 10;
+
+/**
  * Curated error-line openers. A streamed assistant_text is a suppressible BANNER
  * only when — after stripping leading markdown/quote wrappers — it STARTS WITH one
  * of these, i.e. the text IS the error rather than a sentence mentioning it.
@@ -482,20 +528,181 @@ const STREAMED_BANNER_OPENERS: readonly string[] = [
 ];
 
 /**
+ * QR-209b F2: real server-error corpus opener (isProviderServerErrorMessage
+ * ~:336) plus its raw machine-shape tokens. Unlike STREAMED_BANNER_OPENERS above,
+ * these are NOT unconditional openers — QR-209b round-2 (R1-HIGH-3) proved the
+ * original claim here false ("underscored tokens never open genuine assistant
+ * prose... nobody starts a reply 'api_error is going on…'"): ops-agent log
+ * commentary and business-bot customer-facing copy both legitimately open with
+ * these exact tokens. Matching startsWith at position 0 alone is not sufficient —
+ * startsWithErrorOpener additionally requires the shape principle
+ * (MAX_BANNER_SURROUNDING_WORDS) for this list only. The original 20 openers above
+ * are untouched and stay unconditional once the length bound holds.
+ */
+const SHAPE_GATED_BANNER_OPENERS: readonly string[] = [
+  'we are experiencing high demand for',
+  'overloaded_error',
+  'server_error',
+  'server_unavailable',
+  'api_error',
+];
+
+/**
  * Leading markdown-emphasis / blockquote / whitespace wrappers a CLI banner may
  * stream with (`_Rate limited …_`, `> Error: …`). Stripped char-by-char (no regex)
  * before an opener match. Linear in the leading-wrapper run only.
  */
 const BANNER_WRAPPER_CHARS: ReadonlySet<string> = new Set([' ', '\t', '\n', '\r', '_', '*', '~', '>', '`']);
 
-function startsWithErrorOpener(lowerText: string): boolean {
+function stripBannerWrapperChars(lowerText: string): string {
   let i = 0;
   while (i < lowerText.length && BANNER_WRAPPER_CHARS.has(lowerText[i]!)) i++;
-  const stripped = i === 0 ? lowerText : lowerText.slice(i);
+  return i === 0 ? lowerText : lowerText.slice(i);
+}
+
+/**
+ * Word count via literal-space splitting — no regex over reply text (QR-130/133
+ * ReDoS lesson keeps this file free of new patterns there). Used only to measure
+ * SHAPE (how much of a message lies outside its matched evidence), never to
+ * re-derive classification itself. Deliberately word-based rather than
+ * character-based: a run of a single repeated filler character (as the
+ * pre-existing MAX_STREAMED_BANNER_LENGTH boundary tests use to probe the 300-char
+ * cap) adds no new words, so this measure stays orthogonal to that length cap
+ * instead of fighting it (QR-209b round-2).
+ */
+function wordCount(text: string): number {
+  return text.length === 0 ? 0 : text.split(' ').length;
+}
+
+function startsWithErrorOpener(lowerText: string): boolean {
+  const stripped = stripBannerWrapperChars(lowerText);
   for (const opener of STREAMED_BANNER_OPENERS) {
     if (stripped.startsWith(opener)) return true;
   }
+  // QR-209b round-2 R1-HIGH-3: these 5 openers legitimately open genuine prose
+  // too, so a position-0 match alone is not sufficient evidence — also require the
+  // shape principle (little of the message may lie outside the matched opener).
+  for (const opener of SHAPE_GATED_BANNER_OPENERS) {
+    if (
+      stripped.startsWith(opener) &&
+      wordCount(stripped) - wordCount(opener) <= MAX_BANNER_SURROUNDING_WORDS
+    ) {
+      return true;
+    }
+  }
   return false;
+}
+
+/**
+ * Longest bare, system-emitted usage-limit evidence phrase matched in `lower`, or
+ * '' if none matched. This MIRRORS — but does not replace or change the return
+ * type of — two booleans already proven out elsewhere in this file:
+ * hasTerminalLimitAssembler's four constructions per LIMIT_NAME_TOKENS name, and
+ * isProviderCreditBalanceLimitMessage's literal and compound substrings (plus the
+ * model-policy credit-gate compound from isUsageLimitMessage's own top-level
+ * branch). Kept as a separate function — rather than changing either of those
+ * two detectors' return type to expose a match — so their existing,
+ * already-verified infra-channel behavior (isUsageLimitMessage) is untouched
+ * (QR-209b round-2: do not touch pre-existing classification branches beyond
+ * what F1 already changed). CAUTION: because this duplicates rather than reuses
+ * those branches, a future edit to either detector's matched substrings should
+ * also update the mirrored candidate here, or the shape anchor below silently
+ * stops recognizing the new shape. Known gaps as of the 2026-07-04 verify pass:
+ * isUsageLimitMessage's top-level 'out of extra usage', bare 'claude usage
+ * limit', and 'requires usage credits' substrings are NOT mirrored — their bare
+ * reductions classify ambient (over-deliver, the safe direction; no bare
+ * real-corpus occurrence exists in the test corpus, every real form carries a
+ * reset-time cue that anchors via the separate cue path).
+ *
+ * Only the LENGTH of the longest candidate matters (see MAX_BANNER_SURROUNDING_WORDS);
+ * for the two-part compounds (e.g. "out of usage" + an org/admin co-word) the
+ * combined candidate approximates their combined word count even though the two
+ * substrings are not contiguous in the source text — arithmetically equivalent to
+ * bracketing prefix + gap + suffix around two disjoint matched spans.
+ */
+function bareUsageLimitEvidence(lower: string): string {
+  let longest = '';
+  const consider = (candidate: string): void => {
+    if (candidate.length > longest.length) longest = candidate;
+  };
+
+  for (const name of LIMIT_NAME_TOKENS) {
+    if (lower.includes(`hit your ${name}`)) consider(`hit your ${name}`);
+    if (lower.includes(`reached your ${name}`)) consider(`reached your ${name}`);
+    if (lower.includes(`${name} reached`)) consider(`${name} reached`);
+    if (lower.includes(`${name} is set to $0`)) consider(`${name} is set to $0`);
+  }
+
+  if (lower.includes('insufficient_quota')) consider('insufficient_quota');
+  if (lower.includes('billing_error')) consider('billing_error');
+  if (lower.includes('billing quota exceeded')) consider('billing quota exceeded');
+  if (lower.includes('out of usage credits')) consider('out of usage credits');
+  if (lower.includes('out of usage')) {
+    for (const coWord of ['add funds', 'contact your admin', 'your org', 'org is', 'group']) {
+      if (lower.includes(coWord)) consider(`out of usage ${coWord}`);
+    }
+  }
+
+  const providerBillingContext = (
+    lower.includes('provider') ||
+    lower.includes('api') ||
+    lower.includes('billing') ||
+    lower.includes('quota')
+  );
+  if (providerBillingContext) {
+    for (const phrase of ['insufficient credits', 'no credits remaining', 'credit balance exhausted']) {
+      if (lower.includes(phrase)) consider(phrase);
+    }
+  }
+
+  if (
+    lower.includes('account balance') &&
+    (lower.includes('provider') || lower.includes('api') || lower.includes('billing'))
+  ) {
+    for (const coWord of ['too low', 'insufficient', 'exhausted']) {
+      if (lower.includes(coWord)) consider(`account balance ${coWord}`);
+    }
+  }
+
+  if (lower.includes('model policy only allows') && lower.includes('usage credit')) {
+    consider('model policy only allows usage credit');
+  }
+
+  return longest;
+}
+
+/**
+ * ANCHOR for a usage-limit BANNER classification (QR-209b F1, round-2 R1-HIGH-1/2).
+ * isUsageLimitMessage matches several bare, unanchored substrings —
+ * isProviderCreditBalanceLimitMessage's "out of usage credits" / "out of usage" +
+ * org-or-admin-co-word branches, and the top-level "out of extra usage" /
+ * "claude usage limit" / model-policy-credit-gate strings — that ordinary billing
+ * PROSE can contain without being the raw error line itself (e.g. "we're out of
+ * usage credits for this billing cycle" said conversationally).
+ *
+ * Round-1 required the SAME terminal-shape evidence already proven out elsewhere
+ * in this file (the assembled "hit your X" phrasing, a reset-time cue, or a
+ * curated opener) but treated a bare BOOLEAN match as sufficient. Round-2
+ * (R1-HIGH-1, R1-HIGH-2) found that insufficient: real ground-truth CLI banners
+ * with NO assembler/reset-cue/opener (e.g. "You're out of usage credits") were
+ * left with no possible anchor at all, while a reset-time cue matched as a bare
+ * boolean let an incidental clock-time clause anywhere in genuine prose re-arm
+ * suppression. The fix is the SHAPE principle: an evidence match only anchors
+ * banner when little of the message lies outside it
+ * (MAX_BANNER_SURROUNDING_WORDS) — the evidence must essentially BE the message,
+ * not a phrase genuine prose merely embeds. Anything else is ambient (delivered)
+ * — deliver-over-destroy is the QR-209 default when in doubt.
+ */
+function hasUsageLimitBannerAnchor(lower: string, text: string): boolean {
+  const totalWords = wordCount(text);
+
+  const bareEvidence = bareUsageLimitEvidence(lower);
+  if (bareEvidence && totalWords - wordCount(bareEvidence) <= MAX_BANNER_SURROUNDING_WORDS) return true;
+
+  const resetCueMatch = LIMIT_RESET_TIME_PATTERN.exec(text);
+  if (resetCueMatch && totalWords - wordCount(resetCueMatch[0]) <= MAX_BANNER_SURROUNDING_WORDS) return true;
+
+  return startsWithErrorOpener(lower);
 }
 
 export type StreamedFailureConfidence = 'banner' | 'ambient';
@@ -515,11 +722,23 @@ export type StreamedFailureConfidence = 'banner' | 'ambient';
  *   - `{ kind, confidence: 'ambient' }`— matched but is prose about an error → DELIVER
  *
  * BANNER requires the permissive match AND `length <= MAX_STREAMED_BANNER_LENGTH`
- * AND shape evidence the text is the error itself: `usage-limit` already carries
- * tested terminal/prose guards (assembler + reset-time), so the length bound
- * suffices there; every other kind must START WITH a curated error opener. When in
- * doubt the result is `ambient` — on the streaming channel a false delivery is one
- * visible message, a false suppression is permanent unrecoverable silence.
+ * AND shape evidence the text is the error itself. `usage-limit` is NOT exempt from
+ * this (QR-209b F1): isUsageLimitMessage has several bare unanchored substring
+ * branches (see hasUsageLimitBannerAnchor), so it accepts a wider anchor set —
+ * assembled terminal-limit phrasing, a concrete reset-time cue, or a bare
+ * credit/quota phrase — but round-2 additionally requires each of those to
+ * satisfy the SHAPE principle (MAX_BANNER_SURROUNDING_WORDS): the matched
+ * evidence must essentially BE the message, not a phrase genuine prose merely
+ * embeds. A curated error opener ALSO anchors usage-limit text, as the same
+ * unconditional fallback every kind gets — that path carries no shape check,
+ * a known inherited gap tracked as QR-224 (a two-topic reply opening with an
+ * unrelated opener token can still suppress). Every other kind must START WITH
+ * a curated error opener; the 5 newest
+ * openers (SHAPE_GATED_BANNER_OPENERS) carry that same shape requirement
+ * (QR-209b round-2 R1-HIGH-3), while the original 20 stay unconditional once the
+ * length bound holds. When in doubt the result is `ambient` — on the streaming
+ * channel a false delivery is one visible message, a false suppression is
+ * permanent unrecoverable silence.
  *
  * This does NOT change {@link classifyProviderFailure}; the infra channels keep the
  * permissive behavior.
@@ -529,9 +748,10 @@ export function classifyStreamedProviderFailure(
 ): { kind: ProviderFailureKind; confidence: StreamedFailureConfidence } | null {
   const kind = classifyProviderFailure(text);
   if (kind === null) return null;
+  const lower = text.toLowerCase();
   const isBanner =
     text.length <= MAX_STREAMED_BANNER_LENGTH &&
-    (kind === 'usage-limit' || startsWithErrorOpener(text.toLowerCase()));
+    (kind === 'usage-limit' ? hasUsageLimitBannerAnchor(lower, text) : startsWithErrorOpener(lower));
   return { kind, confidence: isBanner ? 'banner' : 'ambient' };
 }
 

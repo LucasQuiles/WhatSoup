@@ -39,7 +39,10 @@ A service is not a provider ID: `nvidia` would be reached as
    presence-only pre-flight: `fallback_credential_invalid` can never fire for
    the service. If you add a probe, update the URL table and the
    mapped-but-unprobed lock in
-   `tests/runtimes/agent/providers/credential-verify.test.ts`.
+   `tests/runtimes/agent/providers/credential-verify.test.ts`. (Doc-sync note:
+   the probe list stated here and in the design note is NOT independently
+   guard-enforced — `tests/lib/provider-service-doc-sync.test.ts` parses
+   `docs/configuration.md` only. Reconcile this file's mentions by hand.)
 4. **Reconcile the hand-maintained doc lists**:
    - `docs/configuration.md` — the env-var table in "Enabling provider
      fallback on a new host" and the probed/no-probe service lists in the
