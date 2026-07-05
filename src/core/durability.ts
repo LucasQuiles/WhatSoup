@@ -9,6 +9,8 @@ import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 
 const log = createChildLogger('durability');
@@ -193,7 +195,9 @@ export class DurabilityEngine {
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
       ),
       markInboundFailed: prepare(
-        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error' WHERE seq = ?`,
+        // terminal_reason stays exactly 'error' (external matcher contract); the
+        // bounded, content-free failure_class column carries the driver split.
+        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
       ),
       markContinuityCandidate: prepare(
         `UPDATE inbound_events
@@ -390,8 +394,8 @@ export class DurabilityEngine {
     this.statements.markInboundComplete.run(terminalReason, seq);
   }
 
-  markInboundFailed(seq: number): void {
-    this.statements.markInboundFailed.run(seq);
+  markInboundFailed(seq: number, failureClass?: InboundFailureClass): void {
+    this.statements.markInboundFailed.run(coerceInboundFailureClass(failureClass), seq);
   }
 
   markContinuityCandidate(
@@ -727,7 +731,7 @@ export class DurabilityEngine {
 
         if (!terminalOp) {
           this.markContinuityCandidate(ev.seq, 'crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
-          this.markInboundFailed(ev.seq);
+          this.markInboundFailed(ev.seq, 'crash_recovery');
           log.info(
             { inboundSeq: ev.seq },
             'preConnectRecovery: inbound processing with no terminal op marked failed',

@@ -214,7 +214,12 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
 
     engine.preConnectRecovery();
 
-    expect(getInbound(db, seq)['processing_status']).toBe('failed');
+    const row = getInbound(db, seq);
+    expect(row['processing_status']).toBe('failed');
+    // Crash-reclaim stamps the bounded crash_recovery driver; terminal_reason
+    // stays 'error' (external matcher contract).
+    expect(row['failure_class']).toBe('crash_recovery');
+    expect(row['terminal_reason']).toBe('error');
   });
 
   it('inbound in `processing` with a live terminal outbound op is left untouched', () => {
