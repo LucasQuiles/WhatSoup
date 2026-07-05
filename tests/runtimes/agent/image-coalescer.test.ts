@@ -127,18 +127,18 @@ describe('ImageCoalescer.markSeqsSkipped — branch coverage', () => {
 
 describe('ImageCoalescer.markSeqFailed — branch coverage', () => {
   it('returns early when durability thunk resolves to null', () => {
-    noDurabilityCoalescer.markSeqFailed('chat-1', 42);
+    noDurabilityCoalescer.markSeqFailed('chat-1', 42, 'transport_send_failed');
 
     expect(replyGuarantee.disarm).not.toHaveBeenCalled();
   });
 
-  it('disarms and marks the representative seq failed when durability is wired', () => {
-    coalescer.markSeqFailed('chat-1', 42);
+  it('disarms and forwards the caller-classified failure class to durability', () => {
+    coalescer.markSeqFailed('chat-1', 42, 'transport_send_failed');
 
     expect(replyGuarantee.disarm).toHaveBeenCalledTimes(1);
     expect(replyGuarantee.disarm).toHaveBeenCalledWith(42);
     expect(durability.markInboundFailed).toHaveBeenCalledTimes(1);
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(42, 'transport_send_failed');
   });
 
   it('does not rethrow when markInboundFailed throws', () => {
@@ -146,10 +146,10 @@ describe('ImageCoalescer.markSeqFailed — branch coverage', () => {
       throw new Error('durability write failed');
     });
 
-    coalescer.markSeqFailed('chat-1', 42);
+    coalescer.markSeqFailed('chat-1', 42, 'db_error');
 
     expect(durability.markInboundFailed).toHaveBeenCalledTimes(1);
-    expect(durability.markInboundFailed).toHaveBeenCalledWith(42);
+    expect(durability.markInboundFailed).toHaveBeenCalledWith(42, 'db_error');
   });
 });
 

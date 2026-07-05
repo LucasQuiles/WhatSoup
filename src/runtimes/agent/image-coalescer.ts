@@ -27,6 +27,7 @@
  */
 import type { IncomingMessage } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import type { InboundFailureClass } from '../../core/inbound-failure-class.ts';
 import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -80,13 +81,18 @@ export class ImageCoalescer {
     }
   }
 
-  /** Mark the representative seq failed in durability after a failed coalesced send. */
-  markSeqFailed(mapKey: string, seq: number): void {
+  /**
+   * Mark the representative seq failed in durability after a failed coalesced
+   * send. The failure class is required — the caller holds the thrown error and
+   * must classify it (classifyErrorForInbound) rather than let the row collapse
+   * to 'unknown'.
+   */
+  markSeqFailed(mapKey: string, seq: number, failureClass: InboundFailureClass): void {
     const durability = this.getDurability();
     if (!durability) return;
     try {
       this.getReplyGuarantee()?.disarm(seq);
-      durability.markInboundFailed(seq);
+      durability.markInboundFailed(seq, failureClass);
     } catch (err) {
       log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative seq failed');
     }

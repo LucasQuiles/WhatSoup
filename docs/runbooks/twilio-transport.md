@@ -85,7 +85,7 @@ Per-field notes (validation rules are exact — see
 | `twilioConfig.voice.voicemailMaxLengthSec` | no | `120` | Max recording length in seconds (`[5, 600]`). |
 | `twilioConfig.voice.voicemailGreeting` | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `twilioConfig.pollIntervalMs` | no | `15000` | Integer in `[5000, 86400000]`. Floor protects against rate-limit storms; the 24h ceiling catches typos that would silently disable inbound. Also the inbound *lookback window* at connect (see below). |
-| `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. **Config-only today** — see [Current limitations](#current-limitations). |
+| `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. Enforced per destination as a sliding one-minute window in the adapter's `sendText` path (validation runs first; the limiter never sees an invalid send). Over-cap sends are **delayed (FIFO queue per destination), never rejected**. In-process, in-memory only — a restart resets the window, and multiple processes sending from the same number each enforce their own independent cap. See [Current limitations](#current-limitations). |
 
 The `transport` and `twilioConfig` fields are also documented in the
 instance.json schema in [`docs/configuration.md`](../configuration.md).
@@ -207,10 +207,19 @@ Each item below is verified against the code on this branch.
   no consent guard, and no per-iteration self-review artifact/guard exist on
   this branch. Do not assume an invariant layer is active when working under
   `src/transport/twilio/`.
-- **`rateLimit.smsPerMinute` is validated config with no enforcement.** No
-  code consumes it on the send path yet. Do not rely on it to cap outbound
-  volume; it exists so configs written today stay valid when the limiter
-  lands.
+- **`rateLimit.smsPerMinute` is enforced, not merely validated — with
+  per-process caveats.** `SmsRateLimiter`
+  (`src/transport/twilio/sms-rate-limiter.ts`) enforces it per destination as
+  a sliding one-minute window at the adapter's `sendText` seam, reserving a
+  slot *after* request validation (invalid sends never consume a slot) and
+  *before* the port call. Over-cap sends are **delayed — queued FIFO per
+  destination — never rejected**; callers do not see a throttling failure.
+  The cap is in-process, in-memory state only: a restart resets it, and it
+  is **not** shared across multiple processes sending from the same Twilio
+  number — each process enforces its own independent cap, so N processes
+  together allow up to N× the configured rate. Surviving restarts or
+  coordinating across processes would require a persistent store, which is
+  not implemented.
 - **The webhook listener binds `127.0.0.1` by default.** Operators MUST
   front it with an HTTPS-terminating reverse proxy or tunnel whose public URL
   exactly matches `webhook.publicBaseUrl`. Twilio signature validation is

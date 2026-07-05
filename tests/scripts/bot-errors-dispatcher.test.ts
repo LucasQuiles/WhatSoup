@@ -92,7 +92,7 @@ function writeRecoveryEvent(root: string, index: number, overrides: Record<strin
     eventType: 'clear',
     severity: 'info',
     createdAt: `2026-05-31T00:${String(index).padStart(2, '0')}:00Z`,
-    machine: 'MACLAB',
+    machine: 'HOST-A',
     platform: 'darwin',
     instance: 'Loops',
     source: 'llm_total_failure',
@@ -106,6 +106,29 @@ function writeRecoveryEvent(root: string, index: number, overrides: Record<strin
   const created = String(event.createdAt).replace(/[-:]/g, '');
   const eventId = String(event.id).replace(/[^A-Za-z0-9_.:-]+/g, '_');
   writeFileSync(join(outbox, `${created}.Loops.${eventId}.json`), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
+}
+
+// Seed an already-open incident into the durable incident-state, standing in for
+// the alert a prior dispatcher run would have surfaced. A clear/recovery only
+// surfaces when it closes an open incident of the same key; a clear with no open
+// incident is orphan-suppressed as connection-flap noise (see commit 3c678e57 and
+// deploy/scripts/tests/test_bot_errors_orphan_clear_suppression.py). openedEpoch
+// predates the recovery events so the clear is not treated as clock-skewed.
+function seedOpenIncident(root: string, key: string, openedEpoch = Math.floor(Date.UTC(2026, 4, 30) / 1000)) {
+  const state = {
+    version: 1,
+    openIncidents: {
+      [key]: {
+        status: 'open',
+        eventCreatedAtEpoch: openedEpoch,
+        openedAt: openedEpoch,
+        openedIso: new Date(openedEpoch * 1000).toISOString().replace('.000', ''),
+        suppressedCount: 0,
+      },
+    },
+    lastSentAt: {},
+  };
+  writeFileSync(join(root, 'incident-state.json'), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
 function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
@@ -680,6 +703,10 @@ describe('bot-errors-dispatcher', () => {
     const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
     const sent = join(tmpRoot, 'sent');
     const suppressed = join(tmpRoot, 'suppressed');
+    // The 12 clears recover one real incident; seed the open incident a prior
+    // alert would have created so the surviving (first) recovery closes it and
+    // surfaces. Without it every clear is orphan-suppressed (no open incident).
+    seedOpenIncident(tmpRoot, 'HOST-A|Loops|llm_total_failure');
     const summaries = [
       'alert source cleared: llm_total_failure',
       ' Alert   Source   Cleared:   llm_total_failure ',
@@ -743,7 +770,7 @@ describe('bot-errors-dispatcher', () => {
     });
     writeRecoveryEvent(tmpRoot, 3, {
       id: 'distinct-host',
-      machine: 'MWLAB',
+      machine: 'HOST-B',
       summary: 'alert source cleared: llm_total_failure run=123 at 2026-05-31T00:01:00Z',
     });
     writeRecoveryEvent(tmpRoot, 4, {
@@ -762,14 +789,28 @@ describe('bot-errors-dispatcher', () => {
       encoding: 'utf8',
     });
 
-    expect(JSON.parse(output)).toMatchObject({ processed: 4, sent: 4, suppressed: 0, recoveryDeduped: 0, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT RECOVERY/g)).toHaveLength(4);
+    // recoveryDeduped: 0 is the property under test: the four recoveries carry
+    // distinguishing tokens (run=123 vs run=124, a different host, a different
+    // source) that must land in four DISTINCT recovery fingerprints, so none is
+    // collapsed as a duplicate. If normalization stripped any of those tokens,
+    // recoveryDeduped would rise above 0. Each recovery has no matching open
+    // incident, so all four are orphan-suppressed rather than surfaced — that is
+    // orthogonal to the conservative-normalization property this test guards.
+    expect(JSON.parse(output)).toMatchObject({ processed: 4, sent: 0, suppressed: 4, recoveryDeduped: 0, failed: 0 });
+    const reasons = readdirSync(join(tmpRoot, 'suppressed')).map(
+      (file) =>
+        (JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as { delivery: { suppressedReason: string } })
+          .delivery.suppressedReason,
+    );
+    expect(reasons).toHaveLength(4);
+    // "no open incident" (not the recovery-duplicate reason) confirms each event
+    // reached should_suppress_send as its own distinct recovery — none was merged.
+    expect(reasons.every((reason) => reason.includes('no open incident'))).toBe(true);
   });
 
   it('does not redact 10-to-15 digit recovery tokens into the same duplicate fingerprint', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
-    const sent = join(tmpRoot, 'sent');
     writeRecoveryEvent(tmpRoot, 1, {
       id: 'bytes-free-1733000111',
       summary: 'disk recovery bytesFree=1733000111 ok',
@@ -789,20 +830,34 @@ describe('bot-errors-dispatcher', () => {
       encoding: 'utf8',
     });
 
-    expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, suppressed: 0, recoveryDeduped: 0, failed: 0 });
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
-    const summaries = readdirSync(sent).map((file) => {
-      const event = JSON.parse(readFileSync(join(sent, file), 'utf8')) as { summary: string };
-      return event.summary;
-    });
-    expect(summaries).toContain('disk recovery bytesFree=1733000111 ok');
-    expect(summaries).toContain('disk recovery bytesFree=1733000999 ok');
+    // recoveryDeduped: 0 is the property under test: bytesFree=1733000111 and
+    // bytesFree=1733000999 are 10-to-15 digit tokens that must NOT be redacted to
+    // one fingerprint. Distinct fingerprints mean neither recovery is collapsed as
+    // a duplicate; if the tokens were redacted alike, one would be recovery-deduped
+    // (recoveryDeduped: 1). Both then have no open incident and are orphan-
+    // suppressed — orthogonal to the fingerprint-distinctness property guarded here.
+    expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 0, suppressed: 2, recoveryDeduped: 0, failed: 0 });
+    const reasons = readdirSync(join(tmpRoot, 'suppressed')).map(
+      (file) =>
+        (JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as { delivery: { suppressedReason: string } })
+          .delivery.suppressedReason,
+    );
+    expect(reasons).toHaveLength(2);
+    // Both carry the orphan reason (not the recovery-duplicate reason), confirming
+    // the two distinct-token recoveries were never merged by the dedupe pass.
+    expect(reasons.every((reason) => reason.includes('no open incident'))).toBe(true);
   });
 
   it('does not suppress a clear separated from the previous clear by a same-fingerprint alert', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    // Seed the incident the first clear recovers (a prior alert would have opened
+    // it). The same-fingerprint critical alert between the two clears reopens the
+    // incident, so the second clear also closes an open incident and surfaces;
+    // both recoveries are therefore non-orphan. This isolates the dedupe-barrier
+    // property: the alert splits the two clears into separate recovery episodes so
+    // the second is not suppressed as a duplicate of the first.
+    seedOpenIncident(tmpRoot, 'HOST-A|Loops|llm_total_failure');
     writeRecoveryEvent(tmpRoot, 0, {
       id: 'flap-clear-before',
       createdAt: '2026-05-31T00:00:00Z',

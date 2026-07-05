@@ -31,7 +31,7 @@ describe('Provider hardening', () => {
 
     it('all mkdirSync calls in providers use mode 0o700', () => {
       const files = readdirSync(PROVIDERS_DIR).filter(f => f.endsWith('.ts'));
-      expect(files).toEqual(expect.arrayContaining(['anthropic-api.ts', 'claude.ts', 'openai-api.ts']));
+      expect(files).toEqual(expect.arrayContaining(['anthropic-api.ts', 'openai-api.ts']));
       const insecureCalls: string[] = [];
       for (const file of files) {
         const content = readFileSync(join(PROVIDERS_DIR, file), 'utf8');
@@ -49,7 +49,7 @@ describe('Provider hardening', () => {
 
   describe('Provider descriptor completeness', () => {
     // Every provider file that exports a descriptor must have all required fields
-    const descriptorFiles = ['claude.ts', 'openai-api.ts', 'anthropic-api.ts'];
+    const descriptorFiles = ['openai-api.ts', 'anthropic-api.ts'];
 
     for (const file of descriptorFiles) {
       it(`${file} descriptor has all required fields`, () => {

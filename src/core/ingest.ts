@@ -7,6 +7,7 @@ import type { Database } from './database.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { DurabilityEngine } from './durability.ts';
+import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
@@ -353,7 +354,7 @@ export function createIngestHandler(
         } catch (err) {
           log.error({ err, messageId: msg.messageId }, 'runtime.handleMessage threw');
           if (durability && seq !== undefined) {
-            durability.markInboundFailed(seq);
+            durability.markInboundFailed(seq, classifyErrorForInbound(err));
           }
         }
       } catch (err) {
