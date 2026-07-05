@@ -503,7 +503,7 @@ Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(s
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PK | Auto-incrementing tool call identifier. |
-| `conversation_key` | TEXT NOT NULL | Chat context of the tool call. |
+| `conversation_key` | TEXT NOT NULL | Chat context of the tool call. Global-tier sessions (no per-chat key) record under the reserved `__global__` sentinel; real keys derive from JIDs so it cannot collide. |
 | `session_checkpoint_id` | INTEGER | FK to `session_checkpoints.id`. Links the tool call to the agent session. |
 | `tool_name` | TEXT NOT NULL | Name of the MCP tool invoked. |
 | `tool_input` | TEXT NOT NULL | JSON-serialized input arguments. |
