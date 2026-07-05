@@ -242,6 +242,19 @@ interface PostCommitActions {
   pauseNotificationFailureCount?: number;
 }
 
+/**
+ * Outcome of a post-commit notification dispatch. `failed` is true ONLY when a
+ * send was attempted and the messenger threw — it distinguishes a fired-but-
+ * undelivered run from one that was never dispatched (throttled / not eligible,
+ * which are gated out before dispatchNotification is called). A successful send
+ * that returns no waMessageId is `{ waId: null, failed: false }` — still
+ * delivered, just without a receipt id, so it is NOT a dispatch failure.
+ */
+interface NotificationDispatch {
+  waId: string | null;
+  failed: boolean;
+}
+
 export class TriggerPoller {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -412,12 +425,23 @@ export class TriggerPoller {
     if (shouldDispatchNotification) {
       // Notification dispatch is intentionally post-commit. A crash between
       // COMMIT and sendMessage is at-most-once delivery for this poller tick.
-      const deliveredWaId = await this.dispatchNotification(t, outcome);
-      if (deliveredWaId) {
+      const dispatch = await this.dispatchNotification(t, outcome);
+      if (dispatch.waId) {
         try {
-          this.recordDeliveredWaMessageId(runId, deliveredWaId);
+          this.recordDeliveredWaMessageId(runId, dispatch.waId);
         } catch (err) {
           log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
+        }
+      } else if (dispatch.failed) {
+        // The trigger evaluated and fired, but delivery threw. Mark the already-
+        // committed run so a fired-but-undelivered run is distinguishable in
+        // telemetry from a throttled one — status is left EXACTLY as finishRun
+        // wrote it (the evaluation succeeded) and error_message stays NULL.
+        // Throttled / not-eligible runs never reach here (shouldDispatchNotification).
+        try {
+          this.recordNotifyDispatchFailed(runId);
+        } catch (err) {
+          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification dispatch failure');
         }
       }
     }
@@ -1024,17 +1048,17 @@ export class TriggerPoller {
     }
   }
 
-  private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<string | null> {
+  private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<NotificationDispatch> {
     const text = formatNotification(t, outcome);
     try {
       const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
-      return receipt.waMessageId ?? null;
+      return { waId: receipt.waMessageId ?? null, failed: false };
     } catch (err) {
       log.error(
         { err, triggerId: t.id, reportChatJid: t.report_chat_jid },
         'failed to dispatch trigger notification',
       );
-      return null;
+      return { waId: null, failed: true };
     }
   }
 
@@ -1082,6 +1106,22 @@ export class TriggerPoller {
        SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
        WHERE id = ?`,
     ).run(deliveredWaId, runId);
+  }
+
+  /**
+   * Post-commit: a fired trigger's notification delivery threw. Record it on the
+   * run row without disturbing the committed trigger-evaluation result — only
+   * error_kind is set; status and error_message are left untouched. The
+   * error_kind IS NULL guard is defense-in-depth: today every fired:true outcome
+   * commits error_kind=NULL, but that invariant is spread across every outcome
+   * branch — the guard makes sure a future fired-with-classification outcome
+   * cannot have its execute classification silently replaced by a delivery note.
+   */
+  private recordNotifyDispatchFailed(runId: number): void {
+    this.db.prepare(
+      `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
+       WHERE id = ? AND error_kind IS NULL`,
+    ).run(runId);
   }
 
   private scheduleNextFire(
