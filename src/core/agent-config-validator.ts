@@ -378,7 +378,120 @@ export function validateInstanceConfig(
     if (agentOptsErr) return agentOptsErr;
   }
 
+  // Chat: chatOptions rules (openaiProviderConfig shape — QR-218 PR-2). Runs
+  // in every mode (create/patch/load/discovery): a malformed chatOptions is
+  // equally unsafe to boot from a fresh CREATE or a persisted config.json.
+  if (type === 'chat') {
+    const chatOptsErr = validateChatOptions(raw);
+    if (chatOptsErr) return chatOptsErr;
+  }
+
   return null;
+}
+
+/**
+ * Pure shape validator for the baseUrl/apiKeyService pair shared by
+ * agentOptions.providerConfig (openai-api/anthropic-api/opencode-cli) and
+ * chatOptions.openaiProviderConfig (chat OpenAI provider, QR-218 PR-2):
+ * baseUrl must be a non-empty, parseable http(s) URL; apiKeyService must be a
+ * non-empty string naming a service SERVICE_ENV_MAP knows, and is rejected
+ * when set without a baseUrl (it would authenticate no endpoint). `path` is
+ * the caller's dotted field prefix (e.g. "agentOptions.providerConfig" or
+ * "chatOptions.openaiProviderConfig") so error fields stay call-site-accurate.
+ * AGENT-ONLY rules (budget shape, opencode-cli baseUrl-needs-model) are NOT
+ * here — they stay at the agentOptions call site.
+ */
+function validateProviderConfigShape(
+  pc: Record<string, unknown>,
+  path: string,
+): ValidationError | null {
+  // baseUrl: custom OpenAI-compatible endpoint. When present it must be a
+  // non-empty, parseable absolute http(s) URL — a malformed value would
+  // silently break routing at agent/chat startup.
+  if (pc['baseUrl'] !== undefined) {
+    if (typeof pc['baseUrl'] !== 'string' || pc['baseUrl'].trim() === '') {
+      return err(
+        `${path}.baseUrl`,
+        `${path}.baseUrl must be a non-empty string when provided`,
+      );
+    }
+    let baseUrl: URL;
+    try {
+      baseUrl = new URL(pc['baseUrl'] as string);
+    } catch {
+      return err(
+        `${path}.baseUrl`,
+        `${path}.baseUrl must be a valid URL when provided`,
+      );
+    }
+    if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
+      return err(
+        `${path}.baseUrl`,
+        `${path}.baseUrl must use http or https`,
+      );
+    }
+  }
+
+  // apiKeyService: names the keyring service whose key authenticates a
+  // custom endpoint. It must be a service SERVICE_ENV_MAP knows, and is only
+  // meaningful alongside baseUrl: without one there is no endpoint for the
+  // key to authenticate, so the setting would be silently inert — reject.
+  if (pc['apiKeyService'] !== undefined) {
+    if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
+      return err(
+        `${path}.apiKeyService`,
+        `${path}.apiKeyService must be a non-empty string when provided`,
+      );
+    }
+    if (SERVICE_ENV_MAP[pc['apiKeyService']] === undefined) {
+      return err(
+        `${path}.apiKeyService`,
+        `${path}.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a known keyring service — valid services: ${Object.keys(SERVICE_ENV_MAP).join(', ')}`,
+      );
+    }
+    if (pc['baseUrl'] === undefined) {
+      return err(
+        `${path}.apiKeyService`,
+        `${path}.apiKeyService is set but ${path}.baseUrl is not — the key service only authenticates a custom endpoint, so without one it would be silently inert; set baseUrl or remove apiKeyService`,
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * chatOptions rules for `type: 'chat'` instances. Currently just
+ * openaiProviderConfig (chat OpenAI provider endpoint/key override — QR-218
+ * PR-2); more chat-runtime knobs may land here over time. Deliberately does
+ * NOT reuse validateAgentOptions or import anything agent-specific — chat and
+ * agent config are independent shapes.
+ */
+function validateChatOptions(raw: Record<string, unknown>): ValidationError | null {
+  const chatOpts = raw['chatOptions'];
+  if (chatOpts === undefined || chatOpts === null) {
+    return null;
+  }
+  if (typeof chatOpts !== 'object' || Array.isArray(chatOpts)) {
+    return err('chatOptions', 'chatOptions must be an object');
+  }
+  const opts = chatOpts as Record<string, unknown>;
+
+  const providerConfig = opts['openaiProviderConfig'];
+  if (providerConfig === undefined || providerConfig === null) {
+    return null;
+  }
+  if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
+    return err(
+      'chatOptions.openaiProviderConfig',
+      'chatOptions.openaiProviderConfig must be an object when provided',
+    );
+  }
+
+  return validateProviderConfigShape(
+    providerConfig as Record<string, unknown>,
+    'chatOptions.openaiProviderConfig',
+  );
 }
 
 function validateAgentOptions(
@@ -637,6 +750,8 @@ function validateAgentOptions(
       );
     }
     const pc = opts['providerConfig'] as Record<string, unknown>;
+    // AGENT-ONLY: budget shape (not part of the shared baseUrl/apiKeyService
+    // rules chat also uses — chatOptions.openaiProviderConfig has no budget).
     if (pc['budget'] !== undefined) {
       if (
         typeof pc['budget'] !== 'object' ||
@@ -649,72 +764,29 @@ function validateAgentOptions(
         );
       }
     }
-    // baseUrl: custom OpenAI-compatible cloud endpoint (the opencode-cli
-    // "different cloud provider" surface). When present it must be a non-empty,
-    // parseable absolute URL — it is written into opencode.json's provider
-    // block as `options.baseURL`, so a malformed value would silently break
-    // routing at agent-start time.
-    if (pc['baseUrl'] !== undefined) {
-      if (typeof pc['baseUrl'] !== 'string' || pc['baseUrl'].trim() === '') {
-        return err(
-          'agentOptions.providerConfig.baseUrl',
-          'agentOptions.providerConfig.baseUrl must be a non-empty string when provided',
-        );
-      }
-      let baseUrl: URL;
-      try {
-        baseUrl = new URL(pc['baseUrl'] as string);
-      } catch {
-        return err(
-          'agentOptions.providerConfig.baseUrl',
-          'agentOptions.providerConfig.baseUrl must be a valid URL when provided',
-        );
-      }
-      if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
-        return err(
-          'agentOptions.providerConfig.baseUrl',
-          'agentOptions.providerConfig.baseUrl must use http or https',
-        );
-      }
-      // Cross-field: for opencode-cli, baseUrl is written into opencode.json
-      // as a custom provider block that is only exercised when the instance's
-      // resolved model (top-level `model`, else `models.conversation`) routes
-      // to it. Without a resolvable model the block would never be used —
-      // reject instead of shipping a silently inert endpoint. API providers
-      // (openai-api / anthropic-api) consume baseUrl directly as an endpoint
-      // override with their own model defaults, so they are exempt.
-      if (opts['provider'] === 'opencode-cli' && resolveAgentModel(raw) === undefined) {
-        return err(
-          'agentOptions.providerConfig.baseUrl',
-          'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
-        );
-      }
-    }
-    // apiKeyService: names the keyring service whose key authenticates a
-    // custom endpoint. It must be a service SERVICE_ENV_MAP knows — the
-    // generated provider block references the key as `{env:<ENVVAR>}` and an
-    // unknown service has no env var to interpolate. It is only meaningful
-    // alongside baseUrl: without one there is no endpoint for the key to
-    // authenticate, so the setting would be silently inert — reject instead.
-    if (pc['apiKeyService'] !== undefined) {
-      if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
-        return err(
-          'agentOptions.providerConfig.apiKeyService',
-          'agentOptions.providerConfig.apiKeyService must be a non-empty string when provided',
-        );
-      }
-      if (SERVICE_ENV_MAP[pc['apiKeyService']] === undefined) {
-        return err(
-          'agentOptions.providerConfig.apiKeyService',
-          `agentOptions.providerConfig.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a known keyring service — valid services: ${Object.keys(SERVICE_ENV_MAP).join(', ')}`,
-        );
-      }
-      if (pc['baseUrl'] === undefined) {
-        return err(
-          'agentOptions.providerConfig.apiKeyService',
-          'agentOptions.providerConfig.apiKeyService is set but providerConfig.baseUrl is not — the key service only authenticates a custom endpoint, so without one it would be silently inert; set baseUrl or remove apiKeyService',
-        );
-      }
+    // Shared shape rules (baseUrl format+scheme; apiKeyService format,
+    // SERVICE_ENV_MAP membership, and apiKeyService-requires-baseUrl) — see
+    // validateProviderConfigShape for the single source of truth, also used
+    // by chatOptions.openaiProviderConfig.
+    const shapeErr = validateProviderConfigShape(pc, 'agentOptions.providerConfig');
+    if (shapeErr) return shapeErr;
+    // AGENT-ONLY: for opencode-cli, baseUrl is written into opencode.json as a
+    // custom provider block that is only exercised when the instance's
+    // resolved model (top-level `model`, else `models.conversation`) routes
+    // to it. Without a resolvable model the block would never be used —
+    // reject instead of shipping a silently inert endpoint. API providers
+    // (openai-api / anthropic-api) consume baseUrl directly as an endpoint
+    // override with their own model defaults, so they are exempt. Chat has no
+    // opencode-cli concept at all, so this rule stays agent-only.
+    if (
+      pc['baseUrl'] !== undefined &&
+      opts['provider'] === 'opencode-cli' &&
+      resolveAgentModel(raw) === undefined
+    ) {
+      return err(
+        'agentOptions.providerConfig.baseUrl',
+        'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
+      );
     }
   }
 

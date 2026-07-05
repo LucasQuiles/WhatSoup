@@ -1060,6 +1060,12 @@ export async function handleCreateLine(
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
   }
+  // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
+  // type 'chat' so an agent/passive config can never carry an unvalidated
+  // chat-shaped block (validateChatOptions below only checks type === 'chat').
+  if (type === 'chat' && body.chatOptions != null) {
+    config['chatOptions'] = body.chatOptions;
+  }
   config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
 
   // --- Shared validator: defense-in-depth before writing to disk ---

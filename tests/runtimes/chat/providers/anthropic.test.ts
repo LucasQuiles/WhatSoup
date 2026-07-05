@@ -229,4 +229,9 @@ describe('Anthropic Provider', () => {
     expect(thrown?.code).toBe('LLM_TIMEOUT');
     expect(thrown?.code).not.toBe('LLM_UNAVAILABLE');
   });
+
+  // ── Regression: PR-2/QR-218 scope lock ──────────────────────────────────────
+  it('constructs the Anthropic client with zero arguments (Anthropic is explicitly out of scope for per-provider chat config)', () => {
+    expect(vi.mocked(Anthropic)).toHaveBeenCalledWith();
+  });
 });

@@ -16,7 +16,8 @@ Both take precedence over built-in defaults.
 | Variable | Type | Description |
 |----------|------|-------------|
 | `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
-| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/transcription/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — repoints every bare `new OpenAI()` in the process, i.e. both the chat completions client and Whisper transcription. Superseded for `chat` instances' chat completions by the per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) (QR-218 PR-2); Whisper transcription has no per-instance override yet (blocked/future PR-B), so this variable still governs it regardless of `openaiProviderConfig`. Not read by `agent`/`passive` instances. |
 | `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
 | `GEMINI_API_KEY` | string | Google Gemini API key. Forwarded into the agent subprocess environment only when `agentOptions.provider` is `gemini-cli` (`src/runtimes/agent/session.ts:157`); `GOOGLE_API_KEY` is forwarded alongside it when present. Not consulted by `claude-cli`/`codex-cli`/`opencode-cli` agents, or by `chat`/`passive` instances. An operator running a `gemini-cli` agent line must set it — without it the Gemini CLI has no credential. |
 
@@ -351,6 +352,7 @@ into place during deployment.
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
+| `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 | `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
@@ -801,7 +803,7 @@ keychain `groq` entry — `lookupCredential`, `src/lib/keyring.ts`), and when
 the service yields nothing at all the API providers take one final hop to
 their provider-family default — `OPENAI_API_KEY` for `openai-api`,
 `ANTHROPIC_API_KEY` for `anthropic-api`
-(`src/runtimes/agent/providers/api-key-resolver.ts`). That last hop can
+(`src/lib/api-key-resolver.ts`). That last hop can
 silently run a custom-endpoint instance on the wrong account's key, so it is
 logged: `apiKeyService configured but keyring lookup missed — falling back to
 env var; verify account isolation` (QR-104). During a pilot, treat that line
@@ -980,6 +982,58 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 - This value is written to `<cwd>/.claude/settings.json` during instance startup and via the PATCH API.
 
 **Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
+
+### `chatOptions`
+
+Chat-specific settings. Currently the only field is `openaiProviderConfig`,
+covered below; more chat-runtime knobs may be added here over time.
+
+#### Custom endpoint for chat instances (`chatOptions.openaiProviderConfig`)
+
+`type: 'chat'` instances can override the OpenAI chat-completions endpoint and
+credential per instance instead of relying on the process-wide `OPENAI_BASE_URL`
+env var (QR-218 PR-2):
+
+```jsonc
+"chatOptions": {
+  "openaiProviderConfig": {
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "apiKeyService": "groq"
+  }
+}
+```
+
+**Routing and auth:** `src/runtimes/chat/providers/openai.ts` consumes
+`baseUrl` directly as the OpenAI SDK's `baseURL` option (default
+`https://api.openai.com/v1` when omitted); `apiKeyService` names the keyring
+service that authenticates it, resolved via the same `resolveApiKey()`
+precedence the agent HTTP providers use (`src/lib/api-key-resolver.ts`):
+service-env-var-first, then platform keyring, then the conventional
+`OPENAI_API_KEY` env var as a final fallback — logging the QR-104 isolation
+warning when that last hop actually yields a key. An instance that sets
+neither field constructs the OpenAI client exactly as before (bare
+`new OpenAI()`), so `OPENAI_BASE_URL` remains fully backward-compatible for
+chat instances that configure nothing.
+
+**Validation:** same shape rules as `agentOptions.providerConfig` —
+`baseUrl` must be a non-empty, parseable `http://`/`https://` URL;
+`apiKeyService` must name a service in `SERVICE_ENV_MAP`
+(`src/lib/provider-key-service.ts`) and requires `baseUrl` to be set (a key
+service with no endpoint to authenticate would be silently inert). Unlike
+`agentOptions.providerConfig`, there is no "custom endpoint needs a routed
+model" rule — every chat `generate()` request already carries its own model,
+so `baseUrl` alone is never inert. A malformed `chatOptions.openaiProviderConfig`
+is rejected at CREATE/PATCH and at load — it does not silently boot.
+
+**Scope:** OpenAI chat completions only. Anthropic chat
+(`src/runtimes/chat/providers/anthropic.ts`) and Whisper voice-note
+transcription (`src/runtimes/chat/providers/transcription/openai-whisper.ts`)
+are explicitly out of scope — Whisper is still a bare, env-only `new OpenAI()`
+shared by the whole process (blocked/future PR-B), so a process-wide
+`OPENAI_BASE_URL` still repoints it regardless of any instance's
+`openaiProviderConfig`. See the Traps section of
+[docs/architecture/provider-credential-services.md](architecture/provider-credential-services.md)
+for the maintainer-facing version of this note.
 
 ### Connector mutation policy (#411)
 
