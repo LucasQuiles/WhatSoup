@@ -1645,7 +1645,7 @@ export class AgentRuntime implements Runtime {
           if (seqQueue && idx >= 0) seqQueue.splice(idx, 1);
           if (seqQueue?.length === 0) this.perChatInboundSeqQueue.delete(mapKey);
         }
-        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq);
+        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq, classifyErrorForInbound(err));
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);

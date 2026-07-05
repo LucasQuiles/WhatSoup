@@ -3212,7 +3212,11 @@ describe('AgentRuntime', () => {
         markInboundFailed: vi.fn(),
       };
       mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
-      mockSession.sendTurn.mockRejectedValueOnce(new Error('send failed'));
+      // ETIMEDOUT-coded rejection: pins that the catch classifies the real error
+      // (→ 'timeout') rather than omitting the class (→ bare call) or hardcoding.
+      mockSession.sendTurn.mockRejectedValueOnce(
+        Object.assign(new Error('send failed: ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      );
 
       await runtime.start();
       state.durability = durability;
@@ -3223,7 +3227,7 @@ describe('AgentRuntime', () => {
 
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
       expect(durability.markInboundSkipped).toHaveBeenCalledWith(151, 'coalesced_image');
-      expect(durability.markInboundFailed).toHaveBeenCalledWith(152);
+      expect(durability.markInboundFailed).toHaveBeenCalledWith(152, 'timeout');
       expect(state.imageCoalesce.buffers.has('test@s.whatsapp.net')).toBe(false);
       expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
       expect(state.pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
