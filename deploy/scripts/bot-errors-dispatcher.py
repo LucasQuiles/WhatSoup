@@ -2171,7 +2171,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         open_record = open_incidents.get(key)
         if not isinstance(open_record, dict):
             recovered_keys = daily_health_recovered_incident_keys(event, incident_state)
-            if recovered_keys or is_recovery_dedupe_candidate(event):
+            if recovered_keys:
                 return None
             return f"clear has no open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")

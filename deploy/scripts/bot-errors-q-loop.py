@@ -615,8 +615,10 @@ def message_role(message: dict[str, Any]) -> str:
         if body.startswith("Lucas ->"):
             return "lucas"
         return "outbound"
-    sender = str(message.get("sender_name") or message.get("sender_jid") or "")
-    if sender.lower() == "q":
+    sender = str(message.get("sender_name") or "")
+    sender_jid = str(message.get("sender_jid") or "")
+    q_lid = os.environ.get("BOT_ERRORS_Q_LID", "").strip()
+    if sender.lower() == "q" or (q_lid and sender_jid == q_lid):
         return "q"
     return "participant"
 
