@@ -119,7 +119,16 @@ export class SmsRateLimiter {
    *  - `window.length === 0` — never deletes a still-populated array, so a
    *    timestamp recorded by a newer acquire() is never evicted.
    *  - `this.windows.get(destination) === window` — never deletes a
-   *    different array a newer acquire() may have installed.
+   *    different array a newer acquire() may have installed. Defensive: as
+   *    of the 2026-07-04 review, no interleaving under this class's actual
+   *    (Date.now()-based, non-monotonic-tick) fake-timer semantics was found
+   *    that makes this guard alone the difference between pass and fail —
+   *    mutation-removing it in isolation left the full suite green,
+   *    including an adversarial multi-generation/backward-step probe built
+   *    specifically to trigger it. Kept because the analogous `chains` guard
+   *    below IS reachable (a cleanup and a sleeping reserveSlot's own wait
+   *    can share the same target tick), and this guard is the array-identity
+   *    counterpart to that same shared-tick scenario.
    *  - `!this.chains.has(destination)` — never deletes while an acquire() is
    *    in flight for this destination. This one matters even when the array
    *    looks empty: this cleanup and a currently-sleeping reserveSlot's own

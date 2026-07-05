@@ -128,7 +128,7 @@ describe('SmsRateLimiter', () => {
     expect(resolvedDelay).toBe(60_000);
   });
 
-  it('documents that a forward clock step frees a slot early (G2 forward step, accepted)', async () => {
+  it('characterization, not a regression guard (passes pre- and post-fix): a forward clock step frees a slot early (G2 forward step, accepted)', async () => {
     const rl = new SmsRateLimiter(1, 60_000);
     await rl.acquire(DEST_A); // t=0 — at cap
 
@@ -137,6 +137,13 @@ describe('SmsRateLimiter', () => {
     // relative to real elapsed time — an accepted tradeoff of staying on
     // Date.now() (no monotonic-clock migration), not something this fix
     // changes; recorded here so the behavior stays intentional, not silent.
+    //
+    // Deliberately bidirectional: pruneWindow's clamp loop only fires on a
+    // BACKWARD step (a stored timestamp ahead of `now`), so a forward step
+    // exercises only the pre-existing, unchanged shift-loop beneath it. This
+    // case passes unmodified on pre-fix code too (confirmed by swarm-2b
+    // review, 2026-07-04) — it documents intended behavior, it does not
+    // guard against a regression introduced by this fix.
     vi.setSystemTime(Date.now() + 60_000);
 
     await expect(rl.acquire(DEST_A)).resolves.toBe(0);
