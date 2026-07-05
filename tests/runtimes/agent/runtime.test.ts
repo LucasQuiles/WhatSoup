@@ -3114,6 +3114,31 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('logs a structured warn when a per_chat turn records empty-output (QR-226)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    mockSession.getDbRowId.mockReturnValue(77);
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+
+    // No assistant_text, no tool_use — pure empty-output terminal result.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'empty-output',
+        chatJid: 'test@s.whatsapp.net',
+        mapKey: 'test@s.whatsapp.net',
+        rowId: 77,
+        turnHadToolWork: false,
+      }),
+      expect.stringContaining('empty-output'),
+    );
+  });
+
   it('image coalescing sends one turn for multiple images in a timer batch', async () => {
     vi.useFakeTimers();
     try {
@@ -4202,6 +4227,28 @@ describe('AgentRuntime', () => {
     const calls = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('_(no response)_');
     expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('logs a structured warn when a single/shared turn records empty-output (QR-226)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // No assistant_text event, no tool_use — pure empty-output terminal result.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_'));
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'empty-output',
+        chatJid: 'test@s.whatsapp.net',
+        rowId: null,
+        turnHadToolWork: false,
+      }),
+      expect.stringContaining('empty-output'),
+    );
   });
 
   it('result event with text enqueues the text', async () => {
