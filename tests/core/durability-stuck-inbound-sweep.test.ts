@@ -31,6 +31,8 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     (db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as { processing_status: string }).processing_status;
   const reason = (seq: number) =>
     (db.raw.prepare('SELECT terminal_reason FROM inbound_events WHERE seq = ?').get(seq) as { terminal_reason: string | null }).terminal_reason;
+  const failureClass = (seq: number) =>
+    (db.raw.prepare('SELECT failure_class FROM inbound_events WHERE seq = ?').get(seq) as { failure_class: string | null }).failure_class;
   const backdate = (seq: number, interval: string) =>
     db.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', ?) WHERE seq = ?`).run(interval, seq);
 
@@ -89,6 +91,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     expect(status(seq)).toBe('failed');
     expect(reason(seq)).toBe('error');
+    expect(failureClass(seq)).toBe('stale_reclaim');
     expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1 });
   });
 
@@ -105,6 +108,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     expect(status(seq)).toBe('failed');
     expect(reason(seq)).toBe('error');
+    expect(failureClass(seq)).toBe('stale_reclaim');
     expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1 });
   });
 
