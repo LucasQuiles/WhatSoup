@@ -37,6 +37,7 @@ import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { buildRestartSelfTool, triggerSelfRestart, type ServiceRestarter } from './self-restart.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
+import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
   type AgentFallbackEntry,
@@ -79,6 +80,20 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
+import {
+  ensureChatPreferenceSchema,
+  getPreference,
+  setPreference,
+  clearPreference,
+  pruneExpired,
+  type ChatModelPreference,
+  type PreferenceIntent,
+} from './chat-preference-db.ts';
+import { preferenceKeys } from './preference-keys.ts';
+import { resolveRoute, type RouteDecision } from './route-resolution.ts';
+import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
+import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
+import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
 import { createChatResolver } from '../../core/chats-resolver.ts';
@@ -527,6 +542,9 @@ export {
   isProviderModelUnavailableMessage,
 } from './failure-taxonomy.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+
+/** TTL for this_thread route preferences (echoed in user copy as "24h"). */
+const PREFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -1442,6 +1460,11 @@ export class AgentRuntime implements Runtime {
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
   // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
   private perChatInboundSeqQueue: Map<string, number[]> = new Map();
+
+  /** Last pin-block notice per conversation (one notice per transition). */
+  private lastPinBlockNotice = new Map<string, string>();
+  /** Last spawn provider per conversation — runtime_switched detection (slice 4). */
+  private lastSpawnRouteProvider = new Map<string, string>();
   // Counts pending system-turn results (context injection, continuation) that should
   // not consume from perChatInboundSeqQueue when their result event arrives. The
   // counter invariants (mark / unmark / consumeIfPending / count) live in the
@@ -1459,6 +1482,15 @@ export class AgentRuntime implements Runtime {
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
   private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
+  // R1 streaming marker scan: hold the FIRST line of a turn's assistant text
+  // until it is resolvable (a newline arrived, or it can no longer be a
+  // [[wa-route: …]] marker) so a marker split across token-streamed deltas
+  // never leaks and always registers. null = not scanning (base per-delta
+  // path); '' or a partial line = actively holding. Shared/single mode uses
+  // the scalar, per_chat uses the map; both armed at turn start and flushed at
+  // the terminal 'result', all flag-gated (flag off leaves them untouched).
+  private currentTurnRouteMarkerHold: string | null = null;
+  private perChatRouteMarkerHold: Map<string, string> = new Map();
 
   // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
   // Used to replay a message when session resume fails and the turn was lost.
@@ -1518,10 +1550,19 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
+    this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
+    // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
+    // mapKey: in sandbox mode mapKey already IS the conversationKey
+    // (workspaceKey = toConversationKey), while in canonical-JID mode it is a
+    // JID that must be reduced. Reconcile so teardown reaches these maps and
+    // they cannot grow unbounded (LEAK-15).
+    const conversationKey = mapKey.includes('@') ? toConversationKey(mapKey) : mapKey;
+    this.lastSpawnRouteProvider.delete(conversationKey);
+    this.lastPinBlockNotice.delete(conversationKey);
     // Drop all auto-compact bookkeeping for this scope (cooldown/last-success/
     // rapid-rearm/measure/boundary + resolve any in-flight waiter + silent timer).
     this.autoCompact.cleanupScope(mapKey);
@@ -1653,7 +1694,7 @@ export class AgentRuntime implements Runtime {
           if (seqQueue && idx >= 0) seqQueue.splice(idx, 1);
           if (seqQueue?.length === 0) this.perChatInboundSeqQueue.delete(mapKey);
         }
-        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq);
+        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq, classifyErrorForInbound(err));
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
@@ -2032,6 +2073,13 @@ export class AgentRuntime implements Runtime {
     ensureHandoffArtifactSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
+    if (config.nlRouting) {
+      // Additive + idempotent; gated so flag-off leaves the DB untouched.
+      ensureChatPreferenceSchema(this.db);
+      // Retention sweep at boot: expired rows are DELETED, not merely
+      // ignored on read (F13) — keeps DB audits honest about live pins.
+      pruneExpired(this.db);
+    }
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
@@ -2426,7 +2474,7 @@ export class AgentRuntime implements Runtime {
             if (this.durability && this.currentInboundSeq !== undefined) {
               this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
               this.replyGuarantee?.disarm(this.currentInboundSeq);
-              this.durability.markInboundFailed(this.currentInboundSeq);
+              this.durability.markInboundFailed(this.currentInboundSeq, 'session_crash');
               this.currentInboundSeq = undefined;
             }
             if (config.controlPeers.size > 0) {
@@ -2748,7 +2796,7 @@ export class AgentRuntime implements Runtime {
         if (this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
-          this.durability.markInboundFailed(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Propagate so the outer turn-chain handler notifies the user and
         // the fleet supervisor sees the PID enter recovery rather than
@@ -2769,7 +2817,7 @@ export class AgentRuntime implements Runtime {
         if (this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
-          this.durability.markInboundFailed(msg.inboundSeq);
+          this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Notify user of failure
         this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
@@ -2814,7 +2862,12 @@ export class AgentRuntime implements Runtime {
     } else {
       this.ensureSessionAndQueueSync(chatJid, undefined, msg.senderJid);
     }
-    const classified = classifyInput(content as string);
+    const classified = classifyInput(content as string, { routingAliases: config.nlRouting });
+
+    // Set only by /model default (R8): the handler clears the route pref
+    // locally and then falls through to forward the raw command so the agent
+    // CLI's own /model default reset still runs. Null for every other command.
+    let forwardAfterLocalCommand: string | null = null;
 
     if (classified.type === 'local') {
       switch (classified.command) {
@@ -2917,6 +2970,94 @@ export class AgentRuntime implements Runtime {
           break;
         }
 
+        case 'model': {
+          // NL-first routing alias (owner-approved design). Records a
+          // per-sender REASONING preference and renders route visibility —
+          // never tool, mutation, or authority changes (capability-preserved
+          // routing). Reachable only when agentOptions.nlRouting is true (the
+          // classifier gates on the same flag).
+          const sub = (classified.args ?? 'status').trim().toLowerCase();
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+          if (sub === '' || sub === 'status') {
+            // Opportunistic retention sweep on read (F13); also runs at init.
+            // Fail-open (R11): a store error on the sweep must not throw out of
+            // this read-only handler — status still renders on the default route.
+            try {
+              pruneExpired(this.db);
+            } catch (err) {
+              log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
+            }
+            this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+            break;
+          }
+          if (sub === 'default') {
+            // R8: clear the sender's route override, then forward /model
+            // default to the CLI so its own model reset still runs — do not
+            // shadow that base capability. The forwarded turn owns terminal
+            // inbound durability, so this path must NOT complete it locally.
+            this.clearRoutePreference(chatJid, chatKey, senderKey);
+            forwardAfterLocalCommand = content as string;
+            break;
+          }
+          const isIntent = sub === 'strongest' || sub === 'fastest';
+          const isProvider = isProviderId(sub);
+          if (isProvider) {
+            const routable = this.routablePinTargets();
+            if (!routable.includes(sub)) {
+              // A pin this instance cannot honor must fail at SET time (F07):
+              // recording it would force slice-2 resolution into either a
+              // hard-fail or a silent fallback. No row is written.
+              this.sendDirect(
+                chatJid,
+                `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+              );
+              break;
+            }
+          }
+          if (!isIntent && !isProvider) {
+            // Out-of-contract value: no state change, honest reply (UH-001).
+            // Never echo unbounded user text into a (possibly group) chat:
+            // strip markdown-breaking chars and cap the length (F03).
+            // Defense-in-depth: unreachable while classifyInput admits only the
+            // recognized /model grammar (bare | verb | provider-id), so a
+            // non-verb/non-provider `sub` never arrives here. Kept as a
+            // fail-safe against any future widening of that grammar (F03).
+            const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
+            this.sendDirect(
+              chatJid,
+              `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
+            );
+            break;
+          }
+          const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
+          const requestedProvider = isProvider ? sub : null;
+          const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
+          if (outcome === 'refreshed') {
+            this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+            break;
+          }
+          if (outcome === 'sticky_kept') {
+            this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+            break;
+          }
+          const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
+          this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
+          break;
+        }
+
+        case 'why': {
+          this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
+          break;
+        }
+
+        case 'reset': {
+          // Idempotent by construction: clearing an absent row is a no-op and
+          // the reply is identical, so a doubled /reset cannot spam or error.
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+          this.clearRoutePreference(chatJid, chatKey, senderKey);
+          break;
+        }
+
         case 'help': {
           const helpText =
             '*/new* — start a fresh session\n' +
@@ -2924,6 +3065,11 @@ export class AgentRuntime implements Runtime {
             '*/sessions* — list all active sessions _(admin)_\n' +
             '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
             '*/help* — show this help\n' +
+            (config.nlRouting
+              ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
+                '*/why* — why this model answered\n' +
+                '*/reset* — back to the default route\n'
+              : '') +
             '_Any other message is forwarded to Claude Code._\n' +
             'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
           this.sendDirect(chatJid, helpText);
@@ -3025,11 +3171,28 @@ export class AgentRuntime implements Runtime {
           break;
         }
       }
-      return;
+      if (forwardAfterLocalCommand === null) {
+        if (msg.inboundSeq !== undefined) {
+          // Terminal durability completion for ANY locally-handled command (R14).
+          // Local handling never reaches the turn path that completes the inbound
+          // journal, so the row would stay 'processing' and restart recovery would
+          // falsely mark it failed. This covers the routing aliases AND the base
+          // local commands (/new /status /help /sessions /kill-session), closing
+          // the pre-existing stuck-'processing' gap once for all of them instead
+          // of a per-command name-list opt-in.
+          this.durability?.completeInbound(msg.inboundSeq, 'local_command_handled');
+        }
+        return;
+      }
+      // R8 fall-through: /model default cleared the route pref above; forward
+      // the raw command below so the CLI resets its own model. Durability is
+      // completed by the forwarded turn's normal terminal path, not here.
     }
 
-    // forwarded or message — enqueue as turn (shared) or send directly (non-shared)
-    const text = classified.text;
+    // forwarded or message — enqueue as turn (shared) or send directly (non-shared).
+    // forwardAfterLocalCommand is set only by the /model default fall-through (R8);
+    // in every other path here classified is 'forwarded' | 'message'.
+    const text = forwardAfterLocalCommand ?? (classified as { text: string }).text;
 
     if (this.shared) {
       // @check CHK-062 // @traces REQ-012.AC-01
@@ -3070,6 +3233,9 @@ export class AgentRuntime implements Runtime {
         this.perChatTurnContentType.set(mapKey, msg.contentType);
         this.perChatTurnText.set(mapKey, '');
         this.perChatAssistantItemText.delete(mapKey);
+        // Arm the R1 first-line marker scan for this turn (flag-gated).
+        if (config.nlRouting) this.perChatRouteMarkerHold.set(mapKey, '');
+        else this.perChatRouteMarkerHold.delete(mapKey);
         await this.sendTurnPerChat(chatJid, text, mapKey, msg.senderJid);
       }
     } else {
@@ -3081,6 +3247,8 @@ export class AgentRuntime implements Runtime {
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
+      // Arm the R1 first-line marker scan for this turn (flag-gated).
+      this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
       await this.sendTurnNonShared(chatJid, text, msg.senderJid);
     }
   }
@@ -3117,6 +3285,8 @@ export class AgentRuntime implements Runtime {
     this.bindActiveGlobalMcpConversation(chatJid);
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+    // Arm the R1 first-line marker scan for this shared turn (flag-gated).
+    this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
     this.currentTurnReplayText = prefixedText;
     this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
@@ -3354,7 +3524,7 @@ export class AgentRuntime implements Runtime {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
           this.markRuntimeFaultContinuityCandidate(failedSeq);
           this.replyGuarantee?.disarm(failedSeq);
-          this.durability.markInboundFailed(failedSeq);
+          this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
         this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
         return;
@@ -4215,7 +4385,24 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(mapKey)) break;
         {
-          const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
+          const rawAssistantText = this.normalizeAssistantTextForDelivery(event, mapKey);
+          if (!rawAssistantText) break;
+          // Slice-3 NL routing: consume typed intent markers before delivery
+          // (flag off → pass-through, byte-identical). Streaming-safe: the
+          // first line is buffered across token deltas so a split marker never
+          // leaks (R1).
+          let normalizedText: string | null;
+          if (config.nlRouting) {
+            const scanActorJid = mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid;
+            const scanKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+            const held = this.perChatRouteMarkerHold.has(scanKey) ? this.perChatRouteMarkerHold.get(scanKey)! : null;
+            const step = this.scanRouteMarkerDelta(held, rawAssistantText, queue.targetChatJid, scanActorJid);
+            if (step.held === null) this.perChatRouteMarkerHold.delete(scanKey);
+            else this.perChatRouteMarkerHold.set(scanKey, step.held);
+            normalizedText = step.deliver;
+          } else {
+            normalizedText = rawAssistantText;
+          }
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
           // Two-tier provider-failure gate (QR-209). Fallback is armed on the
@@ -4325,6 +4512,22 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(mapKey);
+        // R1: flush any held first-line marker buffer for this chat at turn
+        // end — a marker-only / no-newline reply registers its intent here and
+        // delivers whatever remains. No-op when nothing was held.
+        if (config.nlRouting) {
+          const markerScanKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+          const heldMarker = this.perChatRouteMarkerHold.get(markerScanKey);
+          if (heldMarker !== undefined) {
+            this.perChatRouteMarkerHold.delete(markerScanKey);
+            const flushActorJid = mapKey !== undefined ? this.pendingTurnActorJid.get(mapKey) : this.currentTurnReplayActorJid;
+            const tail = this.flushRouteMarker(heldMarker, queue.targetChatJid, flushActorJid);
+            if (tail) {
+              queue.enqueueStreamingText(tail);
+              if (mapKey !== undefined) this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + tail);
+            }
+          }
+        }
         const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
@@ -4687,6 +4890,14 @@ export class AgentRuntime implements Runtime {
                 this.recordTurnCapabilitySuccess(true);
               } else {
                 this.recordTurnCapabilityFailure(true, 'empty-output');
+                // QR-226: the turnErrorCounts increment above is in-memory only —
+                // without a log line, journal greps are blind to empty-output
+                // turns (an on-call canary once needed manual timestamp
+                // correlation to decode this from raw counters alone).
+                log.warn(
+                  { reason: 'empty-output', chatJid: queue.targetChatJid, mapKey, rowId, turnHadToolWork },
+                  'recorded empty-output turn failure',
+                );
                 armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey);
               }
             }
@@ -5393,6 +5604,477 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Per-spawn route resolution (slice-2 B2). Preferences are an INPUT to the
+   * pure resolveRoute core, never an override of fallback/health state; the
+   * decision applies to the session being spawned (provider/model stay
+   * per-session and read-only).
+   */
+  private resolveRouteForTurn(
+    chatJid: string,
+    actorJid?: string,
+  ): RouteDecision & { pinnedProvider: string | null } {
+    // Fail-open over the WHOLE resolution (R13): the preference read AND the
+    // routablePinTargets credential probe both do I/O that can throw. A
+    // resolution failure must degrade to the default route and NEVER drop a
+    // turn — so the pin probe is inside this guard, not just the pref read.
+    try {
+      const pref = actorJid ? this.loadSenderPreference(chatJid, actorJid) : null;
+      const pinned = pref?.intent === 'provider_specific' ? pref.requestedProvider : null;
+      // The tier provider this pref maps to (if any) is probed for routability
+      // the same way a pin is — an ineligible tier degrades to the default
+      // route (R5), never a keyless session. One probe, reused for both (C5).
+      const tierProvider =
+        pref?.intent === 'strongest' ? config.nlRoutingTiers?.strongest
+        : pref?.intent === 'fastest' ? config.nlRoutingTiers?.fastest
+        : undefined;
+      const routable = this.routablePinTargets();
+      const decision = resolveRoute({
+        agentProvider: this.agentProvider,
+        effectiveModel: this.effectiveModel,
+        fallbackEntry: this.effectiveFallbackEntry,
+        pref,
+        pinnedProviderEligible: pinned !== null && routable.includes(pinned),
+        tierMap: config.nlRoutingTiers,
+        tierProviderEligible: tierProvider !== undefined && routable.includes(tierProvider),
+      });
+      return { ...decision, pinnedProvider: pinned };
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'route resolution failed - routing on default');
+      return {
+        provider: this.agentProvider,
+        model: this.effectiveModel,
+        source: 'default',
+        reasonCode: 'route_resolution_failed',
+        pinnedProvider: null,
+      };
+    }
+  }
+
+  /**
+   * Canonical-keyed preference read with fail-open (C3): owns key derivation
+   * (preferenceKeys) AND the fail-open contract, so every reader — the spawn
+   * path, /model status, and /why — degrades identically on a store error
+   * (warn + treat as no preference) instead of one path throwing out of a
+   * read-only command. A preference read failure must never surface as an
+   * error or drop a turn.
+   */
+  private loadSenderPreference(chatJid: string, senderJid: string): ChatModelPreference | null {
+    try {
+      const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, senderJid);
+      return getPreference(this.db, chatKey, senderKey);
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'preference read failed - routing on default');
+      return null;
+    }
+  }
+
+  /**
+   * Provider config for a route-decided session: same inheritance rules as
+   * the fallback path (fallbackProviderConfigFor), including the opencode
+   * strip of primary-specific baseUrl/apiKeyService when routing away from
+   * the primary provider.
+   */
+  private routeSessionProviderConfig(route: RouteDecision): Record<string, unknown> | undefined {
+    if (route.source !== 'preference' || route.provider === this.agentProvider) {
+      return this.sessionProviderConfig();
+    }
+    if (route.provider === 'opencode-cli') {
+      if (!this.agentProviderConfig) return undefined;
+      const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
+      return rest;
+    }
+    // Match the fallback path (effectiveProviderConfig): a provider with no
+    // config of its own inherits the agent's providerConfig — including the
+    // budget cap — instead of spawning with providerConfig=undefined (R2).
+    return fallbackProviderConfigFor(route.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
+  }
+
+  /** Spawn-time route bookkeeping: pin-blocked notice (once per transition) + route events. */
+  private noteRouteAtSpawn(
+    chatJid: string,
+    conversationKey: string,
+    route: RouteDecision & { pinnedProvider: string | null },
+  ): void {
+    // Route-transition tracking (slice 4): a spawn whose provider differs
+    // from this conversation's previous spawn is a SWITCH, recorded exactly
+    // once whatever moved it (preference, fallback, or back to default).
+    const previousProvider = this.lastSpawnRouteProvider.get(conversationKey);
+    this.lastSpawnRouteProvider.set(conversationKey, route.provider);
+    const switched = previousProvider !== undefined && previousProvider !== route.provider;
+    if (route.source === 'pin_blocked_default' && route.pinnedProvider) {
+      let noticeSent = false;
+      if (this.lastPinBlockNotice.get(conversationKey) !== route.pinnedProvider) {
+        this.lastPinBlockNotice.set(conversationKey, route.pinnedProvider);
+        noticeSent = true;
+        // Strict pins never silently fall back: the block is VISIBLE and the
+        // pin survives (the user clears it, we never do).
+        this.sendDirect(
+          chatJid,
+          `_Your pinned ${route.pinnedProvider} isn't available right now. Using the default route — your pin stays set; /reset to clear it._`,
+        );
+      }
+      this.emitRouteEventChecked({
+        event: 'user_pin_unreachable',
+        conversationKey,
+        provider: route.provider,
+        modelRef: route.model ?? null,
+        source: 'default',
+        userVisible: noticeSent,
+        reasonCode: route.reasonCode,
+      });
+      return;
+    }
+    this.lastPinBlockNotice.delete(conversationKey);
+    if (switched || route.source !== 'default') {
+      this.emitRouteEventChecked({
+        event: switched ? 'runtime_switched' : 'runtime_selected',
+        conversationKey,
+        provider: route.provider,
+        modelRef: route.model ?? null,
+        source: route.source === 'fallback' ? 'auto_fallback' : route.source === 'preference' ? 'user' : 'default',
+        userVisible: false,
+        reasonCode: route.reasonCode,
+      });
+    }
+  }
+
+  private emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void {
+    if (!config.nlRouting) return;
+    const dir =
+      config.nlRoutingEventsDir ?? join(homedir(), '.config', 'whatsoup', 'instances', this.instanceName);
+    emitRouteEvent(
+      dir,
+      {
+        ts: Date.now(),
+        instance: this.instanceName,
+        chatScope: deriveChatScope(ev.conversationKey),
+        authority: 'advisory_only',
+        ...ev,
+      },
+      (m) => log.warn({ instance: this.instanceName }, m),
+    );
+  }
+
+  /**
+   * Providers this instance can actually route to: the configured primary
+   * plus the configured fallback chain, minus entries whose key service
+   * resolves but has no credential (same probe the fallback selector uses).
+   * A pin outside this set could only be honored by silent impersonation —
+   * strict pins never silently fall back — so it is rejected at SET time (F07).
+   */
+  private routablePinTargets(): string[] {
+    // The primary is unconditionally routable — it is the provider serving
+    // the instance right now; a credential probe must never filter it (an
+    // API-primary instance would otherwise reject pins to its own route).
+    const targets: string[] = [this.agentProvider];
+    for (const entry of this.agentFallbacks) {
+      if (targets.includes(entry.provider)) continue;
+      if (!this.isEntryCredentialed(entry)) continue;
+      targets.push(entry.provider);
+    }
+    return targets;
+  }
+
+  /**
+   * Single credential-presence predicate for a fallback entry (C4): true when
+   * the entry's key service resolves to a present credential, or when no key
+   * service maps (native-auth CLI). Shared by routablePinTargets (pin
+   * eligibility) and the fallback selector's eligibility loop so the two can
+   * never silently desync — the fallback selector keeps its own service/alert
+   * bookkeeping, but the eligibility DECISION lives here alone.
+   */
+  private isEntryCredentialed(entry: AgentFallbackEntry): boolean {
+    const service = resolveProviderKeyService(
+      entry.provider,
+      entry.model,
+      fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
+    );
+    return service ? lookupCredential(service) !== null : true;
+  }
+
+  /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
+  private clearRoutePreference(chatJid: string, chatKey: string, senderKey: string): void {
+    this.clearRoutePreferenceSilent(chatJid, chatKey, senderKey);
+    this.sendDirect(chatJid, '_Back to the default route._');
+  }
+
+  /** Store clear + route event without the reply echo. The NL typed-intent
+   *  path acknowledges through the agent's own reply (prompt contract), so
+   *  a runtime echo on top would double-message. */
+  private clearRoutePreferenceSilent(chatJid: string, chatKey: string, senderKey: string): void {
+    clearPreference(this.db, chatKey, senderKey);
+    this.emitRouteEventChecked({
+      event: 'model_preference_cleared',
+      conversationKey: toConversationKey(chatJid),
+      provider: this.agentProvider,
+      modelRef: null,
+      source: 'default',
+      userVisible: true,
+      reasonCode: 'user_reset',
+    });
+  }
+
+  /**
+   * Shared preference write for the /model aliases AND NL typed intents —
+   * one path, so the two surfaces can never drift (slice-3 contract). An
+   * identical repeat refreshes the TTL (sticky rows are never demoted); a
+   * durable change writes the row and emits exactly one route event.
+   */
+  private recordRoutePreference(
+    chatJid: string,
+    chatKey: string,
+    senderKey: string,
+    intent: PreferenceIntent,
+    requestedProvider: string | null,
+  ): 'set' | 'refreshed' | 'sticky_kept' {
+    const now = Date.now();
+    const existing = getPreference(this.db, chatKey, senderKey, now);
+    if (existing && existing.intent === intent && existing.requestedProvider === requestedProvider) {
+      // Re-confirmation refreshes the TTL (F08) — "already set" must stay
+      // true for a full window after the user re-asserts it. Sticky rows
+      // (expiresAt null) are never demoted to ephemeral by a repeat.
+      if (existing.expiresAt !== null) {
+        setPreference(this.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+        return 'refreshed';
+      }
+      return 'sticky_kept';
+    }
+    setPreference(this.db, {
+      chatJid: chatKey,
+      senderJid: senderKey,
+      intent,
+      requestedProvider,
+      scope: 'this_thread',
+      pinStrict: true,
+      fallbackPermitted: false,
+      updatedAt: now,
+      // this_thread preferences are ephemeral by design (24h TTL);
+      // sticky pins require explicit confirmation and are a later slice.
+      expiresAt: now + PREFERENCE_TTL_MS,
+    });
+    this.emitRouteEventChecked({
+      event: 'model_preference_set',
+      conversationKey: toConversationKey(chatJid),
+      provider: requestedProvider ?? `intent:${intent}`,
+      modelRef: null,
+      source: 'user',
+      userVisible: true,
+      reasonCode: requestedProvider ? 'user_pin_set' : `intent_${intent}_set`,
+    });
+    return 'set';
+  }
+
+  /**
+   * Slice-3 NL typed-intent consumption (call sites are flag-gated): strip
+   * route-intent marker lines from agent output and feed the FIRST strictly-
+   * valid intent into the same per-sender preference path as the /model
+   * aliases. The agent's own reply carries the user-visible acknowledgement
+   * (prompt contract), so the runtime acts silently here. Malformed or
+   * ambiguous marker content changes nothing durable (UH-010); a store
+   * failure never blocks delivery of the reply (fail-open, same rule as the
+   * spawn-time preference read). Returns the delivery text, or null when
+   * the reply was marker-only and nothing remains to deliver.
+   */
+  private consumeRouteIntents(
+    text: string,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): string | null {
+    const { cleaned, intents, invalid } = extractRouteIntents(text);
+    if (invalid.length > 0) {
+      log.warn({ chatJid: toConversationKey(chatJid), invalid }, 'route-intent marker failed strict validation - no state change');
+    }
+    if (intents.length > 1) {
+      log.warn({ chatJid: toConversationKey(chatJid), count: intents.length }, 'multiple route-intent markers in one reply - acting on the first only');
+    }
+    const intent = intents[0];
+    if (intent) {
+      if (!actorJid) {
+        // No resolvable sender for this turn — record nothing (UH-007).
+        log.warn({ chatJid: toConversationKey(chatJid), intent }, 'route intent without a resolvable sender - no state change');
+      } else {
+        try {
+          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, actorJid);
+          if (intent === 'reset') {
+            this.clearRoutePreferenceSilent(chatJid, chatKey, senderKey);
+          } else {
+            this.recordRoutePreference(chatJid, chatKey, senderKey, intent, null);
+          }
+        } catch (err) {
+          log.warn({ err, intent, instance: this.instanceName }, 'route-intent apply failed - reply delivered without state change');
+        }
+      }
+    }
+    // Suppress delivery ONLY when a marker envelope was actually stripped and
+    // nothing meaningful remains (R12) — a whitespace-only reply that carried
+    // no marker must pass through unchanged, exactly as the flag-off path
+    // would deliver it, instead of being silently swallowed.
+    const markerStripped = intents.length > 0 || invalid.length > 0;
+    return markerStripped && cleaned.trim().length === 0 ? null : cleaned;
+  }
+
+  /**
+   * True while `held` could still grow into a `[[wa-route: …]]` envelope line.
+   * Leading spaces/tabs are tolerated (extractRouteIntents trims each line),
+   * but an all-whitespace buffer is NOT a marker precursor — a whitespace-only
+   * reply is a genuine (empty-ish) reply and must not be held.
+   */
+  private routeMarkerStillPossible(held: string): boolean {
+    const t = held.replace(/^[ \t]+/, '');
+    if (t.length === 0) return false;
+    const marker = '[[wa-route:';
+    return marker.startsWith(t) || t.startsWith(marker);
+  }
+
+  /**
+   * One streaming delta of a turn's assistant text (R1). Token-streaming
+   * providers (anthropic-api/openai-api) emit assistant_text one fragment at a
+   * time with no itemId, so a marker line is split across deltas and the
+   * whole-event extractor never matches it — leaking the syntax and dropping
+   * the intent. This buffers the FIRST line until it is resolvable (a newline
+   * arrived, or it can no longer be a marker), runs the SAME extractRouteIntents
+   * on the resolved prefix, then streams the body untouched. `held` is null
+   * when not scanning (turn not armed, or first line already resolved) → base
+   * per-delta extraction, byte-identical to flag-off body handling.
+   */
+  private scanRouteMarkerDelta(
+    held: string | null,
+    text: string,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): { deliver: string | null; held: string | null } {
+    if (held === null) {
+      return { deliver: this.consumeRouteIntents(text, chatJid, actorJid), held: null };
+    }
+    const next = held + text;
+    if (next.includes('\n')) {
+      // First line complete — resolve the whole held buffer with the shared
+      // extractor (whole-block providers land here on their first delta).
+      return { deliver: this.consumeRouteIntents(next, chatJid, actorJid), held: null };
+    }
+    if (this.routeMarkerStillPossible(next)) {
+      return { deliver: null, held: next };
+    }
+    // The first line is plain text — release it and stop scanning this turn.
+    return { deliver: this.consumeRouteIntents(next, chatJid, actorJid), held: null };
+  }
+
+  /**
+   * Resolve a still-held first-line buffer at turn end (R1): a marker-only or
+   * no-newline reply never saw a newline while streaming, so the terminal
+   * 'result' flushes it — registering the intent and delivering whatever
+   * remains. No-op when nothing was held.
+   */
+  private flushRouteMarker(
+    held: string | null,
+    chatJid: string,
+    actorJid: string | undefined,
+  ): string | null {
+    if (held === null || held.length === 0) return null;
+    return this.consumeRouteIntents(held, chatJid, actorJid);
+  }
+
+  /**
+   * The route actually serving this chat right now, from the chat's LIVE
+   * session delegate. The runtime-global effectiveProvider/effectiveModel
+   * getters describe routing for the NEXT session only — existing sessions
+   * keep their per-session provider/model (cf. markActiveFallbackFailed) —
+   * so route visibility must read the live session first.
+   */
+  private liveSessionRoute(chatJid: string): { provider: string; model: string | undefined } | null {
+    const session = this.sessionScope === 'per_chat'
+      ? this.chatSessions.get(this.resolvePerChatMapKey(chatJid))
+      : this.session;
+    if (!session || !session.getStatus().active) return null;
+    return { provider: session.getProviderId(), model: session.getModelRef() };
+  }
+
+  /**
+   * Shared route-view head for the two visibility surfaces (C6): the live
+   * session route, the sender's fail-open preference, AND the route the NEXT
+   * spawn will actually resolve to — computed via resolveRouteForTurn (R7), the
+   * SAME resolution the next session uses, so /model status and /why can never
+   * misreport the next-session provider by reading effectiveProvider (which
+   * reflects only the fallback window and ignores the pin).
+   */
+  private loadRouteView(chatJid: string, senderJid: string): {
+    live: { provider: string; model: string | undefined } | null;
+    pref: ChatModelPreference | null;
+    next: RouteDecision & { pinnedProvider: string | null };
+  } {
+    return {
+      live: this.liveSessionRoute(chatJid),
+      pref: this.loadSenderPreference(chatJid, senderJid),
+      next: this.resolveRouteForTurn(chatJid, senderJid),
+    };
+  }
+
+  /**
+   * End-user route status (/model status). Visibility policy (capability-
+   * preserved routing): provider, model route, preference, fallback state,
+   * delegation state, and authority class only — never tool names, socket
+   * paths, pids, account JIDs, or cross-conversation metadata.
+   */
+  private renderRouteStatus(chatJid: string, senderJid: string): string {
+    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
+    // Next-session provider/model come from resolveRouteForTurn (R7), so an
+    // eligible pin or tier is reflected here — not the fallback-only
+    // effectiveProvider, which contradicted the "steers new sessions" line.
+    const nextProvider = next.provider || 'unknown-provider';
+    const provider = live?.provider ?? nextProvider;
+    const model = (live ? live.model : next.model) ?? 'provider default';
+    const prefLine = pref
+      ? `Preference: ${pref.requestedProvider ?? pref.intent} for you in this chat` +
+        (pref.expiresAt !== null
+          ? ` (expires in ~${Math.max(1, Math.round((pref.expiresAt - Date.now()) / 3_600_000))}h)`
+          : '') +
+        ' — steers new sessions'
+      : 'Preference: none';
+    const fallbackLine = this.isFallbackWindowActive
+      ? `Fallback: active — new sessions route via ${nextProvider}`
+      : this.agentFallbacks.length > 0
+        ? `Fallback chain (configured): ${this.agentFallbacks.map((e) => e.provider).join(' → ')}`
+        : 'Fallback: none configured';
+    const nextLine = live && live.provider !== nextProvider
+      ? `\nNext session: ${nextProvider}`
+      : '';
+    return (
+      `*Current route:* ${provider}${live ? '' : ' (no live session — next session route)'}\n` +
+      `Model: ${model}\n` +
+      `${prefLine}\n` +
+      `${fallbackLine}${nextLine}\n` +
+      'Delegation: none\n' +
+      // Capability-preserved phrasing, true on EVERY instance (F10): this
+      // surface must not claim the bot can or cannot act — only that
+      // routing choices never change what it may do.
+      'Authority: routing never changes what I am allowed to do'
+    );
+  }
+
+  /** Compact route receipt (/why): what answered and why, one line. */
+  private renderRouteWhy(chatJid: string, senderJid: string): string {
+    const { live, pref, next } = this.loadRouteView(chatJid, senderJid);
+    // With no live session, report the provider the NEXT spawn will use (R7)
+    // — the pinned/tier provider, not the fallback-only effectiveProvider.
+    const provider = live?.provider ?? (next.provider || 'unknown-provider');
+    const reason = live
+      ? this.isFallbackWindowActive && live.provider !== next.provider
+        ? "serving this chat's current session (new sessions use the fallback route)"
+        : "serving this chat's current session"
+      : next.source === 'fallback'
+        ? 'a fallback window is active'
+        : next.source === 'preference'
+          ? 'your preferred route for the next session'
+          : next.source === 'pin_blocked_default'
+            ? 'your pinned provider is unavailable — using the default route'
+            : 'instance default route';
+    const prefNote = pref
+      ? '; your preference steers new sessions'
+      : '';
+    return `_Route: ${provider} (${reason})${prefNote}. No delegation; routing never changes what I am allowed to do._`;
+  }
+
+  /**
    * Provider routing for the *next* session. While a fallback window is active
    * (and a fallback provider is configured), new sessions use the fallback
    * provider/model; otherwise the primary. Existing sessions are unaffected —
@@ -5439,12 +6121,15 @@ export class AgentRuntime implements Runtime {
       if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
         firstIndependentIndex = i;
       }
+      // Eligibility DECISION comes from the shared predicate (C4) so it can
+      // never desync from pin eligibility; `service` is recomputed only for
+      // the credential-missing alert below (the selector's own concern).
+      const eligible = this.isEntryCredentialed(entry);
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
         fallbackProviderConfigFor(entry.provider, this.agentProvider, this.agentProviderConfig),
       );
-      const eligible = service ? lookupCredential(service) !== null : true;
       state.push({ ...entry, eligible });
       if (eligible && firstEligibleIndex === -1) {
         firstEligibleIndex = i;
@@ -6016,6 +6701,17 @@ export class AgentRuntime implements Runtime {
     // every restart would re-count and re-alert the activation that already
     // fired before the restart.
     if (firstArm) {
+      // Slice-4 observability: exactly one auto_fallback_started per window
+      // (extensions re-arm the same window; a restore resumes it quietly).
+      this.emitRouteEventChecked({
+        event: 'auto_fallback_started',
+        conversationKey: null,
+        provider: fallbackEntry.provider,
+        modelRef: fallbackEntry.model ?? null,
+        source: 'auto_fallback',
+        userVisible: !opts?.restored,
+        reasonCode: opts?.restored ? `${reason} (restored)` : reason,
+      });
       this.fallbackWindow.armReason = reason;
       // Snapshot the lifetime turn counters at the first arm of every window
       // (the null-guard skips extensions; restores hit it too because the
@@ -6318,6 +7014,18 @@ export class AgentRuntime implements Runtime {
     // Per-window deltas against the arm-time snapshots — the lifetime counters
     // are NOT reset here (getFallbackState keeps reporting process totals).
     const { served: windowTurnsServed, empty: windowTurnsEmpty } = this.fallbackMetrics.windowDeltas();
+    // Slice-4 observability: one auto_fallback_cleared per window. Recovery
+    // restores QUIETLY — the record is /why-retrievable, not a user notice
+    // (UH-003).
+    this.emitRouteEventChecked({
+      event: 'auto_fallback_cleared',
+      conversationKey: null,
+      provider: this.fallbackWindow.activeEntry?.provider ?? this.agentProvider,
+      modelRef: this.fallbackWindow.activeEntry?.model ?? null,
+      source: 'auto_fallback',
+      userVisible: false,
+      reasonCode: reason,
+    });
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -7131,6 +7839,32 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Compose the flag-gated NL routing prompt contract from live instance
+   * state (slice 3). Evaluated per prompt build so tier/provider facts are
+   * current; flag off never reaches this (the opt stays undefined).
+   */
+  private buildRoutingContractBlock(provider: string): string {
+    // Fail-open (R13): the routablePinTargets credential probe does I/O and can
+    // throw; the routing prompt block must never fail a spawn. Degrade to the
+    // always-routable primary rather than propagating out of prompt build.
+    let routableProviders: string[];
+    try {
+      routableProviders = this.routablePinTargets();
+    } catch (err) {
+      log.warn({ err, instance: this.instanceName }, 'routable-pin probe failed building routing contract - listing primary only');
+      routableProviders = [this.agentProvider];
+    }
+    return buildRoutingPromptContract({
+      // Thread the provider the session actually spawned on (R6), as the
+      // adjacent handoffSystemBlock is — hardcoding effectiveProvider told a
+      // pin/tier-routed agent it was the default provider (contradicting /why).
+      provider,
+      tierMap: config.nlRoutingTiers ?? null,
+      routableProviders,
+    });
+  }
+
+  /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
    */
@@ -7146,6 +7880,10 @@ export class AgentRuntime implements Runtime {
     mcpSocketPath?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
+    // Slice-2 routing wiring (flag-gated): preferences steer the session being
+    // spawned; flag off keeps the exact base expressions below.
+    const route = config.nlRouting ? this.resolveRouteForTurn(opts.chatJid, opts.actorJid) : null;
+    if (route) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
@@ -7177,16 +7915,17 @@ export class AgentRuntime implements Runtime {
       configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: this.effectiveModel,
+      model: route ? route.model : this.effectiveModel,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: this.effectiveProvider,
-      providerConfig: this.sessionProviderConfig(),
+      provider: route ? route.provider : this.effectiveProvider,
+      providerConfig: route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig(),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, this.effectiveProvider),
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
+      routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
     });
     if (this.durability) {
       session.setDurability(this.durability);
@@ -7459,7 +8198,7 @@ export class AgentRuntime implements Runtime {
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.markRuntimeFaultContinuityCandidate(this.currentInboundSeq);
             this.replyGuarantee?.disarm(this.currentInboundSeq);
-            this.durability.markInboundFailed(this.currentInboundSeq);
+            this.durability.markInboundFailed(this.currentInboundSeq, 'session_crash');
             this.currentInboundSeq = undefined;
           }
           if (config.controlPeers.size > 0) {
@@ -7517,7 +8256,7 @@ export class AgentRuntime implements Runtime {
     if (this.durability && inboundSeq !== undefined) {
       this.markRuntimeFaultContinuityCandidate(inboundSeq);
       this.replyGuarantee?.disarm(inboundSeq);
-      this.durability.markInboundFailed(inboundSeq);
+      this.durability.markInboundFailed(inboundSeq, 'session_crash');
       seqQueue.shift();
     }
     this.cleanupPerChatCrashTurnState(mapKey);
@@ -7899,7 +8638,25 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         {
-          const normalizedText = this.normalizeAssistantTextForDelivery(event);
+          const rawAssistantText = this.normalizeAssistantTextForDelivery(event);
+          if (!rawAssistantText) break;
+          // Slice-3 NL routing: consume typed intent markers before delivery
+          // (flag off → pass-through, byte-identical). Streaming-safe: the
+          // first line is buffered across token deltas so a split marker never
+          // leaks (R1).
+          let normalizedText: string | null;
+          if (config.nlRouting) {
+            const step = this.scanRouteMarkerDelta(
+              this.currentTurnRouteMarkerHold,
+              rawAssistantText,
+              (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
+              this.currentTurnReplayActorJid,
+            );
+            this.currentTurnRouteMarkerHold = step.held;
+            normalizedText = step.deliver;
+          } else {
+            normalizedText = rawAssistantText;
+          }
           if (!normalizedText) break;
           if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming')) {
             this.turnHadVisibleOutput = true;
@@ -8012,6 +8769,23 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+        // R1: flush any held first-line marker buffer at turn end (see the
+        // per-chat handler) — registers a marker-only / no-newline intent and
+        // delivers whatever remains. No-op when nothing was held.
+        if (config.nlRouting && this.currentTurnRouteMarkerHold !== null) {
+          const heldMarker = this.currentTurnRouteMarkerHold;
+          this.currentTurnRouteMarkerHold = null;
+          const tail = this.flushRouteMarker(
+            heldMarker,
+            (this.shared ? this.currentTurnChatJid : this.activeChatJid) ?? queue.targetChatJid,
+            this.currentTurnReplayActorJid,
+          );
+          if (tail) {
+            queue.enqueueStreamingText(tail);
+            this.turnHadVisibleOutput = true;
+            this.currentTurnAssistantText += tail;
+          }
+        }
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
@@ -8281,6 +9055,18 @@ export class AgentRuntime implements Runtime {
               this.recordTurnCapabilitySuccess(true);
             } else {
               this.recordTurnCapabilityFailure(true, 'empty-output');
+              // QR-226: see the matching log.warn in handleEventWithContext — the
+              // turnErrorCounts increment above is in-memory only, so without a
+              // log line journal greps are blind to empty-output turns here too.
+              log.warn(
+                {
+                  reason: 'empty-output',
+                  chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+                  rowId,
+                  turnHadToolWork,
+                },
+                'recorded empty-output turn failure',
+              );
               armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, this.session, turnHadToolWork, undefined);
             }
           }

@@ -148,6 +148,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     listTools = vi.fn(() => []);
     call = vi.fn();
     getChatScopedToolNames = vi.fn(() => []);
+    setSensitiveToolAuthorizer = vi.fn();
   },
 }));
 

@@ -97,6 +97,28 @@ function assertAdmin(deps: SubstrateDeps, session: SessionContext): void {
   }
 }
 
+/**
+ * Boolean form of the admin gate for the registry's central sensitive-tool
+ * authorizer (R1). Same predicate as assertAdmin — fail-closed on missing
+ * actors, non-WhatsApp transports, and unlisted phones.
+ */
+export function isAdminActor(deps: SubstrateDeps, session: SessionContext): boolean {
+  try {
+    assertAdmin(deps, session);
+    return true;
+  } catch (err) {
+    // The central gate replies uniformly (non-disclosing) to the caller, so
+    // the specific reason (missing LID mapping, non-WhatsApp transport,
+    // unlisted phone) would otherwise vanish — an admin lockout must stay
+    // diagnosable server-side (F06). Log the actor + cause, deny.
+    log.info(
+      { actorJid: session.actorJid ?? null, reason: err instanceof Error ? err.message : String(err) },
+      'admin predicate denied',
+    );
+    return false;
+  }
+}
+
 function projectBeadQuietly(deps: SubstrateDeps, beadId: number): void {
   try {
     projectBead(deps.db, { vaultPath: deps.memory.vaultPath, beadId });
@@ -147,8 +169,14 @@ function toEntityRef(r: z.infer<typeof EntityRefSchema>): EntityRef {
 }
 
 export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDeps): void {
+  // R1: the central sensitive-tool gate rides the same admin predicate as
+  // the in-handler assertAdmin checks below (which remain as defense in
+  // depth).
+  registry.setSensitiveToolAuthorizer((session) => isAdminActor(deps, session));
+
   registry.register({
     name: 'create_agent_job',
+    sensitive: true,
     description: 'Create an agent_job bead + schedule trigger. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -199,6 +227,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'create_watch',
+    sensitive: true,
     description: 'Create a watch bead + poll trigger. Admin only. TTL defaults to config.memory.watchTtl.defaultHours; clamped to maxHours. Wired kinds: poll.sqlite, poll.pinecone, poll.file, poll.url (gated behind advanced.enableUrlWatch, default OFF — rejected at creation when disabled), and schedule.*. poll.email is accepted and persisted but no-op until its executor is wired. event.message is accepted and persisted but is a reserved scaffold (next_fire_at=NULL, never polled) pending a future ingest path. poll.shell is removed from creation (not in this enum; retained internally only for legacy fail-closed handling).',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -263,6 +292,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'regenerate_vault',
+    sensitive: true,
     description: 'Regenerate the Obsidian vault projection from current substrate state. Admin only.',
     scope: 'global',
     targetMode: 'caller-supplied',
@@ -276,6 +306,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'capture_task',
+    sensitive: true,
     description: 'Create a task bead (no trigger). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -310,6 +341,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'capture_observation',
+    sensitive: true,
     description: 'Append an entity observation. Append/supersede semantics — never mutates existing rows. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -409,6 +441,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'update_bead',
+    sensitive: true,
     description: 'Update title/body/due_at/priority/metadata on a bead. Cannot change kind/owner/status. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -432,6 +465,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'complete_bead',
+    sensitive: true,
     description: 'Transition a bead to completed. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), note: z.string().optional() }),
@@ -446,6 +480,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'cancel_bead',
+    sensitive: true,
     description: 'Transition a bead to cancelled. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), reason: z.string().optional() }),
@@ -460,6 +495,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'approve_proposal',
+    sensitive: true,
     description: 'Promote status=proposed bead to active. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), overrides: z.record(z.unknown()).optional() }),
@@ -476,6 +512,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'reject_proposal',
+    sensitive: true,
     description: 'Cancel status=proposed bead with rejection reason. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), reason: z.string().optional() }),
@@ -505,6 +542,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'pause_trigger',
+    sensitive: true,
     description: 'Pause a trigger. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive() }),
@@ -518,6 +556,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'extend_trigger',
+    sensitive: true,
     description: 'Push trigger terminal_at forward (clamped to policy max). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), until: z.number().int().positive() }),
@@ -559,6 +598,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'add_alias',
+    sensitive: true,
     description: 'Add an alias (display_name/handle/email/phone/url/nickname/other) to an entity — the write-half of the aliases surface read by get_profile. Duplicate (entity, alias, kind) rows are ignored. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({
@@ -592,6 +632,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'merge_entities',
+    sensitive: true,
     description: 'Merge entity A into B; non-destructive. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ from_id: z.number().int().positive(), into_id: z.number().int().positive() }),
@@ -607,6 +648,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'forget_observation',
+    sensitive: true,
     description: 'Tombstone an observation (forgotten=1 with reason). Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     schema: z.object({ id: z.number().int().positive(), reason: z.string().min(1) }),

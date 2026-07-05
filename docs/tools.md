@@ -37,6 +37,17 @@ Complete reference for all 165 MCP tools exposed by WhatSoup. Tools are grouped 
 - `safe` — idempotent write; safe to replay (e.g., set/overwrite).
 - `unsafe` — non-idempotent write; must not be replayed automatically (e.g., send message).
 
+**Sensitive** (R1 admin gate)
+- `sensitive: true` — the tool is gated centrally in `ToolRegistry.call` by the
+  instance admin predicate (the per-turn `actorJid`), in addition to any
+  in-handler `assertAdmin` check (defense in depth). Enforcement is at call
+  time, evaluated with the calling turn's actor; the gate is fail-closed
+  (missing `actorJid`, no authorizer, an authorizer error, or any non-`true`
+  return all deny) and non-disclosing (an unauthorized or actor-less caller
+  receives the same `Unknown tool` reply as for a nonexistent tool). Sensitive
+  tools are still listed in `tools/list` for global sessions — listing is not
+  the gate. (The 15 admin-gated substrate tools carry this flag.)
+
 ---
 
 ## Table of Contents

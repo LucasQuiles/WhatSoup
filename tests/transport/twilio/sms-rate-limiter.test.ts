@@ -76,4 +76,76 @@ describe('SmsRateLimiter', () => {
     await vi.advanceTimersByTimeAsync(60_001);
     await expect(rl.acquire(DEST_A)).resolves.toBe(0);
   });
+
+  it('evicts an idle window entry once the reservation ages out (no leak, G1)', async () => {
+    const rl = new SmsRateLimiter(2, 60_000);
+    await rl.acquire(DEST_A);
+    expect(rl.size).toBe(1);
+
+    // Nothing else ever touches DEST_A again — a long-running instance must
+    // not keep one Map entry per distinct destination forever.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(rl.size).toBe(0);
+  });
+
+  it('does not evict a destination whose window is still live (G1 safety)', async () => {
+    const rl = new SmsRateLimiter(2, 60_000);
+    await rl.acquire(DEST_A); // t=0
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rl.acquire(DEST_A); // t=30s — refreshes the destination
+    expect(rl.size).toBe(1);
+
+    // The t=0 slot's own cleanup check runs at t=60s, but the t=30s send is
+    // still within its window — the entry must survive, not be evicted out
+    // from under the still-live reservation.
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(rl.size).toBe(1);
+
+    // Now the t=30s send has also aged out and nothing renewed it.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(rl.size).toBe(0);
+  });
+
+  it('clamps a stored timestamp ahead of a stepped-back clock, capping the wait at windowMs (G2 backward step)', async () => {
+    const rl = new SmsRateLimiter(1, 60_000);
+    await rl.acquire(DEST_A); // recorded at t=0
+
+    // Backward step: NTP correction / VM resume / manual clock change moves
+    // the wall clock 30s into the past relative to the recorded send.
+    vi.setSystemTime(Date.now() - 30_000);
+
+    let resolvedDelay: number | null = null;
+    const waiter = rl.acquire(DEST_A).then((d) => {
+      resolvedDelay = d;
+      return d;
+    });
+
+    // Without the clamp this would wait 90s (windowMs plus the 30s step
+    // back) — longer than windowMs, and a larger step could go negative.
+    // Advancing exactly windowMs must be enough, and acquire must not throw.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(waiter).resolves.toBe(60_000);
+    expect(resolvedDelay).toBe(60_000);
+  });
+
+  it('characterization, not a regression guard (passes pre- and post-fix): a forward clock step frees a slot early (G2 forward step, accepted)', async () => {
+    const rl = new SmsRateLimiter(1, 60_000);
+    await rl.acquire(DEST_A); // t=0 — at cap
+
+    // Forward step: wall clock jumps a full window ahead without any timers
+    // firing (NTP correction, VM resume/sleep). This frees the slot early
+    // relative to real elapsed time — an accepted tradeoff of staying on
+    // Date.now() (no monotonic-clock migration), not something this fix
+    // changes; recorded here so the behavior stays intentional, not silent.
+    //
+    // Deliberately bidirectional: pruneWindow's clamp loop only fires on a
+    // BACKWARD step (a stored timestamp ahead of `now`), so a forward step
+    // exercises only the pre-existing, unchanged shift-loop beneath it. This
+    // case passes unmodified on pre-fix code too (confirmed by swarm-2b
+    // review, 2026-07-04) — it documents intended behavior, it does not
+    // guard against a regression introduced by this fix.
+    vi.setSystemTime(Date.now() + 60_000);
+
+    await expect(rl.acquire(DEST_A)).resolves.toBe(0);
+  });
 });
