@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the keyring module BEFORE importing the resolver under test.
-vi.mock('../../../../src/lib/keyring.ts', () => ({
+vi.mock('../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(),
 }));
 
@@ -10,12 +10,12 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({
 const { mockLog } = vi.hoisted(() => ({
   mockLog: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
-vi.mock('../../../../src/logger.ts', () => ({
+vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => mockLog,
 }));
 
-import { resolveApiKey } from '../../../../src/runtimes/agent/providers/api-key-resolver.ts';
-import { lookupCredential } from '../../../../src/lib/keyring.ts';
+import { resolveApiKey } from '../../src/lib/api-key-resolver.ts';
+import { lookupCredential } from '../../src/lib/keyring.ts';
 
 const mockedLookup = vi.mocked(lookupCredential);
 

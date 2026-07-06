@@ -1064,6 +1064,12 @@ export async function handleCreateLine(
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
   }
+  // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
+  // type 'chat' so an agent/passive config can never carry an unvalidated
+  // chat-shaped block (validateChatOptions below only checks type === 'chat').
+  if (type === 'chat' && body.chatOptions != null) {
+    config['chatOptions'] = body.chatOptions;
+  }
   // Regression guard, not an active hole: PASSTHROUGH_FIELDS excludes the
   // wizard-era plaintext key fields today; this keeps future allowlist
   // growth from reopening the PATCH-path leak fixed alongside it.

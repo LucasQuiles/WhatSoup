@@ -3,8 +3,8 @@
 // Works with OpenAI, Ollama, vLLM, Azure OpenAI, LM Studio, and any
 // endpoint that implements the OpenAI chat completions SSE streaming API.
 //
-// NOTE: API keys resolve via `resolveApiKey()` (`./api-key-resolver.ts`) at
-// request time — HTTP providers don't spawn subprocesses, so buildEnv() is
+// NOTE: API keys resolve via `resolveApiKey()` (`../../../lib/api-key-resolver.ts`)
+// at request time — HTTP providers don't spawn subprocesses, so buildEnv() is
 // only used as a courtesy.
 // Precedence: `apiKeyService` keyring lookup (when configured) →
 // `process.env.OPENAI_API_KEY` env fallback.
@@ -20,7 +20,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToOpenAI, executeBridgeTool } from './mcp-bridge.ts';
-import { resolveApiKey } from './api-key-resolver.ts';
+import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { turnPartsToOpenAIContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
