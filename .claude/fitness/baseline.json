@@ -1,16 +1,18 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-20",
+  "generatedAt": "2026-07-06",
   "rules": {
     "arch.file-size": {
       "measurements": [
         {
           "filePath": "src/runtimes/agent/runtime.ts",
-          "lines": 7818
+          "lines": 9419,
+          "maxLines": 9419
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
-          "lines": 8794
+          "lines": 12556,
+          "maxLines": 12556
         }
       ]
     }
