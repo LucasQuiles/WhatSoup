@@ -278,7 +278,17 @@ export async function handleVerifyCredential(
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
   let status: 'valid' | 'invalid' | 'unreachable';
   try {
-    const resp = await fetch(descriptor.url, { method: 'GET', headers, signal: controller.signal, redirect: 'error' });
+    const init: Parameters<typeof fetch>[1] = {
+      method: descriptor.method,
+      headers,
+      signal: controller.signal,
+      redirect: 'error',
+    };
+    if (descriptor.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(descriptor.body);
+    }
+    const resp = await fetch(descriptor.url, init);
     status = resp.status >= 200 && resp.status < 300 ? 'valid' : resp.status === 401 || resp.status === 403 ? 'invalid' : 'unreachable';
   } catch {
     status = 'unreachable';

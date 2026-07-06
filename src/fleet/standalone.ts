@@ -17,6 +17,7 @@ const db = new DatabaseSync(':memory:');
 
 const tokens = await loadOrCreateFleetTokens();
 console.log(`Fleet token: ${tokens.active.slice(0, 8)}...`);
+console.log('Console unlock token: full value in ~/.config/whatsoup/fleet-tokens.json (field "active")');
 
 const server = createFleetServer({
   db,
