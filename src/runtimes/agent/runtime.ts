@@ -120,9 +120,10 @@ import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import type { SessionContext } from '../../mcp/types.ts';
@@ -134,6 +135,7 @@ import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor 
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -1498,6 +1500,12 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
+  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  // oldest-dispatched-unresolved = the turn the subprocess is currently running.
+  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
+  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  private perChatSocketResources: Map<string, { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }> = new Map();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
 
@@ -1555,6 +1563,16 @@ export class AgentRuntime implements Runtime {
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
+    // F-STICKY-ACTOR: clear the executing-actor register (fail-closed) and stop
+    // the per-chat socket. cleanupPerChatState covers idle-eviction, /new,
+    // dead-session, and shutdown-via-cleanup.
+    this.perChatExecActorQueue.delete(mapKey);
+    const sockRes = this.perChatSocketResources.get(mapKey);
+    if (sockRes) {
+      try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
+      try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
+      this.perChatSocketResources.delete(mapKey);
+    }
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
     // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
@@ -1999,6 +2017,20 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
+          // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue + the
+          // per-chat socket resource to the canonical key so a LID->phone rekey does
+          // not orphan the in-flight actor or leave the socket keyed by the dead lidKey.
+          // The resolver re-derives mapKey each read, so it follows the canonical key.
+          const execActors = this.perChatExecActorQueue.get(lidKey);
+          if (execActors !== undefined) {
+            this.perChatExecActorQueue.delete(lidKey);
+            this.perChatExecActorQueue.set(canonical, execActors);
+          }
+          const sockRes = this.perChatSocketResources.get(lidKey);
+          if (sockRes !== undefined) {
+            this.perChatSocketResources.delete(lidKey);
+            this.perChatSocketResources.set(canonical, sockRes);
+          }
           // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
           // progress timer + slow/stall setTimeouts that are cleared only by
           // shutdown() keyed on the canonical mapKey — leaving it under lidKey
@@ -2165,6 +2197,15 @@ export class AgentRuntime implements Runtime {
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
+        // F-STICKY-ACTOR (QR-247): the per-turn actor binding covers claude-cli
+        // per_chat only. A non-claude subprocess provider (or a subprocess fallback)
+        // in non-sandbox per_chat stays on THIS shared global socket, so the
+        // concurrent-sender actor race is NOT closed for it — warn rather than imply fixed.
+        if (this.sessionScope === 'per_chat' && !this.sandboxPerChat
+            && this.effectiveProvider?.endsWith('-cli') && this.effectiveProvider !== 'claude-cli') {
+          log.warn({ provider: this.effectiveProvider, sessionScope: this.sessionScope },
+            'per-chat actor binding inactive for this provider: a non-claude subprocess in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed. Subprocess fallbacks share the same exposure.');
+        }
 
         // Write the whatsoup MCP config to every configured CLI provider target:
         // primary first, then fallback when it uses a distinct config file.
@@ -2846,7 +2887,14 @@ export class AgentRuntime implements Runtime {
     //      synchronous per_chat-without-sandbox path uses the global socket
     //      above and never allocates a per-chat socket, so the `workspaceResources`
     //      lookup here is only reachable under sandboxPerChat=true.
-    this.globalSocketServer?.updateActorJid(msg.senderJid);
+    // F-STICKY-ACTOR (QR-247): for claude-cli per_chat (which uses per-chat sockets),
+    // do NOT broadcast the sender onto the shared global socket — the per-chat socket
+    // resolves the actor per-request from the executing register. single/shared AND
+    // non-claude per_chat still broadcast (they use the global socket; non-claude
+    // per_chat stays on the pre-fix path, validator-warned).
+    if (!this.usesPerChatActorSocket()) {
+      this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid, msg.senderJid);
       const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
@@ -3343,6 +3391,23 @@ export class AgentRuntime implements Runtime {
     // here at the single dispatch chokepoint, independent of the per-path binds.
     this.enforceGlobalConversationBinding(chatJid);
     this.updateSessionActorJid(session, actorJid);
+    // F-STICKY-ACTOR (QR-247): push this turn's actor onto the per-chat executing
+    // register. sendTurnToSession is the single dispatch chokepoint reached only
+    // with a confirmed-live session (past sendTurnPerChat's :3534 spawn-fail drop),
+    // so a pushed entry always corresponds to a turn that will run. HEAD = the turn
+    // the subprocess is currently executing; shifted on that turn's result, cleared
+    // on any abnormal termination (Slice-4). per_chat non-sandbox only.
+    if (this.usesPerChatActorSocket() && mapKey !== undefined) {
+      // If the session is not active, any pre-existing entries are from a dead
+      // subprocess (a prior turn whose session crashed/resume-failed without an
+      // in-band clear) — drop them so a stale actor cannot survive a subprocess
+      // restart. A fresh subprocess starts with only this turn. (handleResumeFailed
+      // is a no-op for non-sandbox per_chat, so this is the resume-fail coverage.)
+      if (!session.getStatus().active) this.perChatExecActorQueue.delete(mapKey);
+      const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
+      execQ.push(actorJid);
+      this.perChatExecActorQueue.set(mapKey, execQ);
+    }
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
     const mapKeyForChat = this.sandboxPerChat
@@ -3493,7 +3558,7 @@ export class AgentRuntime implements Runtime {
           advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            this.injectPollAnswers(mapKey, pendingPoll);
+            this.injectPollAnswers(mapKey, pendingPoll, actorJid);
           } else {
             log.info({
               mapKey,
@@ -3612,6 +3677,10 @@ export class AgentRuntime implements Runtime {
       } else {
         // Consume the seq for this completed user turn
         seqQueue.shift();
+        // F-STICKY-ACTOR (QR-247): advance the executing-actor head in lockstep
+        // with the seq FIFO on a completed user turn (unconditional; NOT the
+        // conditional pendingTurnActorJid.delete below, and NOT completeConsumedPerChatInbound).
+        this.perChatExecActorQueue.get(mapKey)?.shift();
         const fallbackReason = event.text ? fallbackReasonForResultText(event.text) : null;
         // Turn completed successfully with visible output — clear pending replay
         // text. Provider limit/auth/rate failures keep it so the fallback replay
@@ -4343,6 +4412,7 @@ export class AgentRuntime implements Runtime {
   private injectPollAnswers(
     mapKey: string,
     pending: PendingPollQuestion,
+    answererActorJid?: string,
   ): void {
     // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
@@ -4366,7 +4436,7 @@ export class AgentRuntime implements Runtime {
     // Route through sendTurnPerChat for proper lifecycle handling.
     // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
     // pendingPolls.questions from being populated in shared mode.
-    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey).catch((err) => {
+    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey, answererActorJid).catch((err) => {
       log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
     });
 
@@ -5529,6 +5599,57 @@ export class AgentRuntime implements Runtime {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
     }
     return canonicalizeChatJid(chatJid, this.db);
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-245): resolve the actor for a per-chat socket tool call
+   * at read time = the actor of the turn the subprocess is CURRENTLY executing
+   * (queue HEAD). Fail-closed: no live active session or empty queue -> undefined,
+   * which the sensitive-tool gate denies. Non-blocking (sync map/status reads).
+   * Re-derives mapKey each call so it is transparent to LID rekey.
+   */
+  private resolveExecutingActor(chatJid: string): string | undefined {
+    const mapKey = this.resolvePerChatMapKey(chatJid);
+    const session = this.chatSessions.get(mapKey);
+    if (!session || !session.getStatus().active) return undefined;
+    return this.perChatExecActorQueue.get(mapKey)?.[0];
+  }
+
+  /** F-STICKY-ACTOR (QR-247): per-chat socket path under <cwd>/.claude, sha1-shortened if it would exceed the unix sun_path limit. */
+  private derivePerChatSocketPath(chatJid: string): string {
+    const dir = join(this.cwd ?? homedir(), '.claude');
+    const key = toConversationKey(chatJid);
+    const full = join(dir, `whatsoup-${key}.sock`);
+    if (Buffer.byteLength(full, 'utf8') <= 100) return full;
+    const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
+    return join(dir, `whatsoup-${h}.sock`);
+  }
+
+  /** F-STICKY-ACTOR (QR-247): true only for the mode this fix covers — claude-cli, per_chat, non-sandbox. Gates the per-chat socket, the exec-queue push, and the global-broadcast skip so other modes are byte-unchanged. */
+  private usesPerChatActorSocket(): boolean {
+    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.effectiveProvider === 'claude-cli';
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-247): create this chat's own MCP socket (tier:'global',
+   * bound to resolveExecutingActor) and write its per-session --mcp-config so the
+   * subprocess talks to it instead of the shared global socket. Returns the socket
+   * + cfg paths for the provider override. Torn down in cleanupPerChatState.
+   */
+  private createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string } {
+    const socketPath = this.derivePerChatSocketPath(chatJid);
+    const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
+    const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
+    writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
+    const socketServer = new WhatSoupSocketServer(
+      socketPath,
+      this.registry,
+      { tier: 'global', allowedRoot: this.cwd ?? homedir() },
+      () => this.resolveExecutingActor(chatJid),
+    );
+    socketServer.start();
+    this.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
+    return { socketPath, cfgPath };
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
@@ -7776,6 +7897,11 @@ export class AgentRuntime implements Runtime {
       await args.oldSession.shutdown(false);
     }
     if (args.mapKey !== undefined) {
+      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
+      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
+      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
+      // re-pushes via sendTurnPerChat -> sendTurnToSession.
+      this.perChatExecActorQueue.delete(args.mapKey);
       this.chatSessions.delete(args.mapKey);
       this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
       await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
@@ -7890,6 +8016,7 @@ export class AgentRuntime implements Runtime {
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
     mcpSocketPath?: string;
+    providerConfigOverride?: Record<string, unknown>;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     // Slice-2 routing wiring (flag-gated): preferences steer the session being
@@ -7931,7 +8058,9 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
       provider: route ? route.provider : this.effectiveProvider,
-      providerConfig: route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig(),
+      providerConfig: opts.providerConfigOverride
+        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
+        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
@@ -8145,10 +8274,20 @@ export class AgentRuntime implements Runtime {
         const toolScopeKey = this.createToolScopeKey(initialMapKey);
         let session!: SessionManager;
         const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        // F-STICKY-ACTOR (QR-247): for claude-cli non-sandbox per_chat, create this
+        // chat's own actor-bound MCP socket + per-session --mcp-config BEFORE the
+        // session so its cfg can be passed as the provider override (session.ts
+        // stays byte-unchanged). Other providers stay on the shared global socket.
+        const perChatSock = this.usesPerChatActorSocket()
+          ? this.createPerChatActorSocket(initialMapKey, chatJid)
+          : undefined;
         session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
           actorJid,
+          ...(perChatSock
+            ? { mcpSocketPath: perChatSock.socketPath, providerConfigOverride: { mcpConfig: [perChatSock.cfgPath], strictMcpConfig: true } }
+            : {}),
           onEvent: (event) => {
             const mapKey = resolveSessionMapKey();
             if (!mapKey) {
@@ -8372,6 +8511,13 @@ export class AgentRuntime implements Runtime {
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
+    // F-STICKY-ACTOR (QR-247, S-CRASH): a crash discards ALL of the subprocess's
+    // in-flight turns (executing + buffered), so clear the WHOLE executing-actor
+    // queue — NOT shift-one. This runs synchronously in handlePerChatCrash BEFORE
+    // the auto-respawn setTimeout, so the direct-sendTurn continuation hits an empty
+    // queue -> fail-closed deny, and a later user turn cannot append behind a stale
+    // (possibly admin) head and be served that actor = escalation.
+    this.perChatExecActorQueue.delete(mapKey);
     this.clearToolScopeFor(mapKey);
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;

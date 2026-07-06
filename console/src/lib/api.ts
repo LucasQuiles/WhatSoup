@@ -398,6 +398,21 @@ export const api = {
       signal: AbortSignal.timeout(30_000),
     }),
 
+  /** Store a provider key in the OS keyring (write-only; body never echoed).
+   *  404 = service not in the server's credential write allowlist — surface
+   *  the CLI provisioning path, do not treat as a key error (QR-238). */
+  setCredential: (service: string, value: string) =>
+    apiFetch<{ ok: boolean; service: string; envShadowed?: boolean }>(
+      `/api/credentials/${encodeURIComponent(service)}`,
+      { method: 'PUT', body: JSON.stringify({ value }) },
+    ),
+
+  verifyCredential: (service: string) =>
+    apiFetch<{ service: string; status: string }>(
+      `/api/credentials/${encodeURIComponent(service)}/verify`,
+      { method: 'POST', signal: AbortSignal.timeout(15_000) },
+    ),
+
   createLine: (config: Record<string, unknown>) =>
     apiFetch<{ name: string; healthPort: number }>('/api/lines', {
       method: 'POST',

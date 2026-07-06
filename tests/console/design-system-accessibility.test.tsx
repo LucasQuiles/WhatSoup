@@ -12,6 +12,7 @@ import { Field, TextInput } from '../../console/src/components/primitives/FormCo
 import HeartbeatStrip from '../../console/src/components/HeartbeatStrip'
 import { PipelineTab } from '../../console/src/components/line-detail/PipelineTab'
 import AddLineWizard from '../../console/src/components/AddLineWizard'
+import { ToastProvider } from '../../console/src/hooks/use-toast'
 
 // framer-motion mock removed (B3W4): AddLineWizard no longer uses framer-motion
 
@@ -62,7 +63,8 @@ describe('PipelineTab node interaction', () => {
 describe('AddLineWizard dialog semantics', () => {
   it('dialog role wired via Modal; aria-labelledby resolves to the title element', () => {
     // AddLineWizard now uses open prop (C-B3W4-3 latched-mount contract)
-    render(createElement(AddLineWizard, { open: true, onClose: vi.fn() }))
+    // AddLineWizard calls useToast() unconditionally, so it needs a ToastProvider ancestor.
+    render(createElement(AddLineWizard, { open: true, onClose: vi.fn() }), { wrapper: ToastProvider })
 
     const dialog = screen.getByRole('dialog', { name: 'Add New Line' })
     expect(dialog.getAttribute('aria-modal')).toBe('true')

@@ -810,6 +810,41 @@ as a failed isolation check, not noise. The fleet credentials routes
 `envShadowed: true` whenever a process-wide env var is masking the stored
 keyring entry.
 
+> **Rotate wizard-typed keys.** Console builds before 2026-07 wrote any API
+> key typed into the Add Line wizard's Model step to the instance's
+> `config.json` as an inert top-level `apiKey`/`openaiKey` field (never read
+> by any auth path). These fields are now stripped automatically on the next
+> config update. If an instance's config carried one, treat that key as
+> having been at rest on disk: rotate it, and delete the field by hand if the
+> config will not be written soon.
+
+#### Custom endpoint as the primary provider
+
+The same `providerConfig` powers a custom endpoint as the PRIMARY provider —
+not only as a fallback rung. Groq as primary, end to end (provision the key
+under service `groq` per [Enabling provider fallback on a new host](#enabling-provider-fallback-on-a-new-host)
+— the same provisioning routes apply to primary keys):
+
+```jsonc
+"agentOptions": {
+  "provider": "openai-api",
+  "providerConfig": { "baseUrl": "https://api.groq.com/openai/v1", "apiKeyService": "groq" },
+  "model": "llama-3.3-70b-versatile",
+  "fallbacks": [
+    { "provider": "anthropic-api", "model": "claude-sonnet-5" }
+  ]
+}
+```
+
+The Add Line wizard exposes the same knobs at creation time: choosing an
+API-type provider on the Config step reveals **Base URL** and **Keyring
+Service** fields for a custom (BYOK) endpoint. After creation these provider
+fields are file-edit only (see [docs/console-guide.md](console-guide.md));
+restart the instance after editing. Verification paths are peers: the
+[`FALLBACK ON` canary](#enabling-provider-fallback-on-a-new-host) exercises a
+live turn, while `POST /api/credentials/:service/verify` runs a single
+list-models probe without touching a session.
+
 #### Provider fallback behavior
 
 When the primary provider returns a usage-limit, rate-limit, or auth-required terminal `result` (`src/runtimes/agent/runtime.ts`), the runtime:
@@ -824,7 +859,7 @@ Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n
 
 #### Enabling provider fallback on a new host
 
-When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise.
+When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise. These provisioning routes apply equally to a custom endpoint used as the primary provider — see [Custom endpoint as the primary provider](#custom-endpoint-as-the-primary-provider).
 
 1. **Install the fallback provider CLI and confirm it is on the service user's PATH.** Skip this step for API-type fallback providers (`openai-api`, `anthropic-api` — e.g. the Groq/OpenRouter recipes in [Custom endpoint](#custom-endpoint-providerconfigbaseurl)): they are managed HTTP loops with no CLI binary to install or probe.
 
