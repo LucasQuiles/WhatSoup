@@ -43,6 +43,21 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
 };
 
+/**
+ * The inference-provider subset of SERVICE_ENV_MAP that may legitimately
+ * authenticate a custom LLM endpoint via providerConfig.apiKeyService /
+ * chatOptions.openaiProviderConfig.apiKeyService. The non-provider secrets in
+ * SERVICE_ENV_MAP (pinecone, elevenlabs, whatsoup-health-token,
+ * whatsoup_health) are DELIBERATELY excluded: apiKeyService is operator-named
+ * alongside an operator-supplied baseUrl, so accepting one of those would let
+ * a BYOK config name it and exfiltrate that secret to an arbitrary endpoint
+ * as a Bearer token.
+ */
+export const PROVIDER_API_KEY_SERVICES: ReadonlySet<string> = new Set([
+  'anthropic', 'openai', 'deepseek', 'minimax', 'glm', 'xai', 'groq',
+  'mistral', 'openrouter', 'google', 'fireworks-ai', 'togetherai',
+]);
+
 export function resolveProviderKeyService(
   provider: unknown,
   model: unknown,

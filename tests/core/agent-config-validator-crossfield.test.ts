@@ -499,3 +499,72 @@ describe('validateInstanceConfig — chatOptions does not inherit agent-only pro
     ).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Security: apiKeyService must not name a non-provider keyring secret
+// (SERVICE_ENV_MAP also holds whatsoup-health-token/whatsoup_health, pinecone,
+// elevenlabs). apiKeyService authenticates an operator-supplied custom LLM
+// endpoint (baseUrl) — if one of those non-provider services were accepted, a
+// BYOK config could name it and exfiltrate that secret to an arbitrary
+// endpoint as a Bearer token. PROVIDER_API_KEY_SERVICES restricts the
+// membership check to inference providers only, closing both surfaces
+// (agentOptions.providerConfig and chatOptions.openaiProviderConfig share the
+// same validateProviderConfigShape helper).
+// ---------------------------------------------------------------------------
+
+describe('validateInstanceConfig — apiKeyService rejects non-provider keyring secrets (security)', () => {
+  const nonProviderServices = ['whatsoup-health-token', 'whatsoup_health', 'pinecone', 'elevenlabs'];
+
+  for (const service of nonProviderServices) {
+    it(`rejects apiKeyService ${service} on agentOptions.providerConfig even with a valid baseUrl`, () => {
+      // Control: the identical config with an allowlisted provider service is
+      // accepted, so the rejection below proves the allowlist rather than
+      // baseUrl itself being the problem.
+      expect(
+        validateInstanceConfig(
+          agentRaw({
+            provider: 'openai-api',
+            providerConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' },
+          }),
+          createCtx,
+        ),
+        'an allowlisted provider service with the same baseUrl must validate clean',
+      ).toBeNull();
+
+      const err = validateInstanceConfig(
+        agentRaw({
+          provider: 'openai-api',
+          providerConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: service },
+        }),
+        createCtx,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+      expect(err?.message).toContain(service);
+    });
+
+    it(`rejects apiKeyService ${service} on chatOptions.openaiProviderConfig even with a valid baseUrl`, () => {
+      // Control: same config with an allowlisted provider service passes, so
+      // the rejection below proves the allowlist rather than baseUrl itself.
+      expect(
+        validateInstanceConfig(
+          chatRaw({
+            openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' },
+          }),
+          createCtx,
+        ),
+        'an allowlisted provider service with the same baseUrl must validate clean',
+      ).toBeNull();
+
+      const err = validateInstanceConfig(
+        chatRaw({
+          openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: service },
+        }),
+        createCtx,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+      expect(err?.message).toContain(service);
+    });
+  }
+});
