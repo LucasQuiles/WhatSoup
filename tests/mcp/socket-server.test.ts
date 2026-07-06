@@ -1165,3 +1165,60 @@ describe('socket-server.ts uncovered-branch coverage', () => {
     expect(response.result.content[0].text).toContain('handler failure');
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-STICKY-ACTOR (QR-245): per-request actorResolver (D2)
+// ---------------------------------------------------------------------------
+describe("F-STICKY-ACTOR: actorResolver overrides the per-request actor (D2)", () => {
+  let socketPath: string;
+  let registry: ToolRegistry;
+  let server: WhatSoupSocketServer | undefined;
+
+  beforeEach(() => {
+    socketPath = makeSocketPath();
+    registry = new ToolRegistry();
+  });
+
+  afterEach(() => {
+    server?.stop();
+    try { unlinkSync(socketPath); } catch { /* ignore */ }
+  });
+
+  async function observeActor(
+    resolver: (() => string | undefined) | undefined,
+    baseActor: string | undefined,
+  ): Promise<string | undefined> {
+    let observed: string | undefined = "UNSET";
+    registry.register(makeTool({
+      name: "read_actor_tool",
+      scope: "global",
+      schema: z.object({}),
+      handler: async (_p, toolSession) => { observed = toolSession.actorJid; return "ok"; },
+    }));
+    server = new WhatSoupSocketServer(
+      socketPath,
+      registry,
+      makeSession(baseActor === undefined ? {} : { actorJid: baseActor }),
+      resolver,
+    );
+    server.start();
+    await waitForSocket(socketPath);
+    await sendJsonRpc(socketPath, {
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "read_actor_tool", arguments: {} },
+    });
+    return observed;
+  }
+
+  it("a resolver return value overrides the broadcast base-session actor", async () => {
+    expect(await observeActor(() => "resolver-actor", "base-actor")).toBe("resolver-actor");
+  });
+
+  it("a resolver returning undefined yields an undefined actor (fail-closed source)", async () => {
+    expect(await observeActor(() => undefined, "base-actor")).toBeUndefined();
+  });
+
+  it("no resolver leaves the base-session actor unchanged (back-compat)", async () => {
+    expect(await observeActor(undefined, "base-actor")).toBe("base-actor");
+  });
+});
