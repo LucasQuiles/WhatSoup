@@ -246,6 +246,26 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 
+  it('preserves a valid chatOptions.openaiProviderConfig on a chat-instance PATCH', async () => {
+    // The chat-only PATCH gate (merged.type !== 'chat' -> drop) must NOT strip
+    // chatOptions from a genuine chat instance. Guards against a future
+    // inversion of that condition silently dropping valid config.
+    const cfg = writeChatConfig();
+    const openaiProviderConfig = {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ chatOptions: { openaiProviderConfig } }), 'PATCH'),
+      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+    );
+    expect(res._status, res._body).toBe(200);
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect(persisted.type).toBe('chat');
+    expect(persisted.chatOptions).toEqual({ openaiProviderConfig });
+  });
+
   it('rejects an unknown chatOptions.openaiProviderConfig.apiKeyService with 400 and leaves the file untouched', async () => {
     const cfg = writeChatConfig();
     const before = fs.readFileSync(cfg, 'utf-8');
