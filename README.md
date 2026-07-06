@@ -116,6 +116,12 @@ npm run fleet
 #    Click "Add Line" → choose a type → scan the QR code with WhatsApp
 ```
 
+The console starts **locked**: paste the fleet token at the lock screen. The
+token is auto-generated on first run and stored at
+`~/.config/whatsoup/fleet-tokens.json` (use the `active` value; the server log
+prints only a prefix). See [docs/console-guide.md](docs/console-guide.md) for
+console authentication details.
+
 The setup script installs the systemd template unit, symlinks the wrapper script to `~/.local/bin`, builds the console, and checks for API keys in your keyring. After setup, `npm run fleet` is the only command you need — everything else is managed from the browser.
 
 ### Docker Quick Start
