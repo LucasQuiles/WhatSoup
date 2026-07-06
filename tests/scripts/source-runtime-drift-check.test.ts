@@ -230,6 +230,7 @@ describe('source runtime drift check --suggest', () => {
     console.log = (value?: unknown) => { logs.push(String(value)); };
     try {
       run(['--manifest', 'manifest.json', '--suggest'], root);
+      expect(process.exitCode).toBe(1);
       const output = logs.join('\n');
       expect(output).toContain('src/main.ts');
       expect(output).toContain(expectedNewSha256);
