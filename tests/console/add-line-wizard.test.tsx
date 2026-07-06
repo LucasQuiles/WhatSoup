@@ -32,9 +32,10 @@ import {
   it,
   vi,
 } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
-import type { FC } from 'react'
+import type { FC, ReactElement } from 'react'
+import { ToastProvider } from '../../console/src/hooks/use-toast'
 
 // ---------------------------------------------------------------------------
 // Mocks — hoisted before component import
@@ -44,6 +45,7 @@ const mockCreateLine = vi.fn()
 const mockUpdateConfig = vi.fn()
 const mockDeleteLine = vi.fn()
 const mockCheckExists = vi.fn()
+const mockSetCredential = vi.fn()
 
 vi.mock('../../console/src/lib/api', () => ({
   api: {
@@ -51,6 +53,7 @@ vi.mock('../../console/src/lib/api', () => ({
     updateConfig: (...args: unknown[]) => mockUpdateConfig(...args),
     deleteLine: (...args: unknown[]) => mockDeleteLine(...args),
     checkExists: (...args: unknown[]) => mockCheckExists(...args),
+    setCredential: (...args: unknown[]) => mockSetCredential(...args),
   },
   // isProductionConsole is exported from the real module; other test workers
   // that share this mock factory expect it to exist on the named export.
@@ -62,6 +65,15 @@ vi.mock('../../console/src/lib/api', () => ({
 // ---------------------------------------------------------------------------
 
 import AddLineWizard from '../../console/src/components/AddLineWizard'
+
+// AddLineWizard now calls useToast() unconditionally (finish-step credential
+// toasts) — every render needs a ToastProvider ancestor, or the hook throws
+// "must be used within a ToastProvider" before the first paint. All renders
+// in this file are of AddLineWizard/WizardWrapper, so shadowing `render` here
+// covers every call site (including `rerender`, which reuses the same wrapper).
+function render(ui: ReactElement) {
+  return rtlRender(ui, { wrapper: ToastProvider })
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,6 +127,7 @@ afterEach(() => {
   mockUpdateConfig.mockReset()
   mockDeleteLine.mockReset()
   mockCheckExists.mockReset()
+  mockSetCredential.mockReset()
 })
 
 beforeEach(() => {
@@ -123,6 +136,7 @@ beforeEach(() => {
   mockUpdateConfig.mockResolvedValue({})
   mockDeleteLine.mockResolvedValue({ deleted: 'test-line' })
   mockCheckExists.mockResolvedValue({ exists: false })
+  mockSetCredential.mockResolvedValue({ ok: true, service: 's' })
   wizardEventSources = []
   // jsdom has no EventSource; LinkStep (mounted when tests advance past
   // Identity) opens one in an effect, which otherwise raises unhandled
@@ -206,6 +220,29 @@ async function advanceToConfigStep(typeName: RegExp = /passive/i): Promise<void>
 
 async function advanceToReviewStep(typeName: RegExp = /passive/i): Promise<void> {
   await advanceToConfigStep(typeName)
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+  })
+  await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
+}
+
+/**
+ * Drive a chat-type line to the Review step, typing an Anthropic API key on
+ * the Model & Auth step along the way (chat type keeps the key entry simple —
+ * no auth-method radios). Chat's Config step ships a non-empty default system
+ * prompt, so no Config-step input is needed before advancing to Review.
+ */
+async function driveToReviewWithApiKey(apiKeyValue: string): Promise<void> {
+  await advanceIdentityToLink(/chat/i)
+  await completeLinkStep()
+  const apiKeyInput = screen.getByPlaceholderText(/sk-ant-/)
+  await act(async () => {
+    fireEvent.change(apiKeyInput, { target: { value: apiKeyValue } })
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+  })
+  await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
   })
@@ -574,6 +611,39 @@ describe('AddLineWizard — config and review workflow', () => {
 
     await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
     expect(screen.queryByRole('button', { name: /create line/i })).toBeNull()
+  })
+})
+
+describe('AddLineWizard — credential wiring (finish step)', () => {
+  it('routes the typed Anthropic key to setCredential and keeps it out of the config patch', async () => {
+    render(<WizardWrapper />)
+    await driveToReviewWithApiKey('sk-ant-x')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockSetCredential).toHaveBeenCalledWith('anthropic', 'sk-ant-x'))
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    const patch = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>
+    expect(patch).not.toHaveProperty('apiKey')
+    expect(patch).not.toHaveProperty('openaiKey')
+  })
+
+  it('still completes and surfaces an error toast when the credential service 404s', async () => {
+    mockSetCredential.mockRejectedValueOnce(new Error('API 404: unknown credential service'))
+    const onClose = vi.fn()
+    render(<WizardWrapper onClose={onClose} />)
+    await driveToReviewWithApiKey('sk-ant-x')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    // Security proof: the write was attempted and the line-creation flow does
+    // not throw/stall on a 404 from the credentials write allowlist (QR-238).
+    await waitFor(() => expect(mockSetCredential).toHaveBeenCalledWith('anthropic', 'sk-ant-x'))
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+    // Designed UX: the 404 surfaces as a CLI-instructions toast, not a hard error.
+    expect(await screen.findByText(/stored via the API yet/i)).toBeDefined()
   })
 })
 
