@@ -57,6 +57,7 @@ describe('fleet standalone launcher', () => {
     expect(start).toHaveBeenCalledWith(9099);
     expect(log.mock.calls.map(([message]) => message)).toEqual([
       'Fleet token: abcdef01...',
+      'Console unlock token: full value in ~/.config/whatsoup/fleet-tokens.json (field "active")',
       'Fleet server listening on http://127.0.0.1:9099',
       'Press Ctrl+C to stop',
     ]);

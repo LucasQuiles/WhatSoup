@@ -1,5 +1,8 @@
-// src/runtimes/agent/providers/api-key-resolver.ts
-// Shared API-key resolution for HTTP agent providers (OpenAI, Anthropic).
+// src/lib/api-key-resolver.ts
+// Shared API-key resolution for HTTP providers (agent OpenAI/Anthropic, chat
+// OpenAI). Neutral home in src/lib/ so both the agent runtime and the chat
+// runtime can depend on it without either importing the other's internals
+// (see src/runtimes/chat/providers/openai.ts).
 //
 // Resolution order at request time:
 //   1. inline apiKey (when non-empty) — caller-supplied
@@ -13,8 +16,8 @@
 // configured-service miss that silently uses the global env key — breaking
 // per-instance account isolation — is observable to operators (QR-104).
 
-import { lookupCredential } from '../../../lib/keyring.ts';
-import { createChildLogger } from '../../../logger.ts';
+import { lookupCredential } from './keyring.ts';
+import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('api-key-resolver');
 

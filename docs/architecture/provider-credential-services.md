@@ -31,13 +31,15 @@ A service is not a provider ID: `nvidia` would be reached as
    - `tests/core/agent-config-validator-crossfield.test.ts` — `nvidia` and
      `cerebras` are pinned as rejected-until-mapped; unpin only the service
      you mapped.
-3. **Decide probe coverage.** `PROBE_ENDPOINTS` in
-   `src/runtimes/agent/providers/credential-verify.ts`. Qualification rule:
-   only an endpoint proven to return 401/403 on a bad key belongs there — a
-   mute probe fails open forever, and OpenRouter and NVIDIA serve
+3. **Decide probe coverage.** `CREDENTIAL_PROBE_DESCRIPTORS` in
+   `src/lib/provider-credential-probes.ts` — the single shared map consumed by
+   both the arm-time pre-flight (`src/runtimes/agent/providers/credential-verify.ts`)
+   and the fleet `/verify` route (`src/fleet/routes/providers.ts`). Qualification
+   rule: only an endpoint proven to return 401/403 on a bad key belongs there —
+   a mute probe fails open forever, and OpenRouter and NVIDIA serve
    `GET /models` publicly (HTTP 200 with an invalid key). No entry means
    presence-only pre-flight: `fallback_credential_invalid` can never fire for
-   the service. If you add a probe, update the URL table and the
+   the service. If you add a probe, update the descriptor and the
    mapped-but-unprobed lock in
    `tests/runtimes/agent/providers/credential-verify.test.ts`. (Doc-sync note:
    the probe list stated here and in the design note is NOT independently
@@ -60,7 +62,7 @@ A service is not a provider ID: `nvidia` would be reached as
 ## Traps
 
 - **Key resolution order**
-  (`src/runtimes/agent/providers/api-key-resolver.ts`): inline → service
+  (`src/lib/api-key-resolver.ts`): inline → service
   lookup (mapped env var first, then keyring) → provider-family env fallback
   (`OPENAI_API_KEY` for `openai-api`, `ANTHROPIC_API_KEY` for
   `anthropic-api`). The last hop is the cross-account bleed risk; it logs the
@@ -72,6 +74,13 @@ A service is not a provider ID: `nvidia` would be reached as
 - **`Retry-After` cap** is 10 seconds
   (`src/runtimes/agent/providers/rate-limit-retry.ts`); a longer wait fails
   the turn into the fallback chain.
-- **The chat runtime is env-only** (`src/runtimes/chat/providers/openai.ts`):
-  `OPENAI_BASE_URL` repoints the whole process, including Whisper voice-note
-  transcription — there is no per-provider chat config today.
+- **The chat runtime is now per-instance configurable for OpenAI chat
+  completions** (`src/runtimes/chat/providers/openai.ts`,
+  `chatOptions.openaiProviderConfig` — QR-218 PR-2): an instance that sets
+  `baseUrl`/`apiKeyService` gets its own endpoint/key regardless of any
+  process-wide env var; one that sets nothing still gets the legacy bare
+  `new OpenAI()`, governed by `OPENAI_BASE_URL` as before (now the
+  legacy/fallback path). **Whisper voice-note transcription is NOT yet
+  covered** (`transcription/openai-whisper.ts`, blocked/future PR-B) — a
+  process-wide `OPENAI_BASE_URL` still repoints it regardless of any chat
+  instance's `openaiProviderConfig`.

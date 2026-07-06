@@ -2,8 +2,8 @@
 // Anthropic Messages API provider — managed_loop execution mode.
 // Uses Anthropic's native Messages API with SSE streaming.
 //
-// NOTE: API keys resolve via `resolveApiKey()` (`./api-key-resolver.ts`) at
-// request time — HTTP providers don't spawn subprocesses, so buildEnv() is
+// NOTE: API keys resolve via `resolveApiKey()` (`../../../lib/api-key-resolver.ts`)
+// at request time — HTTP providers don't spawn subprocesses, so buildEnv() is
 // only used as a courtesy.
 // Precedence: `apiKeyService` keyring lookup (when configured) →
 // `process.env.ANTHROPIC_API_KEY` env fallback.
@@ -19,7 +19,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToAnthropic, executeBridgeTool } from './mcp-bridge.ts';
-import { resolveApiKey } from './api-key-resolver.ts';
+import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { turnPartsToAnthropicContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';

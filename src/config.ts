@@ -827,6 +827,7 @@ const resolvedTwilioConfig: TwilioSmsConfig | undefined =
 
 const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
 const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
+const resolvedChatOptions = (instance?.chatOptions as Record<string, unknown> | undefined) ?? {};
 
 export const config = {
   // NL-first routing aliases + per-sender preference store (owner-approved
@@ -1014,6 +1015,12 @@ export const config = {
   // Defaults to 'claude-cli' for backward compatibility when not specified.
   agentProvider: (resolvedAgentOptions['provider'] as string | undefined) ?? 'claude-cli',
   agentProviderConfig: (resolvedAgentOptions['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
+
+  // Chat OpenAI provider endpoint/key override — read from
+  // chatOptions.openaiProviderConfig (QR-218 PR-2). Undefined (the default)
+  // keeps createOpenAIProvider() on its bare, env-only construction.
+  chatOpenAIProviderConfig:
+    (resolvedChatOptions['openaiProviderConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
   // Automatic provider fallback — read from agentOptions.fallbacks[] or the
   // legacy agentOptions.fallbackProvider / fallbackModel pair. When the primary

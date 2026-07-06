@@ -304,7 +304,9 @@ if (instanceType === 'agent') {
 } else {
   // chat (default): create chat-specific providers
   const anthropic = createAnthropicProvider();
-  const openai = createOpenAIProvider();
+  const openai = createOpenAIProvider(
+    config.chatOpenAIProviderConfig as { baseUrl?: string; apiKeyService?: string } | undefined,
+  );
   const pinecone = new PineconeMemory();
   // Enrichment is queue-backed: the poller enqueues validated facts into
   // `fact_export_queue`. A deployment may provide an external bridge that

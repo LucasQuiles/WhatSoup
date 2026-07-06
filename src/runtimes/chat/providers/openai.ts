@@ -5,6 +5,7 @@ import { WhatSoupError as AppError } from '../../../errors.ts';
 import type { LLMProvider, GenerateRequest, GenerateResponse, ChatMessage } from './types.ts';
 import { handleApiError } from './api-error-classifier.ts';
 import { stripLoneSurrogates } from '../../../core/sanitize-surrogates.ts';
+import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 
 const logger = createChildLogger('openai-provider');
 
@@ -30,16 +31,29 @@ function toOpenAIMessage(m: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam
   return { role: 'user', content };
 }
 
-export function createOpenAIProvider(): LLMProvider {
-  // Bare construction is deliberate env sensitivity: the SDK reads
-  // OPENAI_API_KEY and OPENAI_BASE_URL from the process environment, and a
-  // process-wide OPENAI_BASE_URL repoints EVERY bare client in this process —
-  // this chat provider AND Whisper transcription (transcription/
-  // openai-whisper.ts). Some runbooks export it process-wide; there is no
-  // per-provider chat endpoint config today (docs/architecture/
-  // provider-credential-services.md, Traps). Locked by
-  // tests/runtimes/chat/providers/openai-env-baseurl.test.ts.
-  const client = new OpenAI();
+export function createOpenAIProvider(
+  openaiProviderConfig?: { baseUrl?: string; apiKeyService?: string },
+): LLMProvider {
+  // Bare construction (no config) is deliberate env sensitivity: the SDK
+  // reads OPENAI_API_KEY and OPENAI_BASE_URL from the process environment,
+  // and a process-wide OPENAI_BASE_URL repoints EVERY bare client in this
+  // process — this chat provider AND Whisper transcription (transcription/
+  // openai-whisper.ts, still env-only). An instance that configures
+  // `chatOptions.openaiProviderConfig` gets its OWN endpoint/key instead
+  // (docs/architecture/provider-credential-services.md, Traps); one that
+  // configures nothing must construct byte-identically to before — locked by
+  // the zero-arg assertions in tests/runtimes/chat/providers/openai.test.ts
+  // and the env-default lock in openai-env-baseurl.test.ts. `resolveApiKey`
+  // can return '' on a miss, and the SDK's own apiKey/baseURL defaults only
+  // fire on strict `undefined` — passing '' through would silently send an
+  // empty Bearer header instead of falling back to the env var, hence the
+  // `|| undefined` below.
+  const client = openaiProviderConfig
+    ? new OpenAI({
+        baseURL: openaiProviderConfig.baseUrl,
+        apiKey: resolveApiKey({ service: openaiProviderConfig.apiKeyService, envVar: 'OPENAI_API_KEY' }) || undefined,
+      })
+    : new OpenAI();
 
   return {
     name: 'openai',

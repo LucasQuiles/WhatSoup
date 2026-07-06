@@ -12,7 +12,7 @@
 
 import { createChildLogger } from '../../../logger.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
-import { resolveApiKey } from './api-key-resolver.ts';
+import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { boundedRetryAfterMs } from './rate-limit-retry.ts';
 import { providerPreview } from '../provider-preview-sanitizer.ts';
 

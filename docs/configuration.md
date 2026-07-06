@@ -16,7 +16,8 @@ Both take precedence over built-in defaults.
 | Variable | Type | Description |
 |----------|------|-------------|
 | `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
-| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/transcription/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — repoints every bare `new OpenAI()` in the process, i.e. both the chat completions client and Whisper transcription. Superseded for `chat` instances' chat completions by the per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) (QR-218 PR-2); Whisper transcription has no per-instance override yet (blocked/future PR-B), so this variable still governs it regardless of `openaiProviderConfig`. Not read by `agent`/`passive` instances. |
 | `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
 | `GEMINI_API_KEY` | string | Google Gemini API key. Forwarded into the agent subprocess environment only when `agentOptions.provider` is `gemini-cli` (`src/runtimes/agent/session.ts:157`); `GOOGLE_API_KEY` is forwarded alongside it when present. Not consulted by `claude-cli`/`codex-cli`/`opencode-cli` agents, or by `chat`/`passive` instances. An operator running a `gemini-cli` agent line must set it — without it the Gemini CLI has no credential. |
 
@@ -351,6 +352,7 @@ into place during deployment.
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
+| `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
 | `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 | `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
@@ -801,7 +803,7 @@ keychain `groq` entry — `lookupCredential`, `src/lib/keyring.ts`), and when
 the service yields nothing at all the API providers take one final hop to
 their provider-family default — `OPENAI_API_KEY` for `openai-api`,
 `ANTHROPIC_API_KEY` for `anthropic-api`
-(`src/runtimes/agent/providers/api-key-resolver.ts`). That last hop can
+(`src/lib/api-key-resolver.ts`). That last hop can
 silently run a custom-endpoint instance on the wrong account's key, so it is
 logged: `apiKeyService configured but keyring lookup missed — falling back to
 env var; verify account isolation` (QR-104). During a pilot, treat that line
@@ -810,6 +812,41 @@ as a failed isolation check, not noise. The fleet credentials routes
 `envShadowed: true` whenever a process-wide env var is masking the stored
 keyring entry.
 
+> **Rotate wizard-typed keys.** Console builds before 2026-07 wrote any API
+> key typed into the Add Line wizard's Model step to the instance's
+> `config.json` as an inert top-level `apiKey`/`openaiKey` field (never read
+> by any auth path). These fields are now stripped automatically on the next
+> config update. If an instance's config carried one, treat that key as
+> having been at rest on disk: rotate it, and delete the field by hand if the
+> config will not be written soon.
+
+#### Custom endpoint as the primary provider
+
+The same `providerConfig` powers a custom endpoint as the PRIMARY provider —
+not only as a fallback rung. Groq as primary, end to end (provision the key
+under service `groq` per [Enabling provider fallback on a new host](#enabling-provider-fallback-on-a-new-host)
+— the same provisioning routes apply to primary keys):
+
+```jsonc
+"agentOptions": {
+  "provider": "openai-api",
+  "providerConfig": { "baseUrl": "https://api.groq.com/openai/v1", "apiKeyService": "groq" },
+  "model": "llama-3.3-70b-versatile",
+  "fallbacks": [
+    { "provider": "anthropic-api", "model": "claude-sonnet-5" }
+  ]
+}
+```
+
+The Add Line wizard exposes the same knobs at creation time: choosing an
+API-type provider on the Config step reveals **Base URL** and **Keyring
+Service** fields for a custom (BYOK) endpoint. After creation these provider
+fields are file-edit only (see [docs/console-guide.md](console-guide.md));
+restart the instance after editing. Verification paths are peers: the
+[`FALLBACK ON` canary](#enabling-provider-fallback-on-a-new-host) exercises a
+live turn, while `POST /api/credentials/:service/verify` runs a single
+list-models probe without touching a session.
+
 #### Provider fallback behavior
 
 When the primary provider returns a usage-limit, rate-limit, or auth-required terminal `result` (`src/runtimes/agent/runtime.ts`), the runtime:
@@ -817,14 +854,14 @@ When the primary provider returns a usage-limit, rate-limit, or auth-required te
 1. **Tears down, explains briefly, and continues when safe.** The in-flight session is killed and the user receives a one- or two-line notice naming the switch reason and backup model, for example: "_Primary model hit a token/quota limit; switching until about 3:00 PM. Backup: OpenCode / minimax/MiniMax-M2.7. I will continue here._" If fallback credentials are missing, the notice says an operator has been notified and does not promise continuation. Provider policy-block results deliberately do **not** activate fallback.
 2. **Arms a fallback window** (only when `fallbackProvider` or `fallbacks` is set). The first arm of a window (never an extension, and never the post-restart restore of a persisted window — the alert belongs to the original arm, once per window across restarts) raises the `provider_fallback_activated` operator alert carrying the reason, the selected entry's provider/model, and the window end; a post-restart restore instead raises `provider_fallback_restored` (the same window resuming — repeated restores are the crash-loop signature) carrying the original reason, the selected entry, the window end, and the resumed probe-attempt count; every deactivation of an active window raises `provider_fallback_reverted` carrying the revert reason (`window-elapsed`, `admin-disabled`, `primary-probe-ok`, ...), the window's own turn counts (served/empty during that window — not the process-lifetime totals), and the window duration; a completed replay raises `provider_fallback_replayed` carrying the reason and target entry (a failed replay raises only `runtime_provider_fallback_replay_failed` — never both for the same turn). The interrupted turn is replayed once on a freshly created fallback session when the selected fallback target is usable; later sessions also route to that fallback until the window ends. With `fallbacks`, selection is static at arm/restore time: entries are checked in order for required key presence, the first eligible entry wins, and if every keyed entry is missing a key the runtime fails open to entry zero while alerting per-entry missing-key evidence. Usage-limit windows end at the reset time parsed from the provider message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. Rate-limit windows use the default rolling window. Auth-required windows stay armed until a background primary recovery probe succeeds: while the remaining window exceeds the recheck cadence a standing probe re-checks every `WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS` (early recovery), and once the window reaches its end each failed probe extends it by one recheck interval. After `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed extension probes (default 12) the first `fallback_recovery_stalled` operator alert fires, and then re-fires at every subsequent multiple of the threshold (2T, 3T, …) within the same stall episode — cadenced re-surfacing without per-probe noise. The window keeps extending so the instance is never stranded on a dead primary. A second usage-limit hit while a window is active extends it — never shortens.
 3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores, and the recovery-probe attempt count is persisted in the same row (additive `probe_attempts` column; rows written by older builds read back as 0) so a restart mid-stall resumes the stall clock instead of resetting it — without this, frequent restarts could keep a dead primary below the stall threshold forever. Each restore raises the `provider_fallback_restored` operator alert.
-4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `deepseek`, `minimax`, and `openai`. All other keyring services (`xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `anthropic`, `deepseek`, `minimax`, and `openai`. All other keyring services (`xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
 5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block along with `effectiveProvider`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `primaryModelUsability`, and the recovery-probe telemetry `probeAttempts` (consecutive failed extension probes in the current stall episode) and `lastProbeAt` (epoch ms of the most recent recovery probe, `null` until one runs); counters are reset on restart. Transition totals are counted the same way — `fallbackActivations` (first arms only; extensions and post-restart restores excluded), `fallbackReverts`, and `fallbackReplays` are process-local lifetime totals in the same `instance` block, reset on restart like the turn counters. Provider-reported turn cost is counted too: when a result event carries a finite `costUsd` (opencode today) it is logged beside the token counts and, while a fallback window is active, accumulated into `fallbackWindowCostUsd` — a process-local lifetime total (same semantics as `fallbackTurnsServed`) in the same `instance` block answering "what has fallback serving cost this process". The fleet `GET /api/lines/:name/provider-status` route forwards the same fields under `fallback.probeAttempts` / `fallback.lastProbeAt` / `fallback.windowCostUsd` / `fallback.activations` / `fallback.reverts` / `fallback.replays` (`null` when the instance health predates them). A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal); the alert is deduplicated per chat using the `WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS` window so a sustained silent-bot episode does not flood the operator channel. Counters always increment regardless of the dedup. On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
 
 Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n>m|<n>h]` / `FALLBACK OFF` / `FALLBACK STATUS` — see [docs/runbook.md §7.2](runbook.md#72-force-or-inspect-provider-fallback).
 
 #### Enabling provider fallback on a new host
 
-When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise.
+When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise. These provisioning routes apply equally to a custom endpoint used as the primary provider — see [Custom endpoint as the primary provider](#custom-endpoint-as-the-primary-provider).
 
 1. **Install the fallback provider CLI and confirm it is on the service user's PATH.** Skip this step for API-type fallback providers (`openai-api`, `anthropic-api` — e.g. the Groq/OpenRouter recipes in [Custom endpoint](#custom-endpoint-providerconfigbaseurl)): they are managed HTTP loops with no CLI binary to install or probe.
 
@@ -980,6 +1017,58 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 - This value is written to `<cwd>/.claude/settings.json` during instance startup and via the PATCH API.
 
 **Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
+
+### `chatOptions`
+
+Chat-specific settings. Currently the only field is `openaiProviderConfig`,
+covered below; more chat-runtime knobs may be added here over time.
+
+#### Custom endpoint for chat instances (`chatOptions.openaiProviderConfig`)
+
+`type: 'chat'` instances can override the OpenAI chat-completions endpoint and
+credential per instance instead of relying on the process-wide `OPENAI_BASE_URL`
+env var (QR-218 PR-2):
+
+```jsonc
+"chatOptions": {
+  "openaiProviderConfig": {
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "apiKeyService": "groq"
+  }
+}
+```
+
+**Routing and auth:** `src/runtimes/chat/providers/openai.ts` consumes
+`baseUrl` directly as the OpenAI SDK's `baseURL` option (default
+`https://api.openai.com/v1` when omitted); `apiKeyService` names the keyring
+service that authenticates it, resolved via the same `resolveApiKey()`
+precedence the agent HTTP providers use (`src/lib/api-key-resolver.ts`):
+service-env-var-first, then platform keyring, then the conventional
+`OPENAI_API_KEY` env var as a final fallback — logging the QR-104 isolation
+warning when that last hop actually yields a key. An instance that sets
+neither field constructs the OpenAI client exactly as before (bare
+`new OpenAI()`), so `OPENAI_BASE_URL` remains fully backward-compatible for
+chat instances that configure nothing.
+
+**Validation:** same shape rules as `agentOptions.providerConfig` —
+`baseUrl` must be a non-empty, parseable `http://`/`https://` URL;
+`apiKeyService` must name a service in `SERVICE_ENV_MAP`
+(`src/lib/provider-key-service.ts`) and requires `baseUrl` to be set (a key
+service with no endpoint to authenticate would be silently inert). Unlike
+`agentOptions.providerConfig`, there is no "custom endpoint needs a routed
+model" rule — every chat `generate()` request already carries its own model,
+so `baseUrl` alone is never inert. A malformed `chatOptions.openaiProviderConfig`
+is rejected at CREATE/PATCH and at load — it does not silently boot.
+
+**Scope:** OpenAI chat completions only. Anthropic chat
+(`src/runtimes/chat/providers/anthropic.ts`) and Whisper voice-note
+transcription (`src/runtimes/chat/providers/transcription/openai-whisper.ts`)
+are explicitly out of scope — Whisper is still a bare, env-only `new OpenAI()`
+shared by the whole process (blocked/future PR-B), so a process-wide
+`OPENAI_BASE_URL` still repoints it regardless of any instance's
+`openaiProviderConfig`. See the Traps section of
+[docs/architecture/provider-credential-services.md](architecture/provider-credential-services.md)
+for the maintainer-facing version of this note.
 
 ### Connector mutation policy (#411)
 

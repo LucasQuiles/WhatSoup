@@ -8,6 +8,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse } from '../../lib/http.ts';
 import { PROVIDER_IDS, type ProviderId } from '../../runtimes/agent/providers/index.ts';
+import {
+  CREDENTIAL_PROBE_DESCRIPTORS,
+  type CredentialProbeDescriptor,
+} from '../../lib/provider-credential-probes.ts';
 
 /** Static per-provider display + capability metadata (keyed by ProviderId). */
 interface ProviderCatalogMeta {
@@ -81,30 +85,19 @@ export function buildProviderCatalog(): ProviderCatalogEntry[] {
   });
 }
 
-/** Typed auth schemes — never interpolated from strings. */
-export type VerifyAuth = 'bearer' | 'x-api-key';
-export interface VerifyDescriptor {
-  /** https literal — never derived from config or request input (no SSRF). */
-  url: string;
-  auth: VerifyAuth;
-  /** Static extra headers some providers require (e.g. anthropic-version). */
-  extraHeaders?: Record<string, string>;
-}
+/** Typed auth schemes — never interpolated from strings. Alias of the shared probe module's shape. */
+export type VerifyAuth = CredentialProbeDescriptor['auth'];
+export type VerifyDescriptor = CredentialProbeDescriptor;
 
 /**
  * Keyed by KEYRING SERVICE (not provider id) — verify is a fleet-level,
- * key-centric operation. MiniMax has no stable public list-models endpoint;
- * its absence here yields verify status 'unsupported'.
+ * key-centric operation. Re-exports the shared credential-probe SSOT
+ * (src/lib/provider-credential-probes.ts) so this route and the agent
+ * runtime's arm-time pre-flight (credential-verify.ts) answer "is this key
+ * valid?" identically — see tests/fleet/credential-probe-lists.test.ts. A
+ * service absent from the shared map yields verify status 'unsupported'.
  */
-export const PROVIDER_VERIFY_DESCRIPTORS: Record<string, VerifyDescriptor> = {
-  openai:    { url: 'https://api.openai.com/v1/models', auth: 'bearer' },
-  deepseek:  { url: 'https://api.deepseek.com/models', auth: 'bearer' },
-  anthropic: {
-    url: 'https://api.anthropic.com/v1/models',
-    auth: 'x-api-key',
-    extraHeaders: { 'anthropic-version': '2023-06-01' },
-  },
-};
+export const PROVIDER_VERIFY_DESCRIPTORS: Record<string, VerifyDescriptor> = CREDENTIAL_PROBE_DESCRIPTORS;
 
 /** GET /api/providers — return the provider catalog. */
 export function handleGetProviders(_req: IncomingMessage, res: ServerResponse): void {
