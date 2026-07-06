@@ -3,11 +3,14 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 // The `openai` module is deliberately NOT mocked here (unlike openai.test.ts):
-// this file locks the real SDK's env-default behavior — a process-wide
-// OPENAI_BASE_URL repoints every bare `new OpenAI()` in the process, which is
-// how the chat provider (and Whisper transcription, same construction) can be
-// silently redirected by runbooks that export it. If these tests flip because
-// chat gained per-provider endpoint config, reconcile the Traps section of
+// this file locks the real SDK's env-default behavior for the NO-CONFIG path
+// — a process-wide OPENAI_BASE_URL repoints every bare `new OpenAI()` in the
+// process, including Whisper transcription (same construction, still
+// env-only). PR-2/QR-218 added an opt-in override: an instance that sets
+// `chatOptions.openaiProviderConfig.baseUrl` gets its own endpoint regardless
+// of OPENAI_BASE_URL (third test below) — an instance that configures nothing
+// must keep behaving exactly as before (first two tests, unchanged). If any
+// of these locks flip, reconcile the Traps section of
 // docs/architecture/provider-credential-services.md and the custom-endpoint
 // section of docs/configuration.md in the same PR.
 
@@ -103,5 +106,28 @@ describe('chat provider OPENAI_BASE_URL env sensitivity', () => {
     expect(captured[0].authorization).toBe('Bearer env-test-key');
     expect(result.content).toBe('routed-through-local-endpoint');
     expect(result.model).toBe('local-test-model');
+  });
+
+  it('openaiProviderConfig.baseUrl wins over a deliberately-unreachable OPENAI_BASE_URL (real SDK, real socket)', async () => {
+    // An arbitrary closed port on loopback — nothing listens there, so a
+    // connection attempt fails fast (ECONNREFUSED) instead of hanging, so a
+    // regression (config NOT winning) fails this test quickly rather than
+    // timing out.
+    process.env.OPENAI_BASE_URL = 'http://127.0.0.1:18471/v1';
+    process.env.OPENAI_API_KEY = 'env-test-key';
+    captured.length = 0;
+
+    const provider = createOpenAIProvider({ baseUrl: baseUrl });
+    const result = await provider.generate({
+      model: 'local-test-model',
+      maxTokens: 16,
+      systemPrompt: 'system',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].url).toBe('/v1/chat/completions');
+    expect(captured[0].authorization).toBe('Bearer env-test-key');
+    expect(result.content).toBe('routed-through-local-endpoint');
   });
 });

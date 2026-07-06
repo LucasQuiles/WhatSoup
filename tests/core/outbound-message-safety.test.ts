@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   redactInternalArtifacts,
   classifyInfraStatusClaim,
   evaluateOutboundMessageSafety,
+  resolveOutboundAudience,
   CLIENT_TEMPORARY_ISSUE_TEXT,
 } from '../../src/core/outbound-message-safety.ts';
 
@@ -161,11 +162,31 @@ describe('evaluateOutboundMessageSafety', () => {
     expect(decision.text).toBe(raw);
   });
 
-  it('allows internal audience text unchanged', () => {
+  it('allows internal audience operator vocabulary unchanged (no secret to mask)', () => {
     const raw = 'PreToolUse hook missing in .claude/settings.json';
     const decision = evaluateOutboundMessageSafety({ text: raw, audience: 'internal' });
     expect(decision.action).toBe('allow');
     expect(decision.text).toBe(raw);
+  });
+
+  it('internal audience masks a secret but preserves operator vocabulary', () => {
+    const decision = evaluateOutboundMessageSafety({
+      text: `push done: Bearer ${FAKE_TOKEN} — config at /home/testuser/.claude/settings.json`,
+      audience: 'internal',
+    });
+    expect(decision.action).toBe('redact');
+    expect(decision.text).not.toContain(FAKE_TOKEN);
+    // operator vocabulary is legitimate content in an internal agent group
+    expect(decision.text).toContain('/home/testuser/.claude/settings.json');
+  });
+
+  it('does not divert an internal self-infra claim (agents discuss their own tooling)', () => {
+    const decision = evaluateOutboundMessageSafety({
+      text: 'All my tools are blocked because agent-sandbox.sh is failing closed.',
+      audience: 'internal',
+    });
+    expect(decision.action).toBe('allow');
+    expect(decision.text).toContain('agent-sandbox.sh');
   });
 
   it('redacts client text that leaks an internal path', () => {
@@ -237,5 +258,86 @@ describe('evaluateOutboundMessageSafety', () => {
     expect(decision.action).toBe('redact');
     expect(decision.opsEvidence).toBeDefined();
     expect(decision.opsEvidence).not.toContain('testuser');
+  });
+});
+
+describe('redactInternalArtifacts — audience scoping', () => {
+  const coordinationText =
+    'bead-03 done: see /home/testuser/.claude/settings.json and the PreToolUse hook. Files: ~/.config/whatsoup/x';
+
+  it('internal audience preserves operator vocabulary (paths, hook names, config tree)', () => {
+    const { text, redactions } = redactInternalArtifacts(coordinationText, 'internal');
+    expect(text).toBe(coordinationText);
+    expect(redactions).toHaveLength(0);
+  });
+
+  it('internal audience still masks secrets and emails (third-party transport)', () => {
+    const { text, redactions } = redactInternalArtifacts(
+      `deploy: Bearer ${FAKE_TOKEN} for ${FAKE_EMAIL} — see /home/testuser/.claude/settings.json`,
+      'internal',
+    );
+    expect(text).not.toContain(FAKE_TOKEN);
+    expect(text).not.toContain(FAKE_EMAIL);
+    // operator path preserved for the internal group
+    expect(text).toContain('/home/testuser/.claude/settings.json');
+    expect(redactions.map((r) => r.category)).toContain('provider_secret');
+  });
+
+  it('ops audience is fully verbatim', () => {
+    const raw = `token Bearer ${FAKE_TOKEN} at /home/testuser/.claude/settings.json`;
+    const { text, redactions } = redactInternalArtifacts(raw, 'ops');
+    expect(text).toBe(raw);
+    expect(redactions).toHaveLength(0);
+  });
+
+  it('client audience (default arg) still performs the full scrub', () => {
+    const { text } = redactInternalArtifacts(coordinationText);
+    expect(text).not.toContain('/home/testuser');
+    expect(text).not.toContain('settings.json');
+    expect(text).not.toContain('PreToolUse');
+  });
+});
+
+describe('resolveOutboundAudience', () => {
+  const savedBotErrors = process.env['BOT_ERRORS_JID'];
+  const savedInternal = process.env['WHATSOUP_INTERNAL_JIDS'];
+  const restore = (key: string, saved: string | undefined) => {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  };
+  afterEach(() => {
+    restore('BOT_ERRORS_JID', savedBotErrors);
+    restore('WHATSOUP_INTERNAL_JIDS', savedInternal);
+  });
+
+  it('returns ops for the configured BOT ERRORS channel', () => {
+    process.env['BOT_ERRORS_JID'] = '000@g.us';
+    expect(resolveOutboundAudience('000@g.us')).toBe('ops');
+  });
+
+  it('returns internal for a JID in the WHATSOUP_INTERNAL_JIDS allow-list (whitespace-tolerant)', () => {
+    process.env['WHATSOUP_INTERNAL_JIDS'] = '111@g.us, 222@g.us';
+    expect(resolveOutboundAudience('111@g.us')).toBe('internal');
+    expect(resolveOutboundAudience('222@g.us')).toBe('internal');
+  });
+
+  it('defaults to client for any unlisted chat', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    process.env['WHATSOUP_INTERNAL_JIDS'] = '111@g.us';
+    expect(resolveOutboundAudience('999@g.us')).toBe('client');
+  });
+
+  it('prefers ops over internal when a JID is in both', () => {
+    process.env['BOT_ERRORS_JID'] = '111@g.us';
+    process.env['WHATSOUP_INTERNAL_JIDS'] = '111@g.us';
+    expect(resolveOutboundAudience('111@g.us')).toBe('ops');
+  });
+
+  it('treats an empty or unset allow-list as no internal chats', () => {
+    delete process.env['BOT_ERRORS_JID'];
+    process.env['WHATSOUP_INTERNAL_JIDS'] = '';
+    expect(resolveOutboundAudience('111@g.us')).toBe('client');
+    delete process.env['WHATSOUP_INTERNAL_JIDS'];
+    expect(resolveOutboundAudience('111@g.us')).toBe('client');
   });
 });

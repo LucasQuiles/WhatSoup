@@ -551,6 +551,79 @@ describe('loadInstance — agentOptions: providerConfig validation', () => {
   });
 });
 
+describe('loadInstance — chatOptions: openaiProviderConfig validation (QR-218 PR-2)', () => {
+  it('accepts a chat instance with no chatOptions at all (backward-compat)', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', minimalChat);
+    expect(() => loadInstance('test-chat')).not.toThrow();
+  });
+
+  it('accepts a valid chatOptions.openaiProviderConfig', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'good-chat-provider-config', {
+      ...minimalChat,
+      name: 'good-chat-provider-config',
+      chatOptions: {
+        openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' },
+      },
+    });
+    expect(() => loadInstance('good-chat-provider-config')).not.toThrow();
+  });
+
+  it('rejects a non-object chatOptions rather than silently booting', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-chat-options', {
+      ...minimalChat,
+      name: 'bad-chat-options',
+      chatOptions: 'nope',
+    });
+    expect(() => loadInstance('bad-chat-options')).toThrow(/chatOptions.*object/);
+  });
+
+  it('rejects a non-object chatOptions.openaiProviderConfig', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-chat-provider-config', {
+      ...minimalChat,
+      name: 'bad-chat-provider-config',
+      chatOptions: { openaiProviderConfig: [] },
+    });
+    expect(() => loadInstance('bad-chat-provider-config')).toThrow(
+      /chatOptions\.openaiProviderConfig.*object/,
+    );
+  });
+
+  it('rejects a malformed chatOptions.openaiProviderConfig.baseUrl', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-chat-baseurl', {
+      ...minimalChat,
+      name: 'bad-chat-baseurl',
+      chatOptions: { openaiProviderConfig: { baseUrl: 'not a url' } },
+    });
+    expect(() => loadInstance('bad-chat-baseurl')).toThrow(
+      /chatOptions\.openaiProviderConfig\.baseUrl/,
+    );
+  });
+
+  it('rejects an unknown chatOptions.openaiProviderConfig.apiKeyService', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-chat-keyservice', {
+      ...minimalChat,
+      name: 'bad-chat-keyservice',
+      chatOptions: {
+        openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'nope-svc' },
+      },
+    });
+    expect(() => loadInstance('bad-chat-keyservice')).toThrow(
+      /chatOptions\.openaiProviderConfig\.apiKeyService/,
+    );
+  });
+
+  it('rejects chatOptions.openaiProviderConfig.apiKeyService set without baseUrl', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-chat-keyservice-no-baseurl', {
+      ...minimalChat,
+      name: 'bad-chat-keyservice-no-baseurl',
+      chatOptions: { openaiProviderConfig: { apiKeyService: 'openai' } },
+    });
+    expect(() => loadInstance('bad-chat-keyservice-no-baseurl')).toThrow(
+      /chatOptions\.openaiProviderConfig\.apiKeyService/,
+    );
+  });
+});
+
 describe('loadInstance — agentOptions: autoCompactInputTokens validation', () => {
   it('preserves a valid autoCompactInputTokens threshold', () => {
     writeInstance(path.join(tmpDir, 'config'), 'compact-agent', {
