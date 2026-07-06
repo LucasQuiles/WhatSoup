@@ -705,11 +705,12 @@ config error):
   `models.conversation`) routes to it; without one the endpoint would never be
   used. API providers consume `baseUrl` directly as an endpoint override and
   are exempt from this rule.
-- **`providerConfig.apiKeyService` naming an unknown keyring service.** The
-  value must be one of the services in the service→env-var map
-  (`src/lib/provider-key-service.ts`) — the custom-endpoint provider block
-  references the key as an env interpolation, and an unknown service has no
-  env var to interpolate.
+- **`providerConfig.apiKeyService` naming a non-provider or unknown service.**
+  The value must be one of the inference-provider services in
+  `PROVIDER_API_KEY_SERVICES` (`src/lib/provider-key-service.ts`) — the
+  provider-only subset of the service→env-var map. Non-provider secrets (the
+  health token, Pinecone, ElevenLabs) are rejected so a config cannot point
+  `apiKeyService` at one and exfiltrate it through a custom `baseUrl`.
 - **`providerConfig.apiKeyService` without `providerConfig.baseUrl`.** The key
   service only authenticates a custom endpoint; without one it would be
   silently inert.
@@ -743,8 +744,9 @@ omitted, the service is derived from the configured model's prefix (e.g.
 `minimax/MiniMax-M2` → `minimax`), and a bare model id with no known prefix
 gets no `apiKey` entry. The runtime injects that service's key (env var or
 platform keyring, `src/lib/keyring.ts`) into the session child's environment
-so the interpolation resolves at spawn time. `apiKeyService` must name a
-known keyring service and requires `baseUrl` (see
+so the interpolation resolves at spawn time. `apiKeyService` must name an
+inference-provider service (`PROVIDER_API_KEY_SERVICES`) and requires
+`baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
 
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume
@@ -1017,9 +1019,12 @@ chat instances that configure nothing.
 
 **Validation:** same shape rules as `agentOptions.providerConfig` —
 `baseUrl` must be a non-empty, parseable `http://`/`https://` URL;
-`apiKeyService` must name a service in `SERVICE_ENV_MAP`
-(`src/lib/provider-key-service.ts`) and requires `baseUrl` to be set (a key
-service with no endpoint to authenticate would be silently inert). Unlike
+`apiKeyService` must name an inference-provider service in
+`PROVIDER_API_KEY_SERVICES` (`src/lib/provider-key-service.ts`) — the
+provider-only subset of `SERVICE_ENV_MAP`, so a config cannot name a
+non-provider secret (health token, Pinecone, ElevenLabs) and exfiltrate it
+via a custom `baseUrl` — and requires `baseUrl` to be set (a key service with
+no endpoint to authenticate would be silently inert). Unlike
 `agentOptions.providerConfig`, there is no "custom endpoint needs a routed
 model" rule — every chat `generate()` request already carries its own model,
 so `baseUrl` alone is never inert. A malformed `chatOptions.openaiProviderConfig`
