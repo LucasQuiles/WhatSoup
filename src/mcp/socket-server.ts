@@ -42,10 +42,25 @@ export class WhatSoupSocketServer {
   /** Active client sockets. Destroyed on stop() so FDs do not leak. */
   private readonly activeSockets = new Map<number, Socket>();
 
-  constructor(socketPath: string, registry: ToolRegistry, session: SessionContext) {
+  /**
+   * F-STICKY-ACTOR: optional per-request actor resolver. When set (per-chat
+   * sockets in non-sandbox per_chat mode), the actor for each tool call is
+   * resolved at read time from the turn the subprocess is currently executing,
+   * fail-closed (undefined -> deny). When unset, behavior is unchanged and the
+   * request uses the broadcast connSession.actorJid.
+   */
+  private readonly actorResolver?: () => string | undefined;
+
+  constructor(
+    socketPath: string,
+    registry: ToolRegistry,
+    session: SessionContext,
+    actorResolver?: () => string | undefined,
+  ) {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
+    this.actorResolver = actorResolver;
   }
 
   /** Number of active client connections. */
@@ -149,6 +164,11 @@ export class WhatSoupSocketServer {
           // A shallow per-request copy pins those fields at dispatch time; the live
           // abortSignal is preserved by reference so client-disconnect still aborts.
           const requestSession: SessionContext = { ...connSession };
+          // F-STICKY-ACTOR: per-chat sockets bind the actor to the currently
+          // executing turn, resolved at read time and fail-closed (undefined ->
+          // deny). Overrides the broadcast connSession.actorJid, which is not
+          // maintained for per-chat sockets.
+          if (this.actorResolver) requestSession.actorJid = this.actorResolver();
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               try {

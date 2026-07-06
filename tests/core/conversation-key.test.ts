@@ -3,6 +3,7 @@ import {
   conversationKeyToJid,
   isGroupConversationKey,
   toConversationKey,
+  GLOBAL_CONVERSATION_KEY,
 } from '../../src/core/conversation-key.ts';
 
 describe('toConversationKey', () => {
@@ -179,6 +180,30 @@ describe('residual-branch coverage', () => {
       // String#replace with a string pattern replaces only the first match —
       // verify the function behaves as a single-shot rewrite, not a global one.
       expect(conversationKeyToJid('foo_at_g.us_at_g.us')).toBe('foo@g.us_at_g.us');
+    });
+  });
+
+  // ── Reserved sentinel key ────────────────────────────────────────────────
+  describe('reserved __global__ sentinel', () => {
+    it('exports the sentinel as the single-source constant', () => {
+      expect(GLOBAL_CONVERSATION_KEY).toBe('__global__');
+    });
+
+    it('toConversationKey rejects a personal JID whose local part is the reserved key', () => {
+      // Only the personal/LID branch returns the bare local part, so only it
+      // can mint a key colliding with the reserved sentinel. Real WhatsApp
+      // JIDs carry numeric locals; a '__global__' local is invalid input, and
+      // silently returning it would file a chat's rows under the global bucket.
+      expect(() => toConversationKey('__global__@s.whatsapp.net')).toThrow(/reserved/);
+    });
+
+    it('toConversationKey rejects a LID JID whose device-stripped local is the reserved key', () => {
+      expect(() => toConversationKey('__global__:7@lid')).toThrow(/reserved/);
+    });
+
+    it('group and foreign-domain keys cannot collide (suffix always appended)', () => {
+      expect(toConversationKey('__global__@g.us')).toBe('__global___at_g.us');
+      expect(toConversationKey('__global__@broadcast')).toBe('__global___at_broadcast');
     });
   });
 });

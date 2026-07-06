@@ -8,6 +8,7 @@ import { createChildLogger } from '../../../logger.ts';
 import {
   generateMcpConfigFile,
   mergeOpencodeConfig,
+  writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type AdditionalMcpServerConfig,
@@ -22,7 +23,7 @@ import { errorMessage } from '../../../lib/error-message.ts';
 
 const log = createChildLogger('mcp-bridge');
 
-export { generateMcpConfigFile, mergeOpencodeConfig, writeProviderMcpConfig, writeProviderMcpConfigTarget };
+export { generateMcpConfigFile, mergeOpencodeConfig, writeMcpConfigToPath, writeProviderMcpConfig, writeProviderMcpConfigTarget };
 export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 // ---------------------------------------------------------------------------

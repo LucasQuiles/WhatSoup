@@ -779,6 +779,19 @@ const echoTimeoutInterval = setInterval(() => {
     .catch((err) => log.error({ err }, 'echo timeout drain failed'));
 }, 10_000);
 
+// 13b. Stuck-inbound reconciler — finalize inbound rows stranded in a
+// non-terminal processing_status while the process is live (preConnectRecovery
+// only runs at startup). Runs once now (mirrors preConnectRecovery timing) and
+// then on a slow interval, so retention can reclaim finalized rows.
+try {
+  durability.sweepStuckInbound();
+} catch (err) { log.error({ err }, 'startup stuck-inbound sweep failed'); }
+const stuckInboundInterval = setInterval(() => {
+  try {
+    durability.sweepStuckInbound();
+  } catch (err) { log.error({ err }, 'stuck-inbound sweep failed'); }
+}, 15 * 60 * 1000);
+
 // 14. Degradation signal check — detect persistent decryption failures (Type 2)
 // Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
 // Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
@@ -965,6 +978,7 @@ async function shutdown(signal: string): Promise<void> {
     databaseRetentionTimer.stop();
     await memoryConsolidationScheduler?.stop();
     clearInterval(echoTimeoutInterval);
+    clearInterval(stuckInboundInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
     messageScheduler.stop();

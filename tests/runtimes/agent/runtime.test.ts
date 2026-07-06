@@ -418,6 +418,7 @@ type ImageCoalescerView = {
   }>;
 };
 import { Database as RealDatabase } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
 
@@ -1997,6 +1998,120 @@ describe('AgentRuntime', () => {
     expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(false);
   });
 
+  // ── W2a: local commands finalize their journaled inbound row ──────────────
+  // A local command (/new, /status, /help, /sessions, /kill-session) never
+  // dispatches an agent turn, so no downstream path completes the journaled
+  // inbound row — without an explicit finalization it stays 'processing' forever
+  // (unbounded growth; retention never reclaims it). Merged design: the R14
+  // post-switch completion (landed via the NL-routing PR) finalizes the row as
+  // complete/'local_command_handled' when no forward happens, and this PR wraps
+  // the switch in try/catch so a throwing handler cannot escape to the turnChain
+  // catch-all (which would falsely stamp the row failed/'error'); the completion
+  // still runs after the catch. Early-`return` paths inside the switch (e.g.
+  // admin-denied /new) bypass the completion — those rows are reclaimed by this
+  // PR's stuck-inbound sweep as failed/'stale_reclaim' within the sweep window.
+  describe('local-command inbound finalization (W2a)', () => {
+    it('finalizes the journaled inbound row for a /help local command', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-help', 'k-help', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/help', inboundSeq: seq }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+
+      duraDb.close();
+    });
+
+    it('admin-denied early return leaves the row processing; the stuck-inbound sweep reclaims it as stale_reclaim', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      // Non-admin sender (admin is 15550100001 in mockConfig): /sessions hits a
+      // bare `return` inside the switch, BYPASSING the R14 post-switch completion
+      // (merged-design contract). The row stays 'processing' — and this PR's own
+      // stuck-inbound sweep is the designed reclaim path: after the 24h window it
+      // fails the row with failure_class 'stale_reclaim'. This test pins BOTH
+      // halves of that contract.
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      const seq = durability.journalInbound('m-sessions', 'k-sessions', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        content: '/sessions',
+        senderJid: '15550001111@s.whatsapp.net',
+        inboundSeq: seq,
+      }));
+
+      const before = duraDb.raw.prepare(
+        'SELECT processing_status FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string };
+      expect(before.processing_status).toBe('processing'); // bare return bypassed R14 completion
+
+      // The designed reclaim path: backdate past the sweep window, run the sweep.
+      duraDb.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', '-25 hours') WHERE seq = ?`).run(seq);
+      const sweep = durability.sweepStuckInbound();
+      expect(sweep.failedStale).toBe(1);
+
+      const after = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null; failure_class: string | null };
+      expect(after.processing_status).toBe('failed');
+      expect(after.terminal_reason).toBe('error');
+      expect(after.failure_class).toBe('stale_reclaim');
+
+      duraDb.close();
+    });
+
+    it('a throwing local-command handler does not overwrite the local_command finalization', async () => {
+      const db = makeDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const duraDb = new RealDatabase(':memory:');
+      duraDb.open();
+      const durability = new DurabilityEngine(duraDb);
+      runtime.setDurability(durability);
+      await runtime.start();
+
+      // /new's handleNew() rejects AFTER the top-of-block finalization ran. The
+      // rejection must be contained inside the local-command block — if it
+      // escapes to the turnChain catch-all, its unguarded markInboundFailed
+      // flips the finalized row to failed/'error' (a silent second terminal
+      // write that would count a command-handler fault as an inbound failure).
+      mockSession.handleNew.mockRejectedValueOnce(new Error('session reset failed'));
+
+      const seq = durability.journalInbound('m-new-throw', 'k-new-throw', 'test@s.whatsapp.net', 'agent');
+      await sendAndDrain(runtime, makeMsg({ content: '/new', inboundSeq: seq }));
+
+      expect(mockSession.handleNew).toHaveBeenCalled();
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      // The user still hears about the failure (local notification via the
+      // outbound queue, not the generic turn-chain one).
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => t.includes('Something went wrong processing that command'))).toBe(true);
+      expect(sentMessages.length).toBe(0);
+
+      duraDb.close();
+    });
+  });
+
   it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -3118,6 +3233,31 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('logs a structured warn when a per_chat turn records empty-output (QR-226)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    mockSession.getDbRowId.mockReturnValue(77);
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+
+    // No assistant_text, no tool_use — pure empty-output terminal result.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'empty-output',
+        chatJid: 'test@s.whatsapp.net',
+        mapKey: 'test@s.whatsapp.net',
+        rowId: 77,
+        turnHadToolWork: false,
+      }),
+      expect.stringContaining('empty-output'),
+    );
+  });
+
   it('image coalescing sends one turn for multiple images in a timer batch', async () => {
     vi.useFakeTimers();
     try {
@@ -4213,6 +4353,28 @@ describe('AgentRuntime', () => {
     expect(mockQueue.flush).toHaveBeenCalled();
   });
 
+  it('logs a structured warn when a single/shared turn records empty-output (QR-226)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // No assistant_text event, no tool_use — pure empty-output terminal result.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_'));
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'empty-output',
+        chatJid: 'test@s.whatsapp.net',
+        rowId: null,
+        turnHadToolWork: false,
+      }),
+      expect.stringContaining('empty-output'),
+    );
+  });
+
   it('result event with text enqueues the text', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -4496,6 +4658,10 @@ describe('AgentRuntime', () => {
       expect(mockSession.shutdown).toHaveBeenCalled();
       expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
       expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+      // QR-211 regression guard: a fallback DID activate here, so the no-fallback
+      // re-auth notice (emitNoFallbackReauthNotice) must NOT also fire — only the
+      // activation notice above ('will not replay it automatically') is sent.
+      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
       expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
     } finally {
@@ -4521,6 +4687,27 @@ describe('AgentRuntime', () => {
     expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+  });
+
+  // QR-211: an auth-required result that cannot arm a fallback (no fallback
+  // configured, or activation failed) used to end in permanent user-visible
+  // silence — the session shuts down with nothing ever forwarded to the chat.
+  it('auth-required result without fallback emits a generic re-auth notice and shuts down (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Authentication required. Sign in to continue.';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    expect(runtime.getFallbackState().fallbackReason).toBeNull();
+    expect(mockSession.shutdown).toHaveBeenCalled();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
   });
 
   it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
@@ -7853,6 +8040,125 @@ describe('AgentRuntime', () => {
     expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
   });
 
+  // QR-211: mirrors the transient-network test above (same handleEventWithContext
+  // harness), but for the per_chat auth-required ladder with no fallback armed —
+  // today this path shuts the session down with nothing ever forwarded to the chat.
+  it('per_chat auth-required result without fallback emits a generic re-auth notice', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    // Unlike the transient-network test above, the auth-required arming branch
+    // runs the full cleanupUsageLimitTurn path (it calls session?.shutdown()),
+    // which touches upsertSessionCheckpoint/completeInbound too — stub all three.
+    (runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+    }).durability = {
+      completeTurn: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+      completeInbound: vi.fn(),
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    const raw = 'Authentication required. Sign in to continue.';
+
+    handleEventWithContext(
+      { type: 'result', text: raw, isError: true },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    // Raw provider text must not be forwarded
+    const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    // Generic re-auth notice is sent instead of permanent silence
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+    expect(session.shutdown).toHaveBeenCalled();
+  });
+
+  // QR-211: the notice must be deduped per (chatJid, 'auth-required') within
+  // PROVIDER_FALLBACK_NOTICE_DEDUP_MS — a sustained auth-required episode across
+  // consecutive turns must not spam the chat with one notice per turn.
+  it('per_chat auth-required no-fallback notice is deduped within the window for the same chat', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+    }).durability = {
+      completeTurn: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+      completeInbound: vi.fn(),
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: unknown,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    const raw = 'Authentication required. Sign in to continue.';
+
+    handleEventWithContext({ type: 'result', text: raw, isError: true }, queue, session, 'conv-111', 17, '111', '111#session');
+    handleEventWithContext({ type: 'result', text: raw, isError: true }, queue, session, 'conv-111', 18, '111', '111#session');
+
+    const noticeCalls = (queue.enqueueText as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('re-authentication'),
+    );
+    expect(noticeCalls).toHaveLength(1);
+    expect(session.shutdown).toHaveBeenCalledTimes(2);
+  });
+
   // Regression guard: under WHATSOUP_RESPONSE_REGISTRY_DISPATCH=1, server-error
   // and transient-network terminal-result texts bridge to registry workflows
   // (provider_server_error / provider_network_error) whose providerKind is null.
@@ -7974,6 +8280,32 @@ describe('AgentRuntime', () => {
       // Turn-capability accounting records the real provider failure class.
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
       expect(turnCapability.lastTurnErrorClass).toBe('server-error');
+    });
+
+    // QR-211: unlike the two tests above (null-providerKind classes), auth-required
+    // has a non-null providerKind and so IS routed into handleProviderFailureResult
+    // by dispatchProviderFailureResult. Its comment used to say only usage-limit
+    // emits a standalone notice when no fallback armed — this proves auth-required
+    // does too, through this same central handler, not just the legacy ladders.
+    it('auth-required result with dispatch enabled and no fallback emits the generic re-auth notice', () => {
+      process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+      const { queue, session, handleEventWithContext } = makePerChatDispatchHarness();
+
+      const raw = 'Authentication required. Sign in to continue.';
+      handleEventWithContext(
+        { type: 'result', text: raw, isError: true },
+        queue,
+        session,
+        'conv-111',
+        17,
+        '111',
+        '111#session',
+      );
+
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+      expect(session.shutdown).toHaveBeenCalled();
+      const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+      expect(forwardedRaw).not.toContain(raw);
     });
   });
 
