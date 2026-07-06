@@ -107,8 +107,9 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 | `pending` | `processing` | Initial insert (journalInbound writes `processing` directly) |
 | `processing` | `turn_done` | `markTurnDone()` — agent/chat runtime signals the LLM turn completed |
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
-| `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn |
+| `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
+| open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
 
 Note: `completeInbound()` is a guarded helper — if the row is still `processing` when called, it applies `markTurnDone()` first before `markInboundComplete()`. This handles cases where the agent completes a turn without an explicit `markTurnDone()` call.
 
@@ -287,6 +288,32 @@ accepted tradeoff for those ops and is never incurred for user-terminal (`unsafe
 This is the same risk `sendTracked`-created ops already carry on a `maybe_sent → reset`
 cycle; the drainer does not widen it.
 
+### 4.5 Stuck-Inbound Reconciler (`sweepStuckInbound`)
+
+`preConnectRecovery` (§4.1) only runs at process start. An inbound row can also become
+stranded in a non-terminal `processing_status` **while the process is live** — for example a
+reply that was echoed (delivery confirmed) but whose linked-inbound completion step was
+missed (the QR-102 ordering strand), or a turn that finished with no reply and never
+finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
+terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
+pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
+**15 minutes**, and reconciles three buckets in a single transaction:
+
+| Bucket | Selection | Disposition |
+|---|---|---|
+| 1. Echoed but not finalized | open (`pending`/`processing`/`turn_done`) with an `is_terminal`, `echoed` outbound op, `received_at` older than **5 minutes** | `completeInbound(seq, 'recovered_response_sent')` |
+| 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op | `markInboundComplete(seq, 'recovered_turn_done')` |
+| 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op | `markInboundFailed(seq)` (terminal_reason `error`) |
+
+The buckets are mutually exclusive (bucket 1 requires an echoed terminal op; buckets 2 and 3
+require its absence), so no row is disposed twice. Each SELECT is bounded to 200 rows so a
+large backlog drains over successive sweeps rather than in one long transaction. The
+**5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
+delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
+opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns untouched. The
+sweep is idempotent — once a row is terminal it falls out of every bucket's open-status
+filter — and never re-touches rows already finalized by `preConnectRecovery`.
+
 ---
 
 ## 5. Operational Notes
@@ -445,8 +472,8 @@ All durability tables are created in Migration 2 of `src/core/database.ts`.
 | `routed_to` | TEXT | Runtime that handled the message (`agent`, `chat`, `passive`, etc.). |
 | `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
-| `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `skipped`, `error`, etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
-| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`. |
+| `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
+| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim`. |
 
 ### `outbound_ops`
 

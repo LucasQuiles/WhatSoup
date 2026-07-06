@@ -810,6 +810,14 @@ as a failed isolation check, not noise. The fleet credentials routes
 `envShadowed: true` whenever a process-wide env var is masking the stored
 keyring entry.
 
+> **Rotate wizard-typed keys.** Console builds before 2026-07 wrote any API
+> key typed into the Add Line wizard's Model step to the instance's
+> `config.json` as an inert top-level `apiKey`/`openaiKey` field (never read
+> by any auth path). These fields are now stripped automatically on the next
+> config update. If an instance's config carried one, treat that key as
+> having been at rest on disk: rotate it, and delete the field by hand if the
+> config will not be written soon.
+
 #### Provider fallback behavior
 
 When the primary provider returns a usage-limit, rate-limit, or auth-required terminal `result` (`src/runtimes/agent/runtime.ts`), the runtime:

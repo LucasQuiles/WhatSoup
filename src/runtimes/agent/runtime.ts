@@ -120,9 +120,10 @@ import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import type { SessionContext } from '../../mcp/types.ts';
@@ -134,6 +135,7 @@ import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor 
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
+  writeMcpConfigToPath,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
   type OpencodeProviderConfig,
@@ -907,6 +909,14 @@ export class AgentRuntime implements Runtime {
   private recentProviderFallbackNotices = new Map<string, number>();
   private recentFallbackEmptyTurnAlerts = new Map<string, number>();
   private recentToolFailureAlerts = new Map<string, number>();
+  /**
+   * Dedup for {@link emitNoFallbackReauthNotice} (QR-211), keyed `${chatJid}:auth-required`.
+   * A dedicated map rather than folding into recentProviderFallbackNotices — that
+   * map's keys are 4-part (chatJid:reason:fallbackProvider:fallbackModel) and mean
+   * "already told this chat which backup took over"; this is the opposite case
+   * (no backup took over at all) and needs its own 2-part key shape.
+   */
+  private recentNoFallbackReauthNotices = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -1490,6 +1500,12 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
+  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  // oldest-dispatched-unresolved = the turn the subprocess is currently running.
+  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
+  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  private perChatSocketResources: Map<string, { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }> = new Map();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
 
@@ -1547,6 +1563,16 @@ export class AgentRuntime implements Runtime {
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
+    // F-STICKY-ACTOR: clear the executing-actor register (fail-closed) and stop
+    // the per-chat socket. cleanupPerChatState covers idle-eviction, /new,
+    // dead-session, and shutdown-via-cleanup.
+    this.perChatExecActorQueue.delete(mapKey);
+    const sockRes = this.perChatSocketResources.get(mapKey);
+    if (sockRes) {
+      try { sockRes.socketServer.stop(); } catch (err) { log.warn({ err, mapKey }, 'per-chat socket stop failed'); }
+      try { unlinkSync(sockRes.cfgPath); } catch { /* best-effort */ }
+      this.perChatSocketResources.delete(mapKey);
+    }
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
     // Slice-4 route bookkeeping is keyed by conversationKey, not the raw
@@ -1991,6 +2017,20 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
           }
+          // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue + the
+          // per-chat socket resource to the canonical key so a LID->phone rekey does
+          // not orphan the in-flight actor or leave the socket keyed by the dead lidKey.
+          // The resolver re-derives mapKey each read, so it follows the canonical key.
+          const execActors = this.perChatExecActorQueue.get(lidKey);
+          if (execActors !== undefined) {
+            this.perChatExecActorQueue.delete(lidKey);
+            this.perChatExecActorQueue.set(canonical, execActors);
+          }
+          const sockRes = this.perChatSocketResources.get(lidKey);
+          if (sockRes !== undefined) {
+            this.perChatSocketResources.delete(lidKey);
+            this.perChatSocketResources.set(canonical, sockRes);
+          }
           // QR-049: migrate the per_chat OperationTracker. It holds a setInterval
           // progress timer + slow/stall setTimeouts that are cleared only by
           // shutdown() keyed on the canonical mapKey — leaving it under lidKey
@@ -2157,6 +2197,15 @@ export class AgentRuntime implements Runtime {
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
+        // F-STICKY-ACTOR (QR-247): the per-turn actor binding covers claude-cli
+        // per_chat only. A non-claude subprocess provider (or a subprocess fallback)
+        // in non-sandbox per_chat stays on THIS shared global socket, so the
+        // concurrent-sender actor race is NOT closed for it — warn rather than imply fixed.
+        if (this.sessionScope === 'per_chat' && !this.sandboxPerChat
+            && this.effectiveProvider?.endsWith('-cli') && this.effectiveProvider !== 'claude-cli') {
+          log.warn({ provider: this.effectiveProvider, sessionScope: this.sessionScope },
+            'per-chat actor binding inactive for this provider: a non-claude subprocess in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed. Subprocess fallbacks share the same exposure.');
+        }
 
         // Write the whatsoup MCP config to every configured CLI provider target:
         // primary first, then fallback when it uses a distinct config file.
@@ -2838,7 +2887,14 @@ export class AgentRuntime implements Runtime {
     //      synchronous per_chat-without-sandbox path uses the global socket
     //      above and never allocates a per-chat socket, so the `workspaceResources`
     //      lookup here is only reachable under sandboxPerChat=true.
-    this.globalSocketServer?.updateActorJid(msg.senderJid);
+    // F-STICKY-ACTOR (QR-247): for claude-cli per_chat (which uses per-chat sockets),
+    // do NOT broadcast the sender onto the shared global socket — the per-chat socket
+    // resolves the actor per-request from the executing register. single/shared AND
+    // non-claude per_chat still broadcast (they use the global socket; non-claude
+    // per_chat stays on the pre-fix path, validator-warned).
+    if (!this.usesPerChatActorSocket()) {
+      this.globalSocketServer?.updateActorJid(msg.senderJid);
+    }
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid, msg.senderJid);
       const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
@@ -2864,306 +2920,316 @@ export class AgentRuntime implements Runtime {
     let forwardAfterLocalCommand: string | null = null;
 
     if (classified.type === 'local') {
-      switch (classified.command) {
-        case 'new':
-          // Shared mode: /new is admin-only
-          if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            // @check CHK-067 // @traces REQ-012.AC-06
-            return;
-          }
-          // Capture session ref before branches may delete it from the map.
-          // In per_chat mode, this.session is NOT reliable (shared field race),
-          // so we look up the correct session from the per-chat maps.
-          const sessionForNew = this.sessionScope === 'per_chat'
-            ? this.chatSessions.get(perChatMapKey!)
-            : this.session;
-          log.info({
-            chatJid,
-            sessionScope: this.sessionScope,
-            shared: this.shared,
-            sandboxPerChat: this.sandboxPerChat,
-          }, 'resetting session and queue for /new');
-          // Abort the old queue — clears timers and typing heartbeat before discarding.
-          // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
-          this.getQueueForChat(chatJid, perChatMapKey)?.abortTurn();
-          if (this.sessionScope !== 'per_chat') {
-            this.cleanupGlobalAutoCompactState();
-          }
-          // Create a fresh queue before spawning so stale output from the old session
-          // can never leak into the new session's delivery channel.
-          if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
-            // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
-            const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
-            this.cleanupPerChatState(workspaceKey);
-            this.chatSessions.delete(workspaceKey);
-            const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
-            this.chatQueues.set(workspaceKey, q1);
-          } else if (this.shared) {
-            const q2 = this.createOutboundQueue(chatJid, '/new shared replacement');
-            this.outboundQueues.set(chatJid, q2);
-          } else if (this.sessionScope === 'per_chat') {
-            // non-sandboxPerChat per_chat: keyed by canonical chat key
-            this.cleanupPerChatState(perChatMapKey!);
-            this.chatSessions.delete(perChatMapKey!);
-            const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
-            this.chatQueues.set(perChatMapKey!, q3);
-          } else {
-            const q4 = this.createOutboundQueue(chatJid, '/new single replacement');
-            this.queue = q4;
-          }
-          // NOTE: sessionForNew was captured before the map delete above. handleNew()
-          // signals the old session to reset. Any async events from the dying session
-          // arrive with the old workspaceKey — handleEventPerChat tolerates missing
-          // queue entries (returns early). The next message triggers ensureSessionAndQueue
-          // which creates a fresh session+queue in the map. This is a narrow window
-          // inherited from the original design, not a regression from the race fix.
-          await sessionForNew?.handleNew();
-          // QR-108: /new is a clean reset, so drop the one-message-handoff latches
-          // for this conversation too — otherwise a standby notice or handoff
-          // artifact stashed before /new leaks into the NEXT reply/prelude (both
-          // tables are keyed by the stable conversation_key, which /new does not
-          // change). Both fns are idempotent no-ops when nothing is pending, and
-          // their own JSDoc already documents "cleared on /new".
-          {
-            const resetKey = toConversationKey(chatJid);
-            clearStandbyNotice(this.db, resetKey);
-            deleteHandoffArtifact(this.db, resetKey);
-          }
-          // Reset turn flag — stale value from the old session must not suppress the
-          // _(no response)_ fallback if the first new-session turn has no visible text.
-          this.turnHadVisibleOutput = false;
-          this.sendDirect(chatJid, '*Starting new session* ✓');
-          break;
-
-        case 'status': {
-          // Look up session from per-chat maps (not the shared field) to avoid race.
-          const sessionForStatus = this.sessionScope === 'per_chat'
-            ? this.chatSessions.get(perChatMapKey!)
-            : this.session;
-          const status = sessionForStatus?.getStatus();
-          let text: string;
-          if (status?.active) {
-            const sessionShort = status.sessionId
-              ? status.sessionId.slice(0, 8) + '...'
-              : 'pending';
-            const started = status.startedAt ? formatAge(status.startedAt) : 'unknown';
-            const lastActivity = status.lastMessageAt
-              ? formatAge(status.lastMessageAt)
-              : 'none';
-            text =
-              '*Session active*\n' +
-              `PID: \`${status.pid ?? 'unknown'}\`\n` +
-              `Session: \`${sessionShort}\`\n` +
-              `Started: ${started}\n` +
-              `Messages: ${status.messageCount}\n` +
-              `Last activity: ${lastActivity}`;
-          } else {
-            text = '_No active session._ Send a message to start one.';
-          }
-          this.sendDirect(chatJid, text);
-          break;
-        }
-
-        case 'model': {
-          // NL-first routing alias (owner-approved design). Records a
-          // per-sender REASONING preference and renders route visibility —
-          // never tool, mutation, or authority changes (capability-preserved
-          // routing). Reachable only when agentOptions.nlRouting is true (the
-          // classifier gates on the same flag).
-          const sub = (classified.args ?? 'status').trim().toLowerCase();
-          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
-          if (sub === '' || sub === 'status') {
-            // Opportunistic retention sweep on read (F13); also runs at init.
-            // Fail-open (R11): a store error on the sweep must not throw out of
-            // this read-only handler — status still renders on the default route.
-            try {
-              pruneExpired(this.db);
-            } catch (err) {
-              log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
+      try {
+        switch (classified.command) {
+          case 'new':
+            // Shared mode: /new is admin-only
+            if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              // @check CHK-067 // @traces REQ-012.AC-06
+              return;
             }
-            this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+            // Capture session ref before branches may delete it from the map.
+            // In per_chat mode, this.session is NOT reliable (shared field race),
+            // so we look up the correct session from the per-chat maps.
+            const sessionForNew = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            log.info({
+              chatJid,
+              sessionScope: this.sessionScope,
+              shared: this.shared,
+              sandboxPerChat: this.sandboxPerChat,
+            }, 'resetting session and queue for /new');
+            // Abort the old queue — clears timers and typing heartbeat before discarding.
+            // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
+            this.getQueueForChat(chatJid, perChatMapKey)?.abortTurn();
+            if (this.sessionScope !== 'per_chat') {
+              this.cleanupGlobalAutoCompactState();
+            }
+            // Create a fresh queue before spawning so stale output from the old session
+            // can never leak into the new session's delivery channel.
+            if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
+              // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
+              const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+              this.cleanupPerChatState(workspaceKey);
+              this.chatSessions.delete(workspaceKey);
+              const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
+              this.chatQueues.set(workspaceKey, q1);
+            } else if (this.shared) {
+              const q2 = this.createOutboundQueue(chatJid, '/new shared replacement');
+              this.outboundQueues.set(chatJid, q2);
+            } else if (this.sessionScope === 'per_chat') {
+              // non-sandboxPerChat per_chat: keyed by canonical chat key
+              this.cleanupPerChatState(perChatMapKey!);
+              this.chatSessions.delete(perChatMapKey!);
+              const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
+              this.chatQueues.set(perChatMapKey!, q3);
+            } else {
+              const q4 = this.createOutboundQueue(chatJid, '/new single replacement');
+              this.queue = q4;
+            }
+            // NOTE: sessionForNew was captured before the map delete above. handleNew()
+            // signals the old session to reset. Any async events from the dying session
+            // arrive with the old workspaceKey — handleEventPerChat tolerates missing
+            // queue entries (returns early). The next message triggers ensureSessionAndQueue
+            // which creates a fresh session+queue in the map. This is a narrow window
+            // inherited from the original design, not a regression from the race fix.
+            await sessionForNew?.handleNew();
+            // QR-108: /new is a clean reset, so drop the one-message-handoff latches
+            // for this conversation too — otherwise a standby notice or handoff
+            // artifact stashed before /new leaks into the NEXT reply/prelude (both
+            // tables are keyed by the stable conversation_key, which /new does not
+            // change). Both fns are idempotent no-ops when nothing is pending, and
+            // their own JSDoc already documents "cleared on /new".
+            {
+              const resetKey = toConversationKey(chatJid);
+              clearStandbyNotice(this.db, resetKey);
+              deleteHandoffArtifact(this.db, resetKey);
+            }
+            // Reset turn flag — stale value from the old session must not suppress the
+            // _(no response)_ fallback if the first new-session turn has no visible text.
+            this.turnHadVisibleOutput = false;
+            this.sendDirect(chatJid, '*Starting new session* ✓');
+            break;
+
+          case 'status': {
+            // Look up session from per-chat maps (not the shared field) to avoid race.
+            const sessionForStatus = this.sessionScope === 'per_chat'
+              ? this.chatSessions.get(perChatMapKey!)
+              : this.session;
+            const status = sessionForStatus?.getStatus();
+            let text: string;
+            if (status?.active) {
+              const sessionShort = status.sessionId
+                ? status.sessionId.slice(0, 8) + '...'
+                : 'pending';
+              const started = status.startedAt ? formatAge(status.startedAt) : 'unknown';
+              const lastActivity = status.lastMessageAt
+                ? formatAge(status.lastMessageAt)
+                : 'none';
+              text =
+                '*Session active*\n' +
+                `PID: \`${status.pid ?? 'unknown'}\`\n` +
+                `Session: \`${sessionShort}\`\n` +
+                `Started: ${started}\n` +
+                `Messages: ${status.messageCount}\n` +
+                `Last activity: ${lastActivity}`;
+            } else {
+              text = '_No active session._ Send a message to start one.';
+            }
+            this.sendDirect(chatJid, text);
             break;
           }
-          if (sub === 'default') {
-            // R8: clear the sender's route override, then forward /model
-            // default to the CLI so its own model reset still runs — do not
-            // shadow that base capability. The forwarded turn owns terminal
-            // inbound durability, so this path must NOT complete it locally.
-            this.clearRoutePreference(chatJid, chatKey, senderKey);
-            forwardAfterLocalCommand = content as string;
-            break;
-          }
-          const isIntent = sub === 'strongest' || sub === 'fastest';
-          const isProvider = isProviderId(sub);
-          if (isProvider) {
-            const routable = this.routablePinTargets();
-            if (!routable.includes(sub)) {
-              // A pin this instance cannot honor must fail at SET time (F07):
-              // recording it would force slice-2 resolution into either a
-              // hard-fail or a silent fallback. No row is written.
+
+          case 'model': {
+            // NL-first routing alias (owner-approved design). Records a
+            // per-sender REASONING preference and renders route visibility —
+            // never tool, mutation, or authority changes (capability-preserved
+            // routing). Reachable only when agentOptions.nlRouting is true (the
+            // classifier gates on the same flag).
+            const sub = (classified.args ?? 'status').trim().toLowerCase();
+            const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+            if (sub === '' || sub === 'status') {
+              // Opportunistic retention sweep on read (F13); also runs at init.
+              // Fail-open (R11): a store error on the sweep must not throw out of
+              // this read-only handler — status still renders on the default route.
+              try {
+                pruneExpired(this.db);
+              } catch (err) {
+                log.warn({ err, instance: this.instanceName }, 'pruneExpired failed during /model status - continuing');
+              }
+              this.sendDirect(chatJid, this.renderRouteStatus(chatJid, msg.senderJid));
+              break;
+            }
+            if (sub === 'default') {
+              // R8: clear the sender's route override, then forward /model
+              // default to the CLI so its own model reset still runs — do not
+              // shadow that base capability. The forwarded turn owns terminal
+              // inbound durability, so this path must NOT complete it locally.
+              this.clearRoutePreference(chatJid, chatKey, senderKey);
+              forwardAfterLocalCommand = content as string;
+              break;
+            }
+            const isIntent = sub === 'strongest' || sub === 'fastest';
+            const isProvider = isProviderId(sub);
+            if (isProvider) {
+              const routable = this.routablePinTargets();
+              if (!routable.includes(sub)) {
+                // A pin this instance cannot honor must fail at SET time (F07):
+                // recording it would force slice-2 resolution into either a
+                // hard-fail or a silent fallback. No row is written.
+                this.sendDirect(
+                  chatJid,
+                  `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+                );
+                break;
+              }
+            }
+            if (!isIntent && !isProvider) {
+              // Out-of-contract value: no state change, honest reply (UH-001).
+              // Never echo unbounded user text into a (possibly group) chat:
+              // strip markdown-breaking chars and cap the length (F03).
+              // Defense-in-depth: unreachable while classifyInput admits only the
+              // recognized /model grammar (bare | verb | provider-id), so a
+              // non-verb/non-provider `sub` never arrives here. Kept as a
+              // fail-safe against any future widening of that grammar (F03).
+              const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
               this.sendDirect(
                 chatJid,
-                `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+                `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
               );
               break;
             }
-          }
-          if (!isIntent && !isProvider) {
-            // Out-of-contract value: no state change, honest reply (UH-001).
-            // Never echo unbounded user text into a (possibly group) chat:
-            // strip markdown-breaking chars and cap the length (F03).
-            // Defense-in-depth: unreachable while classifyInput admits only the
-            // recognized /model grammar (bare | verb | provider-id), so a
-            // non-verb/non-provider `sub` never arrives here. Kept as a
-            // fail-safe against any future widening of that grammar (F03).
-            const safeSub = sub.replace(/[`_*\n\r]/g, '').slice(0, 24) + (sub.length > 24 ? '…' : '');
-            this.sendDirect(
-              chatJid,
-              `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
-            );
+            const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
+            const requestedProvider = isProvider ? sub : null;
+            const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
+            if (outcome === 'refreshed') {
+              this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+              break;
+            }
+            if (outcome === 'sticky_kept') {
+              this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+              break;
+            }
+            const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
+            this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
             break;
           }
-          const intent = isIntent ? (sub as 'strongest' | 'fastest') : 'provider_specific';
-          const requestedProvider = isProvider ? sub : null;
-          const outcome = this.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
-          if (outcome === 'refreshed') {
-            this.sendDirect(chatJid, '_Already set — extended for another 24h. /reset to go back to the default route._');
+
+          case 'why': {
+            this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
             break;
           }
-          if (outcome === 'sticky_kept') {
-            this.sendDirect(chatJid, '_Already set (sticky). /reset to go back to the default route._');
+
+          case 'reset': {
+            // Idempotent by construction: clearing an absent row is a no-op and
+            // the reply is identical, so a doubled /reset cannot spam or error.
+            const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
+            this.clearRoutePreference(chatJid, chatKey, senderKey);
             break;
           }
-          const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
-          this.sendDirect(chatJid, `_Okay — preferring ${what} for you in this chat (24h). Applies from your next session — say /new to start one now._`);
-          break;
-        }
 
-        case 'why': {
-          this.sendDirect(chatJid, this.renderRouteWhy(chatJid, msg.senderJid));
-          break;
-        }
-
-        case 'reset': {
-          // Idempotent by construction: clearing an absent row is a no-op and
-          // the reply is identical, so a doubled /reset cannot spam or error.
-          const { chatKey, senderKey } = preferenceKeys(this.db, chatJid, msg.senderJid);
-          this.clearRoutePreference(chatJid, chatKey, senderKey);
-          break;
-        }
-
-        case 'help': {
-          const helpText =
-            '*/new* — start a fresh session\n' +
-            '*/status* — show current session status\n' +
-            '*/sessions* — list all active sessions _(admin)_\n' +
-            '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
-            '*/help* — show this help\n' +
-            (config.nlRouting
-              ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
-                '*/why* — why this model answered\n' +
-                '*/reset* — back to the default route\n'
-              : '') +
+          case 'help': {
+            const helpText =
+              '*/new* — start a fresh session\n' +
+              '*/status* — show current session status\n' +
+              '*/sessions* — list all active sessions _(admin)_\n' +
+              '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
+              '*/help* — show this help\n' +
+              (config.nlRouting
+                ? '*/model* — route status; `/model strongest|fastest|default|<provider>`\n' +
+                  '*/why* — why this model answered\n' +
+                  '*/reset* — back to the default route\n'
+                : '') +
             '_Any other message is forwarded to Claude Code._\n' +
             'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
-          this.sendDirect(chatJid, helpText);
-          break;
-        }
-
-        case 'sessions': {
-          // Admin-only
-          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            return;
-          }
-          const entries: string[] = [];
-          let idx = 1;
-          if (this.sessionScope === 'per_chat') {
-            for (const [mapKey, sess] of this.chatSessions) {
-              const st = sess.getStatus();
-              if (!st.active) continue;
-              const isGrp = isGroupConversationKey(mapKey);
-              const label = isGrp ? 'Group' : 'DM';
-              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-              const dbRowId = sess.getDbRowId();
-              let tkStr = '0';
-              if (dbRowId !== null) {
-                const tokenRow = this.db.raw.prepare(
-                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                if (tokenRow) {
-                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                }
-              }
-              entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-              idx++;
-            }
-          } else {
-            const st = this.session?.getStatus();
-            if (st?.active) {
-              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
-              const dbRowId = this.session?.getDbRowId() ?? null;
-              let tkStr = '0';
-              if (dbRowId !== null) {
-                const tokenRow = this.db.raw.prepare(
-                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
-                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
-                if (tokenRow) {
-                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
-                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
-                }
-              }
-              entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
-            }
-          }
-          const sessionsText = entries.length > 0
-            ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
-            : '_No active sessions._';
-          this.sendDirect(chatJid, sessionsText, true);
-          break;
-        }
-
-        case 'kill-session': {
-          // Admin-only
-          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
-            return;
-          }
-          const targetIdx = parseInt(classified.args ?? '', 10);
-          if (isNaN(targetIdx) || targetIdx < 1) {
-            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+            this.sendDirect(chatJid, helpText);
             break;
           }
-          if (this.sessionScope === 'per_chat') {
-            const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
-            if (targetIdx > activeSessions.length) {
-              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
-              break;
+
+          case 'sessions': {
+            // Admin-only
+            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              return;
             }
-            const [mapKey, targetSession] = activeSessions[targetIdx - 1];
-            this.chatQueues.get(mapKey)?.abortTurn();
-            this.chatSessions.delete(mapKey);
-            this.chatQueues.delete(mapKey);
-            this.cleanupPerChatState(mapKey);
-            await targetSession.shutdown(false);
-            const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
-          } else {
-            if (!this.session?.getStatus().active) {
-              this.sendDirect(chatJid, '_No active session to kill._', true);
-              break;
+            const entries: string[] = [];
+            let idx = 1;
+            if (this.sessionScope === 'per_chat') {
+              for (const [mapKey, sess] of this.chatSessions) {
+                const st = sess.getStatus();
+                if (!st.active) continue;
+                const isGrp = isGroupConversationKey(mapKey);
+                const label = isGrp ? 'Group' : 'DM';
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = sess.getDbRowId();
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+                idx++;
+              }
+            } else {
+              const st = this.session?.getStatus();
+              if (st?.active) {
+                const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+                const dbRowId = this.session?.getDbRowId() ?? null;
+                let tkStr = '0';
+                if (dbRowId !== null) {
+                  const tokenRow = this.db.raw.prepare(
+                    'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                  ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                  if (tokenRow) {
+                    const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                    tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                  }
+                }
+                entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+              }
             }
-            this.getActiveQueue()?.abortTurn();
-            this.operationTracker?.shutdown();
-            this.operationTracker = null;
-            this.cleanupGlobalAutoCompactState();
-            await this.session.shutdown(false);
-            this.session = null;
-            this.queue = null;
-            this.activeChatJid = null;
-            this.sendDirect(chatJid, '_Session killed._', true);
+            const sessionsText = entries.length > 0
+              ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
+              : '_No active sessions._';
+            this.sendDirect(chatJid, sessionsText, true);
+            break;
           }
-          break;
+
+          case 'kill-session': {
+            // Admin-only
+            if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+              return;
+            }
+            const targetIdx = parseInt(classified.args ?? '', 10);
+            if (isNaN(targetIdx) || targetIdx < 1) {
+              this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+              break;
+            }
+            if (this.sessionScope === 'per_chat') {
+              const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
+              if (targetIdx > activeSessions.length) {
+                this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
+                break;
+              }
+              const [mapKey, targetSession] = activeSessions[targetIdx - 1];
+              this.chatQueues.get(mapKey)?.abortTurn();
+              this.chatSessions.delete(mapKey);
+              this.chatQueues.delete(mapKey);
+              this.cleanupPerChatState(mapKey);
+              await targetSession.shutdown(false);
+              const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
+              this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
+            } else {
+              if (!this.session?.getStatus().active) {
+                this.sendDirect(chatJid, '_No active session to kill._', true);
+                break;
+              }
+              this.getActiveQueue()?.abortTurn();
+              this.operationTracker?.shutdown();
+              this.operationTracker = null;
+              this.cleanupGlobalAutoCompactState();
+              await this.session.shutdown(false);
+              this.session = null;
+              this.queue = null;
+              this.activeChatJid = null;
+              this.sendDirect(chatJid, '_Session killed._', true);
+            }
+            break;
+          }
         }
+      } catch (err) {
+        // Contain local-command handler faults: without this, a throwing handler
+        // escapes to the turnChain catch-all, whose unguarded markInboundFailed
+        // would count a command-handler fault as an inbound processing failure.
+        // The R14 completion below still runs and finalizes the row truthfully
+        // (the inbound WAS a locally-handled command).
+        log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
+        this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
       }
       if (forwardAfterLocalCommand === null) {
         if (msg.inboundSeq !== undefined) {
@@ -3325,6 +3391,23 @@ export class AgentRuntime implements Runtime {
     // here at the single dispatch chokepoint, independent of the per-path binds.
     this.enforceGlobalConversationBinding(chatJid);
     this.updateSessionActorJid(session, actorJid);
+    // F-STICKY-ACTOR (QR-247): push this turn's actor onto the per-chat executing
+    // register. sendTurnToSession is the single dispatch chokepoint reached only
+    // with a confirmed-live session (past sendTurnPerChat's :3534 spawn-fail drop),
+    // so a pushed entry always corresponds to a turn that will run. HEAD = the turn
+    // the subprocess is currently executing; shifted on that turn's result, cleared
+    // on any abnormal termination (Slice-4). per_chat non-sandbox only.
+    if (this.usesPerChatActorSocket() && mapKey !== undefined) {
+      // If the session is not active, any pre-existing entries are from a dead
+      // subprocess (a prior turn whose session crashed/resume-failed without an
+      // in-band clear) — drop them so a stale actor cannot survive a subprocess
+      // restart. A fresh subprocess starts with only this turn. (handleResumeFailed
+      // is a no-op for non-sandbox per_chat, so this is the resume-fail coverage.)
+      if (!session.getStatus().active) this.perChatExecActorQueue.delete(mapKey);
+      const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
+      execQ.push(actorJid);
+      this.perChatExecActorQueue.set(mapKey, execQ);
+    }
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
     const mapKeyForChat = this.sandboxPerChat
@@ -3475,7 +3558,7 @@ export class AgentRuntime implements Runtime {
           advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-            this.injectPollAnswers(mapKey, pendingPoll);
+            this.injectPollAnswers(mapKey, pendingPoll, actorJid);
           } else {
             log.info({
               mapKey,
@@ -3594,6 +3677,10 @@ export class AgentRuntime implements Runtime {
       } else {
         // Consume the seq for this completed user turn
         seqQueue.shift();
+        // F-STICKY-ACTOR (QR-247): advance the executing-actor head in lockstep
+        // with the seq FIFO on a completed user turn (unconditional; NOT the
+        // conditional pendingTurnActorJid.delete below, and NOT completeConsumedPerChatInbound).
+        this.perChatExecActorQueue.get(mapKey)?.shift();
         const fallbackReason = event.text ? fallbackReasonForResultText(event.text) : null;
         // Turn completed successfully with visible output — clear pending replay
         // text. Provider limit/auth/rate failures keep it so the fallback replay
@@ -4325,6 +4412,7 @@ export class AgentRuntime implements Runtime {
   private injectPollAnswers(
     mapKey: string,
     pending: PendingPollQuestion,
+    answererActorJid?: string,
   ): void {
     // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
@@ -4348,7 +4436,7 @@ export class AgentRuntime implements Runtime {
     // Route through sendTurnPerChat for proper lifecycle handling.
     // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
     // pendingPolls.questions from being populated in shared mode.
-    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey).catch((err) => {
+    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey, answererActorJid).catch((err) => {
       log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
     });
 
@@ -4654,7 +4742,12 @@ export class AgentRuntime implements Runtime {
               conversationKey,
               mapKey,
             });
-            if (!replayScheduled) session?.shutdown();
+            if (!replayScheduled) {
+              // QR-211: no fallback took over — without this, the turn ends in
+              // permanent silence (session shuts down, nothing forwarded to chat).
+              if (!activation) this.emitNoFallbackReauthNotice(queue);
+              session?.shutdown();
+            }
             break;
           }
           if (providerFailureKind === 'rate-limit' || providerFailureKind === 'server-error') {
@@ -5506,6 +5599,57 @@ export class AgentRuntime implements Runtime {
       return chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey;
     }
     return canonicalizeChatJid(chatJid, this.db);
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-245): resolve the actor for a per-chat socket tool call
+   * at read time = the actor of the turn the subprocess is CURRENTLY executing
+   * (queue HEAD). Fail-closed: no live active session or empty queue -> undefined,
+   * which the sensitive-tool gate denies. Non-blocking (sync map/status reads).
+   * Re-derives mapKey each call so it is transparent to LID rekey.
+   */
+  private resolveExecutingActor(chatJid: string): string | undefined {
+    const mapKey = this.resolvePerChatMapKey(chatJid);
+    const session = this.chatSessions.get(mapKey);
+    if (!session || !session.getStatus().active) return undefined;
+    return this.perChatExecActorQueue.get(mapKey)?.[0];
+  }
+
+  /** F-STICKY-ACTOR (QR-247): per-chat socket path under <cwd>/.claude, sha1-shortened if it would exceed the unix sun_path limit. */
+  private derivePerChatSocketPath(chatJid: string): string {
+    const dir = join(this.cwd ?? homedir(), '.claude');
+    const key = toConversationKey(chatJid);
+    const full = join(dir, `whatsoup-${key}.sock`);
+    if (Buffer.byteLength(full, 'utf8') <= 100) return full;
+    const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
+    return join(dir, `whatsoup-${h}.sock`);
+  }
+
+  /** F-STICKY-ACTOR (QR-247): true only for the mode this fix covers — claude-cli, per_chat, non-sandbox. Gates the per-chat socket, the exec-queue push, and the global-broadcast skip so other modes are byte-unchanged. */
+  private usesPerChatActorSocket(): boolean {
+    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.effectiveProvider === 'claude-cli';
+  }
+
+  /**
+   * F-STICKY-ACTOR (QR-247): create this chat's own MCP socket (tier:'global',
+   * bound to resolveExecutingActor) and write its per-session --mcp-config so the
+   * subprocess talks to it instead of the shared global socket. Returns the socket
+   * + cfg paths for the provider override. Torn down in cleanupPerChatState.
+   */
+  private createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string } {
+    const socketPath = this.derivePerChatSocketPath(chatJid);
+    const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
+    const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
+    writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
+    const socketServer = new WhatSoupSocketServer(
+      socketPath,
+      this.registry,
+      { tier: 'global', allowedRoot: this.cwd ?? homedir() },
+      () => this.resolveExecutingActor(chatJid),
+    );
+    socketServer.start();
+    this.perChatSocketResources.set(mapKey, { socketServer, socketPath, cfgPath });
+    return { socketPath, cfgPath };
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
@@ -6538,6 +6682,32 @@ export class AgentRuntime implements Runtime {
       : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
   }
 
+  /**
+   * QR-211: user-visible notice for an auth-required terminal result when no
+   * fallback could be activated (not configured, or activation failed) — the
+   * three legacy-ladder / registry-handler auth-required branches otherwise end
+   * in permanent silence: the session shuts down with nothing ever forwarded to
+   * the chat. Generic by design (seam-6: no secrets, no provider internals).
+   *
+   * Owns its own enqueue AND de-dup (unlike usageLimitNotice, a pure string
+   * factory called from a single site) because it is invoked from three
+   * independent call sites and must not spam one notice per turn during a
+   * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
+   * prune→check→set→capDedupeMap idiom, reusing PROVIDER_FALLBACK_NOTICE_DEDUP_MS.
+   */
+  private emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentNoFallbackReauthNotices) {
+      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+        this.recentNoFallbackReauthNotices.delete(key);
+      }
+    }
+    const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
+    if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
+    this.recentNoFallbackReauthNotices.set(noticeKey, now);
+    this.capDedupeMap(this.recentNoFallbackReauthNotices);
+    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+  }
 
   /**
    * Count a completed turn during an active fallback window; alert and enqueue
@@ -7339,8 +7509,11 @@ export class AgentRuntime implements Runtime {
     }
     this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
     if (!replayScheduled) {
-      // Only usage-limit emits a standalone notice when no fallback armed.
+      // usage-limit and auth-required each emit a standalone notice when no
+      // fallback armed (QR-211); rate-limit / model-unavailable stay silent here
+      // — this central path is only reached under WHATSOUP_RESPONSE_REGISTRY_DISPATCH=1.
       if (reason === 'usage-limit' && !activation) queue.enqueueText(this.usageLimitNotice());
+      if (reason === 'auth-required' && !activation) this.emitNoFallbackReauthNotice(queue);
       session?.shutdown();
     }
   }
@@ -7724,6 +7897,11 @@ export class AgentRuntime implements Runtime {
       await args.oldSession.shutdown(false);
     }
     if (args.mapKey !== undefined) {
+      // F-STICKY-ACTOR (QR-247): the fallback kills the child (active=false, so
+      // onCrash never fires) and replays on a fresh session. Clear the executing-actor
+      // queue so the old in-flight turn's actor cannot linger as HEAD; the replay
+      // re-pushes via sendTurnPerChat -> sendTurnToSession.
+      this.perChatExecActorQueue.delete(args.mapKey);
       this.chatSessions.delete(args.mapKey);
       this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
       await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
@@ -7838,6 +8016,7 @@ export class AgentRuntime implements Runtime {
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
     mcpSocketPath?: string;
+    providerConfigOverride?: Record<string, unknown>;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     // Slice-2 routing wiring (flag-gated): preferences steer the session being
@@ -7879,7 +8058,9 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
       provider: route ? route.provider : this.effectiveProvider,
-      providerConfig: route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig(),
+      providerConfig: opts.providerConfigOverride
+        ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
+        : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
@@ -8093,10 +8274,20 @@ export class AgentRuntime implements Runtime {
         const toolScopeKey = this.createToolScopeKey(initialMapKey);
         let session!: SessionManager;
         const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        // F-STICKY-ACTOR (QR-247): for claude-cli non-sandbox per_chat, create this
+        // chat's own actor-bound MCP socket + per-session --mcp-config BEFORE the
+        // session so its cfg can be passed as the provider override (session.ts
+        // stays byte-unchanged). Other providers stay on the shared global socket.
+        const perChatSock = this.usesPerChatActorSocket()
+          ? this.createPerChatActorSocket(initialMapKey, chatJid)
+          : undefined;
         session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
           actorJid,
+          ...(perChatSock
+            ? { mcpSocketPath: perChatSock.socketPath, providerConfigOverride: { mcpConfig: [perChatSock.cfgPath], strictMcpConfig: true } }
+            : {}),
           onEvent: (event) => {
             const mapKey = resolveSessionMapKey();
             if (!mapKey) {
@@ -8320,6 +8511,13 @@ export class AgentRuntime implements Runtime {
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
+    // F-STICKY-ACTOR (QR-247, S-CRASH): a crash discards ALL of the subprocess's
+    // in-flight turns (executing + buffered), so clear the WHOLE executing-actor
+    // queue — NOT shift-one. This runs synchronously in handlePerChatCrash BEFORE
+    // the auto-respawn setTimeout, so the direct-sendTurn continuation hits an empty
+    // queue -> fail-closed deny, and a later user turn cannot append behind a stale
+    // (possibly admin) head and be served that actor = escalation.
+    this.perChatExecActorQueue.delete(mapKey);
     this.clearToolScopeFor(mapKey);
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
@@ -8880,7 +9078,12 @@ export class AgentRuntime implements Runtime {
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
-            if (!replayScheduled) this.session?.shutdown();
+            if (!replayScheduled) {
+              // QR-211: no fallback took over — without this, the turn ends in
+              // permanent silence (session shuts down, nothing forwarded to chat).
+              if (!activation) this.emitNoFallbackReauthNotice(queue);
+              this.session?.shutdown();
+            }
             this.singleTurnHadToolActivity = false;
             break;
           }
