@@ -551,6 +551,16 @@ export async function handleConfigUpdate(
         }
       }
 
+      // chatOptions is chat-only (mirrors handleCreateLine's `type === 'chat' &&
+      // body.chatOptions != null` gate). deepMergeRecords above has no type
+      // awareness, so a patch carrying chatOptions onto an agent/passive
+      // instance would otherwise merge straight through — and validateChatOptions
+      // only runs for type === 'chat', so it would reach disk unvalidated. Drop,
+      // don't reject, matching CREATE's drop-not-reject behavior.
+      if (merged.type !== 'chat' && 'chatOptions' in merged) {
+        delete merged.chatOptions;
+      }
+
       // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
       const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
       const clean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;

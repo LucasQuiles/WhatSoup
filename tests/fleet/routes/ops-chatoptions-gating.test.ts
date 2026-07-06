@@ -4,15 +4,17 @@
  * chatOptions is chat-only and, unlike agentOptions, is NOT a PASSTHROUGH_FIELDS
  * entry — it has its own dedicated CREATE-time gate
  * (`type === 'chat' && body.chatOptions != null`) so an agent/passive config can
- * never carry an unvalidated chat-shaped block (src/fleet/routes/ops.ts). On
- * PATCH there is no type gate on the merge itself; a malformed
- * openaiProviderConfig is instead caught by the shared validator
- * (validateChatOptions in src/core/agent-config-validator.ts), which runs for
- * every type: 'chat' instance. Neither the CREATE gate nor the PATCH rejection
- * had a direct test before this file. Harness mirrors
- * ops-create-byok-roundtrip.test.ts (CREATE) and
- * ops-config-patch-validation.test.ts (PATCH) — same temp dirs, real handlers,
- * config.json readback.
+ * never carry an unvalidated chat-shaped block (src/fleet/routes/ops.ts). PATCH
+ * mirrors this: deepMergeRecords has no type awareness, so handleConfigUpdate
+ * drops chatOptions from the merged config when its type is not 'chat' (same
+ * drop-not-reject behavior as CREATE) before persisting. A malformed
+ * openaiProviderConfig on an actual type: 'chat' instance is still caught by
+ * the shared validator (validateChatOptions in
+ * src/core/agent-config-validator.ts), which runs for every type: 'chat'
+ * instance. Neither the CREATE gate nor the PATCH drop had a direct test
+ * before this file. Harness mirrors ops-create-byok-roundtrip.test.ts (CREATE)
+ * and ops-config-patch-validation.test.ts (PATCH) — same temp dirs, real
+ * handlers, config.json readback.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
@@ -166,18 +168,30 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
 describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => {
   let tmpDir: string;
   let originalEnv: NodeJS.ProcessEnv;
+  let agentCwd: string | undefined;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-patch-chatopts-'));
     originalEnv = { ...process.env };
     process.env.XDG_CONFIG_HOME = tmpDir;
     fs.mkdirSync(path.join(tmpDir, 'whatsoup', 'instances'), { recursive: true });
+    agentCwd = undefined;
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (agentCwd) fs.rmSync(agentCwd, { recursive: true, force: true });
     process.env = originalEnv;
   });
+
+  /** Build a real, writable agent cwd under $HOME so the route-level
+   *  resolveAndValidateAgentCwd guard passes (mirrors
+   *  ops-config-patch-validation.test.ts's makeAgentCwd). */
+  function makeAgentCwd(label: string): string {
+    const dir = path.join(os.homedir(), '.whatsoup-test-fixtures', `chatopts-patch-${label}-${process.pid}-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
 
   function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
     return {
@@ -249,8 +263,37 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     );
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body).error).toMatch(
-      /chatOptions\.openaiProviderConfig\.apiKeyService .* is not a known keyring service/,
+      /chatOptions\.openaiProviderConfig\.apiKeyService .* is not a valid provider service/,
     );
     expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
+
+  it('drops chatOptions when the merged config type is not chat (PATCH mirrors the CREATE gate)', async () => {
+    // deepMergeRecords has no type awareness, so without a PATCH-side gate a
+    // chatOptions block merged onto a non-chat instance would never reach
+    // validateChatOptions (gated to type === 'chat') and would be persisted
+    // unvalidated. Mirrors handleCreateLine's `type === 'chat' &&
+    // body.chatOptions != null` gate: drop, don't reject.
+    agentCwd = makeAgentCwd('drop');
+    const cfg = writeChatConfig('test-agent-chatopts', {
+      type: 'agent',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    });
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        chatOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
+      }), 'PATCH'),
+      res, makeDeps(fakeInstance(cfg, { type: 'agent', name: 'test-agent-chatopts' })),
+      { name: 'test-agent-chatopts' },
+    );
+    expect(res._status, 'drop, not reject: ' + res._body).toBe(200);
+
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect('chatOptions' in persisted).toBe(false);
+    // Prove this is a genuine, correctly-populated agent config (not an empty
+    // object that would vacuously lack chatOptions).
+    expect(persisted.type).toBe('agent');
+    expect(persisted.agentOptions.cwd).toBe(agentCwd);
   });
 });
