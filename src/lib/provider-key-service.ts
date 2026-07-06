@@ -6,8 +6,8 @@
  * keyring.ts re-exports both names — runtime callers keep importing from there.
  */
 
-// Validity-probe coverage: PROBE_ENDPOINTS in
-// src/runtimes/agent/providers/credential-verify.ts only covers deepseek,
+// Validity-probe coverage: CREDENTIAL_PROBE_DESCRIPTORS in
+// src/lib/provider-credential-probes.ts only covers anthropic, deepseek,
 // minimax, and openai (endpoints proven to 401/403 on a bad key). Every other
 // service below degrades to a presence-only check — the pre-flight returns
 // 'unknown' for them, so fallback_credential_invalid can never fire. Adding a
