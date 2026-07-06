@@ -62,7 +62,7 @@ A service is not a provider ID: `nvidia` would be reached as
 ## Traps
 
 - **Key resolution order**
-  (`src/runtimes/agent/providers/api-key-resolver.ts`): inline → service
+  (`src/lib/api-key-resolver.ts`): inline → service
   lookup (mapped env var first, then keyring) → provider-family env fallback
   (`OPENAI_API_KEY` for `openai-api`, `ANTHROPIC_API_KEY` for
   `anthropic-api`). The last hop is the cross-account bleed risk; it logs the
@@ -74,6 +74,13 @@ A service is not a provider ID: `nvidia` would be reached as
 - **`Retry-After` cap** is 10 seconds
   (`src/runtimes/agent/providers/rate-limit-retry.ts`); a longer wait fails
   the turn into the fallback chain.
-- **The chat runtime is env-only** (`src/runtimes/chat/providers/openai.ts`):
-  `OPENAI_BASE_URL` repoints the whole process, including Whisper voice-note
-  transcription — there is no per-provider chat config today.
+- **The chat runtime is now per-instance configurable for OpenAI chat
+  completions** (`src/runtimes/chat/providers/openai.ts`,
+  `chatOptions.openaiProviderConfig` — QR-218 PR-2): an instance that sets
+  `baseUrl`/`apiKeyService` gets its own endpoint/key regardless of any
+  process-wide env var; one that sets nothing still gets the legacy bare
+  `new OpenAI()`, governed by `OPENAI_BASE_URL` as before (now the
+  legacy/fallback path). **Whisper voice-note transcription is NOT yet
+  covered** (`transcription/openai-whisper.ts`, blocked/future PR-B) — a
+  process-wide `OPENAI_BASE_URL` still repoints it regardless of any chat
+  instance's `openaiProviderConfig`.

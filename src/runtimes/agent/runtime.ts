@@ -513,6 +513,7 @@ import {
   type AskUserQuestion,
   type AskUserOption,
 } from './poll-resolution.ts';
+import { resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 
 // Tool_use → ToolUpdate formatting, tool-error classification, and operator-alert
 // gating extracted to ./tool-update.ts (module-level FILE-reduction slice). Re-exported
@@ -3847,7 +3848,12 @@ export class AgentRuntime implements Runtime {
     unanswered.forEach(({ question }, fallbackIndex) => {
       this.sendDirect(
         pending.chatJid,
-        formatTextFallbackQuestion(question, fallbackIndex === 0 ? intro : 'Remaining decision question:'),
+        formatTextFallbackQuestion(
+          question,
+          fallbackIndex === 0 ? intro : 'Remaining decision question:',
+          undefined,
+          resolveOutboundAudience(pending.chatJid),
+        ),
       );
     });
   }
@@ -4204,10 +4210,11 @@ export class AgentRuntime implements Runtime {
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
+    const pollAudience = resolveOutboundAudience(chatJid);
     const formattedQuestions = normalizedQuestions.map((q, index) => ({
       index,
       question: q,
-      formatted: formatPollQuestion(q),
+      formatted: formatPollQuestion(q, pollAudience),
     }));
     const detailFlushedQuestionIndexes = new Set<number>();
 
@@ -4267,7 +4274,7 @@ export class AgentRuntime implements Runtime {
       for (const { index, question: q } of formattedQuestions) {
         queue.enqueueText(formatTextFallbackQuestion(q, undefined, {
           includeDescriptions: !detailFlushedQuestionIndexes.has(index),
-        }));
+        }, pollAudience));
       }
     }
 

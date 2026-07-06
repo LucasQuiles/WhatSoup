@@ -371,3 +371,131 @@ describe('validateInstanceConfig — providerConfig.apiKeyService', () => {
     expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
   });
 });
+
+// ---------------------------------------------------------------------------
+// chatOptions.openaiProviderConfig (QR-218 PR-2 — chat OpenAI provider config)
+//
+// Same baseUrl/apiKeyService shape rules as agentOptions.providerConfig
+// (validateProviderConfigShape is a shared pure helper), but AGENT-ONLY rules
+// (budget, opencode-cli "baseUrl needs a routed model") must NOT carry over —
+// chat has no opencode-cli concept and no budget field.
+// ---------------------------------------------------------------------------
+
+function chatRaw(
+  chatOptions: Record<string, unknown>,
+  topLevel: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name: 'test-line',
+    type: 'chat',
+    accessMode: 'allowlist',
+    adminPhones: ['15555550123'],
+    healthPort: 9096,
+    systemPrompt: 'hi',
+    chatOptions,
+    ...topLevel,
+  };
+}
+
+describe('validateInstanceConfig — chatOptions.openaiProviderConfig.baseUrl scheme', () => {
+  for (const bad of ['ftp://host/v1', 'file:///tmp/endpoint', 'ws://host/v1']) {
+    it(`rejects non-http(s) baseUrl ${bad}`, () => {
+      const err = validateInstanceConfig(
+        chatRaw({ openaiProviderConfig: { baseUrl: bad } }),
+        createCtx,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+      expect(err?.message).toMatch(/http/);
+    });
+  }
+
+  for (const ok of ['http://localhost:11434/v1', 'https://api.example.com/v1']) {
+    it(`accepts http(s) baseUrl ${ok}`, () => {
+      expect(
+        validateInstanceConfig(chatRaw({ openaiProviderConfig: { baseUrl: ok } }), createCtx),
+        `${ok} must validate clean`,
+      ).toBeNull();
+      // Control: swapping only the scheme to ftp on the same config is
+      // rejected at the same field.
+      const bad = validateInstanceConfig(
+        chatRaw({ openaiProviderConfig: { baseUrl: ok.replace(/^https?/, 'ftp') } }),
+        createCtx,
+      );
+      expect(bad?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+    });
+  }
+
+  it('fires on the load path too', () => {
+    const err = validateInstanceConfig(
+      chatRaw({ openaiProviderConfig: { baseUrl: 'ftp://host/v1' } }),
+      { name: 'test-line', mode: 'load' },
+    );
+    expect(err?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+  });
+});
+
+describe('validateInstanceConfig — chatOptions.openaiProviderConfig.apiKeyService', () => {
+  const openaiEndpoint = (apiKeyService: unknown, extra: Record<string, unknown> = {}) =>
+    chatRaw({
+      openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService, ...extra },
+    });
+
+  it('accepts a known keyring service alongside baseUrl', () => {
+    expect(
+      validateInstanceConfig(openaiEndpoint('openai'), createCtx),
+      'a SERVICE_ENV_MAP service with baseUrl must validate clean',
+    ).toBeNull();
+    // Control: the identical config with an unknown service is rejected, so
+    // the accept proves the membership rule rather than a vacuous pass.
+    const bad = validateInstanceConfig(openaiEndpoint('not-a-service'), createCtx);
+    expect(bad?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+  });
+
+  it('rejects a non-string apiKeyService', () => {
+    const err = validateInstanceConfig(openaiEndpoint(42), createCtx);
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(err?.message).toMatch(/non-empty string/);
+  });
+
+  it('rejects an apiKeyService that is not a known keyring service, listing the valid ones', () => {
+    const err = validateInstanceConfig(openaiEndpoint('grokcloud'), createCtx);
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(err?.message).toContain('grokcloud');
+    expect(err?.message).toContain('minimax');
+  });
+
+  it('rejects apiKeyService without baseUrl (the key service would be inert)', () => {
+    const err = validateInstanceConfig(
+      chatRaw({ openaiProviderConfig: { apiKeyService: 'openai' } }),
+      createCtx,
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(err?.message).toMatch(/baseUrl/);
+  });
+
+  it('fires on the load path too', () => {
+    const err = validateInstanceConfig(openaiEndpoint('not-a-service'), {
+      name: 'test-line',
+      mode: 'load',
+    });
+    expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+  });
+});
+
+describe('validateInstanceConfig — chatOptions does not inherit agent-only providerConfig rules', () => {
+  it('does not require a resolvable model for a baseUrl-only config (no opencode-cli concept in chat)', () => {
+    // Unlike agentOptions.providerConfig + provider:'opencode-cli', chat has no
+    // "custom endpoint needs a routed model" rule — every chat generate()
+    // request carries its own model, so baseUrl alone is never inert.
+    expect(
+      validateInstanceConfig(
+        chatRaw({ openaiProviderConfig: { baseUrl: 'https://api.example.com/v1' } }),
+        createCtx,
+      ),
+    ).toBeNull();
+  });
+});

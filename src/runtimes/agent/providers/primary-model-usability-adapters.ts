@@ -6,7 +6,7 @@ import {
   type BinaryAuthStatusResult,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
-import { resolveApiKey, type ResolveApiKeyOptions } from './api-key-resolver.ts';
+import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
 import {
   ensureClaudeFileStoreCredential,
   type ClaudeFileStoreHealResult,

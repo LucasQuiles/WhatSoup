@@ -15,9 +15,10 @@ let whisperAlerted = false;
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
-  // Bare construction: a process-wide OPENAI_BASE_URL repoints transcription
-  // together with the chat provider (providers/openai.ts) — they cannot be
-  // separated by env alone. See docs/architecture/
+  // Bare construction, still env-only (PR-B, not yet done): a process-wide
+  // OPENAI_BASE_URL repoints this transcription client regardless of any
+  // chat instance's chatOptions.openaiProviderConfig (providers/openai.ts,
+  // QR-218 PR-2 — the chat completions client only). See docs/architecture/
   // provider-credential-services.md, Traps.
   if (!client) client = new OpenAI();
   return client;
