@@ -10,7 +10,7 @@
  * and the poll test suites are unchanged.
  */
 import { config } from '../../config.ts';
-import { redactInternalArtifacts } from '../../core/outbound-message-safety.ts';
+import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbound-message-safety.ts';
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting
@@ -244,7 +244,7 @@ export const OTHER_LABEL_PATTERNS: EscapeHatchLabelPattern[] = [
 export function formatPollQuestion(q: {
   question: string;
   options: AskUserOption[];
-}): {
+}, audience: OutboundAudience = 'client'): {
   pollName: string;
   pollValues: string[];
   needsFollowUp: boolean;
@@ -252,13 +252,15 @@ export function formatPollQuestion(q: {
 } {
   // Client-safety: the AskUserQuestion → poll path bypasses the send_poll MCP
   // tool (the agent runtime sends it directly), so redact internal-artifact
-  // leaks up front — before truncation — so every derived client surface
-  // (pollName, pollValues, followUpText) is clean. No-op on benign content.
+  // leaks up front — before truncation — so every derived surface (pollName,
+  // pollValues, followUpText) is clean. Audience-scoped: internal agent groups
+  // keep coordination vocabulary and only have secrets/emails masked. No-op on
+  // benign content.
   q = {
-    question: redactInternalArtifacts(q.question).text,
+    question: redactInternalArtifacts(q.question, audience).text,
     options: q.options.map((o) => ({
-      label: redactInternalArtifacts(o.label).text,
-      description: redactInternalArtifacts(o.description).text,
+      label: redactInternalArtifacts(o.label, audience).text,
+      description: redactInternalArtifacts(o.description, audience).text,
     })),
   };
 
@@ -439,16 +441,18 @@ export function formatTextFallbackQuestion(
   q: AskUserQuestion,
   intro?: string,
   { includeDescriptions = true }: { includeDescriptions?: boolean } = {},
+  audience: OutboundAudience = 'client',
 ): string {
   // Client-safety: this is the text fallback when the poll cannot be sent —
   // another client-facing surface that bypasses the send_poll guard. Redact
-  // internal-artifact leaks in the question and option labels/descriptions.
+  // internal-artifact leaks in the question and option labels/descriptions,
+  // audience-scoped (internal groups keep vocabulary, secrets/emails still masked).
   q = {
     ...q,
-    question: redactInternalArtifacts(q.question).text,
+    question: redactInternalArtifacts(q.question, audience).text,
     options: q.options.map((o) => ({
-      label: redactInternalArtifacts(o.label).text,
-      description: redactInternalArtifacts(o.description).text,
+      label: redactInternalArtifacts(o.label, audience).text,
+      description: redactInternalArtifacts(o.description, audience).text,
     })),
   };
   const optionLines = q.options.map((option, index) => {

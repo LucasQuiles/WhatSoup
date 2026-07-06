@@ -864,6 +864,78 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('baseUrl is not');
   });
 
+  // ---- chatOptions.openaiProviderConfig (QR-218 PR-2 — chat OpenAI provider config) ----
+  it('accepts a chat config with no chatOptions at all (backward-compat)', () => {
+    expect(validateInstanceConfig(baseChat({}), ctx('create'))).toBeNull();
+  });
+
+  it('rejects non-object chatOptions', () => {
+    const raw = baseChat({ chatOptions: 'nope' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects non-object chatOptions.openaiProviderConfig', () => {
+    const raw = baseChat({ chatOptions: { openaiProviderConfig: ['array'] } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects non-string chatOptions.openaiProviderConfig.baseUrl', () => {
+    const raw = baseChat({ chatOptions: { openaiProviderConfig: { baseUrl: 123 } } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+    expect(result?.message).toContain('non-empty string');
+  });
+
+  it('rejects unparseable chatOptions.openaiProviderConfig.baseUrl', () => {
+    const raw = baseChat({ chatOptions: { openaiProviderConfig: { baseUrl: 'not a url' } } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+    expect(result?.message).toContain('must be a valid URL');
+  });
+
+  it('rejects non-http(s) chatOptions.openaiProviderConfig.baseUrl', () => {
+    const raw = baseChat({ chatOptions: { openaiProviderConfig: { baseUrl: 'ftp://host.example' } } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.baseUrl');
+    expect(result?.message).toContain('http or https');
+  });
+
+  it('rejects non-string chatOptions.openaiProviderConfig.apiKeyService', () => {
+    const raw = baseChat({
+      chatOptions: { openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 5 } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(result?.message).toContain('non-empty string');
+  });
+
+  it('rejects unknown chatOptions.openaiProviderConfig.apiKeyService', () => {
+    const raw = baseChat({
+      chatOptions: { openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'nope-svc' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(result?.message).toContain('not a known keyring service');
+  });
+
+  it('rejects chatOptions.openaiProviderConfig.apiKeyService set without baseUrl', () => {
+    const raw = baseChat({ chatOptions: { openaiProviderConfig: { apiKeyService: 'openai' } } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(result?.message).toContain('baseUrl is not');
+  });
+
+  it('accepts a valid chatOptions.openaiProviderConfig', () => {
+    const raw = baseChat({
+      chatOptions: { openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' } },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
   // ---- validateTransportConfig (lines 685-725) ----
   it('rejects unknown transport id', () => {
     const raw = baseChat({ transport: 'carrier-pigeon' });

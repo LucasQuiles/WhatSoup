@@ -327,3 +327,22 @@ describe('openAIWhisperProvider — isAvailable', () => {
     expect(openAIWhisperProvider.transcribe).toBe(transcribeWithOpenAI);
   });
 });
+
+describe('getClient — regression: PR-2/QR-218 scope lock', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.OPENAI_API_KEY = 'sk-test';
+    _testing.reset();
+    installOpenAIMock();
+  });
+
+  afterEach(() => {
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('constructs the OpenAI client with zero arguments (Whisper is deliberately still env-only; chat gained config, Whisper did not)', async () => {
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'hi' });
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledWith();
+  });
+});
