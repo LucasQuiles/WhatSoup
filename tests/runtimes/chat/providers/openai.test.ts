@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 
 // Mock the OpenAI SDK before importing the provider
@@ -7,23 +7,35 @@ vi.mock('openai', () => {
   return { default: MockOpenAI };
 });
 
+// Mock the keyring so openaiProviderConfig.apiKeyService tests control the
+// keyring hit/miss outcome deterministically (mirrors tests/lib/api-key-resolver.test.ts).
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(),
+}));
+
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     apiTimeoutMs: 30_000,
   },
 }));
 
+// Hoisted + shared so the resolver's own logger (src/lib/api-key-resolver.ts)
+// and this provider's logger both write to the SAME mock object — needed to
+// assert the QR-104 keyring-miss warning below (mirrors
+// tests/lib/api-key-resolver.test.ts).
+const { mockLog } = vi.hoisted(() => ({
+  mockLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLog,
 }));
 
 import OpenAI from 'openai';
 import { createOpenAIProvider } from '../../../../src/runtimes/chat/providers/openai.ts';
+import { lookupCredential } from '../../../../src/lib/keyring.ts';
+
+const mockedLookupCredential = vi.mocked(lookupCredential);
+const MockOpenAI = vi.mocked(OpenAI);
 
 function makeSuccessResponse(overrides: {
   content?: string;
@@ -59,15 +71,20 @@ function makeRequest(overrides = {}) {
 describe('OpenAI Provider', () => {
   let mockCreate: ReturnType<typeof vi.fn>;
   let provider: ReturnType<typeof createOpenAIProvider>;
+  const originalEnv = { ...process.env };
 
   beforeEach(() => {
     vi.clearAllMocks();
-    const MockOpenAI = vi.mocked(OpenAI);
+    delete process.env.OPENAI_API_KEY;
     mockCreate = vi.fn();
     MockOpenAI.mockImplementation(function (this: Record<string, unknown>) {
       this.chat = { completions: { create: mockCreate } };
     } as unknown as () => OpenAI);
     provider = createOpenAIProvider();
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
   });
 
   // ── Positive tests ────────────────────────────────────────────────────────
@@ -252,5 +269,59 @@ describe('OpenAI Provider', () => {
     }
     expect(thrown?.code).toBe('LLM_TIMEOUT');
     expect(thrown?.code).not.toBe('LLM_UNAVAILABLE');
+  });
+
+  // ── openaiProviderConfig (PR-2/QR-218) ──────────────────────────────────────
+  // Per-instance OpenAI endpoint/key override. No config must stay byte-
+  // identical to today (bare `new OpenAI()`, asserted via the beforeEach's own
+  // construction); resolveApiKey precedence and the QR-104 keyring-miss warn
+  // mirror tests/lib/api-key-resolver.test.ts.
+
+  it('no config: constructs the client with zero arguments (backward-compat lock)', () => {
+    expect(MockOpenAI).toHaveBeenCalledWith();
+  });
+
+  it('openaiProviderConfig.baseUrl maps to the SDK baseURL option', () => {
+    MockOpenAI.mockClear();
+    createOpenAIProvider({ baseUrl: 'https://custom.example.com/v1' });
+    expect(MockOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://custom.example.com/v1' }),
+    );
+  });
+
+  it('openaiProviderConfig.apiKeyService resolves apiKey from the keyring', () => {
+    mockedLookupCredential.mockReturnValue('keyring-secret');
+    MockOpenAI.mockClear();
+    createOpenAIProvider({ apiKeyService: 'my-openai-service' });
+    expect(mockedLookupCredential).toHaveBeenCalledWith('my-openai-service');
+    expect(MockOpenAI).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'keyring-secret' }));
+  });
+
+  it('openaiProviderConfig.apiKeyService keyring miss falls back to OPENAI_API_KEY env and warns (QR-104)', () => {
+    process.env.OPENAI_API_KEY = 'env-fallback-key';
+    mockedLookupCredential.mockReturnValue(null);
+    MockOpenAI.mockClear();
+    createOpenAIProvider({ apiKeyService: 'missing-service' });
+    expect(MockOpenAI).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'env-fallback-key' }));
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      { service: 'missing-service', envVar: 'OPENAI_API_KEY' },
+      expect.stringContaining('keyring lookup missed'),
+    );
+  });
+
+  it('openaiProviderConfig.apiKeyService double-miss (keyring null AND env unset) constructs with apiKey: undefined, not empty string', () => {
+    // OPENAI_API_KEY is already deleted in beforeEach. This is the exact
+    // double-miss the `|| undefined` in openai.ts guards against: resolveApiKey
+    // returns '' here (a visible missing-key condition, no warning per QR-104 —
+    // see tests/lib/api-key-resolver.test.ts), and '' must not reach the SDK as
+    // apiKey: '' (a silent empty Bearer header). It must become undefined so the
+    // SDK re-reads env/throws loudly instead.
+    mockedLookupCredential.mockReturnValue(null);
+    MockOpenAI.mockClear();
+    createOpenAIProvider({ baseUrl: 'https://custom.example.com/v1', apiKeyService: 'custom-openai' });
+    const callArgs = MockOpenAI.mock.calls[0][0] as { baseURL?: string; apiKey?: string };
+    expect(callArgs.baseURL).toBe('https://custom.example.com/v1');
+    expect(callArgs.apiKey).toBeUndefined();
+    expect(mockLog.warn).not.toHaveBeenCalled();
   });
 });
