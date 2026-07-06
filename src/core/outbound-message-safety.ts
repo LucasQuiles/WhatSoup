@@ -60,19 +60,40 @@ export const CLIENT_TEMPORARY_ISSUE_TEXT =
   'I hit a temporary issue and am retrying. I will follow up shortly.';
 
 /**
- * Resolve the audience for an outbound agent send by its target chat. Sends
- * addressed to the configured BOT ERRORS ops channel are `ops` (verbatim
- * diagnostics preserved); everything else defaults to `client` — the
- * conservative direction, since a false-positive redaction on an operator
- * message is low-harm while a leak to a client is high-harm. Shared by every
- * agent free-text send tool (send/reply/edit/poll/media) so none is a bypass.
+ * Resolve the audience for an outbound agent send by its target chat:
+ *   - `ops`      — the configured BOT ERRORS channel (`BOT_ERRORS_JID`);
+ *                  verbatim diagnostics preserved.
+ *   - `internal` — an operator-owned agent-coordination group listed in
+ *                  `WHATSOUP_INTERNAL_JIDS`; the fleet's own vocabulary (home/`~`
+ *                  paths, `.claude/`, hook-event names, bead `Files:` lists) is
+ *                  legitimate content there, so it is NOT scrubbed as a leak.
+ *   - `client`   — everything else; the conservative default, since a false
+ *                  redaction on an operator message is low-harm while a leak to
+ *                  a real client is high-harm.
+ * Shared by every agent free-text send tool (send/reply/edit/poll/media) so none
+ * is a bypass.
  *
- * Reads `process.env.BOT_ERRORS_JID` — the one runtime dependency in this
- * otherwise pure module; kept here so audience policy has a single home.
+ * Reads `process.env.BOT_ERRORS_JID` and `process.env.WHATSOUP_INTERNAL_JIDS` —
+ * the only runtime dependencies in this otherwise pure module; kept here so
+ * audience policy has a single home.
  */
+const EMPTY_JID_SET: ReadonlySet<string> = new Set();
+
+/**
+ * Parse the `WHATSOUP_INTERNAL_JIDS` allow-list (comma-separated). Read per-call
+ * (cheap) so an env change takes effect on the next send without a restart.
+ */
+function internalGroupJids(): ReadonlySet<string> {
+  const raw = process.env['WHATSOUP_INTERNAL_JIDS']?.trim();
+  if (!raw) return EMPTY_JID_SET;
+  return new Set(raw.split(',').map((j) => j.trim()).filter(Boolean));
+}
+
 export function resolveOutboundAudience(chatJid: string): OutboundAudience {
   const opsJid = process.env['BOT_ERRORS_JID']?.trim();
-  return opsJid && chatJid === opsJid ? 'ops' : 'client';
+  if (opsJid && chatJid === opsJid) return 'ops';
+  if (internalGroupJids().has(chatJid)) return 'internal';
+  return 'client';
 }
 
 // --- Internal-artifact shapes (linear / ReDoS-safe; no nested quantifiers) ---
@@ -119,19 +140,41 @@ function maskPhoneLike(value: string): string {
 }
 
 /**
- * Mask operator-local paths and internal runtime identifiers in CLIENT-bound
- * text. Tokens/emails are stripped via the shared provider sanitizer first.
+ * Mask internal artifacts in outbound text, scaled to `audience`:
+ *   - `client`   — full scrub: secrets/emails, then operator paths, runtime
+ *                  identifiers, and tailnet IPs.
+ *   - `internal` — secrets/emails only; operator vocabulary is legitimate
+ *                  content in operator-owned agent groups, so masking it there
+ *                  is over-redaction.
+ *   - `ops`      — verbatim (BOT ERRORS needs raw diagnostics; its outbox
+ *                  redactor scrubs secrets downstream).
+ * Defaults to `client`, so existing single-arg callers are unchanged.
  * Returns the cleaned text plus a categorised (non-sensitive) redaction list.
  */
-export function redactInternalArtifacts(text: string): { text: string; redactions: Redaction[] } {
+export function redactInternalArtifacts(
+  text: string,
+  audience: OutboundAudience = 'client',
+): { text: string; redactions: Redaction[] } {
+  // Ops receives verbatim diagnostics — the BOT ERRORS outbox redactor scrubs
+  // secrets downstream (defense in depth).
+  if (audience === 'ops') return { text, redactions: [] };
+
   const redactions: Redaction[] = [];
   let out = text;
 
+  // Secret/token/email masking applies to client AND internal: WhatsApp is a
+  // third-party transport, so a leaked credential is exposure even in an
+  // operator-owned group.
   const sanitized = sanitizeProviderPreviewText(out);
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-email' });
     out = sanitized;
   }
+
+  // Operator-artifact masking (home/tilde paths, the WhatSoup config tree,
+  // runtime identifiers, tailnet IPs) is CLIENT-only. In internal agent groups
+  // these strings are the coordination vocabulary itself.
+  if (audience === 'internal') return { text: out, redactions };
 
   // Full paths first so a path + dotfile tail collapses to one marker before the
   // standalone-identifier pass can fire inside it. Order: absolute home paths,
@@ -202,20 +245,24 @@ function sanitizeOpsEvidence(text: string): string {
 
 /**
  * Decide how a single outbound message should be handled for its audience.
- * Ops/internal sends are never rewritten. Client sends are diverted when they
- * make a false infra-failure claim, redacted when they leak an internal
- * artifact, and otherwise allowed unchanged.
+ * Ops sends are never rewritten. Internal sends have secrets/emails masked but
+ * keep operator vocabulary. Client sends are diverted when they make a false
+ * infra-failure claim, redacted when they leak an internal artifact, and
+ * otherwise allowed unchanged.
  */
 export function evaluateOutboundMessageSafety(
   input: OutboundMessageSafetyInput,
 ): OutboundMessageSafetyDecision {
   const { text, audience } = input;
 
-  if (audience !== 'client') {
+  // Ops receives verbatim diagnostics.
+  if (audience === 'ops') {
     return { action: 'allow', text };
   }
 
-  if (classifyInfraStatusClaim(text)) {
+  // Only a client send can make a false self-infra-block claim worth diverting;
+  // internal agents legitimately discuss their own tooling state.
+  if (audience === 'client' && classifyInfraStatusClaim(text)) {
     return {
       action: 'divert',
       text: CLIENT_TEMPORARY_ISSUE_TEXT,
@@ -224,7 +271,8 @@ export function evaluateOutboundMessageSafety(
     };
   }
 
-  const { text: redacted, redactions } = redactInternalArtifacts(text);
+  // Client → full scrub; internal → secrets/emails only.
+  const { text: redacted, redactions } = redactInternalArtifacts(text, audience);
   if (redactions.length > 0) {
     return {
       action: 'redact',
