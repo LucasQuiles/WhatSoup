@@ -32,6 +32,7 @@ import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
+import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -1095,6 +1096,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           accessMode: deps.accessMode,
           socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
+          commit: readWhatsoupGitSha(),
+          branch: readWhatsoupGitBranch(),
           pid: process.pid,
           ...(fallbackState
             ? {

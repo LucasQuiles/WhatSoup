@@ -42,6 +42,7 @@ import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-par
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
+import { readWhatsoupGitSha } from '../lib/git-env.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -1102,7 +1103,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           pid: process.pid,
           processStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
           processUptimeSeconds: Math.floor(process.uptime()),
-          codeSha: process.env.WHATSOUP_GIT_SHA ?? process.env.GIT_SHA ?? null,
+          codeSha: readWhatsoupGitSha(),
           nodeVersion: process.version,
           platform: platform(),
           arch: arch(),
