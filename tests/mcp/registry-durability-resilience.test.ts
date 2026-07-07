@@ -165,4 +165,41 @@ describe('ToolRegistry.call durability containment', () => {
     expect(result.content[0].text).toBe('Tool "test_tool" failed: handler exploded');
     expect(mockWarn).toHaveBeenCalledTimes(1);
   });
+
+  it('still returns the uniform deny reply when the deny-path recordToolCall throws (QR-239)', async () => {
+    const throwingDurability = {
+      recordToolCall: () => {
+        throw new Error('SQLITE_BUSY: database is locked');
+      },
+      markToolExecuting: vi.fn(),
+      markToolComplete: vi.fn(),
+    };
+    registry.setDurability(
+      throwingDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine,
+    );
+    registry.register(makeTool({ name: 'sensitive_tool', sensitive: true }));
+
+    const result = await registry.call(
+      'sensitive_tool',
+      { message: 'hi' },
+      makeSession({ actorJid: '15550000001@s.whatsapp.net', conversationKey: '15550000009' }),
+    );
+
+    // Uniform non-disclosing deny reply, unaffected by the durability throw
+    // (no authorizer is installed, so this is a denial regardless).
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Unknown tool: sensitive_tool');
+    // recordToolCall threw, so nothing downstream in the deny-path's
+    // denyId-chained writes can fire.
+    expect(throwingDurability.markToolExecuting).not.toHaveBeenCalled();
+    expect(throwingDurability.markToolComplete).not.toHaveBeenCalled();
+    // Two distinct warns: the R1 denial itself always logs (unrelated to
+    // durability), and the caught durability throw logs a second, separate
+    // warning — unlike the main-path tests above, this deny path does not
+    // start from a clean warn slate.
+    expect(mockWarn).toHaveBeenCalledTimes(2);
+    expect(mockWarn.mock.calls[0][0]).toMatchObject({ tool: 'sensitive_tool' });
+    expect(mockWarn.mock.calls[1][0]).toMatchObject({ tool: 'sensitive_tool' });
+    expect(mockWarn.mock.calls[1][0].err).toBeInstanceOf(Error);
+  });
 });
