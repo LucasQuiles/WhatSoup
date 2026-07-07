@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { WhatSoupError } from '../../../src/errors.ts';
@@ -245,47 +249,15 @@ describe('classifyStreamedProviderFailure — usage-limit banner requires an anc
   });
 
   // ROUND-2 CORRECTION (R1-HIGH-1): a review round proved the ORIGINAL assertion
-  // here (ambient) was itself part of the defect this round fixes. These are bare,
-  // terse, CLI-shaped lines — the same "subject + terminal-credit/allocation clause"
-  // shape as the codebase's own ground-truth corpus (see
-  // tests/runtimes/agent/terminal-limit-detection.test.ts:43-45, e.g. "You're out of
-  // usage credits"). With no surrounding prose, the matched evidence essentially IS
-  // the message, so the shape anchor now classifies these banner. This block is
-  // distinct from the untouched, isUsageLimitMessage-only "residual terminal-
-  // credit/quota branch shapes" describe block further down (~line 819) — that one
-  // exercises only the infra-channel detector and stays green, unmodified.
-  it.each([
-    'You are out of usage; please contact your admin.',
-    'Out of usage — your org has no remaining allocation.',
-    'Out of usage because the org is over its cap.',
-    'Out of usage for the group allocation this cycle.',
-    'The provider account balance is too low.',
-    'Provider account balance is insufficient to continue.',
-    'API account balance is exhausted for this billing cycle.',
-    'Model policy only allows a model that needs a usage credit.',
-  ])('residual-branch usage-limit shapes classify as banner (bare CLI-shaped, no surrounding prose): %j', (message) => {
-    expect(isUsageLimitMessage(message)).toBe(true);
-    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'banner' });
-  });
-
-  // R1-HIGH-1: more bare ground-truth shapes from the same credit/org-allocation
-  // exhaustion family (terminal-limit-detection.test.ts's own ground truth, plus the
-  // structured-token and pre-existing isUsageLimitMessage-only strings from the first
-  // describe block above) that were never exercised against the streaming-channel
-  // classifier before this round. No surrounding prose — the shape anchor must treat
-  // these the same as the residual-branch family above.
-  it.each([
-    "You're out of usage credits",
-    'Your org is out of usage — add funds to continue',
-    'Provider credit balance exhausted.',
-    'API account balance is too low to continue.',
-    'Billing quota exceeded for the provider account.',
-    'insufficient_quota',
-    'billing_error',
-  ])('bare ground-truth credit/quota banners classify as BANNER: %j', (message) => {
-    expect(isUsageLimitMessage(message)).toBe(true);
-    expect(classifyStreamedProviderFailure(message)).toEqual({ kind: 'usage-limit', confidence: 'banner' });
-  });
+  // here (ambient) was itself part of the defect this round fixes. These bare,
+  // terse, CLI-shaped "subject + terminal-credit/allocation clause" strings were
+  // duplicated across two it.each tables here, a third copy in
+  // terminal-limit-detection.test.ts:43-46, and a fourth (isUsageLimitMessage-only)
+  // copy in the 'residual terminal-credit/quota branch shapes' describe further
+  // down — all four drifted independently before this fold (D2, dedup refactor).
+  // Ground truth for both tables now lives in ONE place:
+  // tests/fixtures/failure-taxonomy-corpus.jsonl, consumed by the
+  // 'failure-taxonomy corpus' describe immediately after this one closes.
 
   // R1-HIGH-2: hasLimitResetTimeCue must not act as a standalone anchor — an
   // incidental clock-time clause anywhere in genuine prose must not re-arm
@@ -317,6 +289,74 @@ describe('classifyStreamedProviderFailure — usage-limit banner requires an anc
       confidence: 'banner',
     });
   });
+});
+
+// D2 dedup refactor: SSOT for the bare, CLI-shaped usage-limit/credit-exhaustion
+// ground truth that used to be duplicated across two it.each tables above, a
+// third copy in terminal-limit-detection.test.ts:43-46, and a fourth
+// (isUsageLimitMessage-only) copy in the 'residual terminal-credit/quota branch
+// shapes' describe below — all four drifted independently pre-fold (QR-209b
+// round-2, R1-HIGH-1). One row here is now the only place a given message's
+// expected classification is asserted; every corpus-consuming call site below
+// (this file's describe, the residual-branch describe, and
+// terminal-limit-detection.test.ts) points back to it instead of re-typing it.
+//
+// Add-a-row rule: if the MAX_BANNER_SURROUNDING_WORDS drift-tripwire warns in
+// prod about a newly leaked shape, add the shape as a row here FIRST — it
+// should fail RED against the current classifier — then recalibrate the
+// detector to make it pass. Never edit the detector first and backfill the
+// row after; that would hide the regression the tripwire just caught.
+interface FailureTaxonomyCorpusRow {
+  id: string;
+  message: string;
+  expected_kind: string;
+  expected_confidence: 'banner' | 'ambient' | 'null';
+  source: string;
+  rationale: string;
+}
+
+const FAILURE_TAXONOMY_CORPUS_PATH = join(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '..',
+  '..',
+  'fixtures',
+  'failure-taxonomy-corpus.jsonl',
+);
+
+function loadFailureTaxonomyCorpus(): FailureTaxonomyCorpusRow[] {
+  return readFileSync(FAILURE_TAXONOMY_CORPUS_PATH, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as FailureTaxonomyCorpusRow);
+}
+
+const failureTaxonomyCorpusRows = loadFailureTaxonomyCorpus();
+
+describe('failure-taxonomy corpus (banner/ambient/null ground truth, QR-209b R1-HIGH-1)', () => {
+  it('contains the expected number of rows', () => {
+    expect(failureTaxonomyCorpusRows.length).toBeGreaterThanOrEqual(15);
+  });
+
+  for (const row of failureTaxonomyCorpusRows) {
+    it(`${row.id}: ${JSON.stringify(row.message)} -> ${row.expected_kind}/${row.expected_confidence}`, () => {
+      const result = classifyStreamedProviderFailure(row.message);
+      if (row.expected_confidence === 'null') {
+        expect(result, `row ${row.id} expects no classification`).toBeNull();
+      } else {
+        expect(result).toEqual({ kind: row.expected_kind, confidence: row.expected_confidence });
+      }
+      // kind === 'usage-limit' is only reachable via classifyProviderFailure's
+      // isUsageLimitMessage branch (see classifyProviderFailure in
+      // failure-taxonomy.ts: it returns 'usage-limit' only when isUsageLimitMessage
+      // matched), so asserting it here directly RE-PROVES every
+      // isUsageLimitMessage(true) case the folded tables used to assert — not
+      // merely an implied consequence of the line above.
+      if (row.expected_kind === 'usage-limit') {
+        expect(isUsageLimitMessage(row.message), `row ${row.id} must also satisfy isUsageLimitMessage`).toBe(true);
+      }
+    });
+  }
 });
 
 describe('classifyStreamedProviderFailure — STREAMED_BANNER_OPENERS corpus gaps (QR-209b F2)', () => {
@@ -898,31 +938,23 @@ describe('canonical structured error-token classification', () => {
 });
 
 describe('isUsageLimitMessage — residual terminal-credit/quota branch shapes', () => {
+  // D2 dedup refactor: this describe previously also asserted
+  // isUsageLimitMessage(true) for 8 strings ('Model policy only allows a model
+  // that needs a usage credit.', the 4 "out of usage" + org/admin co-word
+  // strings, and the 3 "account balance" + exhaustion co-word strings) — every
+  // one of those 8 is byte-identical to a tests/fixtures/failure-taxonomy-corpus.jsonl
+  // row already covered by the 'failure-taxonomy corpus' describe above, whose
+  // per-row check asserts isUsageLimitMessage(true) directly (not just kind)
+  // for every row with expected_kind: 'usage-limit'. Removed here as pure
+  // duplication, not a coverage loss — see task-d2-report.md row-count parity.
   it('classifies a "% of your" plan-usage warning as a usage limit', () => {
     // hasApproachingLimitWarning short-circuits on "% of your" before the
     // anchored-name loop, but isProviderCreditBalanceLimitMessage runs first and
     // this phrasing alone is not credit-limit terminal — so the message stays a
     // non-terminal warning. The "% of your" detector itself returns true here.
+    // This negative case is NOT in the corpus (different shape than the schema's
+    // message->kind/confidence rows) and stays inline.
     expect(isUsageLimitMessage("You've used 85% of your weekly limit.")).toBe(false);
-  });
-
-  it('treats a model-policy usage-credit gate as terminal usage-limit', () => {
-    expect(
-      isUsageLimitMessage('Model policy only allows a model that needs a usage credit.'),
-    ).toBe(true);
-  });
-
-  it('treats "out of usage" with each org/admin co-word as a credit limit', () => {
-    expect(isUsageLimitMessage('You are out of usage; please contact your admin.')).toBe(true);
-    expect(isUsageLimitMessage('Out of usage — your org has no remaining allocation.')).toBe(true);
-    expect(isUsageLimitMessage('Out of usage because the org is over its cap.')).toBe(true);
-    expect(isUsageLimitMessage('Out of usage for the group allocation this cycle.')).toBe(true);
-  });
-
-  it('treats "account balance" with each exhaustion co-word as a credit limit', () => {
-    expect(isUsageLimitMessage('The provider account balance is too low.')).toBe(true);
-    expect(isUsageLimitMessage('Provider account balance is insufficient to continue.')).toBe(true);
-    expect(isUsageLimitMessage('API account balance is exhausted for this billing cycle.')).toBe(true);
   });
 });
 
