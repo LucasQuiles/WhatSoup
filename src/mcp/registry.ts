@@ -316,16 +316,27 @@ export class ToolRegistry {
       );
       // Preserve the forensic trail the pre-R1 in-handler denial left in the
       // durable ledger (F07): a denied attempt is still an attributable event.
+      // As with the main-path writes below, these are raw synchronous
+      // node:sqlite calls with no internal error handling — a throw here
+      // (SQLITE_BUSY/FULL) must degrade to "no forensic record", never let
+      // the denial itself throw past the uniform reply below. The three
+      // calls are wrapped together (not individually) because they're
+      // chained through denyId: a throw from recordToolCall leaves no id to
+      // pass to the other two anyway.
       const denyConvKey = session.conversationKey ?? '';
       if (this.durability && denyConvKey) {
-        const denyId = this.durability.recordToolCall(
-          denyConvKey,
-          name,
-          JSON.stringify(params),
-          tool.replayPolicy ?? 'unsafe',
-        );
-        this.durability.markToolExecuting(denyId);
-        this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)');
+        try {
+          const denyId = this.durability.recordToolCall(
+            denyConvKey,
+            name,
+            JSON.stringify(params),
+            tool.replayPolicy ?? 'unsafe',
+          );
+          this.durability.markToolExecuting(denyId);
+          this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)');
+        } catch (err) {
+          log.warn({ tool: name, err }, 'durability deny-path record failed; proceeding without forensic telemetry');
+        }
       }
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
