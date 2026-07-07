@@ -946,7 +946,10 @@ describe('isUsageLimitMessage — residual terminal-credit/quota branch shapes',
   // row already covered by the 'failure-taxonomy corpus' describe above, whose
   // per-row check asserts isUsageLimitMessage(true) directly (not just kind)
   // for every row with expected_kind: 'usage-limit'. Removed here as pure
-  // duplication, not a coverage loss — see task-d2-report.md row-count parity.
+  // duplication, not a coverage loss: every co-word branch those 8 strings
+  // exercised in isProviderCreditBalanceLimitMessage ('out of usage' + add
+  // funds/contact your admin/your org/org is/group; 'account balance' + too
+  // low/insufficient/exhausted) is still hit by a corpus row above.
   it('classifies a "% of your" plan-usage warning as a usage limit', () => {
     // hasApproachingLimitWarning short-circuits on "% of your" before the
     // anchored-name loop, but isProviderCreditBalanceLimitMessage runs first and
