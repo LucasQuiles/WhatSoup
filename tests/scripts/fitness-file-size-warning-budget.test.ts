@@ -12,8 +12,54 @@
  * EXPECTED_FILE_SIZE_WARNING_FILES and add a baseline entry to
  * .claude/fitness/baseline.json).
  */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, it, expect } from 'vitest';
 import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+
+interface FileSizeMeasurement {
+  filePath: string;
+  lines: number;
+  maxLines: number;
+}
+
+interface FitnessBaseline {
+  schemaVersion: number;
+  generatedAt: string;
+  rules: Record<string, { measurements: FileSizeMeasurement[] }>;
+}
+
+function readBaseline(): FitnessBaseline {
+  return JSON.parse(
+    readFileSync(resolve(repoRoot, '.claude/fitness/baseline.json'), 'utf8'),
+  ) as FitnessBaseline;
+}
+
+// Mirrors wc -l (count of newline characters), not content.split('\n').length,
+// which would over-count by one for any file ending in a trailing newline.
+function countLines(absolutePath: string): number {
+  const content = readFileSync(absolutePath, 'utf8');
+  return (content.match(/\n/g) ?? []).length;
+}
+
+const REQUIRED_BUMP_HINT =
+  'consider docs/architecture/fitness-taxonomy.md twin-handler slicing before bumping runtime.ts';
+
+function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: number): string {
+  return [
+    `${measurement.filePath} grew to ${actualLines} lines, exceeding the recorded ceiling of ` +
+      `${measurement.maxLines} in .claude/fitness/baseline.json.`,
+    'To bump this ceiling intentionally, edit BOTH twins together:',
+    '  1. .claude/fitness/baseline.json -- set the "lines" and "maxLines" fields for this' +
+      ' measurement to the freshly measured wc -l count.',
+    '  2. docs/architecture/fitness-taxonomy.md -- update the Ratchet Baseline table entry to match.',
+    `Before bumping, ${REQUIRED_BUMP_HINT}.`,
+  ].join('\n');
+}
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'src/runtimes/agent/runtime.ts',
@@ -56,4 +102,52 @@ describe('arch.file-size warning budget', () => {
     // Full-repo ESLint run regularly exceeds the default 10s under coverage
     // instrumentation or CI load.
   }, 120_000);
+
+  it('the ceiling-bump failure message documents the two-twin bump ceremony', () => {
+    // This pins requirement wording so the remediation text stays intact even
+    // if the growth-ceiling assertion below never fails in CI.
+    const message = ceilingBumpMessage(
+      { filePath: 'src/runtimes/agent/runtime.ts', lines: 1, maxLines: 1 },
+      2,
+    );
+
+    expect(message).toContain('.claude/fitness/baseline.json');
+    expect(message).toContain('docs/architecture/fitness-taxonomy.md');
+    expect(message).toContain(REQUIRED_BUMP_HINT);
+  });
+
+  it('grandfathered arch.file-size files must not grow past their recorded ceiling', () => {
+    const baseline = readBaseline();
+    const measurements = baseline.rules['arch.file-size']?.measurements ?? [];
+    expect(measurements.length).toBeGreaterThan(0);
+
+    const shrinkWarnings: string[] = [];
+
+    for (const measurement of measurements) {
+      expect(
+        typeof measurement.maxLines,
+        `${measurement.filePath} has no recorded maxLines ceiling in .claude/fitness/baseline.json`,
+      ).toBe('number');
+
+      const actualLines = countLines(resolve(repoRoot, measurement.filePath));
+
+      expect(actualLines, ceilingBumpMessage(measurement, actualLines)).toBeLessThanOrEqual(
+        measurement.maxLines,
+      );
+
+      if (actualLines < measurement.maxLines) {
+        shrinkWarnings.push(
+          `${measurement.filePath}: shrank to ${actualLines} lines (recorded ceiling ` +
+            `${measurement.maxLines}); consider lowering the ceiling in .claude/fitness/baseline.json.`,
+        );
+      }
+    }
+
+    if (shrinkWarnings.length > 0) {
+      // Non-blocking: shrinkage is always allowed and never auto-lowers the
+      // recorded ceiling. This is a nudge for a human to bump it down, not a
+      // failure.
+      console.warn(`arch.file-size ceiling WARN (non-blocking):\n${shrinkWarnings.join('\n')}`);
+    }
+  });
 });
