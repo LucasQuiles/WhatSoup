@@ -29,9 +29,11 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
 | `arch.ring-boundaries` | ast | warn | eslint | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. |
 
-† `arch.file-size` severity is `block` for the **hook, guard, and ci rings** (enforced via `.claude/fitness/baseline.json` ratchet).
+† `arch.file-size` severity is `block` for the **hook, guard, and ci rings** (enforced via `.claude/fitness/baseline.json` ratchet:
+  a per-file `maxLines` growth ceiling, checked against each file's actual line count).
   The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
-  The warning count must not grow; see `tests/scripts/fitness-file-size-warning-budget.test.ts`.
+  The ESLint warning identity set must not change, and the recorded ceilings must not be exceeded; both are
+  enforced by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
 
 ## Invariant
 
@@ -85,10 +87,30 @@ Ratcheted rules are grandfathered through `.claude/fitness/baseline.json` (measu
 or `.claude/fitness/boundary-baseline.json` (import violations).
 Current baseline measurements:
 
-| rule | path | lines |
-|------|------|-------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6745 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 7504 |
+| rule | path | lines | ceiling |
+|------|------|-------|---------|
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 9419 | 9419 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 12556 | 12556 |
+
+The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
+growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's
+actual current line count (equivalent to `wc -l`) at test time and fails if it exceeds the recorded
+ceiling — this blocks `coverage:check` and `verify:release` (both run the full test suite), so growth
+past a grandfathered file's ceiling is no longer silently green. Shrinking below the ceiling never
+fails and never auto-lowers it; it only prints a non-blocking WARN suggesting a human lower it.
+
+### Bumping a ceiling (two-twin ceremony)
+
+A ceiling bump is a conscious, reviewed act, not an automatic side effect of a file growing. To bump
+one:
+
+1. Measure the file's real current line count on the branch that needs the bump (`wc -l <path>`).
+2. Edit **both** twins to that same number — a bump that touches only one is incomplete:
+   - `.claude/fitness/baseline.json` — update that measurement's `lines` and `maxLines`.
+   - This table — update the matching row.
+3. Before bumping, consider docs/architecture/fitness-taxonomy.md twin-handler slicing before bumping runtime.ts — i.e. whether the file can be split instead of grown further. This applies
+   most to `src/runtimes/agent/runtime.ts`, the largest grandfathered file and the original source
+   of this ratchet (see the rule's `source` evidence in the registry).
 
 `arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
 Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
@@ -121,14 +143,15 @@ reasons:
 1. **Visibility without blocking.** Known violations (notably the `AgentRuntime`
    god-class and several oversized files) surface as warnings rather than breaking
    CI before they are refactored.
-2. **Advisory mirror, no blocking ratchet guard today** (`meta.no-redundant-gates`).
-   The eslint `max-lines` copy of `arch.file-size` is warn-only because it mirrors
-   a guard/ci enforcement surface — but that blocking ratchet guard does not yet
-   exist. The registry marks the rule `block` in the `guard` and `ci` rings; the
-   baseline file (`.claude/fitness/baseline.json`) is present, but no guard script
-   reads it and enforces a line-count ceiling. Whether to implement the blocking
-   guard or demote the rule's severity/rings is an **open decision** (needs explicit
-   operator approval before implementation).
+2. **Advisory mirror; the blocking ratchet lives beside it, not inside ESLint**
+   (`meta.no-redundant-gates`). The eslint `max-lines` copy of `arch.file-size`
+   stays warn-only — it is a visibility mirror, not the enforcement surface. The
+   registry's `block` severity for the `guard` and `ci` rings is enforced by a
+   per-file `maxLines` growth ceiling recorded in `.claude/fitness/baseline.json`
+   and checked by `tests/scripts/fitness-file-size-warning-budget.test.ts`, which
+   blocks `coverage:check` and `verify:release` on growth past a grandfathered
+   file's recorded ceiling. See the Ratchet Baseline section above for the
+   current ceilings and the two-twin bump ceremony.
 
 Because the ring is warn-only, the known violations are intentionally **not**
 baseline-suppressed here — they stay visible in the lint output. Local runs use

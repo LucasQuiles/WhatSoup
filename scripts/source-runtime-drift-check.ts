@@ -58,6 +58,7 @@ interface CheckOptions {
   cwd: string;
   manifestPath: string;
   json: boolean;
+  suggest: boolean;
 }
 
 const DEFAULT_MANIFEST = 'deploy/source-runtime-manifest.json';
@@ -353,7 +354,7 @@ function dedupeIssues(issues: SourceRuntimeIssue[]): SourceRuntimeIssue[] {
 }
 
 function parseArgs(argv: string[], cwd: string): CheckOptions {
-  const options: CheckOptions = { cwd, manifestPath: DEFAULT_MANIFEST, json: false };
+  const options: CheckOptions = { cwd, manifestPath: DEFAULT_MANIFEST, json: false, suggest: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = (): string => {
@@ -364,13 +365,32 @@ function parseArgs(argv: string[], cwd: string): CheckOptions {
     };
     if (arg === '--manifest') options.manifestPath = next();
     else if (arg === '--json') options.json = true;
+    else if (arg === '--suggest') options.suggest = true;
     else if (arg === '--help' || arg === '-h') {
-      throw new Error('Usage: node --experimental-strip-types scripts/source-runtime-drift-check.ts [--manifest deploy/source-runtime-manifest.json] [--json]');
+      throw new Error('Usage: node --experimental-strip-types scripts/source-runtime-drift-check.ts [--manifest deploy/source-runtime-manifest.json] [--json] [--suggest]');
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
   return options;
+}
+
+const SUGGEST_BANNER = '=== --suggest: review the diff before pasting — corrected hashes are printed only, the manifest is never written ===';
+
+// Prints copy-pasteable "path"/"sha256" manifest lines for every entry whose
+// pinned hash no longer matches its on-disk file. Read-only: never touches
+// the manifest file (blessed-hash philosophy — a human reviews and pastes).
+function printSuggestions(issues: SourceRuntimeIssue[]): void {
+  const driftedEntries = issues.filter(
+    (item): item is SourceRuntimeIssue & { path: string; actual: string } =>
+      item.kind === 'file-sha256-drift' && typeof item.path === 'string' && typeof item.actual === 'string',
+  );
+  if (driftedEntries.length === 0) return;
+  console.log(SUGGEST_BANNER);
+  for (const entry of driftedEntries) {
+    console.log(`  "path": "${entry.path}",`);
+    console.log(`  "sha256": "${entry.actual}",`);
+  }
 }
 
 export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd()): SourceRuntimeIssue[] {
@@ -390,9 +410,13 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
     console.log('source runtime drift check passed');
   } else {
     for (const current of issues) {
-      console.error(`FAIL ${current.severity} ${current.kind}: ${current.message}`);
+      const suggestHint = current.kind === 'file-sha256-drift' && !options.suggest
+        ? ' (run with --suggest to print the corrected sha256)'
+        : '';
+      console.error(`FAIL ${current.severity} ${current.kind}: ${current.message}${suggestHint}`);
     }
   }
+  if (options.suggest && !options.json) printSuggestions(issues);
   if (issues.length > 0) process.exitCode = 1;
   return issues;
 }
