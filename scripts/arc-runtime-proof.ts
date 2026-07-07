@@ -199,12 +199,12 @@ export function run(
   argv: string[] = process.argv.slice(2),
   cwd = process.cwd(),
   _env: NodeJS.ProcessEnv = process.env,
-): Record<string, unknown> | null {
+): 0 | 1 {
   try {
     const args = parseArgs(argv, cwd);
     if (args.help) {
       console.log(usage());
-      return null;
+      return 0;
     }
     const proof = buildRuntimeProof(args);
     const text = `${JSON.stringify(proof, null, 2)}\n`;
@@ -213,14 +213,13 @@ export function run(
     assertNoSecretLike(diagnostic, 'runtime proof diagnostics');
     writeJsonAtomic(args.out, text);
     console.log(diagnostic);
-    return proof;
+    return 0;
   } catch (err) {
     console.error(`arc runtime proof failed: ${(err as Error).message}`);
-    process.exitCode = 1;
-    return null;
+    return 1;
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  run();
+  process.exitCode = run();
 }

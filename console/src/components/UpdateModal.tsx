@@ -39,6 +39,12 @@ interface UpdateModalProps {
   onClose: () => void
   currentSha: string
   lines: LineInstance[]
+  /** Fleet-restart poll interval (ms). Production default: 2000. */
+  pollIntervalMs?: number
+  /** Fleet-down fallback timeout (ms) before forcing restart-instances. Production default: 60_000. */
+  fleetDownTimeoutMs?: number
+  /** Auto-close delay (ms) after a successful restart. Production default: 2200. */
+  autoCloseMs?: number
 }
 
 type StepStatus = 'pending' | 'running' | 'done' | 'skip' | 'error'
@@ -152,7 +158,15 @@ function buildToggles(lines: LineInstance[]): Record<string, boolean> {
   return toggles
 }
 
-const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines }) => {
+const UpdateModal: FC<UpdateModalProps> = ({
+  open,
+  onClose,
+  currentSha,
+  lines,
+  pollIntervalMs = 2000,
+  fleetDownTimeoutMs = 60_000,
+  autoCloseMs = 2200,
+}) => {
   const queryClient = useQueryClient()
   const [state, dispatch] = useReducer(reducer, undefined, () => ({
     phase: 'confirm' as Phase,
@@ -206,7 +220,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       } catch {
         seenDown = true
       }
-    }, 2000)
+    }, pollIntervalMs)
     pollRef.current = poll
 
     timeoutRef.current = setTimeout(() => {
@@ -215,8 +229,8 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       timeoutRef.current = null
       queryClient.invalidateQueries()
       dispatch({ type: 'setPhase', phase: 'restart-instances' })
-    }, 60_000)
-  }, [currentSha, queryClient])
+    }, fleetDownTimeoutMs)
+  }, [currentSha, queryClient, pollIntervalMs, fleetDownTimeoutMs])
 
   const startUpdate = useCallback(() => {
     clearPendingUpdate()
@@ -336,9 +350,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       dispatch({ type: 'setPhase', phase: 'done' })
       setTimeout(() => {
         onClose()
-      }, 2200)
+      }, autoCloseMs)
     }
-  }, [instanceToggles, onClose])
+  }, [instanceToggles, onClose, autoCloseMs])
 
   // handleClose aborts the in-flight fetch stream and clears any pending
   // poll/timeout, then delegates to onClose. Wired as the single Modal onClose
