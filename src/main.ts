@@ -657,6 +657,7 @@ connectionManager.on('decryptionFailure', (data) => {
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,
+  scheduleAllowedRoot: process.env.WHATSOUP_SCHEDULE_ROOT,
   connectionManager,
   startedAt,
   durability,

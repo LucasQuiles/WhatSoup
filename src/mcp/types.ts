@@ -1,7 +1,7 @@
-import { realpathSync } from 'node:fs';
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
 export type TargetMode = 'injected' | 'caller-supplied';
@@ -119,32 +119,4 @@ export function assertConversationAccess(
   if (conversationKey !== session.conversationKey) {
     throw new Error(`${label} belongs to a different conversation`);
   }
-}
-
-/**
- * Check whether a resolved filesystem path is within the session's allowedRoot.
- *
- * Both the resolved path and the allowedRoot are canonicalized via realpathSync
- * before comparison so this works correctly on macOS, where /var/folders is a
- * symlink to /private/var/folders (and the same for /tmp).
- *
- * Fail-closed: returns false when allowedRoot is undefined. A session with no
- * configured root must not be able to read arbitrary host files (audit #1094);
- * every file-capable session is required to set an explicit allowedRoot.
- */
-export function isPathWithinAllowedRoot(
-  resolvedPath: string,
-  allowedRoot: string | undefined,
-): boolean {
-  if (!allowedRoot) return false;
-  let canonicalAllowedRoot: string;
-  try {
-    canonicalAllowedRoot = realpathSync(allowedRoot);
-  } catch {
-    canonicalAllowedRoot = allowedRoot;
-  }
-  return (
-    resolvedPath === canonicalAllowedRoot ||
-    resolvedPath.startsWith(canonicalAllowedRoot + "/")
-  );
 }
