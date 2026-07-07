@@ -431,3 +431,133 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
     expect(priv().perChatSocketResources.get(lidKey)).toBeUndefined();
   });
 });
+
+// ── QR-247 HARDENING: per-session provider keying + choke point (F2/F3/F4/#14) ──
+
+describe('F-STICKY-ACTOR hardening: wirePerChatActorSocket keys on the ACTUAL provider (QR-247 F2/#14)', () => {
+  const CHAT = 'group-route@g.us';
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    perChatSocketResources: Map<string, { socketServer: { stop: ReturnType<typeof vi.fn> }; socketPath: string; cfgPath: string }>;
+    createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
+    wirePerChatActorSocket(chatJid: string, provider: string):
+      | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
+      | undefined;
+  };
+  let runtime: AgentRuntime;
+  let mapKey: string;
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    mapKey = priv().resolvePerChatMapKey(CHAT);
+  });
+
+  // Spy the socket factory so the create/teardown DECISION is tested without real sockets/fs.
+  function spyCreate(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(runtime as unknown as { createPerChatActorSocket: Priv['createPerChatActorSocket'] }, 'createPerChatActorSocket')
+      .mockImplementation((mk: string) => {
+        priv().perChatSocketResources.set(mk, { socketServer: { stop: vi.fn() }, socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` });
+        return { socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` };
+      });
+  }
+
+  it('claude-cli session -> wires a per-chat actor socket + returns the strict mcp override', () => {
+    const create = spyCreate();
+    const override = priv().wirePerChatActorSocket(CHAT, 'claude-cli');
+    expect(create).toHaveBeenCalledWith(mapKey, CHAT);
+    expect(priv().perChatSocketResources.has(mapKey)).toBe(true);
+    expect(override).toEqual({
+      mcpSocketPath: `/tmp/${mapKey}.sock`,
+      providerConfigOverride: { mcpConfig: [`/tmp/${mapKey}.mcp.json`], strictMcpConfig: true },
+    });
+  });
+
+  it('non-claude session (route/fallback divergence) -> NO socket, override undefined (F2: keyed on actual provider, not instance-global claude-cli)', () => {
+    const create = spyCreate();
+    const override = priv().wirePerChatActorSocket(CHAT, 'codex-cli');
+    expect(override).toBeUndefined();
+    expect(create).not.toHaveBeenCalled();
+    expect(priv().perChatSocketResources.has(mapKey)).toBe(false);
+  });
+
+  it('claude-cli -> non-claude fallback TEARS DOWN the per-chat socket (stop + remove) so the socket server is not leaked when the chat moves to the shared global socket (#14)', () => {
+    const stop = vi.fn();
+    // Pre-seed as if a claude-cli session had already wired its socket.
+    priv().perChatSocketResources.set(mapKey, { socketServer: { stop }, socketPath: `/tmp/${mapKey}.sock`, cfgPath: `/tmp/${mapKey}.mcp.json` });
+    const override = priv().wirePerChatActorSocket(CHAT, 'gemini-cli');
+    expect(override).toBeUndefined();
+    expect(stop).toHaveBeenCalled();
+    expect(priv().perChatSocketResources.has(mapKey)).toBe(false);
+  });
+
+  it('sandboxPerChat and single scope are unaffected (helper returns undefined, no socket)', () => {
+    const sandbox = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
+    const single = new AgentRuntime(makeDb(), makeMessenger(), 'test', {});
+    expect((sandbox as unknown as Priv).wirePerChatActorSocket(CHAT, 'claude-cli')).toBeUndefined();
+    expect((single as unknown as Priv).wirePerChatActorSocket(CHAT, 'claude-cli')).toBeUndefined();
+    expect((sandbox as unknown as Priv).perChatSocketResources.has((sandbox as unknown as Priv).resolvePerChatMapKey(CHAT))).toBe(false);
+  });
+});
+
+describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring choke point (QR-247 F2/F3/F4)', () => {
+  const CHAT = 'dm-choke@s.whatsapp.net';
+  type Priv = {
+    resolvePerChatMapKey(c: string): string;
+    perChatSocketResources: Map<string, unknown>;
+    createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string };
+    wirePerChatActorSocket(chatJid: string, provider: string): unknown;
+    createSessionManager(opts: Record<string, unknown>): unknown;
+  };
+  let runtime: AgentRuntime;
+  let mapKey: string;
+  const priv = (): Priv => runtime as unknown as Priv;
+  const baseOpts = () => ({ chatJid: CHAT, cwd: '/tmp/choke', onEvent: () => {}, onCrash: () => {}, notifyUser: () => {} });
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    mapKey = priv().resolvePerChatMapKey(CHAT);
+  });
+
+  it('createSessionManager itself wires the per-chat socket (moved off the ensureSessionAndQueueSync call site so resume/fallback are covered too)', () => {
+    const create = vi.spyOn(runtime as unknown as { createPerChatActorSocket: Priv['createPerChatActorSocket'] }, 'createPerChatActorSocket')
+      .mockImplementation((mk: string) => {
+        (priv().perChatSocketResources as Map<string, unknown>).set(mk, { socketServer: { stop: vi.fn() }, socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` });
+        return { socketPath: `/tmp/${mk}.sock`, cfgPath: `/tmp/${mk}.mcp.json` };
+      });
+    priv().createSessionManager(baseOpts());
+    expect(create).toHaveBeenCalledWith(mapKey, CHAT);
+    expect(priv().perChatSocketResources.has(mapKey)).toBe(true);
+  });
+
+  it('fail-closed choke-point guard: an eligible per_chat claude-cli spawn that wires NO socket throws instead of silently using the shared global socket', () => {
+    vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
+      .mockReturnValue(undefined); // simulate a future path that bypasses wiring
+    expect(() => priv().createSessionManager(baseOpts())).toThrow(/QR-247|actor-bound socket/i);
+  });
+});
+
+describe('F-STICKY-ACTOR hardening: race-exposure warning covers claude-primary + cli-fallback (QR-247 F11)', () => {
+  type Priv = { agentFallbacks: Array<{ provider: string; model?: string }>; perChatActorRaceExposed(): boolean; exposedCliProviders(): string[] };
+  const priv = (r: AgentRuntime): Priv => r as unknown as Priv;
+
+  it('claude-cli primary + a codex-cli fallback -> EXPOSED (the case the old endsWith(-cli) && !==claude-cli check silently missed)', () => {
+    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    priv(r).agentFallbacks = [{ provider: 'codex-cli' }];
+    expect(priv(r).exposedCliProviders()).toEqual(['codex-cli']);
+    expect(priv(r).perChatActorRaceExposed()).toBe(true);
+  });
+
+  it('claude-cli primary + NO fallbacks -> not exposed (fully covered by the per-chat socket)', () => {
+    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    priv(r).agentFallbacks = [];
+    expect(priv(r).exposedCliProviders()).toEqual([]);
+    expect(priv(r).perChatActorRaceExposed()).toBe(false);
+  });
+
+  it('sandboxPerChat is unaffected (its own per-workspace socket) even with a cli fallback', () => {
+    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
+    priv(r).agentFallbacks = [{ provider: 'gemini-cli' }];
+    expect(priv(r).perChatActorRaceExposed()).toBe(false);
+  });
+});
