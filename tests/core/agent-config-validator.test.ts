@@ -849,7 +849,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('agentOptions.providerConfig.apiKeyService');
-    expect(result?.message).toContain('not a known keyring service');
+    expect(result?.message).toContain('not a valid provider service');
   });
 
   it('rejects providerConfig.apiKeyService set without baseUrl', () => {
@@ -919,7 +919,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
-    expect(result?.message).toContain('not a known keyring service');
+    expect(result?.message).toContain('not a valid provider service');
   });
 
   it('rejects chatOptions.openaiProviderConfig.apiKeyService set without baseUrl', () => {

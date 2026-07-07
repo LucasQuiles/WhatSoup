@@ -17,7 +17,7 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { SERVICE_ENV_MAP } from '../lib/provider-key-service.ts';
+import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
@@ -394,8 +394,13 @@ export function validateInstanceConfig(
  * agentOptions.providerConfig (openai-api/anthropic-api/opencode-cli) and
  * chatOptions.openaiProviderConfig (chat OpenAI provider, QR-218 PR-2):
  * baseUrl must be a non-empty, parseable http(s) URL; apiKeyService must be a
- * non-empty string naming a service SERVICE_ENV_MAP knows, and is rejected
- * when set without a baseUrl (it would authenticate no endpoint). `path` is
+ * non-empty string naming a service PROVIDER_API_KEY_SERVICES knows, and is
+ * rejected when set without a baseUrl (it would authenticate no endpoint).
+ * apiKeyService is intentionally checked against PROVIDER_API_KEY_SERVICES
+ * (an inference-provider-only subset of SERVICE_ENV_MAP), not SERVICE_ENV_MAP
+ * itself — SERVICE_ENV_MAP also holds non-provider secrets (pinecone,
+ * elevenlabs, the health token) that a BYOK config must never be able to name
+ * alongside an operator-supplied baseUrl. `path` is
  * the caller's dotted field prefix (e.g. "agentOptions.providerConfig" or
  * "chatOptions.openaiProviderConfig") so error fields stay call-site-accurate.
  * AGENT-ONLY rules (budget shape, opencode-cli baseUrl-needs-model) are NOT
@@ -433,9 +438,13 @@ function validateProviderConfigShape(
   }
 
   // apiKeyService: names the keyring service whose key authenticates a
-  // custom endpoint. It must be a service SERVICE_ENV_MAP knows, and is only
-  // meaningful alongside baseUrl: without one there is no endpoint for the
-  // key to authenticate, so the setting would be silently inert — reject.
+  // custom endpoint. It must be an inference-provider service (SECURITY: NOT
+  // any SERVICE_ENV_MAP entry — pinecone/elevenlabs/the health token are
+  // non-provider secrets that must never be namable here, or a BYOK config
+  // could exfiltrate one to an operator-supplied baseUrl as a Bearer token),
+  // and is only meaningful alongside baseUrl: without one there is no
+  // endpoint for the key to authenticate, so the setting would be silently
+  // inert — reject.
   if (pc['apiKeyService'] !== undefined) {
     if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
       return err(
@@ -443,10 +452,10 @@ function validateProviderConfigShape(
         `${path}.apiKeyService must be a non-empty string when provided`,
       );
     }
-    if (SERVICE_ENV_MAP[pc['apiKeyService']] === undefined) {
+    if (!PROVIDER_API_KEY_SERVICES.has(pc['apiKeyService'])) {
       return err(
         `${path}.apiKeyService`,
-        `${path}.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a known keyring service — valid services: ${Object.keys(SERVICE_ENV_MAP).join(', ')}`,
+        `${path}.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a valid provider service — valid provider services: ${Array.from(PROVIDER_API_KEY_SERVICES).join(', ')}`,
       );
     }
     if (pc['baseUrl'] === undefined) {
@@ -765,9 +774,9 @@ function validateAgentOptions(
       }
     }
     // Shared shape rules (baseUrl format+scheme; apiKeyService format,
-    // SERVICE_ENV_MAP membership, and apiKeyService-requires-baseUrl) — see
-    // validateProviderConfigShape for the single source of truth, also used
-    // by chatOptions.openaiProviderConfig.
+    // PROVIDER_API_KEY_SERVICES membership, and apiKeyService-requires-baseUrl)
+    // — see validateProviderConfigShape for the single source of truth, also
+    // used by chatOptions.openaiProviderConfig.
     const shapeErr = validateProviderConfigShape(pc, 'agentOptions.providerConfig');
     if (shapeErr) return shapeErr;
     // AGENT-ONLY: for opencode-cli, baseUrl is written into opencode.json as a

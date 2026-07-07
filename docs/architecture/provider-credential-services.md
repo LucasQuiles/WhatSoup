@@ -8,12 +8,18 @@ this note is for maintainers changing the surface itself.
 
 ## The single source of truth
 
-`SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`) is the one code-enforced
-"known service" list. Its direct consumers:
+`src/lib/provider-key-service.ts` holds two code-enforced lists with distinct
+roles. `SERVICE_ENV_MAP` maps every known service to its env var (keyring/env
+resolution + opencode interpolation). `PROVIDER_API_KEY_SERVICES` is the
+inference-provider **subset** that a `providerConfig.apiKeyService` may name —
+the non-provider secrets in `SERVICE_ENV_MAP` (health token, Pinecone,
+ElevenLabs) are deliberately excluded so a config cannot name one and
+exfiltrate it via a custom `baseUrl` (QR-248). Direct consumers of
+`SERVICE_ENV_MAP`:
 
 | Consumer | Effect |
 |---|---|
-| `src/core/agent-config-validator.ts` (`apiKeyService` rule) | unknown service → config rejected at create/update and at load/discovery |
+| `src/core/agent-config-validator.ts` (`apiKeyService` rule) | a service not in `PROVIDER_API_KEY_SERVICES` (non-provider or unknown) → config rejected at create/update and at load/discovery |
 | `src/core/provider-mcp-config.ts` | service → `{env:VAR}` interpolation in the generated opencode.json (key value never lands on disk) |
 | `src/lib/keyring.ts` (`lookupCredential`) | service → mapped env var consulted before the platform keyring |
 
@@ -23,8 +29,13 @@ A service is not a provider ID: `nvidia` would be reached as
 
 ## Adding a service — the full checklist
 
-1. **Map it.** Add `<service>: '<ENV_VAR>'` to `SERVICE_ENV_MAP`. This alone
-   wires validation, opencode env interpolation, and keyring lookup.
+1. **Map it.** Add `<service>: '<ENV_VAR>'` to `SERVICE_ENV_MAP` — wires
+   opencode env interpolation and keyring lookup.
+1b. **Allowlist it (inference providers only).** If the service is a real LLM
+   provider a `providerConfig.apiKeyService` may name, add it to
+   `PROVIDER_API_KEY_SERVICES` too, or the validator rejects it as
+   `apiKeyService`. Never add non-provider secrets (health token, Pinecone,
+   ElevenLabs) here — that is the QR-248 exfil guard.
 2. **Reconcile the tests that flip by design.** They are the forcing
    function, and the local push gate runs them (`verify:push:branch`):
    - `tests/lib/provider-key-service.test.ts` — exact-map lock.
