@@ -40,9 +40,14 @@ describe('terminal provider-limit detection (silent-non-rollover failure class)'
   });
 
   it('detects credit / org-allocation exhaustion family', () => {
-    expect(isUsageLimitMessage("You're out of usage credits")).toBe(true);
+    // D2 dedup refactor: "You're out of usage credits" and 'Your org is out of
+    // usage — add funds to continue' used to be asserted here too, byte-identical
+    // to two tests/fixtures/failure-taxonomy-corpus.jsonl rows (credit-out-of-usage-credits,
+    // credit-org-add-funds) consumed by failure-taxonomy.test.ts's 'failure-taxonomy
+    // corpus' describe, whose per-row check asserts isUsageLimitMessage(true)
+    // directly. Removed here as pure duplication, not a coverage loss. The other
+    // two strings below are unique to this file and stay.
     expect(isUsageLimitMessage('You have hit your usage credit limit · resets 1:30pm (America/New_York)')).toBe(true);
-    expect(isUsageLimitMessage('Your org is out of usage — add funds to continue')).toBe(true);
     expect(isUsageLimitMessage("Your group's usage limit is set to $0")).toBe(true);
   });
 
