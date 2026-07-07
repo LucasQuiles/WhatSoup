@@ -14,6 +14,10 @@ async function readRuntimeSource(): Promise<string> {
   return readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
 }
 
+async function readFailureTaxonomySource(): Promise<string> {
+  return readFile(new URL('../../../src/runtimes/agent/failure-taxonomy.ts', import.meta.url), 'utf8');
+}
+
 describe('AgentRuntime structural policy', () => {
   it('LEAK-02 wires cleanup into crash/deletion sites without dropping replay text', async () => {
     const source = await readRuntimeSource();
@@ -138,5 +142,50 @@ describe('AgentRuntime structural policy', () => {
 
     expect(source).toContain('this.timer.unref?.();');
     expect(source).toContain('clearInterval(this.timer);');
+  });
+
+  it('R14: single terminal durability completion for locally-handled commands, no pre-switch resurrection', async () => {
+    const source = await readRuntimeSource();
+    // #1659 R14 unified every locally-handled command (routing aliases + base
+    // commands) onto ONE post-switch completeInbound call instead of a
+    // per-command opt-in. A second call site would double-write the terminal
+    // completion; a reintroduced pre-switch markInboundSkipped reason string
+    // starting with 'local_command' would resurrect the stuck-processing gap
+    // R14 closed.
+    const completionMatches = source.match(/completeInbound\(msg\.inboundSeq, 'local_command_handled'\)/g) ?? [];
+    const preSwitchResurrection = source.match(/markInboundSkipped\(msg\.inboundSeq, 'local_command[^']*'\)/g) ?? [];
+
+    expect(completionMatches).toHaveLength(1);
+    expect(preSwitchResurrection).toHaveLength(0);
+  });
+
+  it('QR-209: suppressStreamedProviderFailure keeps exactly two twin-handler call sites', async () => {
+    const source = await readRuntimeSource();
+    // QR-209 twin-handler contract: the shared-queue path and the non-shared
+    // path each independently need the same silent-reply-defect suppression,
+    // mirroring the register probe. If a handler is added or removed this
+    // count must be consciously updated.
+    const callSites = source.match(/this\.suppressStreamedProviderFailure\([^)]*\)/g) ?? [];
+
+    expect(callSites).toHaveLength(2);
+  });
+});
+
+describe('failure-taxonomy structural policy', () => {
+  it('QR-209b: bareUsageLimitEvidence stays single-defined with its mirror-coupling caveat intact', async () => {
+    const source = await readFailureTaxonomySource();
+    // bareUsageLimitEvidence deliberately duplicates rather than reuses
+    // hasTerminalLimitAssembler's and isProviderCreditBalanceLimitMessage's
+    // matched substrings, round-2, so their already-verified infra-channel
+    // behavior stays untouched. A future edit to either detector's
+    // substrings must also update this mirror — pin both the single
+    // definition and the caveat comment that carries the warning.
+    const definitions = source.match(/function bareUsageLimitEvidence\([^)]*\)/g) ?? [];
+    const mirrorCaveat = source.match(
+      /CAUTION: because this duplicates rather than reuses[\s\S]*?update the mirrored candidate here/,
+    );
+
+    expect(definitions).toHaveLength(1);
+    expect(mirrorCaveat).toBeTruthy();
   });
 });
