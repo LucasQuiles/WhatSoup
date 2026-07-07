@@ -24,10 +24,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── hoisted mocks ─────────────────────────────────────────────────────────────
 
-const { mockTranscriptionsCreate, mockEmitAlertChecked, mockClearAlertSourceChecked } = vi.hoisted(() => ({
+const {
+  mockTranscriptionsCreate,
+  mockEmitAlertChecked,
+  mockClearAlertSourceChecked,
+  mockResolveApiKey,
+  mockConfig,
+} = vi.hoisted(() => ({
   mockTranscriptionsCreate: vi.fn(),
   mockEmitAlertChecked: vi.fn(),
   mockClearAlertSourceChecked: vi.fn(),
+  mockResolveApiKey: vi.fn(),
+  mockConfig: {
+    botName: 'test-bot',
+    transcriptionOpenAIProviderConfig: undefined as undefined | { baseUrl?: string; apiKeyService?: string },
+  },
 }));
 
 vi.mock('openai', () => {
@@ -50,9 +61,11 @@ vi.mock('../../../../../src/logger.ts', () => ({
 }));
 
 vi.mock('../../../../../src/config.ts', () => ({
-  config: {
-    botName: 'test-bot',
-  },
+  config: mockConfig,
+}));
+
+vi.mock('../../../../../src/lib/api-key-resolver.ts', () => ({
+  resolveApiKey: mockResolveApiKey,
 }));
 
 // ── import after mocks ────────────────────────────────────────────────────────
@@ -77,6 +90,16 @@ function installOpenAIMock(): void {
     };
   } as unknown as () => OpenAI);
 }
+
+beforeEach(() => {
+  mockConfig.transcriptionOpenAIProviderConfig = undefined;
+  mockResolveApiKey.mockImplementation((opts: { envVar: string }) => process.env[opts.envVar] ?? '');
+});
+
+afterEach(() => {
+  mockConfig.transcriptionOpenAIProviderConfig = undefined;
+  mockResolveApiKey.mockReset();
+});
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -328,7 +351,7 @@ describe('openAIWhisperProvider — isAvailable', () => {
   });
 });
 
-describe('getClient — regression: PR-2/QR-218 scope lock', () => {
+describe('getClient — transcriptionOptions.openaiProviderConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.OPENAI_API_KEY = 'sk-test';
@@ -340,9 +363,90 @@ describe('getClient — regression: PR-2/QR-218 scope lock', () => {
     delete process.env.OPENAI_API_KEY;
   });
 
-  it('constructs the OpenAI client with zero arguments (Whisper is deliberately still env-only; chat gained config, Whisper did not)', async () => {
+  it('constructs the OpenAI client with zero arguments when transcriptionOptions is unset', async () => {
     mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'hi' });
     await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
     expect(vi.mocked(OpenAI)).toHaveBeenCalledWith();
+  });
+
+  it('maps transcriptionOptions.openaiProviderConfig.baseUrl to the SDK baseURL option', async () => {
+    mockConfig.transcriptionOpenAIProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+    };
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'configured endpoint' });
+
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://transcribe.example.com/openai/v1' }),
+    );
+  });
+
+  it('resolves transcriptionOptions.openaiProviderConfig.apiKeyService into the SDK apiKey', async () => {
+    delete process.env.OPENAI_API_KEY;
+    mockConfig.transcriptionOpenAIProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    mockResolveApiKey.mockReturnValue('keyring-secret');
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'configured key' });
+
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+
+    expect(mockResolveApiKey).toHaveBeenCalledWith({ service: 'groq', envVar: 'OPENAI_API_KEY' });
+    expect(vi.mocked(OpenAI)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseURL: 'https://transcribe.example.com/openai/v1',
+        apiKey: 'keyring-secret',
+      }),
+    );
+  });
+
+  it('reports available and transcribes with keyring-only transcription config when OPENAI_API_KEY env is unset', async () => {
+    delete process.env.OPENAI_API_KEY;
+    mockConfig.transcriptionOpenAIProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    mockResolveApiKey.mockReturnValue('keyring-secret');
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'keyring-only transcript' });
+
+    expect(openAIWhisperProvider.isAvailable()).toBe(true);
+    const result = await openAIWhisperProvider.transcribe(makeBuffer(), 'audio/ogg');
+
+    expect(result).toBe('keyring-only transcript');
+    expect(mockTranscriptionsCreate).toHaveBeenCalledOnce();
+  });
+
+  it('reports unavailable when transcription config keyring and env both miss', () => {
+    delete process.env.OPENAI_API_KEY;
+    mockConfig.transcriptionOpenAIProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    mockResolveApiKey.mockReturnValue('');
+
+    expect(openAIWhisperProvider.isAvailable()).toBe(false);
+  });
+
+  it('does not pass an empty apiKey string if a configured key disappears before lazy client construction', async () => {
+    delete process.env.OPENAI_API_KEY;
+    mockConfig.transcriptionOpenAIProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    mockResolveApiKey
+      .mockReturnValueOnce('initial-key')
+      .mockReturnValueOnce('');
+    mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'race-safe' });
+
+    await transcribeWithOpenAI(makeBuffer(), 'audio/ogg');
+
+    expect(vi.mocked(OpenAI).mock.calls).toEqual([
+      [{
+        baseURL: 'https://transcribe.example.com/openai/v1',
+        apiKey: undefined,
+      }],
+    ]);
   });
 });
