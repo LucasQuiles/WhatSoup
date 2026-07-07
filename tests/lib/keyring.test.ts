@@ -68,6 +68,20 @@ describe('keyring', () => {
       expect(detectKeyringBackend()).toBe('secret-tool');
     });
 
+    it('captures secret-tool --help stderr so exit-2 usage can be classified', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockImplementationOnce((_command, _args, options) => {
+        const err: Error & { status?: number; stderr?: Buffer | null } = new Error('Command failed: secret-tool --help');
+        err.status = 2;
+        err.stderr = (options as { stdio?: unknown } | undefined)?.stdio === 'ignore'
+          ? null
+          : Buffer.from('usage: secret-tool lookup attribute value ...\n');
+        throw err;
+      });
+
+      expect(detectKeyringBackend()).toBe('secret-tool');
+    });
+
     it('returns env-only on linux when secret-tool unavailable', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       mockedExecFileSync.mockImplementationOnce(() => { throw new Error('not found'); });

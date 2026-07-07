@@ -67,7 +67,7 @@ export function detectKeyringBackend(): KeyringBackend {
   // libsecret builds print a valid usage banner but exit 2. Treat that exact
   // usage response as presence; other non-zero exits still mean probe failure.
   try {
-    execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
+    execFileSync('secret-tool', ['--help'], { timeout: 2_000 });
     _cachedBackend = 'secret-tool';
   } catch (err) {
     if (isSecretToolUsageHelpExit(err)) {
