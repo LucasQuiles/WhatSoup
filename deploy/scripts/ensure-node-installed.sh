@@ -53,7 +53,14 @@ if [[ "$NVMRC_VERSION" != [0-9]* ]]; then
 fi
 
 # ── Locate nvm ───────────────────────────────────────────────────────────────
-NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+NVM_ROOT="${NVM_DIR:-$HOME/.nvm}"
+LOCAL_NODE="$NVM_ROOT/versions/node/v$NVMRC_VERSION/bin/node"
+NVM_SH="$NVM_ROOT/nvm.sh"
+
+if [ -x "$LOCAL_NODE" ]; then
+  echo "ensure-node-installed: v$NVMRC_VERSION already present at $LOCAL_NODE; skipping nvm install" >&2
+  exit 0
+fi
 
 if [ ! -f "$NVM_SH" ]; then
   echo "ensure-node-installed: nvm not found at $NVM_SH; skipping pre-install (wrapper's version gate will enforce compatibility at exec)" >&2

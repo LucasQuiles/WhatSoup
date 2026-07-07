@@ -63,12 +63,17 @@ export function detectKeyringBackend(): KeyringBackend {
   }
 
   // Linux / WSL: probe secret-tool directly (avoids dependency on 'which').
-  // Note: secret-tool has no --version flag (exits 2). GLib intercepts --help
-  // before custom dispatch and exits 0, making it a reliable presence probe.
+  // secret-tool has no --version flag, and --help is not portable: some
+  // libsecret builds print a valid usage banner but exit 2. Treat that exact
+  // usage response as presence; other non-zero exits still mean probe failure.
   try {
     execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
   } catch (err) {
+    if (isSecretToolUsageHelpExit(err)) {
+      _cachedBackend = 'secret-tool';
+      return _cachedBackend;
+    }
     const errMsg = errorMessage(err);
     // CRED-2: distinguish "no keyring installed" (ENOENT — the expected, benign
     // fallback) from "the keyring probe ERRORED" (timeout, EACCES, unexpected
@@ -109,6 +114,16 @@ export function detectKeyringBackend(): KeyringBackend {
  */
 function isProbeAbsentError(err: unknown): boolean {
   return (err as { code?: string } | null)?.code === 'ENOENT';
+}
+
+function isSecretToolUsageHelpExit(err: unknown): boolean {
+  const e = err as { status?: number; stdout?: Buffer | string; stderr?: Buffer | string } | null;
+  if (e?.status !== 2) return false;
+  const output = [e.stdout, e.stderr]
+    .filter((part): part is Buffer | string => part !== undefined)
+    .map((part) => Buffer.isBuffer(part) ? part.toString('utf8') : part)
+    .join('\n');
+  return /usage:\s*secret-tool\b/i.test(output);
 }
 
 /**
