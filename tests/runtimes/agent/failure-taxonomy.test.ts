@@ -344,7 +344,7 @@ describe('failure-taxonomy corpus (banner/ambient/null ground truth, QR-209b R1-
       if (row.expected_confidence === 'null') {
         expect(result, `row ${row.id} expects no classification`).toBeNull();
       } else {
-        expect(result).toEqual({ kind: row.expected_kind, confidence: row.expected_confidence });
+        expect(result, `row ${row.id} expected ${row.expected_kind}/${row.expected_confidence}`).toEqual({ kind: row.expected_kind, confidence: row.expected_confidence });
       }
       // kind === 'usage-limit' is only reachable via classifyProviderFailure's
       // isUsageLimitMessage branch (see classifyProviderFailure in
