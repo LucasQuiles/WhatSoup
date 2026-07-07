@@ -213,7 +213,9 @@ describe('ToolRegistry.call durability containment', () => {
   // ---------------------------------------------------------------------------
 
   it('redacts tool input in the deny-path durability record for an erasure-sensitive tool (QR-DENY-REDACT)', async () => {
-    const recordToolCall = vi.fn(() => 99);
+    const recordToolCall = vi.fn(
+      (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 99,
+    );
     const spyDurability = {
       recordToolCall,
       markToolExecuting: vi.fn(),
@@ -239,7 +241,9 @@ describe('ToolRegistry.call durability containment', () => {
   });
 
   it('still records raw params in the deny-path durability record for a non-erasure-sensitive tool (QR-DENY-REDACT companion)', async () => {
-    const recordToolCall = vi.fn(() => 100);
+    const recordToolCall = vi.fn(
+      (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 100,
+    );
     const spyDurability = {
       recordToolCall,
       markToolExecuting: vi.fn(),
