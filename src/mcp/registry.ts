@@ -329,7 +329,7 @@ export class ToolRegistry {
           const denyId = this.durability.recordToolCall(
             denyConvKey,
             name,
-            JSON.stringify(params),
+            ERASURE_SENSITIVE_TOOL_NAMES.has(name) ? REDACTED_TOOL_INPUT_MARKER : JSON.stringify(params),
             tool.replayPolicy ?? 'unsafe',
           );
           this.durability.markToolExecuting(denyId);
