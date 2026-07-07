@@ -273,6 +273,20 @@ describe('config — full INSTANCE_CONFIG override', () => {
     expect(config.dataRoot).toBe(instancePaths.dataRoot);
     expect(config.stateRoot).toBe(instancePaths.stateRoot);
   });
+
+  it('resolves transcriptionOptions.openaiProviderConfig for the shared Whisper client', async () => {
+    const openaiProviderConfig = {
+      baseUrl: 'https://transcribe.example.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transcriptionOptions: { openaiProviderConfig },
+    }));
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.transcriptionOpenAIProviderConfig).toEqual(openaiProviderConfig);
+  });
 });
 
 // ---------------------------------------------------------------------------

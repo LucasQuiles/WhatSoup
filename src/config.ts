@@ -828,6 +828,7 @@ const resolvedTwilioConfig: TwilioSmsConfig | undefined =
 const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
 const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
 const resolvedChatOptions = (instance?.chatOptions as Record<string, unknown> | undefined) ?? {};
+const resolvedTranscriptionOptions = (instance?.transcriptionOptions as Record<string, unknown> | undefined) ?? {};
 
 export const config = {
   // NL-first routing aliases + per-sender preference store (owner-approved
@@ -1021,6 +1022,12 @@ export const config = {
   // keeps createOpenAIProvider() on its bare, env-only construction.
   chatOpenAIProviderConfig:
     (resolvedChatOptions['openaiProviderConfig'] as Record<string, unknown> | undefined) ?? undefined,
+
+  // OpenAI Whisper transcription endpoint/key override — read from
+  // transcriptionOptions.openaiProviderConfig (QR-218 PR-B). Undefined keeps
+  // openai-whisper.ts on the legacy bare SDK construction.
+  transcriptionOpenAIProviderConfig:
+    (resolvedTranscriptionOptions['openaiProviderConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
   // Automatic provider fallback — read from agentOptions.fallbacks[] or the
   // legacy agentOptions.fallbackProvider / fallbackModel pair. When the primary

@@ -1067,6 +1067,7 @@ export async function handleCreateLine(
     'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
     'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
     'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
+    'transcriptionOptions',
     'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
     'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
     'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',

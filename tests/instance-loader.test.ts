@@ -624,6 +624,75 @@ describe('loadInstance — chatOptions: openaiProviderConfig validation (QR-218 
   });
 });
 
+describe('loadInstance — transcriptionOptions: openaiProviderConfig validation (QR-218 PR-B)', () => {
+  it('accepts a valid transcriptionOptions.openaiProviderConfig on agent instances', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'good-transcription-provider-config', {
+      ...minimalAgent,
+      name: 'good-transcription-provider-config',
+      agentOptions: { sessionScope: 'single' },
+      transcriptionOptions: {
+        openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' },
+      },
+    });
+    expect(() => loadInstance('good-transcription-provider-config')).not.toThrow();
+  });
+
+  it('rejects a non-object transcriptionOptions rather than silently booting', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-transcription-options', {
+      ...minimalAgent,
+      name: 'bad-transcription-options',
+      transcriptionOptions: 'nope',
+    });
+    expect(() => loadInstance('bad-transcription-options')).toThrow(/transcriptionOptions.*object/);
+  });
+
+  it('rejects a non-object transcriptionOptions.openaiProviderConfig', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-transcription-provider-config', {
+      ...minimalAgent,
+      name: 'bad-transcription-provider-config',
+      transcriptionOptions: { openaiProviderConfig: [] },
+    });
+    expect(() => loadInstance('bad-transcription-provider-config')).toThrow(
+      /transcriptionOptions\.openaiProviderConfig.*object/,
+    );
+  });
+
+  it('rejects a malformed transcriptionOptions.openaiProviderConfig.baseUrl', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-transcription-baseurl', {
+      ...minimalAgent,
+      name: 'bad-transcription-baseurl',
+      transcriptionOptions: { openaiProviderConfig: { baseUrl: 'not a url' } },
+    });
+    expect(() => loadInstance('bad-transcription-baseurl')).toThrow(
+      /transcriptionOptions\.openaiProviderConfig\.baseUrl/,
+    );
+  });
+
+  it('rejects an unknown transcriptionOptions.openaiProviderConfig.apiKeyService', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-transcription-keyservice', {
+      ...minimalAgent,
+      name: 'bad-transcription-keyservice',
+      transcriptionOptions: {
+        openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'nope-svc' },
+      },
+    });
+    expect(() => loadInstance('bad-transcription-keyservice')).toThrow(
+      /transcriptionOptions\.openaiProviderConfig\.apiKeyService/,
+    );
+  });
+
+  it('rejects transcriptionOptions.openaiProviderConfig.apiKeyService set without baseUrl', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-transcription-keyservice-no-baseurl', {
+      ...minimalAgent,
+      name: 'bad-transcription-keyservice-no-baseurl',
+      transcriptionOptions: { openaiProviderConfig: { apiKeyService: 'openai' } },
+    });
+    expect(() => loadInstance('bad-transcription-keyservice-no-baseurl')).toThrow(
+      /transcriptionOptions\.openaiProviderConfig\.apiKeyService/,
+    );
+  });
+});
+
 describe('loadInstance — agentOptions: autoCompactInputTokens validation', () => {
   it('preserves a valid autoCompactInputTokens threshold', () => {
     writeInstance(path.join(tmpDir, 'config'), 'compact-agent', {

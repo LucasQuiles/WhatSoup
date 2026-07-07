@@ -11,13 +11,13 @@ Both take precedence over built-in defaults.
 
 ## Environment Variables
 
-### API Keys (required for chat and audio transcription)
+### API Keys
 
 | Variable | Type | Description |
 |----------|------|-------------|
 | `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
-| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/transcription/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
-| `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — repoints every bare `new OpenAI()` in the process, i.e. both the chat completions client and Whisper transcription. Superseded for `chat` instances' chat completions by the per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) (QR-218 PR-2); Whisper transcription has no per-instance override yet (blocked/future PR-B), so this variable still governs it regardless of `openaiProviderConfig`. Not read by `agent`/`passive` instances. |
+| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used as the fallback key for OpenAI chat completions and Whisper transcription when the instance does not configure an `apiKeyService`; a configured `chatOptions.openaiProviderConfig.apiKeyService` or `transcriptionOptions.openaiProviderConfig.apiKeyService` resolves through `resolveApiKey()` first. For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs directly. |
+| `OPENAI_BASE_URL` | string | **Legacy/fallback** process-wide override for the OpenAI SDK's endpoint — it governs bare `new OpenAI()` clients. Superseded for `chat` instances' chat completions by per-instance [`chatOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-chat-instances-chatoptionsopenaiproviderconfig) and for Whisper transcription by per-instance [`transcriptionOptions.openaiProviderConfig.baseUrl`](#custom-endpoint-for-whisper-transcription-transcriptionoptionsopenaiproviderconfig). Instances that configure neither field still get the legacy bare SDK behavior. |
 | `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
 | `GEMINI_API_KEY` | string | Google Gemini API key. Forwarded into the agent subprocess environment only when `agentOptions.provider` is `gemini-cli` (`src/runtimes/agent/session.ts:157`); `GOOGLE_API_KEY` is forwarded alongside it when present. Not consulted by `claude-cli`/`codex-cli`/`opencode-cli` agents, or by `chat`/`passive` instances. An operator running a `gemini-cli` agent line must set it — without it the Gemini CLI has no credential. |
 
@@ -28,7 +28,7 @@ before the process starts. They are never written to disk.
 
 ### Audio Transcription (local providers)
 
-These tune the optional on-device voice-note transcription backends. They are read once at module load. The OpenAI Whisper path uses `OPENAI_API_KEY` (above) and needs no extra env vars.
+These tune the optional on-device voice-note transcription backends. They are read once at module load. The OpenAI Whisper path can use per-instance `transcriptionOptions.openaiProviderConfig`; when unset, it falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL` through the OpenAI SDK.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -353,6 +353,7 @@ into place during deployment.
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 | `chatOptions` | object | no | — | Chat-specific settings. Currently just `openaiProviderConfig` (chat OpenAI endpoint/key override). See [chatOptions](#chatoptions). |
+| `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
 | `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 | `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
@@ -1066,14 +1067,45 @@ so `baseUrl` alone is never inert. A malformed `chatOptions.openaiProviderConfig
 is rejected at CREATE/PATCH and at load — it does not silently boot.
 
 **Scope:** OpenAI chat completions only. Anthropic chat
-(`src/runtimes/chat/providers/anthropic.ts`) and Whisper voice-note
-transcription (`src/runtimes/chat/providers/transcription/openai-whisper.ts`)
-are explicitly out of scope — Whisper is still a bare, env-only `new OpenAI()`
-shared by the whole process (blocked/future PR-B), so a process-wide
-`OPENAI_BASE_URL` still repoints it regardless of any instance's
-`openaiProviderConfig`. See the Traps section of
-[docs/architecture/provider-credential-services.md](architecture/provider-credential-services.md)
-for the maintainer-facing version of this note.
+(`src/runtimes/chat/providers/anthropic.ts`) is separate, and Whisper
+voice-note transcription uses the dedicated
+[`transcriptionOptions.openaiProviderConfig`](#custom-endpoint-for-whisper-transcription-transcriptionoptionsopenaiproviderconfig)
+field below.
+
+### `transcriptionOptions`
+
+Shared transcription settings for OpenAI Whisper. The field is valid for chat,
+agent, and passive instances because chat voice notes, agent media-prep, and
+the global MCP `transcribe_audio` tool all call the same transcription chain.
+
+#### Custom endpoint for Whisper transcription (`transcriptionOptions.openaiProviderConfig`)
+
+Any instance can override the OpenAI Whisper endpoint and credential for
+voice-note/audio transcription:
+
+```jsonc
+"transcriptionOptions": {
+  "openaiProviderConfig": {
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "apiKeyService": "groq"
+  }
+}
+```
+
+**Routing and auth:** `src/runtimes/chat/providers/transcription/openai-whisper.ts`
+consumes `baseUrl` as the OpenAI SDK's `baseURL` option and resolves
+`apiKeyService` with `resolveApiKey({ envVar: "OPENAI_API_KEY" })`. A
+keyring-only config is active: `isAvailable()` consults the resolved key, not
+only `process.env.OPENAI_API_KEY`. When `transcriptionOptions` is unset, the
+provider preserves the legacy bare `new OpenAI()` construction, so
+`OPENAI_BASE_URL` and `OPENAI_API_KEY` remain backward-compatible fallbacks.
+
+**Validation:** `transcriptionOptions.openaiProviderConfig` uses the same
+shape rules as `chatOptions.openaiProviderConfig`: `baseUrl` must be a
+non-empty `http://`/`https://` URL; `apiKeyService` must be in
+`PROVIDER_API_KEY_SERVICES`; and `apiKeyService` requires `baseUrl` so the
+selected key cannot be silently inert. A malformed value is rejected at
+CREATE/PATCH and load.
 
 ### Connector mutation policy (#411)
 

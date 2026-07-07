@@ -6,6 +6,7 @@ import { createChildLogger } from '../../../../logger.ts';
 import { extensionForMimeType } from './local-audio.ts';
 import type { TranscriptionProvider } from './types.ts';
 import { errorMessage } from '../../../../lib/error-message.ts';
+import { resolveApiKey } from '../../../../lib/api-key-resolver.ts';
 
 const log = createChildLogger('openai-whisper');
 const WHISPER_TIMEOUT_MS = 20_000;
@@ -14,18 +15,34 @@ const breaker = new CircuitBreaker('openai-whisper', 5, 60_000, log);
 let whisperAlerted = false;
 let client: OpenAI | null = null;
 
+type OpenAIProviderConfig = { baseUrl?: string; apiKeyService?: string };
+
+function transcriptionProviderConfig(): OpenAIProviderConfig | undefined {
+  return config.transcriptionOpenAIProviderConfig as OpenAIProviderConfig | undefined;
+}
+
+function resolveTranscriptionApiKey(): string {
+  return resolveApiKey({
+    service: transcriptionProviderConfig()?.apiKeyService,
+    envVar: 'OPENAI_API_KEY',
+  });
+}
+
 function getClient(): OpenAI {
-  // Bare construction, still env-only (PR-B, not yet done): a process-wide
-  // OPENAI_BASE_URL repoints this transcription client regardless of any
-  // chat instance's chatOptions.openaiProviderConfig (providers/openai.ts,
-  // QR-218 PR-2 — the chat completions client only). See docs/architecture/
-  // provider-credential-services.md, Traps.
-  if (!client) client = new OpenAI();
+  const providerConfig = transcriptionProviderConfig();
+  if (!client) {
+    client = providerConfig
+      ? new OpenAI({
+          baseURL: providerConfig.baseUrl,
+          apiKey: resolveTranscriptionApiKey() || undefined,
+        })
+      : new OpenAI();
+  }
   return client;
 }
 
 export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
-  if (!process.env.OPENAI_API_KEY) {
+  if (!resolveTranscriptionApiKey()) {
     throw new Error('OPENAI_API_KEY not set');
   }
 
@@ -74,7 +91,7 @@ export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Pr
 
 export const openAIWhisperProvider: TranscriptionProvider = {
   name: 'openai',
-  isAvailable: () => Boolean(process.env.OPENAI_API_KEY),
+  isAvailable: () => Boolean(resolveTranscriptionApiKey()),
   transcribe: transcribeWithOpenAI,
 };
 

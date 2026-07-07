@@ -386,13 +386,20 @@ export function validateInstanceConfig(
     if (chatOptsErr) return chatOptsErr;
   }
 
+  // Shared transcription config (QR-218 PR-B) is type-agnostic because chat
+  // media handling, agent media-prep, and the global MCP transcribe_audio tool
+  // all use the same Whisper singleton in an instance process.
+  const transcriptionOptsErr = validateTranscriptionOptions(raw);
+  if (transcriptionOptsErr) return transcriptionOptsErr;
+
   return null;
 }
 
 /**
  * Pure shape validator for the baseUrl/apiKeyService pair shared by
  * agentOptions.providerConfig (openai-api/anthropic-api/opencode-cli) and
- * chatOptions.openaiProviderConfig (chat OpenAI provider, QR-218 PR-2):
+ * chatOptions.openaiProviderConfig (chat OpenAI provider, QR-218 PR-2) and
+ * transcriptionOptions.openaiProviderConfig (OpenAI Whisper, QR-218 PR-B):
  * baseUrl must be a non-empty, parseable http(s) URL; apiKeyService must be a
  * non-empty string naming a service PROVIDER_API_KEY_SERVICES knows, and is
  * rejected when set without a baseUrl (it would authenticate no endpoint).
@@ -500,6 +507,38 @@ function validateChatOptions(raw: Record<string, unknown>): ValidationError | nu
   return validateProviderConfigShape(
     providerConfig as Record<string, unknown>,
     'chatOptions.openaiProviderConfig',
+  );
+}
+
+/**
+ * Transcription options apply to all instance types that can receive or handle
+ * audio. They share the same OpenAI-compatible endpoint/key shape as chat
+ * OpenAI config, without inheriting agent-only providerConfig rules.
+ */
+function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationError | null {
+  const transcriptionOpts = raw['transcriptionOptions'];
+  if (transcriptionOpts === undefined || transcriptionOpts === null) {
+    return null;
+  }
+  if (typeof transcriptionOpts !== 'object' || Array.isArray(transcriptionOpts)) {
+    return err('transcriptionOptions', 'transcriptionOptions must be an object');
+  }
+  const opts = transcriptionOpts as Record<string, unknown>;
+
+  const providerConfig = opts['openaiProviderConfig'];
+  if (providerConfig === undefined || providerConfig === null) {
+    return null;
+  }
+  if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
+    return err(
+      'transcriptionOptions.openaiProviderConfig',
+      'transcriptionOptions.openaiProviderConfig must be an object when provided',
+    );
+  }
+
+  return validateProviderConfigShape(
+    providerConfig as Record<string, unknown>,
+    'transcriptionOptions.openaiProviderConfig',
   );
 }
 

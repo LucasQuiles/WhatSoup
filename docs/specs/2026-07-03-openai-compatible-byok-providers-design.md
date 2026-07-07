@@ -18,8 +18,8 @@ Date: 2026-07-04 · Audited source revision: `9a38a643` (all file:line reference
 | Fallback selection + credential presence | `src/runtimes/agent/runtime.ts:5364-5423, 6012-6053` | Per-window eligibility via keyring presence; `fallback_credential_missing` alert; first-arm pre-flight probes validity async, `fallback_credential_invalid` on 401/403 | Missing keys surface as alerts, not silent failures | — |
 | Credential validity probe limitation | `src/runtimes/agent/providers/credential-verify.ts:15-25` | Hardcoded probe URLs for `deepseek`, `minimax`, `openai` only; others fail open | Groq/OpenRouter keys get **presence** checks only — an invalid key is discovered at first use. Health/parity green ≠ endpoint validity | Optional probe entries per new endpoint (must be proven to 401/403 on bad keys) |
 | OpenCode custom endpoint | `src/core/provider-mcp-config.ts:123-149`, `src/runtimes/agent/session.ts:187-215, 282-294, 886-894` | `providerConfig.baseUrl` (+ optional `providerId`, `model`, `apiKeyService`) written into opencode.json with `{env:VAR}` interpolation — key value never lands on disk; `-m` omitted, model comes from opencode.json | Second config-only lane for custom endpoints, via the opencode-cli harness | — |
-| Chat runtime — OpenAI chat completions (**updated by PR-2/QR-218, this PR**) | `src/runtimes/chat/providers/openai.ts` (`createOpenAIProvider` config branch), `src/core/agent-config-validator.ts` (`validateChatOptions`) | `chatOptions.openaiProviderConfig.{baseUrl,apiKeyService}` overrides the OpenAI chat client per instance; no config → byte-identical bare `new OpenAI()`, still governed by `OPENAI_BASE_URL` | Per-instance chat routing no longer needs a process-wide env var; `OPENAI_BASE_URL` is now a legacy/fallback path for chat completions | Whisper transcription (below) is NOT covered by this seam |
-| Chat runtime — Whisper transcription (env-only, unchanged) | `src/runtimes/chat/providers/transcription/openai-whisper.ts:17-24, 70-74`; OpenAI SDK 5.23.2 reads `OPENAI_BASE_URL` | Bare `new OpenAI()` — SDK env defaults apply | `OPENAI_BASE_URL` repoints the WHOLE process, including this Whisper client — regardless of any chat instance's `openaiProviderConfig`. Too blunt for production chat routing; not recommended | Per-provider baseUrl/key config for Whisper requires code (PR-B) |
+| Chat runtime — OpenAI chat completions (**updated by PR-2/QR-218**) | `src/runtimes/chat/providers/openai.ts` (`createOpenAIProvider` config branch), `src/core/agent-config-validator.ts` (`validateChatOptions`) | `chatOptions.openaiProviderConfig.{baseUrl,apiKeyService}` overrides the OpenAI chat client per instance; no config → byte-identical bare `new OpenAI()`, still governed by `OPENAI_BASE_URL` | Per-instance chat routing no longer needs a process-wide env var; `OPENAI_BASE_URL` is now a legacy/fallback path for chat completions | — |
+| Chat/agent/MCP runtime — Whisper transcription (**updated by QR-218 PR-B**) | `src/runtimes/chat/providers/transcription/openai-whisper.ts`; `src/core/agent-config-validator.ts` (`validateTranscriptionOptions`) | `transcriptionOptions.openaiProviderConfig.{baseUrl,apiKeyService}` overrides the OpenAI Whisper client per instance; no config → bare `new OpenAI()` and SDK env defaults apply | Chat voice, agent media-prep, and MCP `transcribe_audio` now share a dedicated per-instance transcription endpoint/key; `OPENAI_BASE_URL` is legacy/fallback only when transcription config is unset | — |
 
 ## Supported current recipes
 
@@ -61,7 +61,7 @@ Operator obligations for OpenRouter with real chat traffic (dated 2026-07-04, [p
 
 ### Chat runtime (documented caveat, not a recipe)
 
-`OPENAI_BASE_URL` in a chat instance's environment repoints the entire process (SDK 5.23.2 env default), including Whisper transcription and the `FALLBACK_MODEL` retry path. Dev experimentation only; production chat routing to alternate endpoints needs per-provider config work.
+`OPENAI_BASE_URL` in a chat instance's environment repoints bare OpenAI SDK clients. It remains a legacy/fallback path when neither `chatOptions.openaiProviderConfig` nor `transcriptionOptions.openaiProviderConfig` is set. Production routing to alternate endpoints should use those per-instance config fields.
 
 ## Credential handling — operator caveats
 
@@ -74,12 +74,10 @@ Operator obligations for OpenRouter with real chat traffic (dated 2026-07-04, [p
 1. **NVIDIA (`https://integrate.api.nvidia.com/v1`) and Cerebras**: `apiKeyService: "nvidia"` / `"cerebras"` fail validation — absent from `SERVICE_ENV_MAP`. Needs service-map entries, an endpoint-specific pilot, and optionally a credential validity probe (only endpoints proven to 401/403 on bad keys qualify).
 2. **Per-instance credential names** (`whatsoup-<provider>-<instance>`): rejected by the validator today; needs a dynamic service-name policy or a changed credential lookup contract. Not solvable by documentation.
 3. **Per-entry providerConfig** (Groq + NVIDIA + OpenRouter in one chain): fallback-entry schema, validator, runtime selection, health surfaces, and tests.
-4. **Whisper transcription per-provider baseUrl/key** (PR-B): chat completions
-   gained `chatOptions.openaiProviderConfig` (PR-2/QR-218, this PR) — Whisper
-   (`transcription/openai-whisper.ts`) still shares the bare, env-only
-   `new OpenAI()` construction, so a process-wide `OPENAI_BASE_URL` still
-   silently repoints voice-note transcription even on instances that
-   configure `openaiProviderConfig` for chat.
+4. **Additional endpoint validity probes**: Groq/OpenRouter and other
+   OpenAI-compatible endpoints still need endpoint-specific probe entries if
+   operators want invalid-key detection before first use. Presence checks alone
+   do not prove endpoint validity.
 
 ## Policy lanes (operator guidance, dated 2026-07-04)
 

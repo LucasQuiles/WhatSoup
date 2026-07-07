@@ -91,7 +91,11 @@ A service is not a provider ID: `nvidia` would be reached as
   `baseUrl`/`apiKeyService` gets its own endpoint/key regardless of any
   process-wide env var; one that sets nothing still gets the legacy bare
   `new OpenAI()`, governed by `OPENAI_BASE_URL` as before (now the
-  legacy/fallback path). **Whisper voice-note transcription is NOT yet
-  covered** (`transcription/openai-whisper.ts`, blocked/future PR-B) — a
-  process-wide `OPENAI_BASE_URL` still repoints it regardless of any chat
-  instance's `openaiProviderConfig`.
+  legacy/fallback path).
+- **Whisper voice-note transcription is now per-instance configurable**
+  (`src/runtimes/chat/providers/transcription/openai-whisper.ts`,
+  `transcriptionOptions.openaiProviderConfig` — QR-218 PR-B): chat voice,
+  agent media-prep, and MCP `transcribe_audio` share the same instance
+  process and read this dedicated endpoint/key. A process-wide
+  `OPENAI_BASE_URL` only governs the legacy bare `new OpenAI()` path when
+  `transcriptionOptions.openaiProviderConfig` is unset.

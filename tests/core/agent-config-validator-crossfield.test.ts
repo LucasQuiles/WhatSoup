@@ -397,6 +397,22 @@ function chatRaw(
   };
 }
 
+function transcriptionRaw(
+  transcriptionOptions: Record<string, unknown>,
+  topLevel: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name: 'test-line',
+    type: 'agent',
+    accessMode: 'self_only',
+    adminPhones: ['15555550123'],
+    healthPort: 9097,
+    agentOptions: { sessionScope: 'single' },
+    transcriptionOptions,
+    ...topLevel,
+  };
+}
+
 describe('validateInstanceConfig — chatOptions.openaiProviderConfig.baseUrl scheme', () => {
   for (const bad of ['ftp://host/v1', 'file:///tmp/endpoint', 'ws://host/v1']) {
     it(`rejects non-http(s) baseUrl ${bad}`, () => {
@@ -564,6 +580,31 @@ describe('validateInstanceConfig — apiKeyService rejects non-provider keyring 
       );
       expect(err).not.toBeNull();
       expect(err?.field).toBe('chatOptions.openaiProviderConfig.apiKeyService');
+      expect(err?.message).toContain(service);
+    });
+
+    it(`rejects apiKeyService ${service} on transcriptionOptions.openaiProviderConfig even with a valid baseUrl`, () => {
+      // Control: same transcription config with an allowlisted provider
+      // service passes, so the rejection below proves the allowlist rather
+      // than baseUrl itself.
+      expect(
+        validateInstanceConfig(
+          transcriptionRaw({
+            openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: 'openai' },
+          }),
+          createCtx,
+        ),
+        'an allowlisted provider service with the same baseUrl must validate clean',
+      ).toBeNull();
+
+      const err = validateInstanceConfig(
+        transcriptionRaw({
+          openaiProviderConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService: service },
+        }),
+        createCtx,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.field).toBe('transcriptionOptions.openaiProviderConfig.apiKeyService');
       expect(err?.message).toContain(service);
     });
   }

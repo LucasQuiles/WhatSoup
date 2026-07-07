@@ -36,10 +36,10 @@ export function createOpenAIProvider(
 ): LLMProvider {
   // Bare construction (no config) is deliberate env sensitivity: the SDK
   // reads OPENAI_API_KEY and OPENAI_BASE_URL from the process environment,
-  // and a process-wide OPENAI_BASE_URL repoints EVERY bare client in this
-  // process — this chat provider AND Whisper transcription (transcription/
-  // openai-whisper.ts, still env-only). An instance that configures
-  // `chatOptions.openaiProviderConfig` gets its OWN endpoint/key instead
+  // and a process-wide OPENAI_BASE_URL repoints every bare client in this
+  // process. An instance that configures `chatOptions.openaiProviderConfig`
+  // gets its own chat-completions endpoint/key instead; Whisper transcription
+  // has its own `transcriptionOptions.openaiProviderConfig` field.
   // (docs/architecture/provider-credential-services.md, Traps); one that
   // configures nothing must construct byte-identically to before — locked by
   // the zero-arg assertions in tests/runtimes/chat/providers/openai.test.ts

@@ -936,6 +936,69 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
   });
 
+  // ---- transcriptionOptions.openaiProviderConfig (QR-218 PR-B — shared Whisper provider config) ----
+  it('accepts an agent config with no transcriptionOptions at all (backward-compat)', () => {
+    expect(validateInstanceConfig(baseAgent({}), ctx('create'))).toBeNull();
+  });
+
+  it('rejects non-object transcriptionOptions', () => {
+    const raw = baseAgent({ transcriptionOptions: 'nope' });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('transcriptionOptions');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects non-object transcriptionOptions.openaiProviderConfig', () => {
+    const raw = baseAgent({ transcriptionOptions: { openaiProviderConfig: ['array'] } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('transcriptionOptions.openaiProviderConfig');
+    expect(result?.message).toContain('must be an object');
+  });
+
+  it('rejects malformed transcriptionOptions.openaiProviderConfig.baseUrl', () => {
+    const raw = baseAgent({
+      transcriptionOptions: { openaiProviderConfig: { baseUrl: 'not a url' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('transcriptionOptions.openaiProviderConfig.baseUrl');
+    expect(result?.message).toContain('must be a valid URL');
+  });
+
+  it('rejects unknown transcriptionOptions.openaiProviderConfig.apiKeyService', () => {
+    const raw = baseAgent({
+      transcriptionOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.example.com/v1',
+          apiKeyService: 'nope-svc',
+        },
+      },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('transcriptionOptions.openaiProviderConfig.apiKeyService');
+    expect(result?.message).toContain('not a valid provider service');
+  });
+
+  it('rejects transcriptionOptions.openaiProviderConfig.apiKeyService set without baseUrl', () => {
+    const raw = baseAgent({
+      transcriptionOptions: { openaiProviderConfig: { apiKeyService: 'openai' } },
+    });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('transcriptionOptions.openaiProviderConfig.apiKeyService');
+    expect(result?.message).toContain('baseUrl is not');
+  });
+
+  it('accepts a valid transcriptionOptions.openaiProviderConfig on agent configs', () => {
+    const raw = baseAgent({
+      transcriptionOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.example.com/v1',
+          apiKeyService: 'openai',
+        },
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
   // ---- validateTransportConfig (lines 685-725) ----
   it('rejects unknown transport id', () => {
     const raw = baseChat({ transport: 'carrier-pigeon' });

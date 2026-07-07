@@ -163,6 +163,62 @@ describe('handleCreateLine — chatOptions gating (QR-218 PR-2)', () => {
     expect(persisted.agentOptions.cwd).toBe(agentCwd);
     expect('chatOptions' in persisted).toBe(false);
   });
+
+  it('persists a valid transcriptionOptions.openaiProviderConfig for type: agent', async () => {
+    const agentCwd = fs.mkdtempSync(path.join(process.env.HOME!, 'transcription-agent-cwd-'));
+    const openaiProviderConfig = {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'transcription-agent-roundtrip',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+        transcriptionOptions: { openaiProviderConfig },
+      })),
+      res,
+      successDeps(),
+    );
+
+    expect(res._status, 'create must succeed: ' + res._body).toBe(201);
+
+    const cfgPath = path.join(
+      process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'transcription-agent-roundtrip', 'config.json',
+    );
+    const persisted = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    expect(persisted.type).toBe('agent');
+    expect(persisted.transcriptionOptions).toEqual({ openaiProviderConfig });
+  });
+
+  it('rejects malformed transcriptionOptions.openaiProviderConfig on CREATE before writing config.json', async () => {
+    const agentCwd = fs.mkdtempSync(path.join(process.env.HOME!, 'transcription-agent-cwd-'));
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'transcription-agent-invalid',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'single' },
+        transcriptionOptions: {
+          openaiProviderConfig: { baseUrl: 'not-a-url' },
+        },
+      })),
+      res,
+      successDeps(),
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(
+      /transcriptionOptions\.openaiProviderConfig\.baseUrl must be a valid URL/,
+    );
+    const cfgPath = path.join(
+      process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'transcription-agent-invalid', 'config.json',
+    );
+    expect(fs.existsSync(cfgPath)).toBe(false);
+  });
 });
 
 describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => {
@@ -315,5 +371,51 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     // object that would vacuously lack chatOptions).
     expect(persisted.type).toBe('agent');
     expect(persisted.agentOptions.cwd).toBe(agentCwd);
+  });
+
+  it('preserves a valid transcriptionOptions.openaiProviderConfig on an agent-instance PATCH', async () => {
+    agentCwd = makeAgentCwd('transcription-preserve');
+    const cfg = writeChatConfig('test-agent-transcriptionopts', {
+      type: 'agent',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    });
+    const openaiProviderConfig = {
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKeyService: 'groq',
+    };
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ transcriptionOptions: { openaiProviderConfig } }), 'PATCH'),
+      res,
+      makeDeps(fakeInstance(cfg, { type: 'agent', name: 'test-agent-transcriptionopts' })),
+      { name: 'test-agent-transcriptionopts' },
+    );
+    expect(res._status, res._body).toBe(200);
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect(persisted.type).toBe('agent');
+    expect(persisted.transcriptionOptions).toEqual({ openaiProviderConfig });
+  });
+
+  it('rejects a malformed transcriptionOptions.openaiProviderConfig.baseUrl with 400 and leaves the file untouched', async () => {
+    agentCwd = makeAgentCwd('transcription-invalid');
+    const cfg = writeChatConfig('agent-bad-transcription', {
+      type: 'agent',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    });
+    const before = fs.readFileSync(cfg, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        transcriptionOptions: { openaiProviderConfig: { baseUrl: 'not-a-url' } },
+      }), 'PATCH'),
+      res,
+      makeDeps(fakeInstance(cfg, { type: 'agent', name: 'agent-bad-transcription' })),
+      { name: 'agent-bad-transcription' },
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(
+      /transcriptionOptions\.openaiProviderConfig\.baseUrl must be a valid URL/,
+    );
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
   });
 });
