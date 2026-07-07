@@ -33,6 +33,13 @@ async function readRegistrySource(): Promise<string> {
  * immediately followed by the class's own closing brace — reliable because
  * every nested block inside the method body is indented four spaces or
  * more.
+ *
+ * Assumes call() is the last method in ToolRegistry — verified true today.
+ * If a method were added after call(), this regex silently over-captures
+ * (it extends the captured body into the trailing method rather than
+ * failing to match), so it does not fail loud on its own. The exact
+ * call-site count pin below is the backstop that still forces a conscious
+ * look if a trailing method adds this.durability sites.
  */
 function extractCallMethodBody(source: string): string {
   const match = source.match(
@@ -57,6 +64,17 @@ function findDurabilityCallSites(body: string): RegExpMatchArray[] {
 }
 
 describe('ToolRegistry structural policy: durability containment (QR-239)', () => {
+  /**
+   * Limitation, latent false-green, accepted: the site regex matches a
+   * this.durability call written on one line. A future durability call
+   * formatted across two lines — the receiver on one line and the
+   * dot-method-open-paren on the next — would evade both the count pin
+   * and the enclosure check: the count would still read seven and the
+   * new unwrapped site would go unguarded. Current file style is
+   * uniformly single-line. Closing this needs a multi-line-aware regex,
+   * which is a logic change requiring its own red-green, so it is
+   * intentionally not done here.
+   */
   it('pins the exact count of this.durability call sites inside call()', async () => {
     const body = extractCallMethodBody(await readRegistrySource());
     const sites = findDurabilityCallSites(body);
