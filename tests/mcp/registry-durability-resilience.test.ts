@@ -202,4 +202,70 @@ describe('ToolRegistry.call durability containment', () => {
     expect(mockWarn.mock.calls[1][0]).toMatchObject({ tool: 'sensitive_tool' });
     expect(mockWarn.mock.calls[1][0].err).toBeInstanceOf(Error);
   });
+
+  // ---------------------------------------------------------------------------
+  // QR-DENY-REDACT: the deny path must redact erasure-sensitive tool input the
+  // same way the main path does (registry.ts:453-454). A denied
+  // capture_observation/forget_observation attempt still reaches the
+  // durability write below the R1 gate, so its raw params (potentially the
+  // very content meant to be erased) must not land unredacted in the durable
+  // ledger just because the call was refused rather than executed.
+  // ---------------------------------------------------------------------------
+
+  it('redacts tool input in the deny-path durability record for an erasure-sensitive tool (QR-DENY-REDACT)', async () => {
+    const recordToolCall = vi.fn(
+      (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 99,
+    );
+    const spyDurability = {
+      recordToolCall,
+      markToolExecuting: vi.fn(),
+      markToolComplete: vi.fn(),
+    };
+    registry.setDurability(
+      spyDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine,
+    );
+    registry.register(makeTool({ name: 'forget_observation', sensitive: true }));
+
+    const result = await registry.call(
+      'forget_observation',
+      { id: 'obs-123', reason: 'user requested erasure' },
+      makeSession({ actorJid: '15550000001@s.whatsapp.net', conversationKey: '15550000009' }),
+    );
+
+    // No authorizer installed, so this is a denial regardless of actorJid.
+    expect(result.isError).toBe(true);
+    expect(recordToolCall).toHaveBeenCalledTimes(1);
+    // Third positional argument is the durable toolInput string — must be the
+    // fixed marker, not the raw params that could carry erasable content.
+    expect(recordToolCall.mock.calls[0][2]).toBe('[redacted:erasure-sensitive]');
+  });
+
+  it('still records raw params in the deny-path durability record for a non-erasure-sensitive tool (QR-DENY-REDACT companion)', async () => {
+    const recordToolCall = vi.fn(
+      (_conversationKey: string, _toolName: string, _toolInput: string, _replayPolicy: string, _checkpointId?: number) => 100,
+    );
+    const spyDurability = {
+      recordToolCall,
+      markToolExecuting: vi.fn(),
+      markToolComplete: vi.fn(),
+    };
+    registry.setDurability(
+      spyDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine,
+    );
+    registry.register(makeTool({ name: 'sensitive_tool', sensitive: true }));
+
+    const params = { message: 'hi' };
+    const result = await registry.call(
+      'sensitive_tool',
+      params,
+      makeSession({ actorJid: '15550000001@s.whatsapp.net', conversationKey: '15550000009' }),
+    );
+
+    // Same denial path, but this tool name is not in ERASURE_SENSITIVE_TOOL_NAMES,
+    // so the ternary's else-branch must still record the raw params — proving
+    // this fix scopes redaction to erasure-sensitive tools, not all denials.
+    expect(result.isError).toBe(true);
+    expect(recordToolCall).toHaveBeenCalledTimes(1);
+    expect(recordToolCall.mock.calls[0][2]).toBe(JSON.stringify(params));
+  });
 });
