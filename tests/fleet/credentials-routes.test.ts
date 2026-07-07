@@ -20,6 +20,7 @@ import {
   handleGetCredential,
   CREDENTIAL_ALLOWLIST,
   CREDENTIAL_WRITE_BLOCKLIST,
+  setExtraCredentialServices,
   _resetVerifyCooldownsForTests,
   _resetMutationCooldownsForTests,
 } from '../../src/fleet/routes/credentials.ts';
@@ -50,6 +51,7 @@ beforeEach(() => {
   keyringMock.lookupCredential.mockReset().mockReturnValue('resolved-key');
   _resetVerifyCooldownsForTests();
   _resetMutationCooldownsForTests();
+  setExtraCredentialServices([]);
   delete process.env.DEEPSEEK_API_KEY;
 });
 
@@ -187,9 +189,13 @@ describe('POST /api/credentials/:service/verify', () => {
     expect(json().status).toBe('unreachable');
   });
 
-  it('reports unsupported for an allowlisted service with no descriptor (minimax)', async () => {
+  it('reports unsupported for an allowlisted service with no descriptor (custom-svc)', async () => {
+    // All four default-allowlisted services (deepseek, minimax, openai,
+    // anthropic) now have a shared descriptor — use an operator-declared
+    // extra service to exercise the genuinely-undescribed path.
+    setExtraCredentialServices(['custom-svc']);
     const { res, json } = fakeRes();
-    await handleVerifyCredential(fakeReq(), res, { name: 'minimax' });
+    await handleVerifyCredential(fakeReq(), res, { name: 'custom-svc' });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(json().status).toBe('unsupported');
   });

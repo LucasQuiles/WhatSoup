@@ -15,9 +15,10 @@
  * sweep timer, so a misconfigured/keyless distiller is a silent no-op rather
  * than a per-tick failure.
  *
- * Endpoint note: the credential-verify PROBE_ENDPOINTS are `/models` probe
- * URLs; the distiller needs the chat-completions URL, so the endpoints below
- * are defined here independently (deepseek/minimax/z.ai chat surfaces).
+ * Endpoint note: CREDENTIAL_PROBE_DESCRIPTORS (src/lib/provider-credential-probes.ts)
+ * are `/models` probe URLs; the distiller needs the chat-completions URL, so
+ * the endpoints below are defined here independently (deepseek/minimax/z.ai
+ * chat surfaces).
  */
 
 import { SERVICE_ENV_MAP } from '../../lib/provider-key-service.ts';

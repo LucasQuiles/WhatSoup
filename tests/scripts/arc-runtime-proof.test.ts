@@ -72,7 +72,6 @@ function healthJson(root: string, opts: { payloadSha?: string; extra?: Record<st
 
 afterEach(() => {
   vi.restoreAllMocks();
-  process.exitCode = undefined;
   for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -83,10 +82,9 @@ describe('arc-runtime-proof', () => {
     const out = path.join(root, '.arc', 'runtime-enforcement.verification-record.json');
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const proof = run(['--health-json', healthJson(root), '--out', out, '--repo-root', root], root);
+    const code = run(['--health-json', healthJson(root), '--out', out, '--repo-root', root], root);
 
-    expect(proof).toBeNull();
-    expect(process.exitCode).toBe(1);
+    expect(code).toBe(1);
     expect(existsSync(out)).toBe(false);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('verification-record'));
   });
@@ -96,10 +94,9 @@ describe('arc-runtime-proof', () => {
     writeArcFiles(root, { emits: ['verification-record'] });
     const out = path.join(root, '.arc', 'runtime-enforcement.verification-record.json');
 
-    const proof = run(['--health-json', healthJson(root), '--out', out, '--repo-root', root], root);
+    const code = run(['--health-json', healthJson(root), '--out', out, '--repo-root', root], root);
 
-    expect(process.exitCode).toBeUndefined();
-    expect(proof).not.toBeNull();
+    expect(code).toBe(0);
     expect(existsSync(out)).toBe(true);
     const written = JSON.parse(readFileSync(out, 'utf8')) as Record<string, unknown>;
     expect(written).toMatchObject({
@@ -124,10 +121,9 @@ describe('arc-runtime-proof', () => {
     const out = path.join(root, '.arc', 'runtime-enforcement.verification-record.json');
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const proof = run(['--health-json', healthJson(root, { payloadSha: SHA_B }), '--out', out, '--repo-root', root], root);
+    const code = run(['--health-json', healthJson(root, { payloadSha: SHA_B }), '--out', out, '--repo-root', root], root);
 
-    expect(proof).toBeNull();
-    expect(process.exitCode).toBe(1);
+    expect(code).toBe(1);
     expect(existsSync(out)).toBe(false);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('payloadSha'));
   });
@@ -139,7 +135,7 @@ describe('arc-runtime-proof', () => {
     const secretLike = ['API_', 'TOKEN=', 'secret-material-', '1234567890'].join('');
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const proof = run([
+    const code = run([
       '--health-json',
       healthJson(root, { extra: { diagnostic: secretLike } }),
       '--out',
@@ -148,8 +144,7 @@ describe('arc-runtime-proof', () => {
       root,
     ], root);
 
-    expect(proof).toBeNull();
-    expect(process.exitCode).toBe(1);
+    expect(code).toBe(1);
     expect(existsSync(out)).toBe(false);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('redaction_violation'));
   });

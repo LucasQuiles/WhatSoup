@@ -42,13 +42,15 @@ A service is not a provider ID: `nvidia` would be reached as
    - `tests/core/agent-config-validator-crossfield.test.ts` — `nvidia` and
      `cerebras` are pinned as rejected-until-mapped; unpin only the service
      you mapped.
-3. **Decide probe coverage.** `PROBE_ENDPOINTS` in
-   `src/runtimes/agent/providers/credential-verify.ts`. Qualification rule:
-   only an endpoint proven to return 401/403 on a bad key belongs there — a
-   mute probe fails open forever, and OpenRouter and NVIDIA serve
+3. **Decide probe coverage.** `CREDENTIAL_PROBE_DESCRIPTORS` in
+   `src/lib/provider-credential-probes.ts` — the single shared map consumed by
+   both the arm-time pre-flight (`src/runtimes/agent/providers/credential-verify.ts`)
+   and the fleet `/verify` route (`src/fleet/routes/providers.ts`). Qualification
+   rule: only an endpoint proven to return 401/403 on a bad key belongs there —
+   a mute probe fails open forever, and OpenRouter and NVIDIA serve
    `GET /models` publicly (HTTP 200 with an invalid key). No entry means
    presence-only pre-flight: `fallback_credential_invalid` can never fire for
-   the service. If you add a probe, update the URL table and the
+   the service. If you add a probe, update the descriptor and the
    mapped-but-unprobed lock in
    `tests/runtimes/agent/providers/credential-verify.test.ts`. (Doc-sync note:
    the probe list stated here and in the design note is NOT independently

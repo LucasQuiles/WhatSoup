@@ -733,34 +733,36 @@ describe('UpdateModal — restart-instances phase', () => {
   })
 
   it('waits through a transient version failure and advances after the fleet was seen down', async () => {
+    // Deterministic via a tiny injected poll interval (production default is
+    // 2000ms) driving the component's real setInterval, instead of a
+    // monkeypatched globalThis.setInterval + manually invoked callback. This
+    // avoids racing a fixed-timeout waitFor against a single act() flush,
+    // which under maxWorkers CPU contention could lose the race even though
+    // the underlying logic was already correct (QR-244).
     const restartChunk = 'event: progress\ndata: {"step":"restart","status":"running"}\n\n'
-    let pollCallback: (() => Promise<void> | void) | undefined
-    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
-      if (typeof handler === 'function') {
-        pollCallback = handler as () => Promise<void> | void
-      }
-      return 1 as unknown as ReturnType<typeof setInterval>
-    })
-    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([restartChunk]) })))
-    mockApiGetVersion
-      .mockRejectedValueOnce(new Error('fleet down'))
-      .mockResolvedValueOnce({
-        sha: 'abc1234',
-        remoteSha: 'abc1234',
-        updateAvailable: false,
-        checkedAt: '',
-      })
+    // Stateful fleet-availability flag instead of consumable *Once mocks: a stray
+    // getVersion call (e.g. a leaked poll timer under the full parallel suite) can no
+    // longer consume a queued value and desync the phase sequence.
+    let fleetUp = false
+    mockApiGetVersion.mockImplementation(() =>
+      fleetUp
+        ? Promise.resolve({ sha: 'abc1234', remoteSha: 'abc1234', updateAvailable: false, checkedAt: '' })
+        : Promise.reject(new Error('fleet down')),
+    )
 
-    render(<UpdateModal {...defaultProps()} />)
+    render(<UpdateModal {...defaultProps()} pollIntervalMs={5} />)
     fireEvent.click(screen.getByRole('button', { name: 'Update' }))
     await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
 
-    await act(async () => { await pollCallback?.() })
+    // Let the real (tiny-interval) poll observe the fleet down at least once
+    // before flipping it up — fleetUp is still false at this point in test
+    // execution (single-threaded JS), so every call so far has rejected.
+    await waitFor(() => expect(mockApiGetVersion).toHaveBeenCalled())
     expect(screen.getByText('Waiting for fleet server...')).toBeDefined()
     expect(mockInvalidateQueries).not.toHaveBeenCalled()
 
-    await act(async () => { await pollCallback?.() })
+    fleetUp = true
     await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
     expect(mockInvalidateQueries).toHaveBeenCalled()
   })

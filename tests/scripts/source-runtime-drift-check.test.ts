@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -169,5 +170,78 @@ describe('source runtime drift check', () => {
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'file-kind', path: 'src/transport/helper.ts' }),
     ]));
+  });
+});
+
+function sha256Hex(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+// Rewrites manifest.json in `root` with a pinned sha256 for src/main.ts computed
+// from its current on-disk content, so a later edit to that file is guaranteed
+// to drift the hash.
+function pinMainSha256(root: string): string {
+  const currentMain = readFileSync(path.join(root, 'src/main.ts'), 'utf8');
+  const pinned = sha256Hex(currentMain);
+  writeFileSync(
+    path.join(root, 'manifest.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      scope: 'test',
+      entrypoints: [{ path: 'src/main.ts', sha256: pinned, mustContain: ['connect'], importGraph: true }],
+    }, null, 2),
+    'utf8',
+  );
+  return currentMain;
+}
+
+describe('source runtime drift check --suggest', () => {
+  it('mentions --suggest in the default failure message for a sha256 drift', () => {
+    const root = makeRepo();
+    const originalMain = pinMainSha256(root);
+    writeFileSync(path.join(root, 'src/main.ts'), `${originalMain}// drift\n`, 'utf8');
+
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (value?: unknown) => { errors.push(String(value)); };
+    try {
+      const issues = run(['--manifest', 'manifest.json'], root);
+      expect(issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' }),
+      ]));
+      expect(process.exitCode).toBe(1);
+      expect(errors.join('\n')).toContain('--suggest');
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  it('--suggest prints the corrected path and sha256 without writing the manifest', () => {
+    const root = makeRepo();
+    const originalMain = pinMainSha256(root);
+    const manifestPath = path.join(root, 'manifest.json');
+    const manifestBytesBefore = readFileSync(manifestPath);
+    const driftedMain = `${originalMain}// drift\n`;
+    writeFileSync(path.join(root, 'src/main.ts'), driftedMain, 'utf8');
+    const expectedNewSha256 = sha256Hex(driftedMain);
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (value?: unknown) => { logs.push(String(value)); };
+    try {
+      run(['--manifest', 'manifest.json', '--suggest'], root);
+      expect(process.exitCode).toBe(1);
+      const output = logs.join('\n');
+      expect(output).toContain('src/main.ts');
+      expect(output).toContain(expectedNewSha256);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(readFileSync(manifestPath).equals(manifestBytesBefore)).toBe(true);
+  });
+
+  it('--help usage text mentions --suggest', () => {
+    expect(() => run(['--help'], process.cwd())).toThrow(/--suggest/);
   });
 });

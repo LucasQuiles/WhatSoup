@@ -114,10 +114,11 @@ export function registerMediaTools(
       const filePath = params['filePath'] as string;
       const rawCaption = params['caption'] as string | undefined;
       // Client-safety guardrail: a media caption is agent free-text bound for the
-      // client, so mask internal-artifact leaks (redaction-only — there is no
-      // sensible "divert" for a media send). Ops-channel captions stay verbatim.
-      const caption = rawCaption !== undefined && resolveOutboundAudience(chatJid) === 'client'
-        ? redactInternalArtifacts(rawCaption).text
+      // recipient, so mask internal-artifact leaks (redaction-only — there is no
+      // sensible "divert" for a media send). Audience-scoped by the shared
+      // redactor: client → full scrub, internal → secrets/emails only, ops → verbatim.
+      const caption = rawCaption !== undefined
+        ? redactInternalArtifacts(rawCaption, resolveOutboundAudience(chatJid)).text
         : rawCaption;
       const filenameOverride = params['filename'] as string | undefined;
       const ptt = params['ptt'] as boolean | undefined;

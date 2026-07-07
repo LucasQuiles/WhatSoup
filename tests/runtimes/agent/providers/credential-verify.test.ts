@@ -55,7 +55,7 @@ describe('verifyFallbackCredential', () => {
   });
 
   // 5b. Mapped-but-unprobed services (SERVICE_ENV_MAP entries with no
-  //     PROBE_ENDPOINTS entry) degrade to presence-only checks: 'unknown',
+  //     CREDENTIAL_PROBE_DESCRIPTORS entry) degrade to presence-only checks: 'unknown',
   //     fetch never called, so fallback_credential_invalid can never fire for
   //     them. Locked per service so adding a probe entry flips a named test.
   //     If it flips: prove the endpoint returns 401/403 on a bad key first —
@@ -95,6 +95,28 @@ describe('verifyFallbackCredential', () => {
     expect(capturedInit!.signal).toBeInstanceOf(AbortSignal);
   });
 
+  // 6b. anthropic uses x-api-key auth (not Bearer) plus the anthropic-version
+  //     header; the key never appears in the URL or an Authorization header.
+  it('sends x-api-key (not Authorization) + anthropic-version for anthropic', async () => {
+    const secret = 'secret-anthropic-key';
+    let capturedUrl: string | undefined;
+    let capturedInit: RequestInit | undefined;
+
+    const spyFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = url as string;
+      capturedInit = init;
+      return { status: 200, ok: true };
+    }) as unknown as typeof fetch;
+
+    await verifyFallbackCredential('anthropic', secret, spyFetch);
+
+    const headers = capturedInit!.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe(secret);
+    expect(headers['Authorization']).toBeUndefined();
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(capturedUrl).not.toContain(secret);
+  });
+
   // Regression guard for #1056: a 3xx must abort rather than forward the bearer
   // header to the redirect target.
   it("sets redirect: 'error' so a 3xx never forwards the bearer key", async () => {
@@ -111,6 +133,7 @@ describe('verifyFallbackCredential', () => {
 
   // 7. Each mapped service probes its exact documented URL.
   it.each([
+    ['anthropic', 'https://api.anthropic.com/v1/models'],
     ['deepseek', 'https://api.deepseek.com/models'],
     ['minimax', 'https://api.minimax.io/v1/models'],
     ['openai', 'https://api.openai.com/v1/models'],

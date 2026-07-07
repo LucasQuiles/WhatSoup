@@ -31,6 +31,8 @@ import { Stepper } from './primitives'
 import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { DEFAULT_PROVIDER_ID } from '../lib/providers'
+import { buildFinishPatch } from '../lib/wizard-finish'
+import { useToast } from '../hooks/toast-context'
 
 interface AddLineWizardProps {
   /** Controls visibility. SoupKitchen latches mount on first open (C-B3W4-3). */
@@ -175,6 +177,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
   const [instanceCreated, setInstanceCreated] = useState(false)
   const [wizardCompleted, setWizardCompleted] = useState(false)
   const [lineLinked, setLineLinked] = useState(false)
+  const toastApi = useToast()
 
   // Warn user about tab close when instance is created but wizard incomplete
   useEffect(() => {
@@ -246,9 +249,29 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
     try {
       const nextFormData = withDefaultAgentWorkspace(formData)
       if (nextFormData !== formData) setFormData(nextFormData)
-      // Instance already created at step 0→1 transition. Update config with final settings.
-      await api.updateConfig(nextFormData.name as string, nextFormData)
-      // Instance already linked + running from step 1. Config saved. Done.
+      // Instance already created at step 0→1. Keys never ride the config
+      // PATCH — they go to the OS keyring via the credentials API.
+      const { patch, credentials } = buildFinishPatch(nextFormData)
+      await api.updateConfig(nextFormData.name as string, patch)
+      for (const cred of credentials) {
+        try {
+          await api.setCredential(cred.service, cred.value)
+          toastApi.success(`API key stored in the OS keyring (service "${cred.service}")`)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.startsWith('API 404')) {
+            toastApi.error(
+              `Service "${cred.service}" can't be stored via the API yet — run: ` +
+              `security add-generic-password -s ${cred.service} -a "$USER" -w  (key value at the prompt)`,
+            )
+          } else {
+            toastApi.error(
+              `Key for "${cred.service}" was NOT stored (${msg}). The line was created without it — ` +
+              `store it with: security add-generic-password -s ${cred.service} -a "$USER" -w`,
+            )
+          }
+        }
+      }
       setWizardCompleted(true)
       onClose()
     } catch (err) {
@@ -256,7 +279,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
     } finally {
       setCreating(false)
     }
-  }, [formData, onClose])
+  }, [formData, onClose, toastApi])
 
   // Accent: delivered via data-line-type; CSS resolves --wizard-accent statically
   // (WVR-014 retired — no runtime injection, no CSSProperties cast needed).
