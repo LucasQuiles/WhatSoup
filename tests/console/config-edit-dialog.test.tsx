@@ -1000,6 +1000,178 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
 })
 
 // ---------------------------------------------------------------------------
+// chatOptions.openaiProviderConfig — chat BYOK edit surface
+// ---------------------------------------------------------------------------
+
+describe('ConfigEditDialog — chat BYOK edit surface', () => {
+  const CHAT_CONFIG: Record<string, unknown> = {
+    name: 'chat-line',
+    type: 'chat',
+    chatOptions: {
+      openaiProviderConfig: {
+        baseUrl: 'https://api.groq.com/openai/v1',
+        apiKeyService: 'openai',
+      },
+    },
+  }
+
+  it('renders blank chat BYOK rows for chat configs that do not have chatOptions yet', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ type: 'chat' }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const baseUrl = screen.getByLabelText('chatOptions.openaiProviderConfig.baseUrl') as HTMLInputElement
+    const service = screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService') as HTMLSelectElement
+
+    expect(baseUrl.value).toBe('')
+    expect(service.tagName).toBe('SELECT')
+    expect(service.value).toBe('')
+    expect(Array.from(service.options).map(option => option.value)).toContain('groq')
+  })
+
+  it('renders persisted chat BYOK values as separate editable fields', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect((screen.getByLabelText('chatOptions.openaiProviderConfig.baseUrl') as HTMLInputElement).value)
+      .toBe('https://api.groq.com/openai/v1')
+    expect((screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService') as HTMLSelectElement).value)
+      .toBe('openai')
+    expect(screen.queryByText('chatOptions')).toBeNull()
+  })
+
+  it('serializes chat BYOK service edits as a nested chatOptions PATCH', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService'), {
+      target: { value: 'groq' },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      },
+    })
+  })
+
+  it('clears apiKeyService by sending the complete provider config without the service key', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService'), {
+      target: { value: '' },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+        },
+      },
+    })
+  })
+
+  it('clears the whole provider config when both chat BYOK fields are emptied', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.baseUrl'), {
+      target: { value: '' },
+    })
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService'), {
+      target: { value: '' },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(2\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      chatOptions: {
+        openaiProviderConfig: null,
+      },
+    })
+  })
+
+  it('requires a custom endpoint before saving a keyring service', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ type: 'chat' }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.apiKeyService'), {
+      target: { value: 'groq' },
+    })
+
+    expect(screen.getByText('Set a custom OpenAI endpoint before choosing a keyring service')).toBeDefined()
+    expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('blocks removing baseUrl while a keyring service remains selected', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.baseUrl'), {
+      target: { value: '' },
+    })
+
+    expect(screen.getByText('Clear keyring service before removing the custom endpoint')).toBeDefined()
+    expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('does not synthesize chat BYOK rows for non-chat configs', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ type: 'agent', agentOptions: { sessionScope: 'single' } }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect(screen.queryByLabelText('chatOptions.openaiProviderConfig.baseUrl')).toBeNull()
+    expect(screen.queryByLabelText('chatOptions.openaiProviderConfig.apiKeyService')).toBeNull()
+  })
+
+  it('surfaces backend 400s from chat BYOK saves through the existing toast path', async () => {
+    updateConfigMock.mockRejectedValue(new Error('API 400: chatOptions.openaiProviderConfig.baseUrl must be a valid URL'))
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={CHAT_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('chatOptions.openaiProviderConfig.baseUrl'), {
+      target: { value: 'https://api.openrouter.ai/v1' },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(toastValue.error).toHaveBeenCalledWith(
+      'Update failed: API 400: chatOptions.openaiProviderConfig.baseUrl must be a valid URL',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
 // TagInput wiring — adminPhones
 // ---------------------------------------------------------------------------
 

@@ -55,12 +55,15 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
 function deepMergeRecords(
   base: Record<string, unknown>,
   patch: Record<string, unknown>,
+  path: string[] = [],
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     const current = result[key];
-    result[key] = isRecord(current) && isRecord(value)
-      ? deepMergeRecords(current, value)
+    const childPath = [...path, key];
+    const dottedPath = childPath.join('.');
+    result[key] = isRecord(current) && isRecord(value) && dottedPath !== 'chatOptions.openaiProviderConfig'
+      ? deepMergeRecords(current, value, childPath)
       : value;
   }
   return result;

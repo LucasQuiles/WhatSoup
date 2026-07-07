@@ -1053,6 +1053,13 @@ neither field constructs the OpenAI client exactly as before (bare
 `new OpenAI()`), so `OPENAI_BASE_URL` remains fully backward-compatible for
 chat instances that configure nothing.
 
+**Console:** Chat instances expose these fields in the Add Line wizard's
+Model step and in the line configuration edit dialog as **Custom OpenAI
+endpoint** and **Keyring Service**. The console writes only the endpoint URL
+and service name to `config.json`; the API key value must already be set on
+the host keyring or in the matching service env var. Choose no keyring service
+to keep the conventional `OPENAI_API_KEY` fallback.
+
 **Validation:** same shape rules as `agentOptions.providerConfig` —
 `baseUrl` must be a non-empty, parseable `http://`/`https://` URL;
 `apiKeyService` must name an inference-provider service in

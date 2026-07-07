@@ -30,7 +30,7 @@ import { Button } from './primitives/Button'
 import { Stepper } from './primitives'
 import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
-import { DEFAULT_PROVIDER_ID } from '../lib/providers'
+import { CHAT_API_KEY_SERVICE_OPTIONS, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { buildFinishPatch } from '../lib/wizard-finish'
 import { useToast } from '../hooks/toast-context'
 
@@ -51,6 +51,42 @@ interface AddLineWizardProps {
  */
 const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function validateChatOpenAIProviderConfig(formData: Record<string, unknown>): Record<string, string> {
+  if (formData.type !== 'chat') return {}
+
+  const chatOptions = isRecord(formData.chatOptions) ? formData.chatOptions : {}
+  const providerConfig = isRecord(chatOptions.openaiProviderConfig) ? chatOptions.openaiProviderConfig : {}
+  const baseUrl = typeof providerConfig.baseUrl === 'string' ? providerConfig.baseUrl.trim() : ''
+  const apiKeyService = typeof providerConfig.apiKeyService === 'string' ? providerConfig.apiKeyService : ''
+  const errs: Record<string, string> = {}
+
+  if (baseUrl && !isHttpUrl(baseUrl)) {
+    errs['chatOptions.openaiProviderConfig.baseUrl'] = 'Enter a valid http:// or https:// URL'
+  }
+  if (apiKeyService) {
+    if (!baseUrl) {
+      errs['chatOptions.openaiProviderConfig.apiKeyService'] = 'Set a custom OpenAI endpoint before choosing a keyring service'
+    } else if (!CHAT_API_KEY_SERVICE_OPTIONS.includes(apiKeyService)) {
+      errs['chatOptions.openaiProviderConfig.apiKeyService'] = 'Choose a provider keyring service'
+    }
+  }
+
+  return errs
+}
+
 /* ── Step validation ──
  * Principle: normalize first, then validate the normalized value.
  * Never reject what can be silently fixed (case, whitespace, formatting).
@@ -65,6 +101,9 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
     if (!name || name.length < 2) errs.name = 'Enter a name — at least 2 characters (letters, numbers, hyphens)'
     const phones = formData.adminPhones as string[]
     if (!phones || phones.length === 0) errs.adminPhones = 'Add at least one admin phone number, then press Enter'
+  }
+  if (step === 2) {
+    Object.assign(errs, validateChatOpenAIProviderConfig(formData))
   }
   if (step === 3) {
     if (formData.type !== 'passive' && !formData.systemPrompt) errs.systemPrompt = 'Add a system prompt — this defines how the AI responds'

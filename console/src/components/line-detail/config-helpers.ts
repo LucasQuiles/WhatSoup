@@ -2,7 +2,7 @@
 import { validatePhone } from '../../lib/validation'
 import { isRecord } from '../../lib/type-guards'
 import { ACCESS_MODE_VALUES } from '../../lib/access-modes'
-import { PROVIDERS } from '../../lib/providers'
+import { CHAT_API_KEY_SERVICE_OPTIONS, PROVIDERS } from '../../lib/providers'
 
 /** Provider ids sourced from the single console catalog — never a second hardcoded list. */
 const PROVIDER_IDS = PROVIDERS.map((p) => p.id)
@@ -116,6 +116,40 @@ export const AGENT_OPTION_FIELDS: Record<string, AgentOptionFieldDefinition> = {
   'agentOptions.fallbackModel': { type: 'string' },
 }
 
+export const CHAT_OPTION_FIELDS: Record<string, AgentOptionFieldDefinition> = {
+  'chatOptions.openaiProviderConfig.baseUrl': { type: 'string' },
+  'chatOptions.openaiProviderConfig.apiKeyService': {
+    type: 'enum',
+    enum: ['', ...CHAT_API_KEY_SERVICE_OPTIONS],
+  },
+}
+
+function formatDeclaredNestedEntries(
+  value: Record<string, unknown>,
+  fields: Record<string, AgentOptionFieldDefinition>,
+  rootKey: string,
+): {
+  entries: { key: string; value: string; type: ConfigEntryType }[]
+  remaining: Record<string, unknown>
+} {
+  const entries: { key: string; value: string; type: ConfigEntryType }[] = []
+  const remaining = cloneRecord(value)
+
+  for (const [fieldKey, fieldDef] of Object.entries(fields)) {
+    const nestedPath = fieldKey.replace(new RegExp(`^${rootKey}\\.`), '')
+    const nestedValue = getValueAtPath(value, nestedPath)
+    if (nestedValue === undefined) continue
+    deleteValueAtPath(remaining, nestedPath)
+    entries.push({
+      key: fieldKey,
+      value: formatConfigValue(nestedValue),
+      type: getConfigEntryType(fieldKey, nestedValue, fieldDef.type),
+    })
+  }
+
+  return { entries, remaining }
+}
+
 export function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: ConfigEntryType }[] {
   const entries: { key: string; value: string; type: ConfigEntryType }[] = []
 
@@ -123,21 +157,24 @@ export function buildConfigEntries(rawConfig: Record<string, unknown>): { key: s
     if (CONFIG_EXCLUDE_KEYS.has(key)) continue
 
     if (key === 'agentOptions' && isRecord(value)) {
-      const remaining = cloneRecord(value)
-      for (const [fieldKey, fieldDef] of Object.entries(AGENT_OPTION_FIELDS)) {
-        const nestedPath = fieldKey.replace(/^agentOptions\./, '')
-        const nestedValue = getValueAtPath(value, nestedPath)
-        if (nestedValue === undefined) continue
-        deleteValueAtPath(remaining, nestedPath)
-        entries.push({
-          key: fieldKey,
-          value: formatConfigValue(nestedValue),
-          type: getConfigEntryType(fieldKey, nestedValue, fieldDef.type),
-        })
-      }
+      const { entries: nestedEntries, remaining } = formatDeclaredNestedEntries(value, AGENT_OPTION_FIELDS, 'agentOptions')
+      entries.push(...nestedEntries)
       if (Object.keys(remaining).length > 0) {
         entries.push({
           key: 'agentOptions (other)',
+          value: formatConfigValue(remaining),
+          type: 'string',
+        })
+      }
+      continue
+    }
+
+    if (key === 'chatOptions' && rawConfig.type === 'chat' && isRecord(value)) {
+      const { entries: nestedEntries, remaining } = formatDeclaredNestedEntries(value, CHAT_OPTION_FIELDS, 'chatOptions')
+      entries.push(...nestedEntries)
+      if (Object.keys(remaining).length > 0) {
+        entries.push({
+          key: 'chatOptions (other)',
           value: formatConfigValue(remaining),
           type: 'string',
         })
@@ -161,6 +198,7 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: [...ACCESS_MODE_VALUES],
   toolUpdateMode: ['full', 'minimal'],
   model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  'chatOptions.openaiProviderConfig.apiKeyService': ['', ...CHAT_API_KEY_SERVICE_OPTIONS],
 }
 
 export const CUSTOM_ENUM_OPTION = '__custom__'
@@ -175,4 +213,21 @@ export const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> =
   maxTokens: v => typeof v === 'number' && v < 256 ? 'Min 256' : typeof v === 'number' && v > 200000 ? 'Max 200,000' : null,
   tokenBudget: v => typeof v === 'number' && v < 1000 ? 'Min 1,000' : typeof v === 'number' && v > 10000000 ? 'Max 10M' : null,
   rateLimitPerHour: v => typeof v === 'number' && v < 1 ? 'Min 1' : typeof v === 'number' && v > 10000 ? 'Max 10,000' : null,
+  'chatOptions.openaiProviderConfig.baseUrl': v => {
+    if (typeof v !== 'string') return 'Enter a valid http:// or https:// URL'
+    if (v.trim() === '') return null
+    try {
+      const parsed = new URL(v)
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+        ? null
+        : 'Enter a valid http:// or https:// URL'
+    } catch {
+      return 'Enter a valid http:// or https:// URL'
+    }
+  },
+  'chatOptions.openaiProviderConfig.apiKeyService': v => (
+    typeof v === 'string' && (v === '' || CHAT_API_KEY_SERVICE_OPTIONS.includes(v))
+      ? null
+      : 'Choose a provider keyring service'
+  ),
 }
