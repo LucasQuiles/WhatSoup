@@ -322,6 +322,37 @@ describe('handleConfigUpdate PATCH chatOptions validation (QR-218 PR-2)', () => 
     expect(persisted.chatOptions).toEqual({ openaiProviderConfig });
   });
 
+  it('replaces chatOptions.openaiProviderConfig on PATCH so omitted apiKeyService is removed', async () => {
+    const cfg = writeChatConfig('test-line', {
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      },
+    });
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        chatOptions: {
+          openaiProviderConfig: {
+            baseUrl: 'https://api.openrouter.ai/v1',
+          },
+        },
+      }), 'PATCH'),
+      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+    );
+
+    expect(res._status, res._body).toBe(200);
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect(persisted.chatOptions).toEqual({
+      openaiProviderConfig: {
+        baseUrl: 'https://api.openrouter.ai/v1',
+      },
+    });
+  });
+
   it('rejects an unknown chatOptions.openaiProviderConfig.apiKeyService with 400 and leaves the file untouched', async () => {
     const cfg = writeChatConfig();
     const before = fs.readFileSync(cfg, 'utf-8');

@@ -39,6 +39,7 @@ import { Button } from '../primitives/Button'
 import {
   CONFIG_EXCLUDE_KEYS,
   AGENT_OPTION_FIELDS,
+  CHAT_OPTION_FIELDS,
   ENUM_OPTIONS,
   CUSTOM_ENUM_OPTION,
   CUSTOMIZABLE_ENUM_KEYS,
@@ -53,6 +54,26 @@ import {
 
 function fieldIdSegment(key: string): string {
   return key.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'field'
+}
+
+const CHAT_OPENAI_BASE_URL_KEY = 'chatOptions.openaiProviderConfig.baseUrl'
+const CHAT_OPENAI_API_KEY_SERVICE_KEY = 'chatOptions.openaiProviderConfig.apiKeyService'
+const CHAT_OPENAI_FIELD_KEYS = new Set([CHAT_OPENAI_BASE_URL_KEY, CHAT_OPENAI_API_KEY_SERVICE_KEY])
+
+function enumOptionLabel(key: string, value: string): string {
+  if (key === CHAT_OPENAI_API_KEY_SERVICE_KEY && value === '') {
+    return '-- none --'
+  }
+  return value || '(default)'
+}
+
+function buildChatOpenAIProviderConfig(baseUrl: unknown, apiKeyService: unknown): Record<string, unknown> | null {
+  const next: Record<string, unknown> = {}
+  const normalizedBaseUrl = typeof baseUrl === 'string' ? baseUrl.trim() : ''
+  const normalizedService = typeof apiKeyService === 'string' ? apiKeyService.trim() : ''
+  if (normalizedBaseUrl) next.baseUrl = normalizedBaseUrl
+  if (normalizedService) next.apiKeyService = normalizedService
+  return Object.keys(next).length > 0 ? next : null
 }
 
 export function ConfigEditDialog({
@@ -101,8 +122,27 @@ export function ConfigEditDialog({
         if (Object.keys(remaining).length > 0) {
           entries.push(['agentOptions (other)', remaining])
         }
+      } else if (k === 'chatOptions' && config.type === 'chat' && isRecord(v)) {
+        const remaining = cloneRecord(v)
+        for (const fieldKey of Object.keys(CHAT_OPTION_FIELDS)) {
+          const nestedPath = fieldKey.replace(/^chatOptions\./, '')
+          const fieldValue = getValueAtPath(v, nestedPath)
+          if (fieldValue === undefined) continue
+          deleteValueAtPath(remaining, nestedPath)
+          entries.push([fieldKey, fieldValue])
+        }
+        if (Object.keys(remaining).length > 0) {
+          entries.push(['chatOptions (other)', remaining])
+        }
       } else {
         entries.push([k, v])
+      }
+    }
+
+    if (config.type === 'chat') {
+      const entryKeys = new Set(entries.map(([key]) => key))
+      for (const fieldKey of Object.keys(CHAT_OPTION_FIELDS)) {
+        if (!entryKeys.has(fieldKey)) entries.push([fieldKey, ''])
       }
     }
     return entries
@@ -141,7 +181,23 @@ export function ConfigEditDialog({
     if (customEnumActive && typeof value === 'string' && value.trim() === '') {
       return 'Enter a custom model ID or choose a preset'
     }
-    return FIELD_VALIDATORS[key]?.(value) ?? null
+    const fieldError = FIELD_VALIDATORS[key]?.(value) ?? null
+    if (fieldError) return fieldError
+    if (key === CHAT_OPENAI_BASE_URL_KEY) {
+      const baseUrl = typeof value === 'string' ? value.trim() : ''
+      const service = currentValue(CHAT_OPENAI_API_KEY_SERVICE_KEY)
+      if (!baseUrl && typeof service === 'string' && service.trim() !== '') {
+        return 'Clear keyring service before removing the custom endpoint'
+      }
+    }
+    if (key === CHAT_OPENAI_API_KEY_SERVICE_KEY) {
+      const service = typeof value === 'string' ? value : ''
+      const baseUrl = currentValue(CHAT_OPENAI_BASE_URL_KEY)
+      if (service && (typeof baseUrl !== 'string' || baseUrl.trim() === '')) {
+        return 'Set a custom OpenAI endpoint before choosing a keyring service'
+      }
+    }
+    return null
   }, [currentValue, customEnumFields])
 
   const handleSave = async () => {
@@ -152,8 +208,20 @@ export function ConfigEditDialog({
     setSaving(true)
     try {
       const apiPatch: Record<string, unknown> = {}
+      const hasChatOpenAIProviderPatch = Object.keys(patch).some(key => CHAT_OPENAI_FIELD_KEYS.has(key))
       for (const [key, value] of Object.entries(patch)) {
+        if (hasChatOpenAIProviderPatch && CHAT_OPENAI_FIELD_KEYS.has(key)) continue
         setValueAtPath(apiPatch, key, value)
+      }
+      if (hasChatOpenAIProviderPatch) {
+        setValueAtPath(
+          apiPatch,
+          'chatOptions.openaiProviderConfig',
+          buildChatOpenAIProviderConfig(
+            currentValue(CHAT_OPENAI_BASE_URL_KEY),
+            currentValue(CHAT_OPENAI_API_KEY_SERVICE_KEY),
+          ),
+        )
       }
       await api.updateConfig(lineName, apiPatch)
       toast.success('Configuration updated')
@@ -284,7 +352,7 @@ export function ConfigEditDialog({
             error={invalid && !customEnumActive}
           >
             {enumOpts.map(opt => (
-              <option key={opt} value={opt}>{opt || '(default)'}</option>
+              <option key={opt} value={opt}>{enumOptionLabel(key, opt)}</option>
             ))}
             {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
               <option value={CUSTOM_ENUM_OPTION}>Custom…</option>

@@ -4,6 +4,7 @@ import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { Field, RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
+import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../lib/providers'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -45,6 +46,46 @@ const OPENAI_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'openaiExtraction', label: 'Extraction' },
   { key: 'openaiValidation', label: 'Validation' },
 ]
+
+const CHAT_OPENAI_PROVIDER_CONFIG = 'chatOptions.openaiProviderConfig' as const
+const CHAT_OPENAI_BASE_URL = `${CHAT_OPENAI_PROVIDER_CONFIG}.baseUrl` as const
+const CHAT_OPENAI_API_KEY_SERVICE = `${CHAT_OPENAI_PROVIDER_CONFIG}.apiKeyService` as const
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readChatOpenAIProviderConfig(data: Record<string, unknown>): Record<string, unknown> {
+  const chatOptions = isRecord(data.chatOptions) ? data.chatOptions : {}
+  return isRecord(chatOptions.openaiProviderConfig) ? chatOptions.openaiProviderConfig : {}
+}
+
+function buildChatOpenAIProviderPatch(
+  data: Record<string, unknown>,
+  updates: { baseUrl?: string; apiKeyService?: string },
+): Record<string, unknown> {
+  const currentOptions = isRecord(data.chatOptions) ? data.chatOptions : {}
+  const currentProviderConfig = readChatOpenAIProviderConfig(data)
+  const nextProviderConfig = { ...currentProviderConfig }
+
+  if (updates.baseUrl !== undefined) {
+    const baseUrl = updates.baseUrl.trim()
+    if (baseUrl) nextProviderConfig.baseUrl = updates.baseUrl
+    else delete nextProviderConfig.baseUrl
+  }
+
+  if (updates.apiKeyService !== undefined) {
+    if (updates.apiKeyService) nextProviderConfig.apiKeyService = updates.apiKeyService
+    else delete nextProviderConfig.apiKeyService
+  }
+
+  return {
+    chatOptions: {
+      ...currentOptions,
+      openaiProviderConfig: nextProviderConfig,
+    },
+  }
+}
 
 // passwordInputStyle replaced by c-input class + inline paddingRight
 
@@ -219,21 +260,70 @@ const ChatView: FC<{
   const models = (data.models as Record<ModelRole, string> | undefined) ?? { ...MODEL_DEFAULTS }
   const apiKey = (data.apiKey as string | undefined) ?? ''
   const openaiKey = (data.openaiKey as string | undefined) ?? ''
+  const chatProviderConfig = readChatOpenAIProviderConfig(data)
+  const chatBaseUrl = typeof chatProviderConfig.baseUrl === 'string' ? chatProviderConfig.baseUrl : ''
+  const chatApiKeyService = typeof chatProviderConfig.apiKeyService === 'string' ? chatProviderConfig.apiKeyService : ''
 
   const handleModelChange = (role: ModelRole, value: string) => {
     onChange({ models: { ...models, [role]: value } })
   }
 
   return (
-    <ModelAndKeyTabs
-      models={models}
-      onModelChange={handleModelChange}
-      apiKey={apiKey}
-      openaiKey={openaiKey}
-      onApiKeyChange={(v) => onChange({ apiKey: v })}
-      onOpenaiKeyChange={(v) => onChange({ openaiKey: v })}
-      errors={errors}
-    />
+    <div className="flex flex-col gap-[var(--sp-4)]">
+      <ModelAndKeyTabs
+        models={models}
+        onModelChange={handleModelChange}
+        apiKey={apiKey}
+        openaiKey={openaiKey}
+        onApiKeyChange={(v) => onChange({ apiKey: v })}
+        onOpenaiKeyChange={(v) => onChange({ openaiKey: v })}
+        errors={errors}
+      />
+
+      <div className="flex flex-col gap-[var(--sp-3)]">
+        <Field
+          label="Custom OpenAI endpoint"
+          error={errors[CHAT_OPENAI_BASE_URL]}
+          helper="OpenAI-compatible base URL for this chat instance."
+          confirmed={!errors[CHAT_OPENAI_BASE_URL] && chatBaseUrl.trim().length > 0}
+        >
+          {(id) => (
+            <TextInput
+              id={id}
+              type="text"
+              value={chatBaseUrl}
+              onChange={(e) => onChange(buildChatOpenAIProviderPatch(data, { baseUrl: e.target.value }))}
+              placeholder="https://api.groq.com/openai/v1"
+              error={!!errors[CHAT_OPENAI_BASE_URL]}
+              confirmed={!errors[CHAT_OPENAI_BASE_URL] && chatBaseUrl.trim().length > 0}
+            />
+          )}
+        </Field>
+
+        <Field
+          label="Keyring Service"
+          optional
+          error={errors[CHAT_OPENAI_API_KEY_SERVICE]}
+          helper="Key must be set on the host keyring; the console stores only this service name."
+          confirmed={!errors[CHAT_OPENAI_API_KEY_SERVICE] && chatApiKeyService.length > 0}
+        >
+          {(id) => (
+            <SelectInput
+              id={id}
+              value={chatApiKeyService}
+              onChange={(e) => onChange(buildChatOpenAIProviderPatch(data, { apiKeyService: e.target.value }))}
+              error={!!errors[CHAT_OPENAI_API_KEY_SERVICE]}
+              confirmed={!errors[CHAT_OPENAI_API_KEY_SERVICE] && chatApiKeyService.length > 0}
+            >
+              <option value="">-- none --</option>
+              {CHAT_API_KEY_SERVICE_OPTIONS.map((service) => (
+                <option key={service} value={service}>{service}</option>
+              ))}
+            </SelectInput>
+          )}
+        </Field>
+      </div>
+    </div>
   )
 }
 

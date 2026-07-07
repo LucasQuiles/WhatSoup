@@ -17,6 +17,7 @@
 
 import providerIdsJson from '../../../src/runtimes/agent/providers/provider-ids.json';
 import type { ProviderId } from '../../../src/runtimes/agent/providers/index.ts';
+import { PROVIDER_API_KEY_SERVICES } from '../../../src/lib/provider-key-service.ts';
 
 const PROVIDER_IDS = providerIdsJson as readonly ProviderId[];
 
@@ -35,6 +36,8 @@ export interface ConfigFieldDef {
 }
 
 export const DEFAULT_PROVIDER_ID: ProviderId = 'claude-cli';
+
+export const CHAT_API_KEY_SERVICE_OPTIONS: readonly string[] = Array.from(PROVIDER_API_KEY_SERVICES);
 
 /** Console-local display metadata; membership and order come from the JSON. */
 const PROVIDER_META: ProviderDef[] = [

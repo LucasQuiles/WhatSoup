@@ -197,6 +197,115 @@ describe('ModelAuthStep — chat view: change events bubble to onChange', () => 
   })
 })
 
+describe('ModelAuthStep — chat view: custom OpenAI endpoint', () => {
+  it('renders the chat-only BYOK endpoint controls', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    expect(screen.getByLabelText('Custom OpenAI endpoint')).toBeDefined()
+    expect(screen.getByLabelText('Keyring Service')).toBeDefined()
+    expect(screen.getByText(/Key must be set on the host keyring/)).toBeDefined()
+  })
+
+  it('hides the chat BYOK endpoint controls for agent and passive lines', () => {
+    renderStep({ data: { type: 'agent' } })
+    expect(screen.queryByLabelText('Custom OpenAI endpoint')).toBeNull()
+    expect(screen.queryByLabelText('Keyring Service')).toBeNull()
+
+    cleanup()
+    renderStep({ data: { type: 'passive' } })
+    expect(screen.queryByLabelText('Custom OpenAI endpoint')).toBeNull()
+    expect(screen.queryByLabelText('Keyring Service')).toBeNull()
+  })
+
+  it('emits chatOptions.openaiProviderConfig.baseUrl when the custom endpoint changes', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+
+    fireEvent.change(screen.getByLabelText('Custom OpenAI endpoint'), {
+      target: { value: 'https://api.groq.com/openai/v1' },
+    })
+
+    expect(onChange).toHaveBeenCalledWith({
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+        },
+      },
+    })
+  })
+
+  it('preserves the committed endpoint when the keyring service changes', () => {
+    const { onChange } = renderStep({
+      data: {
+        type: 'chat',
+        chatOptions: {
+          openaiProviderConfig: {
+            baseUrl: 'https://api.groq.com/openai/v1',
+          },
+        },
+      },
+    })
+
+    fireEvent.change(screen.getByLabelText('Keyring Service'), {
+      target: { value: 'groq' },
+    })
+
+    expect(onChange).toHaveBeenCalledWith({
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      },
+    })
+  })
+
+  it('clears apiKeyService without dropping the committed endpoint', () => {
+    const { onChange } = renderStep({
+      data: {
+        type: 'chat',
+        chatOptions: {
+          openaiProviderConfig: {
+            baseUrl: 'https://api.groq.com/openai/v1',
+            apiKeyService: 'groq',
+          },
+        },
+      },
+    })
+
+    fireEvent.change(screen.getByLabelText('Keyring Service'), {
+      target: { value: '' },
+    })
+
+    expect(onChange).toHaveBeenCalledWith({
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+        },
+      },
+    })
+  })
+
+  it('renders dotted-field validation errors for the chat BYOK controls', () => {
+    renderStep({
+      data: { type: 'chat' },
+      errors: {
+        'chatOptions.openaiProviderConfig.baseUrl': 'Enter a valid http(s) URL',
+        'chatOptions.openaiProviderConfig.apiKeyService': 'Choose a base URL first',
+      },
+    })
+
+    const endpoint = screen.getByLabelText('Custom OpenAI endpoint')
+    const service = screen.getByLabelText('Keyring Service')
+    const endpointError = screen.getByText('Enter a valid http(s) URL')
+    const serviceError = screen.getByText('Choose a base URL first')
+
+    expect(endpoint.getAttribute('aria-invalid')).toBe('true')
+    expect(service.getAttribute('aria-invalid')).toBe('true')
+    expect(endpoint.getAttribute('aria-describedby')).toBe(endpointError.id)
+    expect(service.getAttribute('aria-describedby')).toBe(serviceError.id)
+  })
+})
+
 describe('ModelAuthStep — ApiKeyInput visibility toggle', () => {
   it('flips the Anthropic key input from password to text when the eye button is clicked, and back', () => {
     renderStep({ data: { type: 'chat', apiKey: 'sk-ant-secret' } })

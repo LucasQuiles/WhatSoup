@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { PROVIDERS, PROVIDER_COLORS, getProvider, getProviderColor, getProviderConfigFields } from '../../console/src/lib/providers.ts';
+import { PROVIDER_API_KEY_SERVICES } from '../../src/lib/provider-key-service.ts';
+import { CHAT_API_KEY_SERVICE_OPTIONS, PROVIDERS, PROVIDER_COLORS, getProvider, getProviderColor, getProviderConfigFields } from '../../console/src/lib/providers.ts';
 
 describe('PROVIDERS', () => {
   it('has 6 providers', () => {
@@ -76,5 +77,20 @@ describe('getProviderConfigFields', () => {
 
   it('returns empty array for claude-cli (no extra config needed)', () => {
     expect(getProviderConfigFields('claude-cli')).toHaveLength(0);
+  });
+});
+
+describe('CHAT_API_KEY_SERVICE_OPTIONS', () => {
+  it('stays in lockstep with the backend provider api-key allowlist', () => {
+    expect(new Set(CHAT_API_KEY_SERVICE_OPTIONS)).toEqual(PROVIDER_API_KEY_SERVICES);
+  });
+
+  it('includes provider services and excludes non-provider secrets', () => {
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).toContain('openai');
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).toContain('groq');
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).not.toContain('pinecone');
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).not.toContain('elevenlabs');
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).not.toContain('whatsoup-health-token');
+    expect(CHAT_API_KEY_SERVICE_OPTIONS).not.toContain('whatsoup_health');
   });
 });

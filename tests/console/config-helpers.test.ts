@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AGENT_OPTION_FIELDS,
+  CHAT_OPTION_FIELDS,
   CONFIG_EXCLUDE_KEYS,
   CONFIG_PATH_KEYS,
   CUSTOM_ENUM_OPTION,
@@ -21,6 +22,7 @@ import {
   isRecord,
   setValueAtPath,
 } from '../../console/src/components/line-detail/config-helpers.ts';
+import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../console/src/lib/providers.ts';
 
 describe('isRecord', () => {
   it('accepts plain objects and rejects arrays/null/primitives', () => {
@@ -256,6 +258,14 @@ describe('static config tables', () => {
     }
   });
 
+  it('CHAT_OPTION_FIELDS exposes the chat BYOK editable field schema', () => {
+    expect(CHAT_OPTION_FIELDS['chatOptions.openaiProviderConfig.baseUrl']).toEqual({ type: 'string' });
+    expect(CHAT_OPTION_FIELDS['chatOptions.openaiProviderConfig.apiKeyService']).toEqual({
+      type: 'enum',
+      enum: ['', ...CHAT_API_KEY_SERVICE_OPTIONS],
+    });
+  });
+
   it('TYPE_COLOR covers every ConfigEntryType returned by getConfigEntryType', () => {
     expect(typeof TYPE_COLOR.string).toBe('string');
     expect(typeof TYPE_COLOR.number).toBe('string');
@@ -266,6 +276,7 @@ describe('static config tables', () => {
   it('ENUM_OPTIONS pins the known UI dropdown sets', () => {
     expect(ENUM_OPTIONS.accessMode).toEqual(['self_only', 'allowlist', 'open_dm', 'groups_only']);
     expect(ENUM_OPTIONS.toolUpdateMode).toEqual(['full', 'minimal']);
+    expect(ENUM_OPTIONS['chatOptions.openaiProviderConfig.apiKeyService']).toEqual(['', ...CHAT_API_KEY_SERVICE_OPTIONS]);
     // Model list begins with an empty string sentinel so the UI can clear the value.
     expect(ENUM_OPTIONS.model[0]).toBe('');
     expect(ENUM_OPTIONS.model).toContain('claude-opus-4-6');
@@ -310,6 +321,22 @@ describe('FIELD_VALIDATORS', () => {
     expect(FIELD_VALIDATORS.rateLimitPerHour(1)).toBeNull();
     expect(FIELD_VALIDATORS.rateLimitPerHour(10_000)).toBeNull();
     expect(FIELD_VALIDATORS.rateLimitPerHour(10_001)).toBe('Max 10,000');
+  });
+
+  it('chat BYOK baseUrl accepts only non-empty http(s) URLs when edited', () => {
+    const validate = FIELD_VALIDATORS['chatOptions.openaiProviderConfig.baseUrl'];
+    expect(validate('')).toBeNull();
+    expect(validate('not-a-url')).toBe('Enter a valid http:// or https:// URL');
+    expect(validate('ftp://api.example.com/v1')).toBe('Enter a valid http:// or https:// URL');
+    expect(validate('https://api.groq.com/openai/v1')).toBeNull();
+    expect(validate('http://localhost:11434/v1')).toBeNull();
+  });
+
+  it('chat BYOK apiKeyService allows the empty sentinel or a provider service', () => {
+    const validate = FIELD_VALIDATORS['chatOptions.openaiProviderConfig.apiKeyService'];
+    expect(validate('')).toBeNull();
+    expect(validate('groq')).toBeNull();
+    expect(validate('pinecone')).toBe('Choose a provider keyring service');
   });
 });
 
@@ -368,6 +395,50 @@ describe('buildConfigEntries', () => {
     expect(leftover.custom).toBe('leftover');
     expect((leftover.mcp as Record<string, unknown>).extra).toBe('kept');
     expect((leftover.mcp as Record<string, unknown>).inheritUserConfig).toBeUndefined();
+  });
+
+  it('flattens persisted chatOptions.openaiProviderConfig fields and bundles leftover chatOptions keys', () => {
+    const entries = buildConfigEntries({
+      type: 'chat',
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+        futureKnob: true,
+      },
+    });
+
+    const byKey = Object.fromEntries(entries.map((e) => [e.key, e]));
+    expect(byKey['chatOptions.openaiProviderConfig.baseUrl']).toEqual({
+      key: 'chatOptions.openaiProviderConfig.baseUrl',
+      value: 'https://api.groq.com/openai/v1',
+      type: 'string',
+    });
+    expect(byKey['chatOptions.openaiProviderConfig.apiKeyService']).toEqual({
+      key: 'chatOptions.openaiProviderConfig.apiKeyService',
+      value: 'groq',
+      type: 'string',
+    });
+    expect(byKey['chatOptions (other)']?.type).toBe('string');
+    expect(JSON.parse(byKey['chatOptions (other)']!.value)).toEqual({ futureKnob: true });
+  });
+
+  it('does not flatten chatOptions for non-chat configs', () => {
+    const entries = buildConfigEntries({
+      type: 'agent',
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      },
+    });
+
+    const keys = entries.map((e) => e.key);
+    expect(keys).not.toContain('chatOptions.openaiProviderConfig.baseUrl');
+    expect(keys).not.toContain('chatOptions.openaiProviderConfig.apiKeyService');
+    expect(keys).toContain('chatOptions');
   });
 
   it('omits the leftover bucket when every agentOptions key is flattened', () => {

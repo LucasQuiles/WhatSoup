@@ -394,6 +394,46 @@ describe('AddLineWizard — step-0 validation', () => {
   })
 })
 
+describe('AddLineWizard — chat BYOK validation on Model step', () => {
+  it('blocks advancing when the custom OpenAI endpoint is not an http(s) URL', async () => {
+    render(<WizardWrapper />)
+    await advanceIdentityToLink(/chat/i)
+    await completeLinkStep()
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Custom OpenAI endpoint'), {
+        target: { value: 'not-a-url' },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+
+    expect(screen.getByText('Enter a valid http:// or https:// URL')).toBeDefined()
+    expect(screen.getByText('Model & Auth')).toBeDefined()
+    expect(screen.queryByRole('tab', { name: /behavior/i })).toBeNull()
+  })
+
+  it('blocks advancing when keyring service is set without a custom endpoint', async () => {
+    render(<WizardWrapper />)
+    await advanceIdentityToLink(/chat/i)
+    await completeLinkStep()
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Keyring Service'), {
+        target: { value: 'groq' },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+
+    expect(screen.getByText('Set a custom OpenAI endpoint before choosing a keyring service')).toBeDefined()
+    expect(screen.getByText('Model & Auth')).toBeDefined()
+    expect(screen.queryByRole('tab', { name: /behavior/i })).toBeNull()
+  })
+})
+
 describe('AddLineWizard — step-0→1 creation side-effect', () => {
   it('Next on valid step 0 calls createLine exactly once', async () => {
     render(<WizardWrapper />)
@@ -615,6 +655,45 @@ describe('AddLineWizard — config and review workflow', () => {
 })
 
 describe('AddLineWizard — credential wiring (finish step)', () => {
+  it('sends chat BYOK config through the finish PATCH while keeping raw keys out', async () => {
+    render(<WizardWrapper />)
+    await advanceIdentityToLink(/chat/i)
+    await completeLinkStep()
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Custom OpenAI endpoint'), {
+        target: { value: 'https://api.groq.com/openai/v1' },
+      })
+      fireEvent.change(screen.getByLabelText('Keyring Service'), {
+        target: { value: 'groq' },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+    await waitFor(() => expect(screen.getByRole('tab', { name: /behavior/i })).toBeDefined())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    const patch = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>
+    expect(patch).toMatchObject({
+      chatOptions: {
+        openaiProviderConfig: {
+          baseUrl: 'https://api.groq.com/openai/v1',
+          apiKeyService: 'groq',
+        },
+      },
+    })
+    expect(patch).not.toHaveProperty('apiKey')
+    expect(patch).not.toHaveProperty('openaiKey')
+  })
+
   it('routes the typed Anthropic key to setCredential and keeps it out of the config patch', async () => {
     render(<WizardWrapper />)
     await driveToReviewWithApiKey('sk-ant-x')
