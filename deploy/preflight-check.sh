@@ -21,6 +21,8 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 #   - a credentials/env init failure  => every import RESOLVED + linked => SAFE
 #   - "does not provide an export" / "Cannot find module" => phantom import => LANDMINE
 #   - "Cannot find package"           => dependencies not installed => UNSAFE (distinct)
+# It also probes the per-session agent path, because the agent session graph is
+# loaded lazily at session spawn and can otherwise false-green a startup-only probe.
 # This mirrors the fleet pre-flight audit that distinguished safe from landmine hosts.
 #
 # Usage:  preflight-check.sh <repo-root> [instance-name]
@@ -30,8 +32,9 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 #   3  unsafe to start: import landmine (phantom module/export) or missing deps -> BLOCK
 #   1  usage / internal error (cannot run the probe)
 #
-# Warnings (dirty tree, unpushed commits, node-pin skew) go to stderr and are
-# NON-FATAL — they annotate the latent-landmine signature without blocking.
+# Warnings (untracked files, unpushed commits, node-pin skew) go to stderr and
+# are NON-FATAL. Tracked file drift and missing dependencies are fatal because a
+# restart would not load the recorded git SHA/dependency set.
 
 REPO_ROOT="${1:?Usage: preflight-check.sh <repo-root> [instance-name]}"
 INSTANCE="${2:-}"
@@ -47,6 +50,7 @@ if [ ! -f "$MAIN_TS" ]; then
   echo "PREFLIGHT-ERROR: entrypoint not found: $MAIN_TS" >&2
   exit 1
 fi
+SESSION_TS="$REPO_ROOT/src/runtimes/agent/session.ts"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROBE_TS="$SCRIPT_DIR/preflight-probe.ts"
@@ -71,13 +75,26 @@ if ! whatsoup_check_node_pin "$REPO_ROOT" "$NODE"; then
   echo "PREFLIGHT-WARN: resolved Node major differs from .nvmrc pin" >&2
 fi
 
-# Dirty-tree / unpushed advisory (non-fatal). A long-uptime process on a dirty
-# tree is the latent-landmine signature, so we surface the counts.
+# Tree-integrity gate: tracked drift is fatal; untracked files and unpushed
+# commits are advisory. A long-uptime process on a drifted tracked tree is the
+# latent-landmine signature, so we block before restart.
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  tracked_drift_count="$(git -C "$REPO_ROOT" diff --name-only HEAD -- | grep -c . || true)"
+  : "${tracked_drift_count:=0}"
+  if [ "$tracked_drift_count" -gt 0 ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — tracked file drift in checkout."
+      echo "  $tracked_drift_count tracked path(s) differ from HEAD."
+      echo "  A restart would not be a clean launch of the recorded git SHA."
+      echo "  Fix: restore/commit the tracked edits, then re-run: git diff HEAD --exit-code"
+    } >&2
+    exit 3
+  fi
+
   dirty_count="$(git -C "$REPO_ROOT" status --porcelain | grep -c . || true)"
   : "${dirty_count:=0}"
   if [ "$dirty_count" -gt 0 ]; then
-    echo "PREFLIGHT-WARN: working tree has $dirty_count uncommitted/untracked path(s)" >&2
+    echo "PREFLIGHT-WARN: working tree has $dirty_count untracked path(s)" >&2
   fi
   if git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
     unpushed="$(git -C "$REPO_ROOT" rev-list '@{u}..HEAD' --count 2>/dev/null || echo 0)"
@@ -89,13 +106,27 @@ else
   echo "PREFLIGHT-WARN: $REPO_ROOT is not a git work tree (cannot compute dirty/unpushed)" >&2
 fi
 
+if [ -f "$REPO_ROOT/package-lock.json" ] && [ ! -d "$REPO_ROOT/node_modules" ]; then
+  {
+    echo "PREFLIGHT-FAIL: REFUSING TO START — dependencies are not installed (node_modules)."
+    echo "  package-lock.json exists but $REPO_ROOT/node_modules is missing."
+    echo "  Run 'npm ci' in $REPO_ROOT before starting."
+  } >&2
+  exit 3
+fi
+
 # Import-closure probe — the authoritative landmine check. Runs an isolated import
-# of src/main.ts (no instance arg) under a throwaway state/config/data dir so the
-# probe is side-effect-free (no touching prod DB).
+# of startup and lazy agent-session entrypoints under a throwaway state/config/data
+# dir so the probe is side-effect-free (no touching prod DB).
 PROBE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-preflight.XXXXXX")"
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() { rm -rf "$PROBE_TMP" || true; }
 trap cleanup EXIT
+
+PROBE_TARGETS=("$MAIN_TS")
+if [ -f "$SESSION_TS" ]; then
+  PROBE_TARGETS+=("$SESSION_TS")
+fi
 
 set +e
 probe_out="$(
@@ -105,7 +136,7 @@ probe_out="$(
   "$NODE" \
     --disable-warning=ExperimentalWarning \
     --experimental-strip-types \
-    "$PROBE_TS" "$MAIN_TS" 2>&1
+    "$PROBE_TS" "${PROBE_TARGETS[@]}" 2>&1
 )"
 probe_rc=$?
 set -e
