@@ -2,7 +2,7 @@
  * Tests for the shared schedule-enqueue helper (Sprint 5E-0).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from '../../src/core/database.ts';
@@ -105,5 +105,45 @@ describe('enqueueScheduledMessage', () => {
     expect(() => enqueueScheduledMessage(db, { chatJid: CHAT, scheduled_at: NOW + 10, filePath: pdf }, { allowedRoot: undefined, now: NOW }))
       .toThrow(/Path outside workspace/);
     expect(countRows(db)).toBe(0);
+  });
+
+  it('rejects a static symlink inside root that points outside root, leaking nothing', () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sched-outside-')));
+    try {
+      const secret = join(outside, 'secret.pdf');
+      writeFileSync(secret, Buffer.from('%PDF-1.4 TOP-SECRET-CREDENTIAL'));
+      const link = join(root, 'evil.pdf');
+      symlinkSync(secret, link);
+      expect(() => enqueueScheduledMessage(db, { chatJid: CHAT, scheduled_at: NOW + 10, filePath: link }, { allowedRoot: root, now: NOW }))
+        .toThrow(/Path outside workspace/);
+      expect(countRows(db)).toBe(0);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a sibling directory that shares the root path as a prefix (root vs root-evil)', () => {
+    const evilDir = `${root}-evil`;
+    mkdirSync(evilDir, { recursive: true });
+    try {
+      const f = join(evilDir, 'x.pdf');
+      writeFileSync(f, Buffer.from('%PDF-1.4 TOP-SECRET-CREDENTIAL'));
+      expect(() => enqueueScheduledMessage(db, { chatJid: CHAT, scheduled_at: NOW + 10, filePath: f }, { allowedRoot: root, now: NOW }))
+        .toThrow(/Path outside workspace/);
+      expect(countRows(db)).toBe(0);
+    } finally {
+      rmSync(evilDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an invalid IANA timezone before inserting (parity with the MCP schema)', () => {
+    expect(() => enqueueScheduledMessage(db, { chatJid: CHAT, scheduled_at: NOW + 10, text: 'hi', recurrence: '0 9 * * *', timezone: 'Not/AZone' }, { allowedRoot: root, now: NOW }))
+      .toThrow(/[Ii]nvalid.*timezone/);
+    expect(countRows(db)).toBe(0);
+  });
+
+  it('accepts a valid IANA timezone on a recurring message', () => {
+    const r = enqueueScheduledMessage(db, { chatJid: CHAT, scheduled_at: NOW + 10, text: 'hi', recurrence: '0 9 * * *', timezone: 'America/New_York' }, { allowedRoot: root, now: NOW });
+    expect(getRow(db, r.id)!.timezone).toBe('America/New_York');
   });
 });

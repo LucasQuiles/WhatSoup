@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
 import type { Database } from './database.ts';
 import type { OutboundMedia } from './types.ts';
@@ -7,6 +7,16 @@ import { parseCron } from './cron.ts';
 import { EXTENSION_MEDIA_MAP } from './media-mime.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+/** Validate a string is a real IANA timezone (shared by the MCP schema and the HTTP path). */
+export function isValidIanaTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface EnqueueMessageParams {
   chatJid: string;
@@ -40,27 +50,45 @@ export function resolveScheduledFile(
   filePath: string,
   allowedRoot: string | undefined,
 ): { resolved: string; info: { type: OutboundMedia['type']; mime: string }; buffer: Buffer } {
-  let resolved: string;
+  // QR-090 fd-pin TOCTOU guard: open the path ONCE, then verify the actually-opened
+  // inode against the canonical path within allowedRoot before trusting any bytes, and
+  // read off the pinned fd. Re-opening by name (realpath → statSync → readFileSync) let
+  // a symlink swap between the check and the read escape allowedRoot; the fd pin closes
+  // that window (mirrors createMediaReadStream in src/transport/baileys-media-errors.ts).
+  let fd: number;
   try {
-    resolved = realpathSync(filePath);
+    fd = openSync(filePath, 'r');
   } catch {
     throw new Error(`File not found: ${filePath}`);
   }
-  if (!isPathWithinAllowedRoot(resolved, allowedRoot)) {
-    throw new Error(`Path outside workspace: ${filePath}`);
+  try {
+    const opened = fstatSync(fd);
+    let resolved: string;
+    try {
+      resolved = realpathSync(filePath);
+    } catch {
+      throw new Error(`File not found: ${filePath}`);
+    }
+    if (!isPathWithinAllowedRoot(resolved, allowedRoot)) {
+      throw new Error(`Path outside workspace: ${filePath}`);
+    }
+    const canonicalStat = statSync(resolved);
+    if (canonicalStat.dev !== opened.dev || canonicalStat.ino !== opened.ino) {
+      // The name we validated no longer resolves to the inode we opened — a swap
+      // raced the check. Fail closed rather than read the swapped target.
+      throw new Error(`Path outside workspace: ${filePath}`);
+    }
+    if (opened.size > MAX_FILE_SIZE_BYTES) {
+      throw new Error(`File too large: ${(opened.size / 1024 / 1024).toFixed(1)} MB (limit 25 MB)`);
+    }
+    const info = EXTENSION_MEDIA_MAP[extname(resolved).toLowerCase()];
+    if (!info) {
+      throw new Error(`Unsupported file extension "${extname(resolved)}". Supported: ${Object.keys(EXTENSION_MEDIA_MAP).join(', ')}`);
+    }
+    return { resolved, info, buffer: readFileSync(fd) };
+  } finally {
+    closeSync(fd);
   }
-  if (!existsSync(resolved)) {
-    throw new Error(`File not found: ${filePath}`);
-  }
-  const stat = statSync(resolved);
-  if (stat.size > MAX_FILE_SIZE_BYTES) {
-    throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (limit 25 MB)`);
-  }
-  const info = EXTENSION_MEDIA_MAP[extname(resolved).toLowerCase()];
-  if (!info) {
-    throw new Error(`Unsupported file extension "${extname(resolved)}". Supported: ${Object.keys(EXTENSION_MEDIA_MAP).join(', ')}`);
-  }
-  return { resolved, info, buffer: readFileSync(resolved) };
 }
 
 /** Build the content_type + JSON payload + media blob for a scheduled row. */
@@ -115,6 +143,11 @@ export function enqueueScheduledMessage(
   }
   if (params.recurrence) {
     parseCron(params.recurrence); // validate cron expression before inserting
+  }
+  if (params.timezone !== undefined && !isValidIanaTimeZone(params.timezone)) {
+    // Parity with the MCP schema's refine: the HTTP path passes timezone through
+    // unvalidated, which would silently kill a recurring row after its first send.
+    throw new Error(`Invalid IANA timezone: ${params.timezone}`);
   }
 
   const { contentType, payload, mediaBlob } = buildScheduledPayload(params, opts.allowedRoot);

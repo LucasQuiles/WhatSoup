@@ -5,17 +5,11 @@ import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
-import { enqueueScheduledMessage } from '../../core/schedule-enqueue.ts';
+import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.
-function isValidIanaTimeZone(tz: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
+// `isValidIanaTimeZone` is the single source in schedule-enqueue.ts, shared with the
+// HTTP /schedule path so both entry points reject bogus zones identically.
 
 export interface SchedulingDeps {
   db: Database;
