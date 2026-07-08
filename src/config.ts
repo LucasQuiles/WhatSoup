@@ -11,6 +11,7 @@ import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/consta
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { validateModelRoleValue } from './lib/model-resolver.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -855,12 +856,16 @@ export const config = {
   logDir,
   lockPath: instance ? (instance.paths.lockPath as string) : join(stateRoot, 'bot.lock'),
 
-  // Models — deep merge: instance > env var > default
+  // Models — deep merge: instance > env var > default. Each value is either a
+  // literal model ID (pinned, exact passthrough — the default) or a symbolic
+  // `<vendor>[:<family>]:latest[-stable]` form resolved at point of use
+  // (src/lib/model-resolver.ts). Validation throws at load on malformed
+  // symbolic values so typos never reach a provider as bogus literal IDs.
   models: {
-    conversation: (instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8',
-    extraction: (instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6',
-    validation: (instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5',
-    fallback: (instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4',
+    conversation: validateModelRoleValue((instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
+    extraction: validateModelRoleValue((instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
+    validation: validateModelRoleValue((instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
+    fallback: validateModelRoleValue((instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
   },
 
   // Conversation

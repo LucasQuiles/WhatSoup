@@ -18,6 +18,12 @@
 import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
+import {
+  parseSymbolicModel,
+  resolveSymbolicFromCatalog,
+  resolveSymbolicFromIds,
+  type SymbolicModelSpec,
+} from './model-resolver.ts';
 import { errorMessage } from './error-message.ts';
 
 const log = createChildLogger('model-advisor');
@@ -78,6 +84,7 @@ export function __resetModelAdvisorForTest(): void {
   lastCheckedAt = null;
   lastNotifiedKey = null;
   lastLiveScanFailureKey = null;
+  liveIdsCache = null;
 }
 
 interface ModelsListResponse {
@@ -166,6 +173,93 @@ export async function fetchLiveModelIds(): Promise<string[]> {
   return (await fetchLiveModelIdsWithStatus()).ids;
 }
 
+// ---------------------------------------------------------------------------
+// Live-ID cache + symbolic model resolution
+//
+// Symbolic model-role values (`<vendor>:<family>:latest[-stable]` — grammar
+// and selection in model-resolver.ts) resolve against the live vendor lists.
+// The cache below is the single in-process source for those lists: the
+// currency monitor refreshes it on startup and on its daily tick, and
+// point-of-use resolution (resolveModelRole) reads through it, so a hot chat
+// path never adds a second network fetch.
+// ---------------------------------------------------------------------------
+
+const LIVE_IDS_CACHE_TTL_MS = CHECK_INTERVAL_MS;
+let liveIdsCache: { fetchedAt: number; ids: string[]; liveScan: LiveModelScanStatus } | null = null;
+
+async function refreshLiveModelIdsCache(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+  const result = await fetchLiveModelIdsWithStatus();
+  liveIdsCache = { fetchedAt: Date.now(), ...result };
+  return result;
+}
+
+/** Live model IDs through the shared daily cache (refresh on miss/expiry). */
+export async function fetchLiveModelIdsCached(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+  if (liveIdsCache && Date.now() - liveIdsCache.fetchedAt < LIVE_IDS_CACHE_TTL_MS) {
+    return { ids: liveIdsCache.ids, liveScan: liveIdsCache.liveScan };
+  }
+  return refreshLiveModelIdsCache();
+}
+
+// Resolve a parsed symbolic spec against a live scan. When the spec's vendor
+// was not scanned live (missing key) or its scan degraded, fall back to the
+// static catalog `current` entry for the family — warn-logged, never thrown.
+function resolveSpecWithScan(
+  spec: SymbolicModelSpec,
+  liveIds: readonly string[],
+  liveScan: LiveModelScanStatus,
+): string {
+  const vendorLive = liveScan.attemptedVendors.includes(spec.vendor)
+    && !liveScan.degradedVendors.some((failure) => failure.vendor === spec.vendor);
+  if (vendorLive) {
+    const resolved = resolveSymbolicFromIds(spec, liveIds);
+    if (resolved) return resolved;
+  }
+  const fromCatalog = resolveSymbolicFromCatalog(spec);
+  log.warn(
+    { model: spec.raw, resolved: fromCatalog, scanMode: liveScan.mode, vendor: spec.vendor },
+    vendorLive
+      ? 'symbolic model matched nothing in the live list — resolved from static catalog'
+      : 'live scan unavailable for vendor — symbolic model resolved from static catalog',
+  );
+  return fromCatalog ?? spec.raw;
+}
+
+// Parse a role value, treating malformed symbolic values as literals here:
+// config load already rejects them loudly (validateModelRoleValue), so a
+// runtime parse failure can only come from an unvalidated source — advisory
+// paths must not throw for it.
+function parseSymbolicLenient(value: string): SymbolicModelSpec | null {
+  try {
+    return parseSymbolicModel(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a configured model-role value to the concrete ID to send to a
+ * provider. Literal IDs return unchanged without touching the network.
+ * Symbolic values resolve through the shared live-ID cache and degrade to
+ * the static catalog `current` for the family — this never throws and never
+ * blocks on anything slower than one cached vendor-list fetch.
+ */
+export async function resolveModelRole(value: string): Promise<string> {
+  const spec = parseSymbolicLenient(value);
+  if (!spec) return value;
+  try {
+    const { ids, liveScan } = await fetchLiveModelIdsCached();
+    return resolveSpecWithScan(spec, ids, liveScan);
+  } catch (err) {
+    const fromCatalog = resolveSymbolicFromCatalog(spec);
+    log.warn(
+      { model: value, resolved: fromCatalog, err: errorMessage(err) },
+      'symbolic model resolution failed — resolved from static catalog',
+    );
+    return fromCatalog ?? value;
+  }
+}
+
 /**
  * Check every configured role→model pair and return advisories for the ones
  * that are behind, deprecated, or retired. Roles with empty values are skipped.
@@ -179,11 +273,19 @@ export async function checkModelCurrency(
 export async function checkModelCurrencyStatus(
   models: Record<string, string | undefined>,
 ): Promise<ModelCurrencyCheckResult> {
-  const { ids: liveIds, liveScan } = await fetchLiveModelIdsWithStatus();
+  // Force-refresh (not read-through) so the startup check and each daily tick
+  // re-resolve symbolic values against a fresh vendor list, priming the shared
+  // cache that point-of-use resolution reads.
+  const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache();
   const advisories: ModelAdvisory[] = [];
   for (const [role, modelId] of Object.entries(models)) {
     if (!modelId || modelId.trim() === '') continue;
-    const advisory = adviseModel(modelId, liveIds);
+    // Advise on the RESOLVED target: for symbolic values the advisory-worthy
+    // question is whether what they currently resolve to is current, not
+    // whether the symbolic string itself parses as a model ID.
+    const spec = parseSymbolicLenient(modelId);
+    const target = spec ? resolveSpecWithScan(spec, liveIds, liveScan) : modelId;
+    const advisory = adviseModel(target, liveIds);
     if (advisory) advisories.push({ ...advisory, role });
   }
   return { advisories, liveScan };

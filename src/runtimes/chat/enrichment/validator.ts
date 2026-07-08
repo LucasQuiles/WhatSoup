@@ -1,5 +1,6 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { resolveModelRole } from '../../../lib/model-advisor.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import type { ExtractedFact } from './extractor.ts';
@@ -122,7 +123,9 @@ export async function validateFacts(
   let raw: string;
   try {
     const response = await provider.generate({
-      model: config.models.validation,
+      // Resolve symbolic model values (vendor:family:latest[-stable]) at point
+      // of use; literal IDs pass through untouched. Never throws.
+      model: await resolveModelRole(config.models.validation),
       maxTokens: 1000,
       systemPrompt: 'You are a fact validator. Output only JSON arrays.',
       messages: [{ role: 'user', content: buildValidationPrompt(facts, sourceMessages) }],

@@ -1,5 +1,6 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { resolveModelRole } from '../../../lib/model-advisor.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
 import { stripJsonFences } from '../../../lib/json-fences.ts';
@@ -80,7 +81,9 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
   let raw: string;
   try {
     const response = await provider.generate({
-      model: config.models.validation,
+      // Resolve symbolic model values (vendor:family:latest[-stable]) at point
+      // of use; literal IDs pass through untouched. Never throws.
+      model: await resolveModelRole(config.models.validation),
       maxTokens: 500,
       systemPrompt: NLI_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt }],
