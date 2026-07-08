@@ -273,8 +273,32 @@ describe('classifyAssistantTextEgress', () => {
     });
   });
 
+  it('suppresses live gate-check narration without satisfying the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress(
+      "I'll silently check current gate state before deciding whether anything new needs surfacing.",
+    );
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'internal_narration',
+      satisfiesReplyGuarantee: false,
+    });
+  });
+
   it('suppresses send/read-back verification chatter and satisfies the reply guarantee', () => {
     const decision = classifyAssistantTextEgress('Acknowledged and delivered (verified, pk 23924).');
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'send_verification',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  it('suppresses landed-cleanly verification chatter and satisfies the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress(
+      'The gate-failure message landed cleanly (pk 23971). I also note my pre-tool line leaked.',
+    );
 
     expect(decision).toEqual({
       action: 'suppress',

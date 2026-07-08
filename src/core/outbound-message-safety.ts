@@ -78,6 +78,8 @@ const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
   /\bread-?back\b.{0,160}\b(?:verified|pk\s+\d+|correct chat|matching content|delivered)\b/i,
   /\b(?:verified|delivery verified|delivered \(verified\))\b[^.]{0,120}\bpk\s+\d+\b/i,
   /\bpk\s+\d+\b[^.]{0,120}\b(?:verified|correct chat|matching content|delivered)\b/i,
+  /\blanded cleanly\b.{0,160}\b(?:pk\s+\d+|delivered|sent|verified|message)\b/i,
+  /\b(?:message|send|delivery|read-?back)\b.{0,120}\blanded cleanly\b/i,
   /^acknowledged and delivered\b.{0,120}\b(?:verified|pk\s+\d+)\b/i,
   /^intended .{0,80}\bverified\b/i,
 ];
@@ -85,10 +87,12 @@ const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
 const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
   /^now\b.{0,160}\b(?:add|wire|rebuild|update|run|send|read|check|pull|load|implement|smoke|verify|workbook|sheet|script|command|tool|delete|revoke|entryrows|weekemployeetotals)\b/i,
   /^let me\b(?!\s+know\b).{0,160}\b(?:implement|close|pull|send|verify|revoke|delete|wire|load|check|read|run)\b/i,
+  /^i(?:'|’)?ll\s+(?:silently\s+)?(?:check|record|confirm|inspect|look|verify)\b.{0,180}\b(?:gate|state|surface|surfacing|tool|thread|message|target|preflight)\b/i,
   /^(?:loading|reading|checking|pulling|verifying)\b.{0,160}\b(?:tool|file|log|db|database|message|thread|script|command|workbook|sheet|pk|read-?back|socket)\b/i,
   /^root cause confirmed\b/i,
   /^one more narration line leaked\b/i,
   /^the \d+ leaked narration lines\b/i,
+  /\blet me\b.{0,80}\b(?:record|confirm)\b.{0,120}\bbefore surfacing\b/i,
   /\b(?:outside a tool call|loading the delete tool|smoke\/verify script)\b/i,
 ];
 
