@@ -15,6 +15,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
+import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -65,6 +66,8 @@ export interface HealthDeps {
   instanceType: string;  // 'chat' | 'agent' | 'passive'
   accessMode: string;
   socketPath?: string | null;
+  /** Filesystem root that POST /schedule bounds media file paths to (fail-closed; route replies 409 when unset). */
+  scheduleAllowedRoot?: string;
   /** Callback for POST /access — allow triggers queued-message replay. */
   handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<void>;
 }
@@ -551,6 +554,94 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
           });
+      });
+      return;
+    }
+
+    // ── POST /schedule — enqueue a text or media message for durable delivery ──
+    // Reuses the scheduled_messages enqueue helper; the always-on MessageScheduler
+    // delivers on its next tick (≤ ~60 s). Media is passed by FILE PATH (bounded to
+    // deps.scheduleAllowedRoot), never inline bytes — a branded PDF exceeds the body cap.
+    if (req.url === '/schedule' && req.method === 'POST') {
+      if (!requireAuth(req, res)) return;
+
+      const jsonHeaders = { 'Content-Type': 'application/json' };
+      const MAX_BODY_BYTES = 64 * 1024; // 64 KB — JSON body references a file path, not bytes
+      let body = '';
+      let byteCount = 0;
+      let destroyed = false;
+      req.on('data', (chunk) => {
+        if (destroyed) return;
+        byteCount += Buffer.byteLength(chunk);
+        if (byteCount > MAX_BODY_BYTES) {
+          destroyed = true;
+          res.writeHead(413, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+          req.destroy();
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (destroyed) return;
+
+        if (!deps.scheduleAllowedRoot) {
+          res.writeHead(409, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'schedule route not configured' }));
+          return;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          return;
+        }
+        if (!isRecord(parsed)) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'request body must be a JSON object' }));
+          return;
+        }
+
+        const chatJid = parsed['chatJid'];
+        if (typeof chatJid !== 'string' || chatJid.length === 0) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'chatJid is required' }));
+          return;
+        }
+
+        const LEAD_SECONDS = 2;
+        const now = Math.floor(Date.now() / 1000);
+        const scheduledAtRaw = parsed['scheduledAt'];
+        const scheduledAt = typeof scheduledAtRaw === 'number' ? scheduledAtRaw : now + LEAD_SECONDS;
+
+        const str = (k: string): string | undefined => (typeof parsed[k] === 'string' ? (parsed[k] as string) : undefined);
+
+        try {
+          const result = enqueueScheduledMessage(
+            deps.db,
+            {
+              chatJid,
+              scheduled_at: scheduledAt,
+              text: str('text'),
+              filePath: str('filePath'),
+              caption: str('caption'),
+              filename: str('filename'),
+              mediaType: str('mediaType') as EnqueueMessageParams['mediaType'],
+              recurrence: str('recurrence'),
+              timezone: str('timezone'),
+              chatName: str('chatName'),
+            },
+            { allowedRoot: deps.scheduleAllowedRoot, now },
+          );
+          res.writeHead(200, jsonHeaders);
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+        }
       });
       return;
     }

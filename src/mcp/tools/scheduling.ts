@@ -1,26 +1,15 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { extname } from 'node:path';
 import { z } from 'zod';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Database } from '../../core/database.ts';
-import type { OutboundMedia } from '../../core/types.ts';
 import type { ToolRegistry } from '../registry.ts';
-import { isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
+import type { SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
-import { EXTENSION_MEDIA_MAP } from '../../core/media-mime.ts';
-
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.
-function isValidIanaTimeZone(tz: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
+// `isValidIanaTimeZone` is the single source in schedule-enqueue.ts, shared with the
+// HTTP /schedule path so both entry points reject bogus zones identically.
 
 export interface SchedulingDeps {
   db: Database;
@@ -103,100 +92,6 @@ function assertSessionAccess(rowChatJid: string, session: SessionContext): void 
 
   if (conversationKey !== session.conversationKey) {
     throw new Error('Access denied: scheduled message belongs to a different conversation');
-  }
-}
-
-function resolveFile(filePath: string, session: SessionContext): { resolved: string; info: { type: OutboundMedia['type']; mime: string }; buffer: Buffer } {
-  let resolved: string;
-  try {
-    resolved = realpathSync(filePath);
-  } catch {
-    throw new Error(`File not found: ${filePath}`);
-  }
-
-  if (!isPathWithinAllowedRoot(resolved, session.allowedRoot)) {
-      throw new Error(`Path outside workspace: ${filePath}`);
-  }
-
-  if (!existsSync(resolved)) {
-    throw new Error(`File not found: ${filePath}`);
-  }
-
-  const stat = statSync(resolved);
-  if (stat.size > MAX_FILE_SIZE_BYTES) {
-    throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (limit 25 MB)`);
-  }
-
-  const info = EXTENSION_MEDIA_MAP[extname(resolved).toLowerCase()];
-  if (!info) {
-    throw new Error(`Unsupported file extension "${extname(resolved)}". Supported: ${Object.keys(EXTENSION_MEDIA_MAP).join(', ')}`);
-  }
-
-  return { resolved, info, buffer: readFileSync(resolved) };
-}
-
-function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, session: SessionContext): { contentType: string; payload: Record<string, unknown>; mediaBlob: Buffer | null } {
-  const {
-    text,
-    filePath,
-    caption,
-    filename,
-    ptt,
-    seconds,
-    ptv,
-    gifPlayback,
-    viewOnce,
-    isAnimated,
-    mediaType,
-  } = params;
-
-  if (!text && !filePath) {
-    throw new Error('Provide text for a scheduled text message or filePath for scheduled media');
-  }
-
-  if (!filePath) {
-    return {
-      contentType: 'text',
-      payload: { text: text! },
-      mediaBlob: null,
-    };
-  }
-
-  const { resolved, info, buffer } = resolveFile(filePath, session);
-  const effectiveType = mediaType ?? info.type;
-  const basename = filename ?? resolved.split('/').pop() ?? 'file';
-
-  switch (effectiveType) {
-    case 'image':
-      return {
-        contentType: 'image',
-        payload: { type: 'image', caption: caption ?? text, mimetype: info.mime, viewOnce },
-        mediaBlob: buffer,
-      };
-    case 'document':
-      return {
-        contentType: 'document',
-        payload: { type: 'document', filename: basename, mimetype: info.mime, caption: caption ?? text },
-        mediaBlob: buffer,
-      };
-    case 'audio':
-      return {
-        contentType: 'audio',
-        payload: { type: 'audio', mimetype: info.mime, ptt, seconds },
-        mediaBlob: buffer,
-      };
-    case 'video':
-      return {
-        contentType: 'video',
-        payload: { type: 'video', caption: caption ?? text, mimetype: info.mime, ptv, gifPlayback, viewOnce },
-        mediaBlob: buffer,
-      };
-    case 'sticker':
-      return {
-        contentType: 'sticker',
-        payload: { type: 'sticker', mimetype: info.mime, isAnimated },
-        mediaBlob: buffer,
-      };
   }
 }
 
@@ -296,28 +191,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     schema: ScheduleMessageSchema,
     handler: async (params, session) => {
       const parsed = ScheduleMessageSchema.parse(params);
-      const now = nowUnixSec();
-      if (parsed.scheduled_at <= now) {
-        throw new Error('scheduled_at must be a future UTC unix timestamp');
-      }
-      if (parsed.recurrence) {
-        parseCron(parsed.recurrence); // validate cron expression before inserting
-      }
-
-      const { contentType, payload, mediaBlob } = buildScheduledPayload(parsed, session);
-      const nextRunAt = parsed.recurrence ? parsed.scheduled_at : null;
-      const result = db.raw.prepare(
-        `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, timezone, next_run_at, status, media_blob)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      ).run(parsed.chatJid, parsed.chatName ?? null, contentType, JSON.stringify(payload), parsed.scheduled_at, parsed.recurrence ?? null, parsed.timezone ?? null, nextRunAt, mediaBlob);
-
-      return {
-        id: Number(result.lastInsertRowid),
-        chatJid: parsed.chatJid,
-        contentType,
-        scheduledAt: parsed.scheduled_at,
-        status: 'pending',
-      };
+      return enqueueScheduledMessage(db, parsed, { allowedRoot: session.allowedRoot, now: nowUnixSec() });
     },
   });
 
