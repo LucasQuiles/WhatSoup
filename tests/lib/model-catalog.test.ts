@@ -75,6 +75,32 @@ describe('latestInFamily', () => {
     const parsed = parseModelId('claude-sonnet-4-6')!;
     expect(latestInFamily(parsed, ['claude-opus-4-9', 'gpt-6'])?.normalized).toBe('claude-sonnet-4-6');
   });
+
+  it('excludes pre-release IDs by default (stable comparison)', () => {
+    const parsed = parseModelId('gpt-5.4')!;
+    expect(latestInFamily(parsed, ['gpt-5.5', 'gpt-5.6-preview'])?.normalized).toBe('gpt-5.5');
+  });
+
+  it('admits pre-release IDs with stable: false, keeping the served ID', () => {
+    const parsed = parseModelId('gpt-5.4')!;
+    expect(latestInFamily(parsed, ['gpt-5.5', 'gpt-5.6-preview'], { stable: false })?.normalized)
+      .toBe('gpt-5.6-preview');
+    const opus = parseModelId('claude-opus-4-8')!;
+    expect(latestInFamily(opus, ['claude-opus-4-9-beta'], { stable: false })?.normalized)
+      .toBe('claude-opus-4-9-beta');
+  });
+
+  it('keeps variant product lines (-codex, -mini) out of the family even with stable: false', () => {
+    const parsed = parseModelId('gpt-5.4')!;
+    expect(latestInFamily(parsed, ['gpt-5.9-codex', 'gpt-5.8-mini'], { stable: false })?.normalized)
+      .toBe('gpt-5.4');
+  });
+
+  it('prefers the stable ID over a pre-release one on a version tie', () => {
+    const parsed = parseModelId('gpt-5.4')!;
+    expect(latestInFamily(parsed, ['gpt-5.6-preview', 'gpt-5.6'], { stable: false })?.normalized)
+      .toBe('gpt-5.6');
+  });
 });
 
 describe('adviseModel', () => {

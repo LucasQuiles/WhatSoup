@@ -41,12 +41,54 @@ These tune the optional on-device voice-note transcription backends. They are re
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `CONVERSATION_MODEL` | string | `claude-opus-4-8` | Primary model for response generation. |
-| `EXTRACTION_MODEL` | string | `claude-sonnet-4-6` | Model for memory extraction and enrichment. |
-| `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. |
-| `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. |
+| `CONVERSATION_MODEL` | string | `claude-opus-4-8` | Primary model for response generation. Literal ID or [symbolic form](#dynamic-model-resolution). |
+| `EXTRACTION_MODEL` | string | `claude-sonnet-4-6` | Model for memory extraction and enrichment. Literal ID or [symbolic form](#dynamic-model-resolution). |
+| `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. Literal ID or [symbolic form](#dynamic-model-resolution). |
+| `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. Literal ID (pinned, the default) or a [symbolic form](#dynamic-model-resolution) such as `openai:gpt:latest-stable` to track the newest stable release automatically. |
 
 All four can be overridden per-instance via `config.json` `models` object.
+
+#### Dynamic model resolution
+
+Each model-role value accepts one of three modes:
+
+1. **Literal ID** (default, fully backward compatible) — `gpt-5.4`,
+   `claude-opus-4-8`, `claude-opus-4-6[1m]`. Pinned; passed to the provider
+   exactly as written.
+2. **`<vendor>[:<family>]:latest-stable`** (recommended dynamic mode) —
+   resolves to the newest **stable** model in the vendor+family line:
+   current/legacy catalog entries plus live-served IDs, excluding pre-release
+   markers (`-preview`, `-beta`, …), dated snapshots (normalized to their base
+   ID), and variant product lines (`-codex`, `-mini`). Example:
+   `openai:gpt:latest-stable`, `anthropic:sonnet:latest-stable`.
+3. **`<vendor>[:<family>]:latest`** — newest served ID in the line with no
+   stability filter (tracks previews/snapshots too). Variant product lines
+   stay excluded — `-codex`/`-mini` are different products, not newer builds.
+
+Vendors: `openai`, `anthropic`. The family may be omitted
+(`openai:latest-stable`) and defaults to the vendor's flagship chat line
+(openai→`gpt`, anthropic→`opus`). Valid families are the ones present in the
+static catalog (`src/lib/model-catalog.ts`) — currently `gpt`/`gpt-o` for
+openai and `opus`/`sonnet`/`haiku`/`fable` for anthropic.
+
+Semantics and failure behavior:
+
+- **Validation is at config load.** An unknown vendor or family (or malformed
+  mode) in a symbolic value fails startup with a clear error — it is never
+  silently passed through as a literal, so typos cannot masquerade as model
+  IDs. Note this claims any value ending in `:latest`/`:latest-stable`
+  (e.g. an Ollama-style `llama3:latest` tag is rejected); other colon-tagged
+  literals (`llama3:70b`) still pass through untouched.
+- **Resolution is async, at point of use.** The raw symbolic string stays on
+  the config; the chat runtime, enrichment extractor/validator, and memory
+  consolidation resolve it to a concrete ID just before each provider call via
+  a shared in-process cache of the live vendor `/v1/models` lists
+  (`src/lib/model-advisor.ts`). The model-currency monitor refreshes that
+  cache on startup and on its daily tick, re-resolving symbolic values and
+  advising on the **resolved** target. Literal IDs never touch the network.
+- **Degraded/offline live scan** (missing API key, network failure, non-OK
+  response) resolves to the static catalog `current` entry for the family —
+  warn-logged, never thrown; a live turn is never blocked on resolution.
 
 #### Model currency advisories
 
@@ -334,7 +376,7 @@ into place during deployment.
 | `adminPhones` | string[] | yes | — | Non-empty array of phone numbers with admin access. All elements must be non-empty strings. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
-| `models` | object | no | env/default | Model overrides. Keys: `conversation`, `extraction`, `validation`, `fallback`. Each takes a model ID string. |
+| `models` | object | no | env/default | Model overrides. Keys: `conversation`, `extraction`, `validation`, `fallback`. Each takes a literal model ID or a symbolic `<vendor>[:<family>]:latest[-stable]` form (see [Dynamic model resolution](#dynamic-model-resolution)). |
 | `memory` | object | no | defaults | Canonical BYOK memory/search config. Use this for all new configs. See [`memory`](#memory). |
 | `pineconeIndex` | string | no | `whatsapp-bot` | Legacy alias for `memory.pinecone.index`. Runtime still reads it; fleet writes and the migrator convert it to `memory.*`. |
 | `pineconeSearchMode` | string | no | auto | Legacy alias for `memory.pinecone.searchMode`. |
@@ -403,11 +445,16 @@ All access modes keep phone blocklist checks authoritative. If a sender arrives 
   "conversation": "claude-sonnet-4-6",
   "extraction": "claude-haiku-4-5-20251001",
   "validation": "claude-haiku-4-5-20251001",
-  "fallback": "gpt-5.4"
+  "fallback": "openai:gpt:latest-stable"
 }
 ```
 
-Omit any key to inherit the env var or built-in default for that slot.
+Omit any key to inherit the env var or built-in default for that slot. Each
+value is a literal model ID (pinned) or a symbolic
+`<vendor>[:<family>]:latest[-stable]` form that tracks the vendor's newest
+release — see [Dynamic model resolution](#dynamic-model-resolution) for the
+grammar, stability semantics, and offline fallback behavior. Malformed
+symbolic values (unknown vendor/family) fail config load.
 
 ### `chatAliases`
 

@@ -318,6 +318,25 @@ else
     echo "  ✗ systemctl --user daemon-reload failed after installing units" >&2
     exit 1
   fi
+  reenable_units=()
+  seen_reenable_units=" "
+  shopt -s nullglob
+  for link in "$SYSTEMD_DIR"/*.target.wants/whatsoup@*.service "$SYSTEMD_DIR"/*.target.wants/whatsoup-fleet.service; do
+    unit="$(basename "$link")"
+    case "$seen_reenable_units" in
+      *" $unit "*) continue ;;
+    esac
+    seen_reenable_units="$seen_reenable_units$unit "
+    reenable_units+=("$unit")
+  done
+  shopt -u nullglob
+  if [ "${#reenable_units[@]}" -gt 0 ]; then
+    if ! systemctl --user reenable "${reenable_units[@]}"; then
+      echo "  ✗ systemctl --user reenable failed after installing units" >&2
+      exit 1
+    fi
+    echo "  ✓ refreshed systemd enablement for ${reenable_units[*]}"
+  fi
   echo "  ✓ whatsoup@.service installed"
   echo "  ✓ whatsoup-fleet.service installed"
   echo "  ✓ whatsoup-heal-notify@.service installed"

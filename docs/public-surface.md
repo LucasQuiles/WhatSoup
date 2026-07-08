@@ -125,11 +125,11 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 |---|---|---|---|---|---|
 | `http:health.status` | `GET /health` | `src/core/health.ts:908` | stable | active | Liveness probe; the `instance` block includes nullable checkout metadata (`commit`, full 40-character git SHA when known; `branch`, current branch or `HEAD-detached` when known) plus, on agent instances, provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) and `primaryModelUsability` (`status`, `provider`, `model`, `reason`, `suggestion`, `checkedAt`, `probeInFlight`) from the startup primary model usability probe. The top-level `turn_capability` block exposes `model_usable`, `model_usability_status`, `model_usable_stale`, `model_usable_checked_at`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at` (`model_usable_stale` flags a usability verdict whose probe is past its freshness window — treated as unusable so a stale "usable" reading cannot keep health green; `model_usable_checked_at` is the probe timestamp); agent health degrades when runtime health is degraded, the configured primary model is unusable or its usability probe is stale, or a user-turn error has no later successful user turn (an `empty-output` error degrades only as a current, sustained stall — past a short debounce and within a staleness bound — so a transient empty turn or a stale idle one self-clears; #1433). |
 | `http:health.send` | `POST /send` | `src/core/health.ts:498` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:726` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:818` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:888` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:641` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:552` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.access` | `POST /access` | `src/core/health.ts:733` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:825` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:895` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:648` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:559` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
@@ -286,6 +286,8 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-repo-commit-authors` | `npm run guard:repo:commit-authors` | `package.json` | stable | active | Repo hygiene guard over branch-range commit authors |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
+| `cli:npm.guard-agent-iteration-review` | `npm run guard:agent-iteration-review` | `package.json` | internal | active | Validate a self-review markdown artifact has required sections and a valid decision |
+| `cli:npm.guard-worker-artifacts` | `npm run guard:worker-artifacts` | `package.json` | internal | active | Validate worker-delegation report artifacts (JSON validity, metadata, manifest completeness) |
 | `cli:npm.guard-unit-drift` | `npm run guard:unit-drift` | `package.json` | internal | active | Compare checked-in systemd user units with installed units |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |

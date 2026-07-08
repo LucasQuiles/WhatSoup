@@ -761,6 +761,10 @@ export class AgentRuntime implements Runtime {
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
+  /** F-STICKY-ACTOR (QR-263): nlRouting adds a DYNAMIC actor-race surface — a live
+   *  per-sender `/model` pin can route a turn to a non-claude CLI provider at runtime,
+   *  independent of the static primary/fallback config. Mutable only in tests. */
+  private nlRoutingEnabled: boolean = config.nlRouting === true;
   private readonly serviceRestarter: ServiceRestarter | undefined;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
@@ -2193,14 +2197,15 @@ export class AgentRuntime implements Runtime {
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
         // F-STICKY-ACTOR (QR-247 hardening): the per-turn actor binding covers
-        // claude-cli per_chat only. A non-claude subprocess provider — as PRIMARY or
-        // as a configured FALLBACK — in non-sandbox per_chat stays on THIS shared
-        // global socket, so the concurrent-sender actor race is NOT closed for it.
-        // Warn (naming the exposed providers) rather than imply fixed.
+        // claude-cli per_chat only. A non-claude subprocess provider — as PRIMARY, as
+        // a configured FALLBACK, or (QR-263) selected at runtime by a live nlRouting
+        // per-sender pin — in non-sandbox per_chat stays on THIS shared global socket,
+        // so the concurrent-sender actor race is NOT closed for it.
+        // Warn (naming the exposed surfaces) rather than imply fixed.
         if (this.perChatActorRaceExposed()) {
           log.warn(
-            { provider: this.effectiveProvider, exposedProviders: this.exposedCliProviders(), sessionScope: this.sessionScope },
-            'per-chat actor binding covers claude-cli only: a non-claude subprocess (primary OR configured fallback) in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed for it.',
+            { provider: this.effectiveProvider, exposedProviders: this.exposedCliProviders(), nlRoutingPinSurface: this.nlRoutingEnabled, sessionScope: this.sessionScope },
+            'per-chat actor binding covers claude-cli only: a non-claude subprocess (primary, configured fallback, or a live nlRouting per-sender pin) in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed for it.',
           );
         }
 
@@ -5773,9 +5778,10 @@ export class AgentRuntime implements Runtime {
     return [...providers];
   }
 
-  /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider (primary OR fallback) on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Drives the honest startup warning (F11). */
+  /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Covers the STATIC config surface (primary OR fallback) and — QR-263 — the DYNAMIC nlRouting surface (a live per-sender pin can select a non-claude CLI provider at runtime even when the static config is claude-only). Drives the honest startup warning (F11). */
   private perChatActorRaceExposed(): boolean {
-    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.exposedCliProviders().length > 0;
+    if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return false;
+    return this.exposedCliProviders().length > 0 || this.nlRoutingEnabled;
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {

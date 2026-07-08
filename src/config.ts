@@ -5,12 +5,13 @@ import { normalizePhoneE164 } from './lib/phone.ts';
 import { asRecord } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
-import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
+import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import { errorMessage } from './lib/error-message.ts';
+import { validateModelRoleValue } from './lib/model-resolver.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -21,7 +22,7 @@ const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
 const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
 const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
-export type { AccessMode } from './instance-loader.ts';
+export type { AccessMode, GroupSenderPolicy } from './instance-loader.ts';
 export type PineconeSearchMode = 'memory' | 'entity';
 export type KnowledgeSearchMode = 'entity' | 'text' | 'vector';
 
@@ -855,12 +856,16 @@ export const config = {
   logDir,
   lockPath: instance ? (instance.paths.lockPath as string) : join(stateRoot, 'bot.lock'),
 
-  // Models — deep merge: instance > env var > default
+  // Models — deep merge: instance > env var > default. Each value is either a
+  // literal model ID (pinned, exact passthrough — the default) or a symbolic
+  // `<vendor>[:<family>]:latest[-stable]` form resolved at point of use
+  // (src/lib/model-resolver.ts). Validation throws at load on malformed
+  // symbolic values so typos never reach a provider as bogus literal IDs.
   models: {
-    conversation: (instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8',
-    extraction: (instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6',
-    validation: (instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5',
-    fallback: (instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4',
+    conversation: validateModelRoleValue((instanceModels.conversation as string | undefined) ?? process.env.CONVERSATION_MODEL ?? 'claude-opus-4-8', 'conversation'),
+    extraction: validateModelRoleValue((instanceModels.extraction as string | undefined) ?? process.env.EXTRACTION_MODEL ?? 'claude-sonnet-4-6', 'extraction'),
+    validation: validateModelRoleValue((instanceModels.validation as string | undefined) ?? process.env.VALIDATION_MODEL ?? 'claude-haiku-4-5', 'validation'),
+    fallback: validateModelRoleValue((instanceModels.fallback as string | undefined) ?? process.env.FALLBACK_MODEL ?? 'gpt-5.4', 'fallback'),
   },
 
   // Conversation
@@ -1094,6 +1099,23 @@ export const config = {
       );
     }
     return raw as AccessMode;
+  })(),
+
+  // R5: per-sender group response policy. Default 'any_member' preserves current
+  // behavior (any non-blocked group participant can trigger a response). Set
+  // 'allowlisted_only' (per-instance config or WHATSOUP_GROUP_SENDER_POLICY env) to
+  // require the group sender to be allowlisted or admin. Env takes precedence so an
+  // operator can flip strict mode per instance without editing config.json.
+  groupSenderPolicy: (() => {
+    const raw = process.env.WHATSOUP_GROUP_SENDER_POLICY
+      ?? (instance?.groupSenderPolicy as string | undefined)
+      ?? 'any_member';
+    if (!VALID_GROUP_SENDER_POLICIES.has(raw)) {
+      throw new Error(
+        `Invalid groupSenderPolicy "${raw}" — must be one of: ${[...VALID_GROUP_SENDER_POLICIES].join(', ')}`,
+      );
+    }
+    return raw as GroupSenderPolicy;
   })(),
 
   // Transport selection — read from instance.transport, defaults to DEFAULT_TRANSPORT_ID.

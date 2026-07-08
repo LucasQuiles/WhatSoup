@@ -73,6 +73,21 @@ describe('keyring fail-loud logging', () => {
       expect(logWarn).not.toHaveBeenCalled();
     });
 
+    it('does not warn when secret-tool --help exits 2 with a usage banner', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+      mockedExecFileSync.mockImplementationOnce(() => {
+        const err: Error & { status?: number; stderr?: Buffer } = new Error('Command failed: secret-tool --help');
+        err.status = 2;
+        err.stderr = Buffer.from('usage: secret-tool lookup attribute value ...\n');
+        throw err;
+      });
+
+      detectKeyringBackend();
+
+      expect(logWarn).not.toHaveBeenCalled();
+      expect(logError).not.toHaveBeenCalled();
+    });
+
     it('does not warn on darwin (no probe attempted)', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin', writable: true });
 
