@@ -140,8 +140,7 @@ describe('status-op lifecycle (PR-C)', () => {
 
     // The text op is provably untouched: still pending, no 'superseded' error.
     const textRow = getOutbound(db, textId);
-    expect(textRow['status']).toBe('pending');
-    expect(textRow['error']).toBeNull();
+    expect(textRow).toMatchObject({ status: 'pending', error: null });
   });
 
   // ── Task 4: TTL age-out at drain (status class only) ──
