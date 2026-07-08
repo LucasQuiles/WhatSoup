@@ -147,6 +147,7 @@ type DurabilityStatements = {
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   createOutboundOp: PreparedStatement;
+  supersedeOutstandingStatus: PreparedStatement;
   markSending: PreparedStatement;
   markSubmitted: PreparedStatement;
   markEchoed: PreparedStatement;
@@ -226,6 +227,17 @@ export class DurabilityEngine {
       createOutboundOp: prepare(
         `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ),
+      // PR-C: one outstanding status ping per chat. Enqueuing a new status_ping
+      // marks any prior non-terminal status_ping for the same chat
+      // failed_permanent/superseded (a terminal state retention already reclaims),
+      // so a re-pair / crash-loop cannot flush a backlog of stale "back online"
+      // notices in one burst. Scoped strictly to op_type='status_ping' — never
+      // touches 'text' ops (user replies, admin responses, isResume continuity).
+      supersedeOutstandingStatus: prepare(
+        `UPDATE outbound_ops SET status = 'failed_permanent', error = 'superseded'
+           WHERE chat_jid = ? AND op_type = 'status_ping'
+             AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
       ),
       markSending: prepare(
         `UPDATE outbound_ops SET status = 'sending' WHERE id = ? AND status = 'pending'`,
@@ -539,6 +551,10 @@ export class DurabilityEngine {
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
     const hash = createHash('sha256').update(params.payload).digest('hex');
+    // PR-C supersede-on-enqueue: collapse to one outstanding status ping per chat.
+    if (params.opType === 'status_ping') {
+      this.statements.supersedeOutstandingStatus.run(params.chatJid);
+    }
     const result = this.statements.createOutboundOp.run(
       params.conversationKey, params.chatJid, params.opType, params.payload, hash,
       params.sourceInboundSeq ?? null, params.isTerminal ? 1 : 0, params.replayPolicy,

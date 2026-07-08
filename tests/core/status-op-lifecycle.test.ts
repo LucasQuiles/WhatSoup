@@ -95,4 +95,52 @@ describe('status-op lifecycle (PR-C)', () => {
     expect(row['wa_message_id']).toBe('WA_PING_1');
     expect(emitAlert).not.toHaveBeenCalled();
   });
+
+  // ── Task 3: supersede-on-enqueue (one outstanding status ping per chat) ──
+
+  /** Enqueue a status_ping whose send fails, leaving it non-terminal (maybe_sent). */
+  async function sendFailingPing(chatJid: string, text: string): Promise<void> {
+    const failing = makeMessenger(async () => { throw new Error('send failed'); });
+    await expect(
+      sendTracked(failing, chatJid, text, durability, { replayPolicy: 'unsafe', opType: 'status_ping' }),
+    ).rejects.toThrow('send failed');
+  }
+
+  it('second status ping supersedes the outstanding one for the same chat only', async () => {
+    const cm = makeMessenger(async () => ({ waMessageId: 'WA_OK' }));
+    await sendFailingPing(CHAT, 'ping1');       // CHAT ping → maybe_sent (non-terminal)
+    await sendTracked(cm, OTHER_CHAT, 'pingX', durability, { replayPolicy: 'unsafe', opType: 'status_ping' });
+    await sendTracked(cm, CHAT, 'ping2', durability, { replayPolicy: 'unsafe', opType: 'status_ping' });
+
+    const rows = db.raw.prepare(
+      `SELECT chat_jid, status, error FROM outbound_ops WHERE op_type='status_ping' ORDER BY id`,
+    ).all() as Array<{ chat_jid: string; status: string; error: string | null }>;
+
+    // ping1 (CHAT) superseded by ping2 (CHAT).
+    expect(rows[0]).toMatchObject({ chat_jid: CHAT, status: 'failed_permanent', error: 'superseded' });
+    // pingX (OTHER_CHAT) untouched — different chat.
+    expect(rows[1].chat_jid).toBe(OTHER_CHAT);
+    expect(rows[1].status).not.toBe('failed_permanent');
+    // ping2 (CHAT) is the survivor — delivered, not superseded.
+    expect(rows[2].chat_jid).toBe(CHAT);
+    expect(rows[2].status).toBe('submitted');
+  });
+
+  it('SCOPE GUARD: enqueueing a status_ping never supersedes a pending text op in the same chat', async () => {
+    // A stale, undelivered user/admin reply sitting in `pending` for CHAT.
+    const textId = durability.createOutboundOp({
+      conversationKey: 'k1', chatJid: CHAT, opType: 'text',
+      payload: JSON.stringify({ text: 'important user reply' }), replayPolicy: 'safe',
+    });
+    expect(getOutbound(db, textId)['status']).toBe('pending');
+
+    // Enqueue a status_ping for the SAME chat.
+    const cm = makeMessenger(async () => ({ waMessageId: 'WA_OK' }));
+    await sendTracked(cm, CHAT, '*Agent back online* ✓', durability, { replayPolicy: 'unsafe', opType: 'status_ping' });
+
+    // The text op is provably untouched: still pending, no 'superseded' error.
+    const textRow = getOutbound(db, textId);
+    expect(textRow['status']).toBe('pending');
+    expect(textRow['error']).toBeNull();
+  });
 });
