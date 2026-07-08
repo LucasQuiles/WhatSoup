@@ -1,14 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
-  createAuditedReplyGuaranteeSender,
+  createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TEXT,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
   type ReplyGuaranteeDurability,
 } from '../../src/core/reply-guarantee.ts';
 import { Database } from '../../src/core/database.ts';
-import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
-import type { ChatResolver } from '../../src/core/chats-resolver.ts';
 
 function makeDurability(status: string | undefined = 'processing'): ReplyGuaranteeDurability {
   return {
@@ -54,6 +52,29 @@ describe('ReplyGuaranteeManager', () => {
     });
   });
 
+  it('uses a sender-provided terminal reason for non-text liveness fallbacks', async () => {
+    const durability = makeDurability('processing');
+    const sendFallback = vi.fn(async () => ({ terminalReason: 'rgp_liveness_nudged' }));
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback,
+      timeoutMs: 100,
+      rateLimitMs: 1_000,
+    });
+
+    manager.arm({ inboundSeq: 17, chatJid: '15550100017@s.whatsapp.net' });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(sendFallback).toHaveBeenCalledOnce();
+    expect(durability.completeTurn).toHaveBeenCalledWith({
+      inbound: {
+        seq: 17,
+        terminalReason: 'rgp_liveness_nudged',
+      },
+    });
+  });
+
   it('QR-107: a completeTurn failure AFTER a successful send does not release the rate-limit slot (no duplicate burst)', async () => {
     const durability = makeDurability('processing');
     // completeTurn throws (e.g. SQLITE_BUSY) AFTER sendFallback has already delivered.
@@ -69,7 +90,7 @@ describe('ReplyGuaranteeManager', () => {
       rateLimitMs: 30_000,
     });
 
-    // Turn A: fallback delivered, but completeTurn throws.
+    // Turn A: fallback succeeds, but completeTurn throws.
     manager.arm({ inboundSeq: 1, chatJid });
     await vi.advanceTimersByTimeAsync(100);
     expect(sendFallback).toHaveBeenCalledOnce(); // the "still working" message WAS delivered
@@ -351,45 +372,36 @@ describe('ReplyGuaranteeManager', () => {
   });
 });
 
-describe('createAuditedReplyGuaranteeSender', () => {
-  it('sends through the shared send pipeline and records an outbound_sends rgp audit row', async () => {
+describe('createReplyGuaranteeLivenessSender', () => {
+  it('uses typing-only liveness and does not send or audit filler text', async () => {
     const db = new Database(':memory:');
     db.open();
     try {
       const messenger = {
         sendMessage: vi.fn(async () => ({ waMessageId: 'wamid.rgp' })),
+        setTyping: vi.fn(async () => undefined),
         sendMedia: vi.fn(async () => ({ waMessageId: null })),
       };
-      const resolver: ChatResolver = {
-        resolve: ({ chatJid }) => chatJid ?? 'missing@s.whatsapp.net',
-      };
-      const sender = createAuditedReplyGuaranteeSender({
+      const sender = createReplyGuaranteeLivenessSender({
         messenger,
-        resolver,
-        auditWriter: createOutboundSendsWriter({ db: db.raw, line: 'personal' }),
       });
 
-      await sender({
+      const result = await sender({
         inboundSeq: 21,
         chatJid: '15550100021@s.whatsapp.net',
         text: DEFAULT_REPLY_GUARANTEE_TEXT,
       });
 
-      expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect(result).toEqual({ terminalReason: 'rgp_liveness_nudged' });
+      expect(messenger.setTyping).toHaveBeenCalledWith(
         '15550100021@s.whatsapp.net',
-        DEFAULT_REPLY_GUARANTEE_TEXT,
+        'composing',
       );
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
       const row = db.raw
-        .prepare('SELECT line, caller, chat_jid, target_kind, status, transport_message_id FROM outbound_sends')
-        .get() as Record<string, unknown>;
-      expect(row).toEqual({
-        line: 'personal',
-        caller: 'rgp',
-        chat_jid: '15550100021@s.whatsapp.net',
-        target_kind: 'chatJid',
-        status: 'sent',
-        transport_message_id: 'wamid.rgp',
-      });
+        .prepare('SELECT COUNT(*) AS count FROM outbound_sends')
+        .get() as { count: number };
+      expect(row.count).toBe(0);
     } finally {
       db.close();
     }
