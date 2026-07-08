@@ -182,6 +182,11 @@ function driveTurn(runtime: AgentRuntime, queue: ReturnType<typeof makeFakeQueue
   v(runtime).handleEventWithContext({ type: 'result', text }, queue, null, 'conv', seq, 'mapkey');
 }
 
+/** Drive a turn as the synthetic control/repair session (control@heal.internal). */
+function driveControlTurn(runtime: AgentRuntime, queue: ReturnType<typeof makeFakeQueue>, text: string | null, seq: number) {
+  v(runtime).handleEventWithContext({ type: 'result', text }, queue, null, 'control@heal.internal', seq, 'control@heal.internal');
+}
+
 /** A usability probe result that primaryModelUsabilityRequiresAlert() rejects
  *  (status unknown + binary-model-probe-failed) — the transient
  *  startup-unusable shape that triggered the spurious probe-fast-path arming. */
@@ -506,6 +511,72 @@ describe('empty-output arming — probeInFlight guard (R2 regression)', () => {
 
     vi.advanceTimersByTime(61_000); // past grace
     driveTurn(runtime, queue, null, 1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── R3 regression: control/repair session empties must NOT feed the counter ──
+describe('empty-output arming — control/repair session exclusion (R3 regression)', () => {
+  // ml-bot false failover root cause: the control@heal.internal repair probe
+  // (dispatched by the /heal endpoint's onCrash path) can legitimately produce
+  // empty output. Before R3, that empty bumped the SHARED
+  // consecutivePrimaryEmptyTurns counter, so the next real-chat empty tripped
+  // the threshold=2 and armed the fallback against a healthy primary.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-17T01:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('a control/repair session empty turn does NOT increment the consecutive-empty counter', () => {
+    const runtime = makeRuntime(FALLBACK);
+    const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000); // past grace
+
+    driveControlTurn(runtime, queue, null, 1); // control empty -> must be ignored
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+
+    // A subsequent REAL-chat empty must start counting fresh at 1, not arm.
+    driveTurn(runtime, queue, null, 2);
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+  });
+
+  it('control empties never arm even past the threshold (no real-chat contamination path)', () => {
+    const runtime = makeRuntime(FALLBACK);
+    const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000);
+
+    // Three control empties — well past threshold=2 — must NOT arm and must NOT
+    // increment the counter.
+    driveControlTurn(runtime, queue, null, 1);
+    driveControlTurn(runtime, queue, null, 2);
+    driveControlTurn(runtime, queue, null, 3);
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+  });
+
+  it('control empty then two real-chat empties arms exactly at 2 (control did not pre-charge the counter)', () => {
+    // The original false-failover replay: control empty (count→1 pre-fix), then
+    // ONE real-chat empty armed at threshold=2. Post-R3 the control empty is
+    // excluded, so it takes TWO real-chat empties to arm.
+    const runtime = makeRuntime(FALLBACK);
+    const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000);
+
+    driveControlTurn(runtime, queue, null, 1); // ignored
+    driveTurn(runtime, queue, null, 2); // real empty #1 -> count 1, no arm
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+
+    driveTurn(runtime, queue, null, 3); // real empty #2 -> threshold, arms
     expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
     expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
   });
