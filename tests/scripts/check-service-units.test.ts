@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +94,12 @@ describe('check-service-units guard', () => {
     const result = checkServiceUnits({ cwd: repoRoot, skipPlutil: true });
     expect(result.scanned.length).toBeGreaterThan(0);
     expect(result.violations).toEqual([]);
+  });
+
+  it('keeps agent instance units independent of graphical-session.target', () => {
+    const unit = readFileSync(path.join(repoRoot, 'deploy/whatsoup@.service'), 'utf8');
+    expect(unit).toContain('WantedBy=default.target');
+    expect(unit).not.toMatch(/(?:Wants|After|WantedBy)=.*graphical-session\.target/);
   });
 
   it('reads the canonical node major from .nvmrc', () => {

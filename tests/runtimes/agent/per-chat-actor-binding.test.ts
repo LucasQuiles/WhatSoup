@@ -538,8 +538,23 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
 });
 
 describe('F-STICKY-ACTOR hardening: race-exposure warning covers claude-primary + cli-fallback (QR-247 F11)', () => {
-  type Priv = { agentFallbacks: Array<{ provider: string; model?: string }>; perChatActorRaceExposed(): boolean; exposedCliProviders(): string[] };
+  type Priv = { agentFallbacks: Array<{ provider: string; model?: string }>; nlRoutingEnabled: boolean; perChatActorRaceExposed(): boolean; exposedCliProviders(): string[] };
   const priv = (r: AgentRuntime): Priv => r as unknown as Priv;
+
+  it('nlRouting live-pin surface: claude-only config + nlRouting enabled -> EXPOSED (a per-sender /model pin can route a turn to a non-claude CLI provider at runtime — QR-263)', () => {
+    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    priv(r).agentFallbacks = [];
+    priv(r).nlRoutingEnabled = true;
+    expect(priv(r).exposedCliProviders()).toEqual([]); // static set stays honest
+    expect(priv(r).perChatActorRaceExposed()).toBe(true); // dynamic pin surface counts
+  });
+
+  it('nlRouting live-pin surface: sandboxPerChat stays unaffected even with nlRouting enabled', () => {
+    const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
+    priv(r).agentFallbacks = [];
+    priv(r).nlRoutingEnabled = true;
+    expect(priv(r).perChatActorRaceExposed()).toBe(false);
+  });
 
   it('claude-cli primary + a codex-cli fallback -> EXPOSED (the case the old endsWith(-cli) && !==claude-cli check silently missed)', () => {
     const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
