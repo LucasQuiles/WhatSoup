@@ -98,6 +98,7 @@ import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { createChatResolver } from '../../core/chats-resolver.ts';
 import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
+import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
@@ -1746,6 +1747,30 @@ export class AgentRuntime implements Runtime {
     if (event.text === prior) return null;
     if (event.text.startsWith(prior)) return event.text.slice(prior.length);
     return event.text;
+  }
+
+  private gateAssistantTextForOutbound(
+    text: string,
+    queue: IOutboundQueue,
+    inboundSeq: number | undefined,
+  ): string | null {
+    const decision = classifyAssistantTextEgress(text);
+    if (decision.action === 'allow') return text;
+
+    log.info(
+      {
+        chatJid: queue.targetChatJid,
+        reason: decision.reason,
+        satisfiesReplyGuarantee: decision.satisfiesReplyGuarantee,
+        textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+      },
+      'assistant_text egress gate suppressed non-user-facing text',
+    );
+
+    if (decision.satisfiesReplyGuarantee) {
+      this.replyGuarantee?.disarm(inboundSeq);
+    }
+    return null;
   }
 
   /**
@@ -4568,6 +4593,8 @@ export class AgentRuntime implements Runtime {
           // matching no failure pattern, are delivered — dropping them is the QR-209
           // silent-reply defect. See suppressStreamedProviderFailure.
           if (this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid)) break;
+          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq);
+          if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           // Reply-guarantee: visible output reached the user, so reset the
           // silence window for this chat. The "still working" fallback then
@@ -8966,6 +8993,8 @@ export class AgentRuntime implements Runtime {
           // prose about an error is delivered, so genuine replies are never silently
           // dropped. See suppressStreamedProviderFailure.
           if (this.suppressStreamedProviderFailure(normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid)) break;
+          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;
           // Reply-guarantee: visible output reached the user — reset the silence

@@ -4113,6 +4113,42 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
   });
 
+  it('suppresses internal assistant_text narration before it reaches WhatsApp', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi', inboundSeq: 101 }));
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    mockQueue.enqueueStreamingText.mockClear();
+
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Now rebuild the workbook with the new trace columns.' });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
+    expect(replyGuarantee.disarm).not.toHaveBeenCalled();
+  });
+
+  it('suppresses no-op assistant_text and disarms reply guarantee for the active turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'do not reply', inboundSeq: 102 }));
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    mockQueue.enqueueStreamingText.mockClear();
+
+    capturedOnEventRef.current!({ type: 'assistant_text', text: '.' });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(102);
+  });
+
   it('suppresses provider usage-cap assistant text and logs a preview', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -7736,6 +7772,37 @@ describe('AgentRuntime', () => {
     expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(queue.enqueueText).not.toHaveBeenCalled();
     expect(queue.enqueueToolUpdate).not.toHaveBeenCalled();
+  });
+
+  it('per_chat handleEventWithContext: no-op assistant_text disarms the matching reply guarantee', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'assistant_text', text: '.' },
+      queue, null, undefined, 777, '111', '111#session',
+    );
+
+    expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(777);
   });
 
   it('per_chat late result from a replaced session does not wipe the new session tool name scope', () => {
