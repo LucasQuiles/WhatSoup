@@ -30,6 +30,7 @@ export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert';
 
 export type AssistantTextSuppressionReason =
   | 'internal_narration'
+  | 'progress_filler'
   | 'send_verification'
   | 'noop';
 
@@ -99,6 +100,11 @@ const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
 const INTERNAL_WORK_HEADING =
   /^(?:add|wire|rebuild|update)\b.{0,120}\b(?:command|script|sheet|workbook|summary|rows?|columns?|anomal(?:y|ies))\b/i;
 
+const PROGRESS_FILLER_PATTERNS: readonly RegExp[] = [
+  /^_?still working(?:\s+\(\d+s\))?\.{3}_?$/i,
+  /^i(?:'|’| a)m\s+still\s+working(?:\s+on\s+this)?(?:\s+and\s+(?:will\s+)?follow\s+up\s+shortly)?[.!]?$/i,
+];
+
 /**
  * Classify raw provider assistant_text before it becomes a WhatsApp message.
  *
@@ -124,6 +130,10 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
     INTERNAL_WORK_HEADING.test(trimmed)
   ) {
     return { action: 'suppress', reason: 'internal_narration', satisfiesReplyGuarantee: false };
+  }
+
+  if (PROGRESS_FILLER_PATTERNS.some((re) => re.test(trimmed))) {
+    return { action: 'suppress', reason: 'progress_filler', satisfiesReplyGuarantee: false };
   }
 
   return { action: 'allow' };

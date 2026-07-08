@@ -43,7 +43,7 @@ import {
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
-  createAuditedReplyGuaranteeSender,
+  createReplyGuaranteeLivenessSender,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
@@ -96,8 +96,6 @@ import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.
 import { isProviderId } from './providers/index.ts';
 import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
-import { createChatResolver } from '../../core/chats-resolver.ts';
-import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -1949,10 +1947,8 @@ export class AgentRuntime implements Runtime {
     this.replyGuarantee = new ReplyGuaranteeManager({
       durability: engine,
       timeoutMs: this.replyGuaranteeTimeoutMs,
-      sendFallback: createAuditedReplyGuaranteeSender({
+      sendFallback: createReplyGuaranteeLivenessSender({
         messenger: this.messenger,
-        resolver: createChatResolver({ db: this.db.raw }),
-        auditWriter: createOutboundSendsWriter({ db: this.db.raw, line: this.instanceName }),
       }),
     });
     // Propagate to any already-created outbound queues

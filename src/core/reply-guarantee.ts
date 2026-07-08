@@ -1,9 +1,6 @@
 import { createChildLogger } from '../logger.ts';
-import type { ChatResolver } from './chats-resolver.ts';
 import type { CompleteTurnParams } from './durability.ts';
 import type { Messenger } from './types.ts';
-import type { OutboundSendsWriter } from './outbound-sends.ts';
-import { createSendPipeline } from './send-pipeline.ts';
 
 const log = createChildLogger('reply-guarantee');
 
@@ -24,7 +21,13 @@ export interface ReplyGuaranteeFallbackInput {
   text: string;
 }
 
-export type ReplyGuaranteeFallbackSender = (input: ReplyGuaranteeFallbackInput) => Promise<unknown>;
+export interface ReplyGuaranteeFallbackResult {
+  terminalReason?: string;
+}
+
+export type ReplyGuaranteeFallbackSender = (
+  input: ReplyGuaranteeFallbackInput,
+) => Promise<ReplyGuaranteeFallbackResult | unknown>;
 
 export interface ReplyGuaranteeArmInput {
   inboundSeq: number | undefined;
@@ -140,73 +143,71 @@ export class ReplyGuaranteeManager {
       return;
     }
 
-    // Reserve the rate-limit slot BEFORE awaiting the send. onTimeout does a
-    // check-then-act across an await; concurrent same-chat timeouts would all
-    // pass the guard above before any of them recorded a send (TOCTOU), causing
-    // duplicate "still working" bursts. Reserving synchronously closes the race.
+    // Reserve the rate-limit slot BEFORE awaiting the fallback. onTimeout does
+    // a check-then-act across an await; concurrent same-chat timeouts would all
+    // pass the guard above before any of them recorded success (TOCTOU), causing
+    // duplicate liveness fallbacks. Reserving synchronously closes the race.
     this.lastFallbackByChat.set(chatJid, now);
-    // QR-107: separate a SEND failure from a FINALIZE failure. The single try
+    // QR-107: separate a FALLBACK failure from a FINALIZE failure. The single try
     // previously wrapped both sendFallback and completeTurn, and the catch
     // unconditionally released the rate-limit reservation. A completeTurn/DB
-    // failure AFTER a successful send was thus conflated with a send failure —
-    // releasing the slot despite the "still working" message having been
-    // delivered, so a subsequent same-chat timeout fired a DUPLICATE burst.
-    let sent = false;
+    // failure AFTER a successful fallback was thus conflated with a fallback
+    // failure, releasing the slot and allowing a duplicate same-chat timeout.
+    let fallbackSucceeded = false;
     try {
-      await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
-      sent = true;
+      const result = await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
+      fallbackSucceeded = true;
       this.durability.completeTurn({
         inbound: {
           seq: inboundSeq,
-          terminalReason: 'rgp_fallback_sent',
+          terminalReason: fallbackTerminalReason(result),
         },
       });
     } catch (err) {
-      if (!sent) {
-        // TRUE send failure: nothing was delivered. Release the reservation
+      if (!fallbackSucceeded) {
+        // TRUE fallback failure: no liveness signal was emitted. Release the reservation
         // (only if no other send claimed the slot meanwhile) so a future
         // legitimate fallback is not blocked — preserves retry-after-failure.
         if (this.lastFallbackByChat.get(chatJid) === now) {
           this.lastFallbackByChat.delete(chatJid);
         }
-        log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback send failed');
+        log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback failed');
       } else {
-        // The fallback WAS delivered but completeTurn (durability write) failed.
-        // Do NOT release the slot — releasing would allow a duplicate "still
-        // working" burst for a message the user already received. The inbound is
-        // left unfinalized for durability recovery to reconcile.
+        // The fallback succeeded but completeTurn (durability write) failed.
+        // Do NOT release the slot — releasing would allow a duplicate fallback
+        // for a signal the user already received. The inbound is left
+        // unfinalized for durability recovery to reconcile.
         log.error(
           { err, inboundSeq, chatJid },
-          'reply guarantee fallback delivered but completeTurn failed — inbound left for recovery',
+          'reply guarantee fallback succeeded but completeTurn failed — inbound left for recovery',
         );
       }
     }
   }
 }
 
-export function createAuditedReplyGuaranteeSender({
+export function createReplyGuaranteeLivenessSender({
   messenger,
-  resolver,
-  auditWriter,
 }: {
   messenger: Messenger;
-  resolver: ChatResolver;
-  auditWriter: OutboundSendsWriter;
 }): ReplyGuaranteeFallbackSender {
-  const pipeline = createSendPipeline({
-    resolver,
-    auditWriter,
-    caller: 'rgp',
-  });
-  return async ({ chatJid, text }) => {
-    await pipeline.executeSend(
-      { chatJid, text },
-      async (prepared) => {
-        const receipt = await messenger.sendMessage(prepared.chatJid, prepared.text);
-        return { transportId: receipt.waMessageId };
-      },
-    );
+  return async ({ chatJid }) => {
+    await messenger.setTyping?.(chatJid, 'composing').catch(() => undefined);
+    return { terminalReason: 'rgp_liveness_nudged' };
   };
+}
+
+function fallbackTerminalReason(result: unknown): string {
+  if (
+    result !== null &&
+    typeof result === 'object' &&
+    'terminalReason' in result &&
+    typeof result.terminalReason === 'string' &&
+    result.terminalReason.trim().length > 0
+  ) {
+    return result.terminalReason;
+  }
+  return 'rgp_fallback_sent';
 }
 
 function isOpenInboundStatus(status: string | undefined): boolean {

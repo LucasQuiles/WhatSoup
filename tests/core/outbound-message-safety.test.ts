@@ -317,6 +317,19 @@ describe('classifyAssistantTextEgress', () => {
     });
   });
 
+  it('suppresses generic progress filler without satisfying the reply guarantee', () => {
+    expect(classifyAssistantTextEgress("I'm still working on this and will follow up shortly.")).toEqual({
+      action: 'suppress',
+      reason: 'progress_filler',
+      satisfiesReplyGuarantee: false,
+    });
+    expect(classifyAssistantTextEgress('_Still working..._')).toEqual({
+      action: 'suppress',
+      reason: 'progress_filler',
+      satisfiesReplyGuarantee: false,
+    });
+  });
+
   it('allows user-facing final text', () => {
     expect(classifyAssistantTextEgress('Workbook delivered with 597 entry rows and 83 employee-week totals.')).toEqual({
       action: 'allow',
