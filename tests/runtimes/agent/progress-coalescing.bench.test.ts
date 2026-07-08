@@ -34,6 +34,8 @@ vi.mock('../../../src/logger.ts', () => ({
 
 const CHAT_JID = 'bench@s.whatsapp.net';
 const INSTANCE = 'Bench';
+const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
+const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
@@ -81,11 +83,11 @@ describe('progress-coalescing BENCH', () => {
 
   // ── 1. Invariants ────────────────────────────────────────────────────────
   describe('1. invariants', () => {
-    it('identical concurrent slow placeholders collapse to one (minimal)', async () => {
-      const b = bench('minimal');
+    it('identical concurrent slow placeholders collapse to one (friendly)', async () => {
+      const b = bench('friendly');
       for (const id of ['a', 'b', 'c', 'd']) b.queue.enqueueProgressUpdate(slow(id), INSTANCE);
       await drain();
-      expect(b.calls).toEqual(['_Still working..._']);
+      expect(b.calls).toEqual([SLOW_TEXT]);
       b.queue.abortTurn();
     });
 
@@ -101,12 +103,12 @@ describe('progress-coalescing BENCH', () => {
     });
 
     it('escalation slow→stalled emits two distinct messages', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
       b.queue.enqueueProgressUpdate(stalled('a', 30_000), INSTANCE);
       await drain();
-      expect(b.calls).toEqual(['_Still working..._', '_Still working (30s)..._']);
+      expect(b.calls).toEqual([SLOW_TEXT, STALL_TEXT]);
       b.queue.abortTurn();
     });
   });
@@ -114,7 +116,7 @@ describe('progress-coalescing BENCH', () => {
   // ── 2. Window boundaries ─────────────────────────────────────────────────
   describe('2. window boundaries', () => {
     it('suppresses an identical placeholder just inside the window', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
       await vi.advanceTimersByTimeAsync(PROGRESS_TEXT_DEDUPE_WINDOW_MS - MIN_SEND_GAP_MS - 2);
@@ -125,7 +127,7 @@ describe('progress-coalescing BENCH', () => {
     });
 
     it('allows an identical placeholder once the window has elapsed', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
       await vi.advanceTimersByTimeAsync(PROGRESS_TEXT_DEDUPE_WINDOW_MS + 1);
@@ -139,18 +141,18 @@ describe('progress-coalescing BENCH', () => {
   // ── 3. Lifecycle reset ───────────────────────────────────────────────────
   describe('3. lifecycle reset', () => {
     it('flush() resets coalescing so the next turn re-announces', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
       await b.queue.flush();
       b.queue.enqueueProgressUpdate(slow('b'), INSTANCE);
       await drain();
-      expect(b.calls).toEqual(['_Still working..._', '_Still working..._']);
+      expect(b.calls).toEqual([SLOW_TEXT, SLOW_TEXT]);
       b.queue.abortTurn();
     });
 
     it('abortTurn() resets coalescing (crash path)', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
       b.queue.abortTurn();
@@ -163,7 +165,7 @@ describe('progress-coalescing BENCH', () => {
 
   // ── 4. Mode matrix ───────────────────────────────────────────────────────
   describe('4. mode matrix', () => {
-    for (const mode of ['minimal', 'friendly', 'full'] as const) {
+    for (const mode of ['friendly', 'full'] as const) {
       it(`${mode}: identical concurrent slow collapses to one`, async () => {
         const b = bench(mode);
         // Same elapsed → identical rendered text in every mode.
@@ -178,7 +180,7 @@ describe('progress-coalescing BENCH', () => {
   // ── 5. Failure modes ─────────────────────────────────────────────────────
   describe('5. failure modes', () => {
     it('pollPending gates progress to typing only — and does not pollute the dedupe map', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.setPollPending(true);
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       await drain();
@@ -189,12 +191,12 @@ describe('progress-coalescing BENCH', () => {
       b.queue.setPollPending(false);
       b.queue.enqueueProgressUpdate(slow('b'), INSTANCE);
       await drain();
-      expect(b.calls).toEqual(['_Still working..._']);
+      expect(b.calls).toEqual([SLOW_TEXT]);
       b.queue.abortTurn();
     });
 
     it('dedupe is recorded on enqueue, not on delivery (suppresses a duplicate even before the first is sent)', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       // First send never resolves — it is in-flight, not delivered.
       b.setSend(() => new Promise<{ waMessageId: string | null }>(() => {}));
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
@@ -210,7 +212,7 @@ describe('progress-coalescing BENCH', () => {
     });
 
     it('abortTurn() mid-stream stops further progress output', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       b.queue.enqueueProgressUpdate(slow('a'), INSTANCE);
       b.queue.abortTurn();
       await drain();
@@ -223,10 +225,10 @@ describe('progress-coalescing BENCH', () => {
   // ── 6. Stress ────────────────────────────────────────────────────────────
   describe('6. stress', () => {
     it('a 50-tool parallel batch yields exactly one placeholder', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       for (let i = 0; i < 50; i++) b.queue.enqueueProgressUpdate(slow(`tool-${i}`), INSTANCE);
       await drain();
-      expect(b.calls).toEqual(['_Still working..._']);
+      expect(b.calls).toEqual([SLOW_TEXT]);
       b.queue.abortTurn();
     });
 
@@ -239,14 +241,14 @@ describe('progress-coalescing BENCH', () => {
     });
 
     it('100 sequential turns each emit exactly one placeholder (no cross-turn leak at scale)', async () => {
-      const b = bench('minimal');
+      const b = bench('friendly');
       for (let turn = 0; turn < 100; turn++) {
         for (const id of ['a', 'b', 'c']) b.queue.enqueueProgressUpdate(slow(`${turn}-${id}`), INSTANCE);
         await drain();
         await b.queue.flush(); // turn boundary
       }
       expect(b.calls).toHaveLength(100);
-      expect(new Set(b.calls)).toEqual(new Set(['_Still working..._']));
+      expect(new Set(b.calls)).toEqual(new Set([SLOW_TEXT]));
       b.queue.abortTurn();
     });
   });
