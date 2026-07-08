@@ -275,6 +275,37 @@ describe('deploy/setup.sh platform portability', () => {
     expect(result.stdout).toContain('systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service');
   });
 
+  it('Linux setup replay re-enables existing WhatSoup units after daemon-reload', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const systemdDir = path.join(home, '.config', 'systemd', 'user');
+    const staleTarget = path.join(systemdDir, 'graphical-session.target.wants');
+    const defaultTarget = path.join(systemdDir, 'default.target.wants');
+    const agentUnit = ['whatsoup', 'alpha.service'].join('@');
+    const fleetUnit = 'whatsoup-fleet.service';
+    const reenableCommand = `--user reenable ${agentUnit} ${fleetUnit}`;
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(staleTarget, { recursive: true });
+    fs.mkdirSync(defaultTarget, { recursive: true });
+    fs.writeFileSync(path.join(staleTarget, agentUnit), '');
+    fs.writeFileSync(path.join(defaultTarget, fleetUnit), '');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const systemctlLog = fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8');
+    expect(systemctlLog).toContain('--user daemon-reload');
+    expect(systemctlLog).toContain(reenableCommand);
+    expect(systemctlLog.indexOf('--user daemon-reload')).toBeLessThan(
+      systemctlLog.indexOf(reenableCommand),
+    );
+    expect(result.stdout).toContain(`refreshed systemd enablement for ${agentUnit} ${fleetUnit}`);
+  });
+
   it('Linux setup replay mirrors BOT_ERRORS_SOCKET when BOT_ERRORS_SOCKET_PATH is absent', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
