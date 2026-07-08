@@ -1,5 +1,6 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { resolveModelRole } from '../../../lib/model-advisor.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
@@ -156,7 +157,9 @@ export async function extractFacts(
   let raw: string;
   try {
     const response = await provider.generate({
-      model: config.models.extraction,
+      // Resolve symbolic model values (vendor:family:latest[-stable]) at point
+      // of use; literal IDs pass through untouched. Never throws.
+      model: await resolveModelRole(config.models.extraction),
       maxTokens: 2000,
       systemPrompt: EXTRACTION_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: conversationLog }],

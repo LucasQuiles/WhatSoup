@@ -185,8 +185,14 @@ describe('GET /health', () => {
   let db: Database;
   let server: ReturnType<typeof createServer>;
   let port: number;
+  let prevGitSha: string | undefined;
+  let prevGitBranch: string | undefined;
 
   beforeEach(async () => {
+    prevGitSha = process.env.WHATSOUP_GIT_SHA;
+    prevGitBranch = process.env.WHATSOUP_GIT_BRANCH;
+    delete process.env.WHATSOUP_GIT_SHA;
+    delete process.env.WHATSOUP_GIT_BRANCH;
     db = makeDb();
     delete process.env.WHATSOUP_HEALTH_TOKEN;
     ({ server, port } = await buildTestServer(makeDeps(db)));
@@ -195,6 +201,10 @@ describe('GET /health', () => {
   afterEach(async () => {
     db.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (prevGitSha === undefined) delete process.env.WHATSOUP_GIT_SHA;
+    else process.env.WHATSOUP_GIT_SHA = prevGitSha;
+    if (prevGitBranch === undefined) delete process.env.WHATSOUP_GIT_BRANCH;
+    else process.env.WHATSOUP_GIT_BRANCH = prevGitBranch;
   });
 
   it('returns 200 with healthy status when connected', async () => {
@@ -1245,6 +1255,9 @@ describe('GET /health', () => {
   });
 
   it('includes instance block with expected fields', async () => {
+    process.env.WHATSOUP_GIT_SHA = 'a'.repeat(40);
+    process.env.WHATSOUP_GIT_BRANCH = 'main';
+
     const { status, body } = await httpReq(port, '/health', 'GET');
     expect(status).toBe(200);
     const json = JSON.parse(body);
@@ -1253,6 +1266,8 @@ describe('GET /health', () => {
     expect(json.instance.mode).toBe('chat');
     expect(json.instance.accessMode).toBe('allowlist');
     expect(json.instance.pid).toBe(process.pid);
+    expect(json.instance.commit).toBe('a'.repeat(40));
+    expect(json.instance.branch).toBe('main');
   });
 
   it('returns instance.socketPath as null when not provided', async () => {
@@ -1263,6 +1278,8 @@ describe('GET /health', () => {
       mode: 'chat',
       accessMode: 'allowlist',
       socketPath: null,
+      commit: null,
+      branch: null,
       pid: process.pid,
     });
   });
@@ -2663,6 +2680,7 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
   afterEach(async () => {
     if (db) db.close();
     delete process.env.HEALTH_BIND_ADDRESS;
+    delete process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -2674,8 +2692,9 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
     expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('127.0.0.1');
   });
 
-  it('binds to 0.0.0.0 when HEALTH_BIND_ADDRESS=0.0.0.0', async () => {
+  it('binds to 0.0.0.0 when HEALTH_BIND_ADDRESS=0.0.0.0 AND WHATSOUP_HEALTH_UNSAFE_REMOTE=1', async () => {
     process.env.HEALTH_BIND_ADDRESS = '0.0.0.0';
+    process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE = '1'; // R7a: explicit opt-in required for a non-loopback bind
     db = makeDb();
     // Need a fresh import to pick up the env change in the closure
     const { startHealthServer } = await import('../../src/core/health.ts');
@@ -2689,6 +2708,14 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
     });
     const addr = testServer.address();
     expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('0.0.0.0');
+  });
+
+  it('R7a: refuses to start with HEALTH_BIND_ADDRESS=0.0.0.0 and no WHATSOUP_HEALTH_UNSAFE_REMOTE override', async () => {
+    process.env.HEALTH_BIND_ADDRESS = '0.0.0.0';
+    delete process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE;
+    db = makeDb();
+    const { startHealthServer } = await import('../../src/core/health.ts');
+    expect(() => startHealthServer(makeDeps(db))).toThrow(/non-loopback/i);
   });
 });
 

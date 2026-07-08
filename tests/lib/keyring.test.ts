@@ -50,10 +50,36 @@ describe('keyring', () => {
 
     it('returns secret-tool on linux when available', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
-      // --help is intercepted by GLib and exits 0; execFileSync returns empty buffer
+      // Some builds exit 0 for --help; others exit 2 with a usage banner.
       mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
       expect(detectKeyringBackend()).toBe('secret-tool');
       expect(mockedExecFileSync).toHaveBeenCalledWith('secret-tool', ['--help'], expect.any(Object));
+    });
+
+    it('returns secret-tool when --help prints usage but exits 2', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockImplementationOnce(() => {
+        const err: Error & { status?: number; stderr?: Buffer } = new Error('Command failed: secret-tool --help');
+        err.status = 2;
+        err.stderr = Buffer.from('usage: secret-tool lookup attribute value ...\n');
+        throw err;
+      });
+
+      expect(detectKeyringBackend()).toBe('secret-tool');
+    });
+
+    it('captures secret-tool --help stderr so exit-2 usage can be classified', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockedExecFileSync.mockImplementationOnce((_command, _args, options) => {
+        const err: Error & { status?: number; stderr?: Buffer | null } = new Error('Command failed: secret-tool --help');
+        err.status = 2;
+        err.stderr = (options as { stdio?: unknown } | undefined)?.stdio === 'ignore'
+          ? null
+          : Buffer.from('usage: secret-tool lookup attribute value ...\n');
+        throw err;
+      });
+
+      expect(detectKeyringBackend()).toBe('secret-tool');
     });
 
     it('returns env-only on linux when secret-tool unavailable', () => {

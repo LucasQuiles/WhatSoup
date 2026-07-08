@@ -511,7 +511,8 @@ describe('TriggerPoller — schedule kinds', () => {
 
   it('schedule.at_time: fires once, then expires', async () => {
     const { messenger, calls } = makeMessenger();
-    const bead = createBead(db.raw, { kind: 'agent_job', title: 'one-shot', ownerJid: 'mw', actor: 'u' });
+    // Non-agent_job bead: exercises the plain-notification fallback branch.
+    const bead = createBead(db.raw, { kind: 'task', title: 'one-shot', ownerJid: 'mw', actor: 'u' });
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'schedule.at_time',
       spec: { fire_at: 1_000_000_000 },
@@ -535,7 +536,8 @@ describe('TriggerPoller — schedule kinds', () => {
 
   it('schedule.cron: fires and advances next_fire_at via nextCronRun', async () => {
     const { messenger, calls } = makeMessenger();
-    const bead = createBead(db.raw, { kind: 'agent_job', title: 'cron', ownerJid: 'mw', actor: 'u' });
+    // Non-agent_job bead: exercises the plain-notification fallback branch.
+    const bead = createBead(db.raw, { kind: 'task', title: 'cron', ownerJid: 'mw', actor: 'u' });
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'schedule.cron',
       spec: { expr: '*/5 * * * *' },
@@ -576,6 +578,162 @@ describe('TriggerPoller — schedule kinds', () => {
     expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_parse' });
     const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(triggerId) as { next_fire_at: number };
     expect(refreshed.next_fire_at).toBe(now + 1 + 60);
+  });
+});
+
+describe('TriggerPoller — agent_job dispatch', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('schedule.cron on an agent_job bead RUNS the prompt as a turn (not a bare cron tick)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const dispatched: Array<{ beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string }> = [];
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'daily invoicing sweep',
+      body: 'Run the Edenwald/Manhattanville invoicing sweep.',
+      ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '30 15 * * *', tz: 'America/New_York' },
+      reportChatJid: 'report@g.us',
+      nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: (ctx) => { dispatched.push(ctx); return { dispatched: true, detail: 'enqueued' }; },
+    });
+    await poller.tickOnce();
+
+    // Dispatched the prompt, with the bead body + report chat.
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({
+      beadId: bead.id, triggerId: t.id,
+      prompt: 'Run the Edenwald/Manhattanville invoicing sweep.',
+      title: 'daily invoicing sweep', reportChatJid: 'report@g.us',
+    });
+    // No bare "cron tick" notification — the agent turn does the visible work.
+    expect(calls).toHaveLength(0);
+
+    const runs = db.raw.prepare(`SELECT status, output_summary, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string; output_json: string }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('ok');
+    expect(runs[0].output_summary).toContain('agent job dispatched');
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ agentJob: true });
+
+    // Cron rescheduled (still active).
+    const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number };
+    expect(refreshed.status).toBe('active');
+    expect(refreshed.next_fire_at).toBeGreaterThan(1_000_000_001);
+  });
+
+  it('fails CLOSED with an alert when no dispatcher is wired (never a silent cron tick)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '30 15 * * *', tz: 'America/New_York' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    // No agentJobDispatch injected (simulates a non-agent instance).
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    // Immediate operator alert (fail-loud), not a silent success.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain('FAILED');
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('agent_job_dispatcher_unavailable');
+  });
+
+  it('fails CLOSED when the dispatcher rejects the enqueue (queue full)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '30 15 * * *', tz: 'America/New_York' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => ({ dispatched: false, detail: 'queue full' }),
+    });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain('FAILED');
+    expect(calls[0].text).toContain('queue full');
+    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('agent_job_enqueue_rejected');
+  });
+
+  it('repeated cron dispatch failures alert every fire and never silently auto-pause', async () => {
+    // A once-daily invoicing job must FAIL LOUD: a cron trigger always reschedules
+    // to the next tick, so each failed fire emits its own operator alert. It must
+    // NOT trip the interval circuit breaker (which would auto-pause and go silent
+    // after 5 days). Pausing a daily job = the exact silent-failure mode we forbid.
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '* * * * *', tz: 'America/New_York' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    let clock = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => clock,
+      agentJobDispatch: () => ({ dispatched: false, detail: 'down' }),
+    });
+    for (let i = 0; i < 5; i++) { await poller.tickOnce(); clock += 120; }
+
+    // Every fire alerted; trigger stays active and keeps rescheduling.
+    expect(calls).toHaveLength(5);
+    for (const c of calls) expect(c.text).toContain('FAILED');
+    const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
+    expect(refreshed.status).toBe('active');
+    expect(refreshed.next_fire_at).not.toBeNull();
+    const runs = db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string }>;
+    expect(runs).toHaveLength(5);
+    for (const r of runs) expect(r.status).toBe('failed');
+  });
+
+  it('tz is honoured: cron next_fire_at lands on the correct wall-clock instant', async () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'x', ownerJid: 'mw', actor: 'u',
+    });
+    // 2026-06-29 12:00:00 UTC = 08:00 EDT. Next "30 15" (3:30 PM) ET fire that day.
+    const now = Math.floor(Date.parse('2026-06-29T12:00:00Z') / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron',
+      spec: { expr: '30 15 * * *', tz: 'America/New_York' },
+      reportChatJid: 'report@g.us', nextFireAt: now, actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      agentJobDispatch: () => ({ dispatched: true }),
+    });
+    await poller.tickOnce();
+
+    const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number };
+    // 3:30 PM EDT on 2026-06-29 = 19:30 UTC. NOT 15:30 UTC (the pre-fix drift).
+    expect(refreshed.next_fire_at).toBe(Math.floor(Date.parse('2026-06-29T19:30:00Z') / 1000));
   });
 });
 

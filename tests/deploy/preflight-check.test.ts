@@ -96,6 +96,26 @@ function makeFixtureTree(
   return root;
 }
 
+const GIT_FIXTURE_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'Fixture',
+  GIT_AUTHOR_EMAIL: 'fixture@local',
+  GIT_COMMITTER_NAME: 'Fixture',
+  GIT_COMMITTER_EMAIL: 'fixture@local',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+};
+
+function gitFixture(repoRoot: string, args: string[]): void {
+  const result = spawnSync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: GIT_FIXTURE_ENV,
+    timeout: SPAWN_TIMEOUT_MS,
+  });
+  expect(result.status, result.stderr || result.stdout).toBe(0);
+}
+
 function runPreflight(
   repoRoot: string,
   instance = '',
@@ -154,6 +174,18 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(stderr).toContain('missing module');
   });
 
+  it('blocks a phantom MODULE reachable only from the lazy agent session path', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n', {
+      'src/runtimes/agent/session.ts': "import './prompt-compose.ts';\n",
+    });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('PREFLIGHT-FAIL');
+    expect(stderr).toContain('session.ts');
+    expect(stderr).toContain('missing module');
+  });
+
   it('(b) allows a clean, link-resolvable tree — exit 0', () => {
     const root = makeFixtureTree(
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
@@ -175,6 +207,38 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(status).toBe(0);
     expect(stderr).toContain('CRED-OK');
     expect(stderr).toContain('PREFLIGHT-OK');
+  });
+
+  it('refuses a git tree with tracked file drift before restart', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    gitFixture(root, ['init', '-q']);
+    gitFixture(root, ['add', '.']);
+    gitFixture(root, ['commit', '-m', 'base']);
+    writeFileSync(join(root, 'src', 'helper.ts'), 'export const ok = false;\n', 'utf8');
+
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('tracked file drift');
+    expect(stderr).toContain('git diff HEAD --exit-code');
+  });
+
+  it('refuses a lockfile-backed tree when root node_modules is absent', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    writeFileSync(
+      join(root, 'package-lock.json'),
+      JSON.stringify({ name: 'fixture', lockfileVersion: 3, packages: {} }),
+      'utf8',
+    );
+
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('dependencies are not installed');
+    expect(stderr).toContain('npm ci');
   });
 
   it('emits a dirty-tree advisory but still resolves verdict on a git tree', () => {

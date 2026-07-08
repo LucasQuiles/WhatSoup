@@ -38,6 +38,8 @@
     "guard:repo:branch-diff": "npm run guard:repo -- --branch-diff",
     "guard:repo:scan-history": "npm run guard:repo -- --scan-history",
     "guard:harness-maintenance": "bash scripts/run-with-pinned-node.sh scripts/harness-maintenance-guard.ts",
+    "guard:agent-iteration-review": "bash scripts/run-with-pinned-node.sh scripts/agent-iteration-review-check.ts",
+    "guard:worker-artifacts": "bash scripts/run-with-pinned-node.sh scripts/validate-worker-artifacts.ts",
     "qregistry:loop": "bash scripts/run-with-pinned-node.sh scripts/qregistry-loop.ts",
     "guard:unit-drift": "bash scripts/check-unit-drift.sh",
     "guard:source-runtime-drift": "bash scripts/run-with-pinned-node.sh scripts/source-runtime-drift-check.ts",

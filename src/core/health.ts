@@ -5,6 +5,7 @@ import { safeStringEqual } from '../lib/safe-compare.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
+import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
@@ -33,6 +34,7 @@ import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
+import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -1186,6 +1188,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           accessMode: deps.accessMode,
           socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
+          commit: readWhatsoupGitSha(),
+          branch: readWhatsoupGitBranch(),
           pid: process.pid,
           ...(fallbackState
             ? {
@@ -1278,6 +1282,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   });
 
   const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  // R7a: refuse a non-loopback bind without an explicit opt-in — the health server
+  // exposes GET /health metadata and the token-gated POST /access endpoint, and a
+  // remote plain-HTTP bind sends the health token over the wire. Mirrors the fleet guard.
+  assertSafeHealthBind(healthHost);
   server.listen(config.healthPort, healthHost, () => {
     log.info({ port: config.healthPort, host: healthHost }, 'health server listening');
   });

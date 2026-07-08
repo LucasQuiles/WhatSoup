@@ -761,6 +761,10 @@ export class AgentRuntime implements Runtime {
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
+  /** F-STICKY-ACTOR (QR-263): nlRouting adds a DYNAMIC actor-race surface — a live
+   *  per-sender `/model` pin can route a turn to a non-claude CLI provider at runtime,
+   *  independent of the static primary/fallback config. Mutable only in tests. */
+  private nlRoutingEnabled: boolean = config.nlRouting === true;
   private readonly serviceRestarter: ServiceRestarter | undefined;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
@@ -2193,14 +2197,15 @@ export class AgentRuntime implements Runtime {
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
         // F-STICKY-ACTOR (QR-247 hardening): the per-turn actor binding covers
-        // claude-cli per_chat only. A non-claude subprocess provider — as PRIMARY or
-        // as a configured FALLBACK — in non-sandbox per_chat stays on THIS shared
-        // global socket, so the concurrent-sender actor race is NOT closed for it.
-        // Warn (naming the exposed providers) rather than imply fixed.
+        // claude-cli per_chat only. A non-claude subprocess provider — as PRIMARY, as
+        // a configured FALLBACK, or (QR-263) selected at runtime by a live nlRouting
+        // per-sender pin — in non-sandbox per_chat stays on THIS shared global socket,
+        // so the concurrent-sender actor race is NOT closed for it.
+        // Warn (naming the exposed surfaces) rather than imply fixed.
         if (this.perChatActorRaceExposed()) {
           log.warn(
-            { provider: this.effectiveProvider, exposedProviders: this.exposedCliProviders(), sessionScope: this.sessionScope },
-            'per-chat actor binding covers claude-cli only: a non-claude subprocess (primary OR configured fallback) in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed for it.',
+            { provider: this.effectiveProvider, exposedProviders: this.exposedCliProviders(), nlRoutingPinSurface: this.nlRoutingEnabled, sessionScope: this.sessionScope },
+            'per-chat actor binding covers claude-cli only: a non-claude subprocess (primary, configured fallback, or a live nlRouting per-sender pin) in non-sandbox per_chat uses the shared global MCP socket, so the concurrent-sender actor race (QR-247) is NOT closed for it.',
           );
         }
 
@@ -2752,6 +2757,52 @@ export class AgentRuntime implements Runtime {
     }, 'AgentRuntime started');
   }
 
+  /**
+   * Dispatch a scheduled `agent_job` as a real agent turn. Wired into the
+   * TriggerPoller (main.ts) so a schedule.cron/at_time fire whose linked bead
+   * is an agent_job RUNS the prompt instead of posting a bare "cron tick". The
+   * synthetic turn flows through the normal handleMessage path, so it works in
+   * shared / per_chat / single modes alike. Returns synchronously once the turn
+   * is ACCEPTED onto the turn chain — the turn itself runs async (we never block
+   * the poller tick for the whole turn). Throwing here is reported by the poller
+   * as a fail-CLOSED dispatch (the schedule does not silently no-op).
+   */
+  dispatchAgentJob(ctx: {
+    beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
+  }): { dispatched: boolean; detail?: string } {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const synthetic: IncomingMessage = {
+        messageId: `agentjob-${ctx.triggerId}-${now}`,
+        chatJid: ctx.reportChatJid,
+        senderJid: config.memory.adminJid,
+        senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
+        content: ctx.prompt,
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        isGroup: ctx.reportChatJid.endsWith('@g.us'),
+        mentionedJids: [],
+        timestamp: now,
+        quotedMessageId: null,
+        isResponseWorthy: true,
+        inboundSeq: undefined,
+        isSyntheticJob: true,
+      };
+      // Fire-and-forget onto the turn chain; failures inside the turn are logged
+      // by handleMessage's own turn-chain error handler.
+      void this.handleMessage(synthetic).catch((err: unknown) => {
+        log.error(
+          { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
+          'agent job turn failed after dispatch',
+        );
+      });
+      return { dispatched: true, detail: `enqueued turn for bead ${ctx.beadId}` };
+    } catch (err) {
+      return { dispatched: false, detail: errorMessage(err) };
+    }
+  }
+
   async handleMessage(msg: IncomingMessage): Promise<void> {
     // Process media messages (transcription, text extraction, etc.) before routing.
     // For text messages this is a no-op. For all other types we attempt to convert
@@ -2789,7 +2840,11 @@ export class AgentRuntime implements Runtime {
     // drowsy or misfired match doesn't silently commit real work to the task list.
     try {
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      if (isAdminPhone(senderPhone, config.adminPhones)) {
+      // Skip the inline imperative extractor for synthetic agent-job turns —
+      // otherwise a scheduled prompt would spawn a proposed task bead on every
+      // fire. The job is already a durable agent_job bead; it is not an ad-hoc
+      // imperative to capture.
+      if (isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);
@@ -5723,9 +5778,10 @@ export class AgentRuntime implements Runtime {
     return [...providers];
   }
 
-  /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider (primary OR fallback) on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Drives the honest startup warning (F11). */
+  /** F-STICKY-ACTOR (QR-247): true when a non-sandbox per_chat instance has ANY non-claude subprocess CLI provider on the shared global socket, so the concurrent-sender actor race is NOT closed for it. Covers the STATIC config surface (primary OR fallback) and — QR-263 — the DYNAMIC nlRouting surface (a live per-sender pin can select a non-claude CLI provider at runtime even when the static config is claude-only). Drives the honest startup warning (F11). */
   private perChatActorRaceExposed(): boolean {
-    return this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.exposedCliProviders().length > 0;
+    if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return false;
+    return this.exposedCliProviders().length > 0 || this.nlRoutingEnabled;
   }
 
   private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {

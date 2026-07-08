@@ -22,6 +22,8 @@ import {
   getModelAdvisories,
   fetchLiveModelIds,
   fetchLiveModelIdsWithStatus,
+  fetchLiveModelIdsCached,
+  resolveModelRole,
   startModelCurrencyMonitor,
   __resetModelAdvisorForTest,
 } from '../../src/lib/model-advisor.ts';
@@ -398,5 +400,105 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
     expect(setIntervalSpy).toHaveBeenCalledTimes(1);
     setIntervalSpy.mockRestore();
     toIso.mockRestore();
+  });
+});
+
+describe('resolveModelRole (symbolic model resolution)', () => {
+  // The acceptance live-list from the bead spec.
+  const OPENAI_LIVE_RESPONSE = {
+    ok: true,
+    json: async () => ({
+      data: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-codex' }, { id: 'gpt-5.4' }, { id: 'gpt-5.6-preview' }],
+    }),
+  };
+
+  it('returns literal IDs unchanged without touching the network', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await resolveModelRole('gpt-5.4')).toBe('gpt-5.4');
+    expect(await resolveModelRole('claude-opus-4-8')).toBe('claude-opus-4-8');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('resolves latest-stable from the live list and caches the fetch', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    vi.stubGlobal('fetch', fetchSpy);
+    expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.5');
+    expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.5');
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // second resolution hit the cache
+  });
+
+  it('resolves latest (unfiltered) to the newest served ID including preview', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE));
+    expect(await resolveModelRole('openai:gpt:latest')).toBe('gpt-5.6-preview');
+  });
+
+  it('resolves to the static catalog current when the vendor live-scan is degraded (never throws)', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.4');
+  });
+
+  it('resolves to the static catalog current when no vendor key is configured (static-only)', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubGlobal('fetch', vi.fn());
+    expect(await resolveModelRole('anthropic:opus:latest-stable')).toBe('claude-opus-4-8');
+    expect(await resolveModelRole('anthropic:haiku:latest')).toBe('claude-haiku-4-5');
+  });
+
+  it('fetchLiveModelIdsCached refreshes on miss and reuses within the TTL', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    vi.stubGlobal('fetch', fetchSpy);
+    const first = await fetchLiveModelIdsCached();
+    const second = await fetchLiveModelIdsCached();
+    expect(first.ids).toContain('gpt-5.5');
+    expect(second.ids).toEqual(first.ids);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('checkModelCurrencyStatus advises on the RESOLVED target and re-primes the shared cache', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE);
+    vi.stubGlobal('fetch', fetchSpy);
+    // The symbolic role resolves to the newest stable (gpt-5.5), which IS
+    // current on the live list — so no advisory fires for it, even though the
+    // raw symbolic string is not a model ID at all.
+    const result = await checkModelCurrencyStatus({ fallback: 'openai:gpt:latest-stable' });
+    expect(result.advisories).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The check force-refreshed the shared cache: point-of-use resolution
+    // afterwards does not fetch again.
+    expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.5');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('checkModelCurrencyStatus still advises when the resolved target is behind the live list', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    // Live list has only a preview newer than the newest stable: latest-stable
+    // resolves to gpt-5.5 and no upgrade advisory fires (preview lines are a
+    // different comparison family) — but a LITERAL gpt-5.4 in another role is
+    // still flagged against the live list.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(OPENAI_LIVE_RESPONSE));
+    const result = await checkModelCurrencyStatus({
+      fallback: 'openai:gpt:latest-stable',
+      conversation: 'gpt-5.4',
+    });
+    expect(result.advisories).toHaveLength(1);
+    expect(result.advisories[0]).toMatchObject({
+      role: 'conversation',
+      model: 'gpt-5.4',
+      level: 'upgrade-available',
+      recommended: 'gpt-5.5',
+    });
   });
 });

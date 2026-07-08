@@ -86,7 +86,7 @@ describe('platform service managers', () => {
     else process.env.WHATSOUP_DOCKER = originalDocker;
   });
 
-  it('detects linux systemd and dispatches template and fleet units through systemctl', async () => {
+  it('detects linux systemd and re-enables template and fleet units through systemctl', async () => {
     setPlatform('linux');
     childProcessMocks.execFileSync.mockReturnValue(Buffer.from('DISPLAY=:0'));
     const { createServiceManager } = await importPlatform();
@@ -105,7 +105,7 @@ describe('platform service managers', () => {
       timeout: 3_000,
       stdio: 'ignore',
     });
-    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'systemctl', ['--user', 'enable', templateUnit('alpha')], expect.any(Function));
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'systemctl', ['--user', 'reenable', templateUnit('alpha')], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'systemctl', ['--user', 'disable', templateUnit('alpha')], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'systemctl', ['--user', 'start', templateUnit('alpha')], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(4, 'systemctl', ['--user', 'stop', templateUnit('alpha')], expect.any(Function));

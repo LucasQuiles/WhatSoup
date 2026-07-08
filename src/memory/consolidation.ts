@@ -2,6 +2,7 @@ import { shortHash } from '../lib/short-hash.ts';
 import { stripJsonFences } from '../lib/json-fences.ts';
 import { createChildLogger } from '../logger.ts';
 import { config } from '../config.ts';
+import { resolveModelRole } from '../lib/model-advisor.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
 import type { MemoryCluster, ConsolidationResult } from './types.ts';
 
@@ -119,7 +120,9 @@ export async function consolidateCluster(
   let raw: string;
   try {
     const response = await provider.generate({
-      model: config.models.validation,
+      // Resolve symbolic model values (vendor:family:latest[-stable]) at point
+      // of use; literal IDs pass through untouched. Never throws.
+      model: await resolveModelRole(config.models.validation),
       maxTokens: 1000,
       systemPrompt: CONSOLIDATION_PROMPT,
       messages: [{ role: 'user', content: clusterJson }],
