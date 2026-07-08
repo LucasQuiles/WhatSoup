@@ -34,6 +34,12 @@ export const ACCESS_MODES = [
 ] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(ACCESS_MODES);
+// R5: per-sender group response policy. `any_member` (default) preserves current
+// behavior — any non-blocked group participant can trigger a response. `allowlisted_only`
+// requires the group sender to be allowlisted (access_list phone `allowed`) or admin.
+export const GROUP_SENDER_POLICIES = ['any_member', 'allowlisted_only'] as const;
+export type GroupSenderPolicy = (typeof GROUP_SENDER_POLICIES)[number];
+export const VALID_GROUP_SENDER_POLICIES: ReadonlySet<string> = new Set(GROUP_SENDER_POLICIES);
 export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'single',
   'shared',
