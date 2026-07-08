@@ -286,6 +286,8 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-repo-commit-authors` | `npm run guard:repo:commit-authors` | `package.json` | stable | active | Repo hygiene guard over branch-range commit authors |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
+| `cli:npm.guard-agent-iteration-review` | `npm run guard:agent-iteration-review` | `package.json` | internal | active | Validate a self-review markdown artifact has required sections and a valid decision |
+| `cli:npm.guard-worker-artifacts` | `npm run guard:worker-artifacts` | `package.json` | internal | active | Validate worker-delegation report artifacts (JSON validity, metadata, manifest completeness) |
 | `cli:npm.guard-unit-drift` | `npm run guard:unit-drift` | `package.json` | internal | active | Compare checked-in systemd user units with installed units |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |
