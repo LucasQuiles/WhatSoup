@@ -75,4 +75,24 @@ describe('status-op lifecycle (PR-C)', () => {
     expect(rows[0].op_type).toBe('status_ping');
     expect(rows[1].op_type).toBe('text');
   });
+
+  // ── Task 2: drain treats status_ping as text-reconstructable ──
+
+  it('drain re-sends a pending status_ping op (reconstructable), does not quarantine it', async () => {
+    const opId = durability.createOutboundOp({
+      conversationKey: 'k1', chatJid: CHAT, opType: 'status_ping',
+      payload: JSON.stringify({ text: '*Agent back online* ✓' }), replayPolicy: 'unsafe',
+    });
+    expect(getOutbound(db, opId)['status']).toBe('pending');
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_PING_1' }));
+    await drainPendingOutbound(messenger, durability);
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT, '*Agent back online* ✓');
+    const row = getOutbound(db, opId);
+    expect(row['status']).toBe('submitted');
+    expect(row['wa_message_id']).toBe('WA_PING_1');
+    expect(emitAlert).not.toHaveBeenCalled();
+  });
 });

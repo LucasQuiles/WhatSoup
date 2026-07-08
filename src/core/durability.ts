@@ -1203,7 +1203,7 @@ export async function drainPendingOutbound(
   for (const op of pending) {
     try {
       let text: string | undefined;
-      if (op.op_type === 'text') {
+      if (op.op_type === 'text' || op.op_type === 'status_ping') {
         try {
           const parsed = JSON.parse(op.payload) as unknown;
           if (
