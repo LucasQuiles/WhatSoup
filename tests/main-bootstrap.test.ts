@@ -251,7 +251,7 @@ async function importMainWithMocks(options: {
     selectReplayableDms: vi.fn((stored: unknown[]) => ({ toReplay: stored, groupSkipped: 1 })),
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
-    drainPendingOutbound: vi.fn(async () => 0),
+    drainPendingOutbound: vi.fn(async () => ({ resent: 0, expired: 0 })),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
       await recover();
     }),

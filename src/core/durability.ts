@@ -16,6 +16,14 @@ import { config } from '../config.ts';
 
 const log = createChildLogger('durability');
 
+/**
+ * PR-C: max age a `status_ping` op may sit in `pending` before the drain ages it
+ * out (quarantine + alert) instead of re-sending. A "back online" notice older
+ * than this is stale misinformation, so dropping it is correct. Strictly scoped
+ * to `op_type='status_ping'` — `text` ops have no age gate.
+ */
+const STATUS_OP_TTL_MS = 30 * 60 * 1000;
+
 // ── Status string unions ──
 
 type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
@@ -41,6 +49,7 @@ export interface OutboundOpRow {
   payload: string;
   wa_message_id: string | null;
   replay_policy: string;
+  created_at: string;
   submitted_at: string | null;
   source_inbound_seq: number | null;
   is_terminal: number;
@@ -316,7 +325,7 @@ export class DurabilityEngine {
         `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
       ),
       getOutboundByStatus: prepare(
-        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+        `SELECT id, chat_jid, op_type, payload, wa_message_id, replay_policy, created_at, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
       ),
       getRecoverableToolCalls: prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
@@ -1206,15 +1215,17 @@ export async function sendTracked(
  * `sendTracked`-created ops already carry on a maybe_sent → reset cycle; the
  * drainer does not widen it.
  *
- * One failing op never aborts the rest of the drain. Returns the count of ops
- * successfully re-sent (transitioned out of `pending` via `markSubmitted`).
+ * One failing op never aborts the rest of the drain. Returns `{ resent, expired }`:
+ * `resent` = ops transitioned out of `pending` via `markSubmitted`; `expired` =
+ * `status_ping` ops aged out past `STATUS_OP_TTL_MS` (quarantined, never sent).
  */
 export async function drainPendingOutbound(
   messenger: Messenger,
   durability: DurabilityEngine,
-): Promise<number> {
+): Promise<{ resent: number; expired: number }> {
   const pending = durability.getOutboundByStatus('pending');
   let resent = 0;
+  let expired = 0;
 
   for (const op of pending) {
     try {
@@ -1251,6 +1262,30 @@ export async function drainPendingOutbound(
         continue;
       }
 
+      if (
+        op.op_type === 'status_ping' &&
+        Date.parse(op.created_at + 'Z') < Date.now() - STATUS_OP_TTL_MS
+      ) {
+        // PR-C TTL age-out (status class only): a "back online" ping stranded in
+        // `pending` past the TTL is stale misinformation. Mirror the
+        // non-reconstructable branch — quarantine (a terminal state retention
+        // reclaims) + alert — but never re-send it. `text` ops are exempt: this
+        // branch is gated on op_type='status_ping'.
+        durability.markQuarantined(op.id);
+        log.warn(
+          { opId: op.id, opType: op.op_type, createdAt: op.created_at },
+          'drainPendingOutbound: stale status_ping past TTL → quarantined',
+        );
+        emitAlertChecked(
+          config.botName,
+          'outbound_quarantined',
+          `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+          `replay_policy=${op.replay_policy} op_type=${op.op_type} reason=status_op_ttl_expired`,
+        );
+        expired += 1;
+        continue;
+      }
+
       if (!durability.markSending(op.id)) {
         // Another concurrent drain (the un-serialized recover callback vs. the
         // echo-timeout interval) already claimed this op out of `pending` from
@@ -1281,9 +1316,9 @@ export async function drainPendingOutbound(
   }
 
   if (pending.length > 0) {
-    log.info({ pending: pending.length, resent }, 'drainPendingOutbound: complete');
+    log.info({ pending: pending.length, resent, expired }, 'drainPendingOutbound: complete');
   }
-  return resent;
+  return { resent, expired };
 }
 
 /**

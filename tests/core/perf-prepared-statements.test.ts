@@ -27,7 +27,8 @@ describe('prepared statement caching', () => {
     const engine = new DurabilityEngine(db);
 
     // 46 pre-existing + 3 stuck-inbound sweep statements (echoed-terminal, stale turn_done, stale open)
-    expect(prepareSpy).toHaveBeenCalledTimes(49);
+    // + 1 PR-C supersedeOutstandingStatus (one outstanding status ping per chat)
+    expect(prepareSpy).toHaveBeenCalledTimes(50);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

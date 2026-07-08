@@ -143,4 +143,51 @@ describe('status-op lifecycle (PR-C)', () => {
     expect(textRow['status']).toBe('pending');
     expect(textRow['error']).toBeNull();
   });
+
+  // ── Task 4: TTL age-out at drain (status class only) ──
+
+  it('drain TTL-expires a stale status_ping, sends a fresh one, never expires a stale text op', async () => {
+    // Stale status_ping, backdated past STATUS_OP_TTL_MS (30 min).
+    const staleId = durability.createOutboundOp({
+      conversationKey: 'k1', chatJid: CHAT, opType: 'status_ping',
+      payload: JSON.stringify({ text: 'stale back online' }), replayPolicy: 'unsafe',
+    });
+    db.raw.prepare(`UPDATE outbound_ops SET created_at = datetime('now','-31 minutes') WHERE id = ?`).run(staleId);
+
+    // Fresh status_ping, within TTL. Different chat so supersede-on-enqueue does
+    // not touch the stale one (this test isolates the drain-time TTL, not supersede).
+    const freshId = durability.createOutboundOp({
+      conversationKey: 'k2', chatJid: OTHER_CHAT, opType: 'status_ping',
+      payload: JSON.stringify({ text: 'fresh back online' }), replayPolicy: 'unsafe',
+    });
+
+    // Stale text op, backdated identically — must be EXEMPT from TTL and still re-sent.
+    const textId = durability.createOutboundOp({
+      conversationKey: 'k3', chatJid: 'chat3@s.whatsapp.net', opType: 'text',
+      payload: JSON.stringify({ text: 'old user reply' }), replayPolicy: 'safe',
+    });
+    db.raw.prepare(`UPDATE outbound_ops SET created_at = datetime('now','-31 minutes') WHERE id = ?`).run(textId);
+
+    const messenger = makeMessenger(async () => ({ waMessageId: 'WA_SENT' }));
+    const { resent, expired } = await drainPendingOutbound(messenger, durability);
+
+    // Stale ping: quarantined + TTL alert, never sent.
+    expect(getOutbound(db, staleId)['status']).toBe('quarantined');
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(CHAT, 'stale back online');
+    expect(emitAlert).toHaveBeenCalledWith(
+      'Loops',
+      'outbound_quarantined',
+      expect.any(String),
+      expect.stringContaining('status_op_ttl_expired'),
+    );
+    // Fresh ping: re-sent.
+    expect(getOutbound(db, freshId)['status']).toBe('submitted');
+    expect(messenger.sendMessage).toHaveBeenCalledWith(OTHER_CHAT, 'fresh back online');
+    // SCOPE GUARD: stale text op is re-sent, NEVER TTL-expired.
+    expect(getOutbound(db, textId)['status']).toBe('submitted');
+    expect(messenger.sendMessage).toHaveBeenCalledWith('chat3@s.whatsapp.net', 'old user reply');
+    // Counters: fresh ping + text op re-sent; stale ping expired.
+    expect(resent).toBe(2);
+    expect(expired).toBe(1);
+  });
 });
