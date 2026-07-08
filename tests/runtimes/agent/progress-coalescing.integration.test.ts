@@ -21,6 +21,9 @@ vi.mock('../../../src/logger.ts', () => ({
 
 const CHAT_JID = 'ana-invoicing@s.whatsapp.net';
 const INSTANCE = 'Ana';
+const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
+const PROGRESS_TEXT = `_${INSTANCE} is working on something, this might take a moment..._`;
+const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
 
 const CONFIG: OperationTrackerConfig = {
   enabled: true,
@@ -77,7 +80,7 @@ describe('progress placeholder coalescing (tracker → queue integration)', () =
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it('a parallel batch of 3 slow Read tools emits 3 tracker events but ONE chat message', async () => {
-    const { queue, tracker, calls, slowEvents } = wire('minimal');
+    const { queue, tracker, calls, slowEvents } = wire('friendly');
 
     // The model issues three Read tools in one turn (read: slow at 3000*3 = 9000ms).
     tracker.onToolStart('toolu_a', 'Read', 'reading');
@@ -89,30 +92,30 @@ describe('progress placeholder coalescing (tracker → queue integration)', () =
     // SOURCE proof: the tracker genuinely fires one slow event per concurrent op.
     expect(slowEvents).toHaveLength(3);
     // FIX proof: the user-facing chat receives exactly one identical placeholder.
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();
   });
 
   it('escalation: one op going slow then stalled sends two DISTINCT messages', async () => {
-    const { queue, tracker, calls } = wire('minimal');
+    const { queue, tracker, calls } = wire('friendly');
 
     // read: slow at 9000ms, stalled at 3000*10 = 30000ms.
     tracker.onToolStart('toolu_a', 'Read', 'reading');
 
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     await vi.advanceTimersByTimeAsync(21_000 + MIN_SEND_GAP_MS); // reach 30000ms stall
-    expect(calls).toEqual(['_Still working..._', '_Still working (30s)..._']);
+    expect(calls).toEqual([SLOW_TEXT, PROGRESS_TEXT, STALL_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();
   });
 
   it('a brand-new turn re-announces after flush() resets coalescing', async () => {
-    const { queue, tracker, calls } = wire('minimal');
+    const { queue, tracker, calls } = wire('friendly');
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
@@ -125,14 +128,14 @@ describe('progress placeholder coalescing (tracker → queue integration)', () =
     // Next turn, same placeholder text, well within 30s of the previous one — must re-announce.
     tracker.onToolStart('toolu_b', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._', '_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT, SLOW_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();
   });
 
   it('coalesces across a JID-alias retarget within the window (text-only key)', async () => {
-    const { queue, tracker, calls } = wire('minimal');
+    const { queue, tracker, calls } = wire('friendly');
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
@@ -150,11 +153,11 @@ describe('progress placeholder coalescing (tracker → queue integration)', () =
   });
 
   it('window expiry inside one long turn allows a genuine later nudge', async () => {
-    const { queue, tracker, calls } = wire('minimal');
+    const { queue, tracker, calls } = wire('friendly');
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
     // End it so it does not escalate to a (distinct) stall message — we are isolating
     // window expiry of the identical plain placeholder, with no flush in between.
     tracker.onToolEnd('toolu_a');
@@ -162,7 +165,7 @@ describe('progress placeholder coalescing (tracker → queue integration)', () =
     await vi.advanceTimersByTimeAsync(PROGRESS_TEXT_DEDUPE_WINDOW_MS);
     tracker.onToolStart('toolu_b', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._', '_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT, SLOW_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();

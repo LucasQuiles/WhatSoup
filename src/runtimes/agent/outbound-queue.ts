@@ -549,7 +549,7 @@ export class OutboundQueue implements IOutboundQueue {
 
       case 'thinking_stalled': {
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueueProgress(`_${name} may be stuck..._`);
+          this.startTyping();
         } else {
           this.enqueueProgress(`_${name} has gone silent \u2014 checking..._`);
         }
@@ -587,7 +587,7 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueueProgress('_Still working..._');
+          this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name} is still working on it..._`);
         } else {
@@ -604,7 +604,7 @@ export class OutboundQueue implements IOutboundQueue {
         }
         const elapsed = formatElapsed(event.elapsedMs);
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueueProgress(`_Still working (${elapsed})..._`);
+          this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name}: Still working (${elapsed})..._`);
         } else {

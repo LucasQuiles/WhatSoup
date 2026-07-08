@@ -1368,7 +1368,7 @@ describe('OutboundQueue', () => {
       queue.abortTurn(); // clean up typing interval
     });
 
-    it('renders operation_stalled as still-working copy with elapsed time in all three modes', async () => {
+    it('renders operation_stalled as still-working copy with elapsed time in full and friendly modes', async () => {
       const baseEvent = {
         type: 'operation_stalled' as const,
         toolId: 'tool-1',
@@ -1377,7 +1377,7 @@ describe('OutboundQueue', () => {
         elapsedMs: 65_000,
       };
 
-      for (const mode of ['full', 'friendly', 'minimal'] as const) {
+      for (const mode of ['full', 'friendly'] as const) {
         const { messenger, calls } = makeMessenger();
         const queue = new OutboundQueue(messenger, CHAT_JID);
         queue.setToolUpdateMode(mode);
@@ -1391,6 +1391,40 @@ describe('OutboundQueue', () => {
         expect(calls[0]).not.toContain('Something went wrong');
         expect(calls[0]).not.toContain('stuck');
       }
+    });
+
+    it('suppresses operation_slow and operation_stalled text in minimal mode', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      queue.enqueueProgressUpdate(
+        {
+          type: 'operation_slow',
+          toolId: 'tool-1',
+          toolName: 'Bash',
+          category: 'running',
+          elapsedMs: 45_000,
+          expectedMs: 15_000,
+        },
+        INSTANCE,
+      );
+      queue.enqueueProgressUpdate(
+        {
+          type: 'operation_stalled',
+          toolId: 'tool-1',
+          toolName: 'Bash',
+          category: 'running',
+          elapsedMs: 65_000,
+        },
+        INSTANCE,
+      );
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(calls).toHaveLength(0);
+      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(2);
+
+      queue.abortTurn();
     });
 
     it('renders operation_slow differently per mode', async () => {
@@ -1423,24 +1457,26 @@ describe('OutboundQueue', () => {
       expect(friendly.calls[0]).toContain('still working');
       expect(friendly.calls[0]).toContain(INSTANCE);
 
-      // Minimal mode — generic, no instance name
+      // Minimal mode — typing only, no placeholder message
       const minimal = makeMessenger();
       const qMinimal = new OutboundQueue(minimal.messenger, CHAT_JID);
       qMinimal.setToolUpdateMode('minimal');
       qMinimal.enqueueProgressUpdate(baseEvent, INSTANCE);
       await vi.runAllTimersAsync();
-      expect(minimal.calls).toHaveLength(1);
-      expect(minimal.calls[0]).toContain('Still working');
+      expect(minimal.calls).toHaveLength(0);
+      expect(minimal.typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+      qMinimal.abortTurn();
     });
 
     it('coalesces identical concurrent operation_slow placeholders into one message', async () => {
       // Reproduces the "Still working… x3 back to back" report: a parallel tool
-      // batch arms one slow-timer per tool; in minimal mode every operation_slow
-      // renders the identical text "_Still working..._". Without coalescing the
+      // batch arms one slow-timer per tool; in friendly mode every operation_slow
+      // renders the same visible progress placeholder. Without coalescing the
       // user receives N identical messages.
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
-      queue.setToolUpdateMode('minimal');
+      queue.setToolUpdateMode('friendly');
 
       for (const toolId of ['tool-a', 'tool-b', 'tool-c']) {
         queue.enqueueProgressUpdate(
@@ -1459,7 +1495,7 @@ describe('OutboundQueue', () => {
       // that the suppressed duplicates re-assert.
       await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
 
-      expect(calls).toEqual(['_Still working..._']);
+      expect(calls).toEqual([`_${INSTANCE} is still working on it..._`]);
 
       queue.abortTurn(); // clean up typing interval
     });
@@ -1467,7 +1503,7 @@ describe('OutboundQueue', () => {
     it('allows an identical progress placeholder again after the dedupe window elapses', async () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
-      queue.setToolUpdateMode('minimal');
+      queue.setToolUpdateMode('friendly');
       queue.setProgressFloorMs(0); // isolate the 30s text-window layer; floor covered separately
 
       const event: ProgressEvent = {
@@ -1537,7 +1573,7 @@ describe('OutboundQueue', () => {
       queue.abortTurn(); // clean up typing interval
     });
 
-    it('renders thinking_stalled in both full/friendly and minimal modes', async () => {
+    it('renders thinking_stalled in full mode and typing only in minimal mode', async () => {
       // Full mode
       const full = makeMessenger();
       const qFull = new OutboundQueue(full.messenger, CHAT_JID);
@@ -1553,8 +1589,10 @@ describe('OutboundQueue', () => {
       qMinimal.setToolUpdateMode('minimal');
       qMinimal.enqueueProgressUpdate({ type: 'thinking_stalled', gapMs: 60_000 }, INSTANCE);
       await vi.runAllTimersAsync();
-      expect(minimal.calls).toHaveLength(1);
-      expect(minimal.calls[0]).toContain('may be stuck');
+      expect(minimal.calls).toHaveLength(0);
+      expect(minimal.typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+      qMinimal.abortTurn();
     });
 
     it('clears friendlyProgressSent on abortTurn', async () => {

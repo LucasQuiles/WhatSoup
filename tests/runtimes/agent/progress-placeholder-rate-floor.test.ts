@@ -27,6 +27,9 @@ vi.mock('../../../src/logger.ts', () => ({
 
 const CHAT_JID = 'ana-invoicing@s.whatsapp.net';
 const INSTANCE = 'Ana';
+const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
+const PROGRESS_TEXT = `_${INSTANCE} is working on something, this might take a moment..._`;
+const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
 
 const CONFIG: OperationTrackerConfig = {
   enabled: true,
@@ -60,7 +63,7 @@ function makeMessenger(): { messenger: Messenger; calls: string[]; typingCalls: 
 function wire(floorMs: number = PROGRESS_PLACEHOLDER_RATE_FLOOR_MS) {
   const { messenger, calls, typingCalls } = makeMessenger();
   const queue = new OutboundQueue(messenger, CHAT_JID);
-  queue.setToolUpdateMode('minimal');
+  queue.setToolUpdateMode('friendly');
   queue.setProgressFloorMs(floorMs);
   const tracker = new OperationTracker(INSTANCE, CONFIG, {
     onProgress: (e: ProgressEvent) => { queue.enqueueProgressUpdate(e, INSTANCE); },
@@ -81,10 +84,10 @@ describe('progress placeholder per-chat rate floor', () => {
     // inside the 180s floor. Old behavior emitted two; the floor allows only one.
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     await vi.advanceTimersByTimeAsync(21_000 + MIN_SEND_GAP_MS); // reach 30000ms stall
-    expect(calls).toEqual(['_Still working..._']); // distinct stall text suppressed by floor
+    expect(calls).toEqual([SLOW_TEXT]); // distinct stall text suppressed by floor
 
     tracker.shutdown();
     queue.abortTurn();
@@ -111,7 +114,7 @@ describe('progress placeholder per-chat rate floor', () => {
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     // Turn ends — runtime calls flush(). The text window resets, but the floor must not.
     tracker.onToolEnd('toolu_a');
@@ -119,7 +122,7 @@ describe('progress placeholder per-chat rate floor', () => {
 
     tracker.onToolStart('toolu_b', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']); // second turn suppressed by surviving floor
+    expect(calls).toEqual([SLOW_TEXT]); // second turn suppressed by surviving floor
 
     tracker.shutdown();
     queue.abortTurn();
@@ -130,7 +133,7 @@ describe('progress placeholder per-chat rate floor', () => {
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn(); // session crash mid-turn
@@ -142,7 +145,7 @@ describe('progress placeholder per-chat rate floor', () => {
     });
     tracker2.onToolStart('toolu_b', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']); // still suppressed — abortTurn did not reset floor
+    expect(calls).toEqual([SLOW_TEXT]); // still suppressed — abortTurn did not reset floor
 
     tracker2.shutdown();
     queue.abortTurn();
@@ -153,14 +156,14 @@ describe('progress placeholder per-chat rate floor', () => {
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
     tracker.onToolEnd('toolu_a');
 
     // Advance past the full floor window, then a genuine later nudge is allowed.
     await vi.advanceTimersByTimeAsync(PROGRESS_PLACEHOLDER_RATE_FLOOR_MS);
     tracker.onToolStart('toolu_b', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._', '_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT, SLOW_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();
@@ -187,10 +190,10 @@ describe('progress placeholder per-chat rate floor', () => {
 
     tracker.onToolStart('toolu_a', 'Read', 'reading');
     await vi.advanceTimersByTimeAsync(9_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._']);
+    expect(calls).toEqual([SLOW_TEXT]);
 
     await vi.advanceTimersByTimeAsync(21_000 + MIN_SEND_GAP_MS);
-    expect(calls).toEqual(['_Still working..._', '_Still working (30s)..._']);
+    expect(calls).toEqual([SLOW_TEXT, PROGRESS_TEXT, STALL_TEXT]);
 
     tracker.shutdown();
     queue.abortTurn();
