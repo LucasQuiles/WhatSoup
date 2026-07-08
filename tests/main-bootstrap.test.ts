@@ -783,7 +783,7 @@ describe('main bootstrap', () => {
       '15551230000@s.whatsapp.net',
       '*Agent back online* \u2713',
       h.durability,
-      { replayPolicy: 'safe' },
+      { replayPolicy: 'unsafe', opType: 'status_ping' },
     );
   });
 });

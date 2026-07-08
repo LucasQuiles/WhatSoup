@@ -1180,13 +1180,13 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         h.durability,
         { replayPolicy: 'safe' },
       );
-      // It must NOT fall back to the default "back online" notice.
+      // It must NOT fall back to the default "back online" notice (a status op).
       expect(h.sendTracked).not.toHaveBeenCalledWith(
         h.connection,
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
       );
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559001@s.whatsapp.net', isResume: true },
@@ -1212,7 +1212,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '15551230000@s.whatsapp.net',
         '*Agent back online* ✓',
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
       );
     });
 
@@ -1277,7 +1277,7 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         '15559002@s.whatsapp.net',
         expect.stringContaining('Back online'),
         h.durability,
-        { replayPolicy: 'safe' },
+        { replayPolicy: 'unsafe', opType: 'status_ping' },
       );
       expect(h.logger.info).toHaveBeenCalledWith(
         { chatJid: '15559002@s.whatsapp.net' },
