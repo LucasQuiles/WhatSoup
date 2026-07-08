@@ -32,3 +32,20 @@ export function cleanGitEnv(): NodeJS.ProcessEnv {
       .filter(([, value]) => value !== undefined),
   ) as NodeJS.ProcessEnv;
 }
+
+const FULL_GIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+function readNonEmptyEnv(name: string): string | null {
+  const value = process.env[name]?.trim();
+  return value ? value : null;
+}
+
+export function readWhatsoupGitSha(): string | null {
+  const value = readNonEmptyEnv('WHATSOUP_GIT_SHA') ?? readNonEmptyEnv('GIT_SHA');
+  if (!value || !FULL_GIT_SHA_RE.test(value)) return null;
+  return value.toLowerCase();
+}
+
+export function readWhatsoupGitBranch(): string | null {
+  return readNonEmptyEnv('WHATSOUP_GIT_BRANCH');
+}
