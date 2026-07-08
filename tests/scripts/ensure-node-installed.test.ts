@@ -7,7 +7,7 @@
 // No setTimeout/sleep — purely synchronous process spawn + result inspection.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -137,6 +137,27 @@ describe('ensure-node-installed.sh', () => {
 
     expect(exitCode, 'should exit 0 on idempotent install').toBe(0);
     expect(stderr).toMatch(/already installed/i);
+  });
+
+  it('skips nvm install when the pinned local node binary already exists', () => {
+    const { home, nvmDir } = makeHomeWithFakeNvm(
+      'echo "nvm install should not run" >&2; return 42',
+    );
+    const repo = makeRepoFixture('24.15.0\n');
+    const localNode = join(nvmDir, 'versions/node/v24.15.0/bin/node');
+    mkdirSync(dirname(localNode), { recursive: true });
+    writeFileSync(localNode, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+    chmodSync(localNode, 0o755);
+
+    const { exitCode, stderr } = runScript({
+      HOME: home,
+      NVM_DIR: nvmDir,
+      REPO_ROOT: repo,
+    });
+
+    expect(exitCode, 'should exit 0 without calling nvm install').toBe(0);
+    expect(stderr).toMatch(/already present/i);
+    expect(stderr).not.toContain('nvm install should not run');
   });
 
   // ── Test 3 ─────────────────────────────────────────────────────────────────
