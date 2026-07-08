@@ -5,7 +5,7 @@ import { normalizePhoneE164 } from './lib/phone.ts';
 import { asRecord } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
-import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
+import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
@@ -22,7 +22,7 @@ const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
 const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
 const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
-export type { AccessMode } from './instance-loader.ts';
+export type { AccessMode, GroupSenderPolicy } from './instance-loader.ts';
 export type PineconeSearchMode = 'memory' | 'entity';
 export type KnowledgeSearchMode = 'entity' | 'text' | 'vector';
 
@@ -1099,6 +1099,23 @@ export const config = {
       );
     }
     return raw as AccessMode;
+  })(),
+
+  // R5: per-sender group response policy. Default 'any_member' preserves current
+  // behavior (any non-blocked group participant can trigger a response). Set
+  // 'allowlisted_only' (per-instance config or WHATSOUP_GROUP_SENDER_POLICY env) to
+  // require the group sender to be allowlisted or admin. Env takes precedence so an
+  // operator can flip strict mode per instance without editing config.json.
+  groupSenderPolicy: (() => {
+    const raw = process.env.WHATSOUP_GROUP_SENDER_POLICY
+      ?? (instance?.groupSenderPolicy as string | undefined)
+      ?? 'any_member';
+    if (!VALID_GROUP_SENDER_POLICIES.has(raw)) {
+      throw new Error(
+        `Invalid groupSenderPolicy "${raw}" — must be one of: ${[...VALID_GROUP_SENDER_POLICIES].join(', ')}`,
+      );
+    }
+    return raw as GroupSenderPolicy;
   })(),
 
   // Transport selection — read from instance.transport, defaults to DEFAULT_TRANSPORT_ID.

@@ -194,7 +194,7 @@ class SystemdServiceManager extends BaseServiceManager {
   }
 
   async enable(name: string): Promise<void> {
-    await execFileAsync('systemctl', ['--user', 'enable', this.unit(name)]);
+    await execFileAsync('systemctl', ['--user', 'reenable', this.unit(name)]);
   }
 
   async disable(name: string): Promise<void> {

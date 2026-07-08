@@ -2680,6 +2680,7 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
   afterEach(async () => {
     if (db) db.close();
     delete process.env.HEALTH_BIND_ADDRESS;
+    delete process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -2691,8 +2692,9 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
     expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('127.0.0.1');
   });
 
-  it('binds to 0.0.0.0 when HEALTH_BIND_ADDRESS=0.0.0.0', async () => {
+  it('binds to 0.0.0.0 when HEALTH_BIND_ADDRESS=0.0.0.0 AND WHATSOUP_HEALTH_UNSAFE_REMOTE=1', async () => {
     process.env.HEALTH_BIND_ADDRESS = '0.0.0.0';
+    process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE = '1'; // R7a: explicit opt-in required for a non-loopback bind
     db = makeDb();
     // Need a fresh import to pick up the env change in the closure
     const { startHealthServer } = await import('../../src/core/health.ts');
@@ -2706,6 +2708,14 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
     });
     const addr = testServer.address();
     expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('0.0.0.0');
+  });
+
+  it('R7a: refuses to start with HEALTH_BIND_ADDRESS=0.0.0.0 and no WHATSOUP_HEALTH_UNSAFE_REMOTE override', async () => {
+    process.env.HEALTH_BIND_ADDRESS = '0.0.0.0';
+    delete process.env.WHATSOUP_HEALTH_UNSAFE_REMOTE;
+    db = makeDb();
+    const { startHealthServer } = await import('../../src/core/health.ts');
+    expect(() => startHealthServer(makeDeps(db))).toThrow(/non-loopback/i);
   });
 });
 

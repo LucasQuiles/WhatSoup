@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Console auto-unlock wrapper: reads the root token from the login keychain and
+# runs the CDP helper. Token travels via env only (never argv/disk/clipboard).
+# Exit: 0 only when the helper reports already-valid/unlocked; 1 otherwise.
+set -uo pipefail
+CDP_PORT="${CDP_PORT:-9333}"; FLEET="${FLEET:-http://localhost:9227}"
+# Resolve node: PATH first, newest fnm install as fallback (no pinned version/user).
+NODE="$(command -v node || true)"
+if [ -z "$NODE" ]; then
+  NODE="$(ls -t "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node 2>/dev/null | head -1 || true)"
+fi
+[ -n "$NODE" ] && [ -x "$NODE" ] || { echo "no-node"; exit 1; }
+for i in $(seq 1 24); do curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 && break; sleep 0.5; done
+curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 || { echo "cdp-unreachable"; exit 1; }
+TOKEN=$(security find-generic-password -s whatsoup-console-token -w 2>/dev/null) || { echo "no-keychain-token"; exit 1; }
+CDP_PORT="$CDP_PORT" FLEET="$FLEET" WHATSOUP_CONSOLE_TOKEN="$TOKEN" exec "$NODE" "$HOME/.local/bin/whatsoup-console-unlock.mjs"

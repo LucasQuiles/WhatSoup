@@ -8,8 +8,6 @@ import { isAdminPhone } from '../lib/phone.ts';
 
 const log = createChildLogger('conversation');
 
-const IMPLICIT_MENTION_TYPES = new Set(['audio', 'image', 'sticker', 'video']);
-
 /**
  * Structured result from shouldRespond.
  */
@@ -133,6 +131,25 @@ export function shouldRespond(
       return { respond: mentioned, reason: mentioned ? 'sibling_mentioned' : 'sibling_bot' };
     }
 
+    // ── R5: strict group-sender gate ──
+    // A single guard, placed AFTER the sibling-bot return (so orchestrator delegation is
+    // unaffected) and BEFORE group_auto_respond / media / @mention, so it covers every group
+    // response path at once. In `allowlisted_only` mode a group message only produces a
+    // response if the SENDER (not just the group) is allowlisted (`entry.status === 'allowed'`,
+    // reusing the per-sender lookup above) or admin. This closes both #4 (an allowed group
+    // auto-responding to a non-allowlisted member) and #20 (an unknown/pending sender
+    // @mention-activating the bot in an un-allowlisted group). Default 'any_member' is a no-op.
+    if (config.groupSenderPolicy === 'allowlisted_only') {
+      // Admin elevation is transport-gated (QR-143), mirroring the self_only admin path:
+      // a spoofable non-WhatsApp-authenticated sender must not clear the admin branch.
+      const senderAllowed = entry?.status === 'allowed'
+        || (isWhatsAppAuthenticatedJid(msg.senderJid) && isAdminPhone(effectivePhone, config.adminPhones));
+      if (!senderAllowed) {
+        log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: group strict mode rejects non-allowlisted sender');
+        return { respond: false, reason: 'strict_group_non_allowlisted', accessStatus: entry?.status ?? 'unknown' };
+      }
+    }
+
     // Check if this group is set to auto-respond (access_list entry with subject_type='group', status='allowed')
     const groupEntry = lookupAccess(db, 'group', msg.chatJid);
     if (groupEntry?.status === 'allowed') {
@@ -140,17 +157,15 @@ export function shouldRespond(
       return { respond: true, reason: 'group_auto_respond' };
     }
 
-    // Media in a known group (access_list entry) is treated as an implicit
-    // mention: audio and stickers can never carry an @mention, and image/video
-    // captions are optional, so requiring one would silently drop most media.
-    // Captioned media that DOES @mention the bot is already handled by the
-    // explicit `mentioned` check above (contextInfo is extracted from media
-    // content nodes by parseIncomingMessage). Documents are excluded from the
-    // implicit set; a captioned document must @mention the bot explicitly.
-    if (IMPLICIT_MENTION_TYPES.has(msg.contentType) && groupEntry && groupEntry.status !== 'blocked') {
-      log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, contentType: msg.contentType }, 'trigger: media in known group — implicit mention');
-      return { respond: true, reason: 'media_implicit_mention' };
-    }
+    // (#9) There is deliberately NO media-implicit-mention branch here. An ALLOWED
+    // group already responds to every message (group_auto_respond, above), so media
+    // in an allowed group is covered. A non-allowed (pending/unknown) group must NOT
+    // auto-respond to media: the prior predicate `groupEntry.status !== 'blocked'`
+    // wrongly fired for *pending* groups, letting a media message from an
+    // un-approved group elicit a reply with no @mention. Media without an @mention in
+    // a non-allowed group now falls through to the @mention check below and only
+    // responds when the bot is actually mentioned. Do not re-add a status-based media
+    // shortcut: `=== 'allowed'` is dead (narrowed out above) and `!== 'blocked'` is the bug.
 
     log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, mentioned }, 'trigger: group message');
     return { respond: mentioned, reason: mentioned ? 'mentioned' : 'not_mentioned' };
