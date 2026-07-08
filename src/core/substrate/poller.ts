@@ -136,6 +136,40 @@ export type PineconeSearchFn = (args: PineconeSearchArgs) => Promise<{ matches: 
  */
 export type UrlFetchFn = (url: string, opts: { maxBytes: number }) => Promise<GuardedFetchResult>;
 
+/**
+ * Context handed to the agent-job dispatcher when a schedule.* trigger whose
+ * linked bead is an `agent_job` fires. The dispatcher (wired only into the
+ * agent runtime — the poller itself cannot run turns) enqueues the prompt as a
+ * real agent turn and returns synchronously whether the turn was accepted.
+ */
+export interface AgentJobContext {
+  beadId: number;
+  triggerId: number;
+  /** agent_job bead body — the prompt to run as a turn. */
+  prompt: string;
+  /** agent_job bead title — for logging / turn labelling. */
+  title: string;
+  /** Where the job reports — becomes the synthetic turn's chat. */
+  reportChatJid: string;
+}
+
+/** Result of an agent-job dispatch attempt. `dispatched:false` fails CLOSED. */
+export interface AgentJobDispatchResult {
+  dispatched: boolean;
+  /** Optional detail (queue depth, rejection reason) recorded on the run. */
+  detail?: string;
+}
+
+/**
+ * Injected agent-job dispatcher. Production wires this to the AgentRuntime
+ * (enqueues a synthetic turn). Instances with no agent runtime (the passive
+ * primary-line) leave it UNSET, so an agent_job-linked schedule fails CLOSED
+ * with `agent_job_dispatcher_unavailable` rather than silently no-op'ing.
+ * Synchronous by design: it only ACCEPTS the turn for async processing and
+ * must not block the poller tick on the whole turn.
+ */
+export type AgentJobDispatchFn = (ctx: AgentJobContext) => AgentJobDispatchResult;
+
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
   intervalMs?: number;
@@ -180,6 +214,13 @@ export interface TriggerPollerOptions {
    * shared `fetchUrlGuarded` SSRF helper. Tests inject a stub to avoid network.
    */
   urlFetch?: UrlFetchFn;
+  /**
+   * Injected agent-job dispatcher for schedule.* triggers whose linked bead is
+   * an `agent_job`. When UNSET (e.g. passive instances with no agent runtime),
+   * such a fire fails CLOSED (`agent_job_dispatcher_unavailable`) instead of
+   * posting a bare "cron tick fired" notification that never runs the prompt.
+   */
+  agentJobDispatch?: AgentJobDispatchFn;
 }
 
 interface SqliteSpec {
@@ -272,6 +313,7 @@ export class TriggerPoller {
   private readonly fileWatchAllowedRoots: readonly string[];
   private readonly enableUrlWatch: boolean;
   private readonly urlFetch: UrlFetchFn;
+  private readonly agentJobDispatch: AgentJobDispatchFn | null;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -293,6 +335,7 @@ export class TriggerPoller {
     this.fileWatchAllowedRoots = (opts.fileWatchAllowedRoots ?? []).map(canonicalizeAllowedRoot);
     this.enableUrlWatch = opts.enableUrlWatch ?? false;
     this.urlFetch = opts.urlFetch ?? fetchUrlGuarded;
+    this.agentJobDispatch = opts.agentJobDispatch ?? null;
   }
 
   start(): void {
@@ -523,6 +566,14 @@ export class TriggerPoller {
       };
     }
     if (kind === 'schedule.cron' || kind === 'schedule.at_time') {
+      // If the linked bead is an agent_job, the schedule must RUN the prompt as
+      // an agent turn — not just post a bare "cron tick fired" notification.
+      // (Bug fix: previously every agent_job schedule silently no-op'd — the
+      // prompt in the bead body was never executed.)
+      const bead = this.lookupBead(t.bead_id);
+      if (bead?.kind === 'agent_job') {
+        return this.dispatchAgentJob(t, bead);
+      }
       return {
         status: 'ok',
         fired: true,
@@ -553,6 +604,75 @@ export class TriggerPoller {
       fired: false,
       outputSummary: `kind ${kind} not yet implemented`,
       outputJson: { kind, reason: 'not_implemented' satisfies TriggerReason },
+    };
+  }
+
+  private lookupBead(beadId: number): { kind: string; title: string; body: string | null } | undefined {
+    return this.db.prepare(
+      `SELECT kind, title, body FROM beads WHERE id = ?`,
+    ).get(beadId) as { kind: string; title: string; body: string | null } | undefined;
+  }
+
+  /**
+   * Run an agent_job-linked schedule fire as a real agent turn. Fails CLOSED on
+   * every error path (no dispatcher wired, empty prompt, enqueue rejected,
+   * dispatcher threw): the run is recorded `failed` with a named errorKind AND
+   * fired=true, so the report chat gets an immediate operator alert — never a
+   * silent success. On success the run is `ok` with fired=false (no
+   * notification: the agent turn itself does the visible work in-chat).
+   */
+  private dispatchAgentJob(
+    t: TriggerRow,
+    bead: { title: string; body: string | null },
+  ): ExecuteOutcome {
+    const prompt = bead.body?.trim();
+    if (!prompt) {
+      return {
+        status: 'failed', fired: true,
+        outputSummary: 'agent job dispatch FAILED — empty prompt body',
+        outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_empty_body' },
+        errorKind: 'agent_job_empty_body',
+        errorMessage: 'agent_job bead has no body to run as a turn',
+      };
+    }
+    if (!this.agentJobDispatch) {
+      return {
+        status: 'failed', fired: true,
+        outputSummary: 'agent job dispatch FAILED — no agent runtime wired on this instance',
+        outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_dispatcher_unavailable' },
+        errorKind: 'agent_job_dispatcher_unavailable',
+        errorMessage: 'no agentJobDispatch injected; this poller instance cannot run agent turns',
+      };
+    }
+    let result: AgentJobDispatchResult;
+    try {
+      result = this.agentJobDispatch({
+        beadId: t.bead_id, triggerId: t.id,
+        prompt, title: bead.title, reportChatJid: t.report_chat_jid,
+      });
+    } catch (err) {
+      return {
+        status: 'failed', fired: true,
+        outputSummary: `agent job dispatch FAILED — ${errorMessage(err)}`,
+        outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_dispatch_threw' },
+        errorKind: 'agent_job_dispatch_threw',
+        errorMessage: errorMessage(err),
+      };
+    }
+    if (!result.dispatched) {
+      const detail = result.detail ?? 'turn queue rejected the job (queue full?)';
+      return {
+        status: 'failed', fired: true,
+        outputSummary: `agent job dispatch FAILED — ${detail}`,
+        outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_enqueue_rejected' },
+        errorKind: 'agent_job_enqueue_rejected',
+        errorMessage: detail,
+      };
+    }
+    return {
+      status: 'ok', fired: false,
+      outputSummary: 'agent job dispatched — turn enqueued',
+      outputJson: { kind: t.kind, agentJob: true, detail: result.detail ?? null },
     };
   }
 

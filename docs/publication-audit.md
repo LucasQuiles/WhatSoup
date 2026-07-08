@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 83
+**Total classification rows:** 84
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 83 |
+| PRIVATE-ARCHIVE | 84 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 83 |
+| Total | 84 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -24,6 +24,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/research/2026-06-30-continuity-rd/WHATSOUP-FLEET-CONTINUITY-MATRIX.md` | PRIVATE-ARCHIVE | Internal continuity research; retained in the repository but excluded from public publication by default. |
 | `docs/research/gemini-cli-stream-json-investigation-2026-04-04.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/agent-decision-polls.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/agent-job-dispatch-gap.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/error-response-workflows.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/fleet-bot-hardening-standard.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/host-maintenance.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |

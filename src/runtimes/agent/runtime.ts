@@ -2757,6 +2757,52 @@ export class AgentRuntime implements Runtime {
     }, 'AgentRuntime started');
   }
 
+  /**
+   * Dispatch a scheduled `agent_job` as a real agent turn. Wired into the
+   * TriggerPoller (main.ts) so a schedule.cron/at_time fire whose linked bead
+   * is an agent_job RUNS the prompt instead of posting a bare "cron tick". The
+   * synthetic turn flows through the normal handleMessage path, so it works in
+   * shared / per_chat / single modes alike. Returns synchronously once the turn
+   * is ACCEPTED onto the turn chain — the turn itself runs async (we never block
+   * the poller tick for the whole turn). Throwing here is reported by the poller
+   * as a fail-CLOSED dispatch (the schedule does not silently no-op).
+   */
+  dispatchAgentJob(ctx: {
+    beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
+  }): { dispatched: boolean; detail?: string } {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const synthetic: IncomingMessage = {
+        messageId: `agentjob-${ctx.triggerId}-${now}`,
+        chatJid: ctx.reportChatJid,
+        senderJid: config.memory.adminJid,
+        senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
+        content: ctx.prompt,
+        contentText: null,
+        contentType: 'text',
+        isFromMe: false,
+        isGroup: ctx.reportChatJid.endsWith('@g.us'),
+        mentionedJids: [],
+        timestamp: now,
+        quotedMessageId: null,
+        isResponseWorthy: true,
+        inboundSeq: undefined,
+        isSyntheticJob: true,
+      };
+      // Fire-and-forget onto the turn chain; failures inside the turn are logged
+      // by handleMessage's own turn-chain error handler.
+      void this.handleMessage(synthetic).catch((err: unknown) => {
+        log.error(
+          { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
+          'agent job turn failed after dispatch',
+        );
+      });
+      return { dispatched: true, detail: `enqueued turn for bead ${ctx.beadId}` };
+    } catch (err) {
+      return { dispatched: false, detail: errorMessage(err) };
+    }
+  }
+
   async handleMessage(msg: IncomingMessage): Promise<void> {
     // Process media messages (transcription, text extraction, etc.) before routing.
     // For text messages this is a no-op. For all other types we attempt to convert
@@ -2794,7 +2840,11 @@ export class AgentRuntime implements Runtime {
     // drowsy or misfired match doesn't silently commit real work to the task list.
     try {
       const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
-      if (isAdminPhone(senderPhone, config.adminPhones)) {
+      // Skip the inline imperative extractor for synthetic agent-job turns —
+      // otherwise a scheduled prompt would spawn a proposed task bead on every
+      // fire. The job is already a durable agent_job bead; it is not an ad-hoc
+      // imperative to capture.
+      if (isAdminPhone(senderPhone, config.adminPhones) && !msg.isSyntheticJob) {
         const hit = matchImperative(content);
         if (hit) {
           const target = extractImperativeTarget(content);
