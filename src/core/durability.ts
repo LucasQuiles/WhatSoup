@@ -1126,7 +1126,7 @@ export async function sendTracked(
   chatJid: string,
   text: string,
   durability: DurabilityEngine | undefined,
-  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller },
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number; caller?: GuardCaller; opType?: 'text' | 'status_ping' },
 ): Promise<void> {
   let opId: number | undefined;
   if (durability) {
@@ -1134,7 +1134,7 @@ export async function sendTracked(
     opId = durability.createOutboundOp({
       conversationKey,
       chatJid,
-      opType: 'text',
+      opType: opts.opType ?? 'text',
       payload: JSON.stringify({ text }),
       replayPolicy: opts.replayPolicy,
       sourceInboundSeq: opts.sourceInboundSeq,
