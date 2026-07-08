@@ -94,6 +94,7 @@ const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
   /^one more narration line leaked\b/i,
   /^the \d+ leaked narration lines\b/i,
   /\blet me\b.{0,80}\b(?:record|confirm)\b.{0,120}\bbefore surfacing\b/i,
+  /\blet me\b.{0,100}\bsend\b.{0,120}\b(?:gate|status|chat|message)\b/i,
   /\b(?:outside a tool call|loading the delete tool|smoke\/verify script)\b/i,
 ];
 

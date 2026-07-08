@@ -285,6 +285,18 @@ describe('classifyAssistantTextEgress', () => {
     });
   });
 
+  it('suppresses pre-send gate status narration without satisfying the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress(
+      "The lane is still blocked at step 2 — Intuit session is UNAUTHENTICATED and the login driver can't restore it. This is the same wall as 18:36, and the two unblock actions both require Lucas or Ana. Let me send the gate-failure status to the LCP chat.",
+    );
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'internal_narration',
+      satisfiesReplyGuarantee: false,
+    });
+  });
+
   it('suppresses send/read-back verification chatter and satisfies the reply guarantee', () => {
     const decision = classifyAssistantTextEgress('Acknowledged and delivered (verified, pk 23924).');
 
