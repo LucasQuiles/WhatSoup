@@ -28,6 +28,19 @@ export type OutboundAudience = 'client' | 'ops' | 'internal';
 
 export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert';
 
+export type AssistantTextSuppressionReason =
+  | 'internal_narration'
+  | 'send_verification'
+  | 'noop';
+
+export type AssistantTextEgressDecision =
+  | { action: 'allow' }
+  | {
+      action: 'suppress';
+      reason: AssistantTextSuppressionReason;
+      satisfiesReplyGuarantee: boolean;
+    };
+
 export type RedactionCategory =
   | 'home_path'
   | 'internal_path'
@@ -58,6 +71,59 @@ export interface OutboundMessageSafetyDecision {
 /** Generic, non-technical text shown to a client when the original is diverted. */
 export const CLIENT_TEMPORARY_ISSUE_TEXT =
   'I hit a temporary issue and am retrying. I will follow up shortly.';
+
+const NOOP_ASSISTANT_TEXT = /^(?:[.!?…]+|[-_]+)$/u;
+const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
+  /^send-and-verify\b.{0,120}\b(?:ok|complete|done|verified|pk\s+\d+|delivered|sent)\b/i,
+  /\bread-?back\b.{0,160}\b(?:verified|pk\s+\d+|correct chat|matching content|delivered)\b/i,
+  /\b(?:verified|delivery verified|delivered \(verified\))\b[^.]{0,120}\bpk\s+\d+\b/i,
+  /\bpk\s+\d+\b[^.]{0,120}\b(?:verified|correct chat|matching content|delivered)\b/i,
+  /^acknowledged and delivered\b.{0,120}\b(?:verified|pk\s+\d+)\b/i,
+  /^intended .{0,80}\bverified\b/i,
+];
+
+const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
+  /^now\b.{0,160}\b(?:add|wire|rebuild|update|run|send|read|check|pull|load|implement|smoke|verify|workbook|sheet|script|command|tool|delete|revoke|entryrows|weekemployeetotals)\b/i,
+  /^let me\b(?!\s+know\b).{0,160}\b(?:implement|close|pull|send|verify|revoke|delete|wire|load|check|read|run)\b/i,
+  /^(?:loading|reading|checking|pulling|verifying)\b.{0,160}\b(?:tool|file|log|db|database|message|thread|script|command|workbook|sheet|pk|read-?back|socket)\b/i,
+  /^root cause confirmed\b/i,
+  /^one more narration line leaked\b/i,
+  /^the \d+ leaked narration lines\b/i,
+  /\b(?:outside a tool call|loading the delete tool|smoke\/verify script)\b/i,
+];
+
+const INTERNAL_WORK_HEADING =
+  /^(?:add|wire|rebuild|update)\b.{0,120}\b(?:command|script|sheet|workbook|summary|rows?|columns?|anomal(?:y|ies))\b/i;
+
+/**
+ * Classify raw provider assistant_text before it becomes a WhatsApp message.
+ *
+ * This is deliberately narrow: it catches process narration and send
+ * verification chatter observed in the agent transport, not arbitrary
+ * low-quality replies. Explicit MCP send tools bypass this classifier because
+ * those payloads already carry user-visible intent.
+ */
+export function classifyAssistantTextEgress(text: string): AssistantTextEgressDecision {
+  const trimmed = text.trim();
+  if (!trimmed) return { action: 'allow' };
+
+  if (NOOP_ASSISTANT_TEXT.test(trimmed)) {
+    return { action: 'suppress', reason: 'noop', satisfiesReplyGuarantee: true };
+  }
+
+  if (SEND_VERIFICATION_PATTERNS.some((re) => re.test(trimmed))) {
+    return { action: 'suppress', reason: 'send_verification', satisfiesReplyGuarantee: true };
+  }
+
+  if (
+    INTERNAL_NARRATION_OPENERS.some((re) => re.test(trimmed)) ||
+    INTERNAL_WORK_HEADING.test(trimmed)
+  ) {
+    return { action: 'suppress', reason: 'internal_narration', satisfiesReplyGuarantee: false };
+  }
+
+  return { action: 'allow' };
+}
 
 /**
  * Resolve the audience for an outbound agent send by its target chat:

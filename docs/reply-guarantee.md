@@ -73,6 +73,15 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    event and disarms when the existing durability journal observes a terminal
    echoed outbound response.
 
+6. Assistant-text egress gate (shipped).
+   The agent runtime classifies provider `assistant_text` before it reaches the
+   WhatsApp outbound queue. High-confidence process narration is suppressed but
+   leaves the watchdog armed; high-confidence no-op or send-verification chatter
+   is suppressed and disarms the watchdog for the active inbound turn, preventing
+   a hidden acknowledgement from being followed by the generic runtime fallback.
+   Explicit MCP sends (`send_message`, `reply_message`, media captions) bypass
+   this gate because they already carry user-visible send intent.
+
 The runtime watchdog is the root guarantee. Hooks and daemons are recovery
 coverage for agent/session boundaries.
 

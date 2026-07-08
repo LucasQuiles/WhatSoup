@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   redactInternalArtifacts,
+  classifyAssistantTextEgress,
   classifyInfraStatusClaim,
   evaluateOutboundMessageSafety,
   resolveOutboundAudience,
@@ -258,6 +259,56 @@ describe('evaluateOutboundMessageSafety', () => {
     expect(decision.action).toBe('redact');
     expect(decision.opsEvidence).toBeDefined();
     expect(decision.opsEvidence).not.toContain('testuser');
+  });
+});
+
+describe('classifyAssistantTextEgress', () => {
+  it('suppresses internal work narration without satisfying the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress('Now rebuild the workbook with the new trace columns.');
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'internal_narration',
+      satisfiesReplyGuarantee: false,
+    });
+  });
+
+  it('suppresses send/read-back verification chatter and satisfies the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress('Acknowledged and delivered (verified, pk 23924).');
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'send_verification',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  it('suppresses no-op punctuation and satisfies the reply guarantee', () => {
+    const decision = classifyAssistantTextEgress('.');
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      reason: 'noop',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  it('allows user-facing final text', () => {
+    expect(classifyAssistantTextEgress('Workbook delivered with 597 entry rows and 83 employee-week totals.')).toEqual({
+      action: 'allow',
+    });
+  });
+
+  it('allows normal user-facing prose that mentions verified totals', () => {
+    expect(classifyAssistantTextEgress('The workbook verified the totals against the source rows.')).toEqual({
+      action: 'allow',
+    });
+  });
+
+  it('allows normal closing prose that begins with let me know', () => {
+    expect(classifyAssistantTextEgress('Let me know if you want me to export the workbook as CSV too.')).toEqual({
+      action: 'allow',
+    });
   });
 });
 
