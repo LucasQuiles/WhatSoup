@@ -6511,6 +6511,21 @@ export class AgentRuntime implements Runtime {
   ): boolean {
     if (this.isFallbackWindowActive) return false;
     if (this.agentFallbacks.length === 0) return false;
+    // The control/repair session (control@heal.internal) is a synthetic
+    // diagnostic probe, not a real conversation turn. Its emptiness must NOT
+    // feed the production consecutivePrimaryEmptyTurns counter: a canned repair
+    // prompt can legitimately produce no text, and counting it cross-contaminates
+    // the threshold that the NEXT real-chat turn trips on. The control session
+    // has its own lifecycle (onCrash → HEAL_ESCALATE, 15min hard timeout) and
+    // does not need the fallback ladder. (Seen in production on ml-bot: a /heal
+    // provider-reset repair turn returned empty, bumped the counter to 1, then a
+    // single real-chat empty armed the fallback at threshold 2 — false failover.)
+    // The controlSession !== null guard avoids the null===null trap: per-chat
+    // turns pass session=null here, and this.controlSession also defaults to
+    // null, so a bare session===this.controlSession would match every turn.
+    if ((this.controlSession !== null && session === this.controlSession) || mapKey === 'control@heal.internal') {
+      return false;
+    }
 
     this.consecutivePrimaryEmptyTurns += 1;
     // R2 guard: mirror getTurnCapability's probeInFlight check. When the

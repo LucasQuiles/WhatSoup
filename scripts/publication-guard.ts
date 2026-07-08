@@ -85,7 +85,7 @@ const privatePatterns: PrivatePattern[] = [
   {
     code: 'personal-email',
     description: 'personal email address',
-    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|s\.whatsapp\.net|g\.us)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+    regex: /\b[A-Z0-9._%+-]+@(?!(?:users\.noreply\.github\.com|s\.whatsapp\.net|g\.us|heal\.internal)\b)[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
   },
   {
     code: 'local-home-path',
