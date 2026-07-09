@@ -965,6 +965,14 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.suppressDuplicateTerminalText(chunk)) {
       return;
     }
+    // PR-E telemetry: count every message actually enqueued this turn (content
+    // AND status). NEVER gates a send — crossing the high-volume watermark logs
+    // ONCE for PR-G/observability so a pure-content runaway is visible even
+    // though E deliberately never drops content.
+    this.turnTotalCount++;
+    if (this.turnTotalCount === HIGH_VOLUME_TURN_WATERMARK) {
+      log.warn({ chatJid: this.chatJid, count: this.turnTotalCount }, 'high-volume turn');
+    }
     this.lastActivity = Date.now();
     this.sendQueue.push(chunk);
     if (!this.sending) {

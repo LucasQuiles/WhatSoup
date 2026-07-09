@@ -2801,6 +2801,28 @@ describe('OutboundQueue', () => {
       const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
       expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
     });
+
+    // Telemetry (feeds PR-G): a high-volume turn is logged ONCE past the
+    // watermark for observability — it NEVER gates or suppresses a send.
+    it('logs a high-volume turn once past the watermark without suppressing content', async () => {
+      mockLog.warn.mockClear();
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      for (let i = 0; i < 45; i++) {
+        queue.enqueueText(`content ${i}`);
+        await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+      }
+      await queue.flush();
+
+      // Every content message delivered — telemetry never suppresses.
+      expect(calls.filter((c) => c.startsWith('content ')).length).toBe(45);
+
+      // The watermark fired exactly once, with chatJid + count.
+      const hv = mockLog.warn.mock.calls.filter((c) => c[1] === 'high-volume turn');
+      expect(hv).toHaveLength(1);
+      expect(hv[0][0]).toMatchObject({ chatJid: CHAT_JID, count: 40 });
+    });
   });
 });
 
