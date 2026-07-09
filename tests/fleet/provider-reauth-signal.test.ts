@@ -39,6 +39,34 @@ describe('classifyProviderReauthSignal', () => {
     (body as Record<string, unknown>)['reauth_required'] = false;
     expect(classifyProviderReauthSignal(body).confirmed).toBe(false);
   });
+
+  it('precedence pin: reauth_required=false VETOES incident-shaped turn_capability enums', () => {
+    // The enums alone would derive confirmed=true (credential-unavailable), so
+    // this test FAILS if the boolean-first branch is deleted — it pins that the
+    // instance's own boolean outranks the enum fallback, not just agrees with it.
+    const body = {
+      status: 'degraded',
+      reauth_required: false,
+      turn_capability: {
+        model_usable: false,
+        model_usable_stale: false,
+        model_usable_checked_at: 1_782_349_000_000,
+        model_usability_status: 'credential-unavailable',
+        last_successful_turn_at: null,
+        last_turn_error_class: 'auth-required',
+        last_turn_error_at: 1_782_349_000_000,
+      },
+    };
+    expect(classifyProviderReauthSignal(body).confirmed).toBe(false);
+  });
+
+  it('boundary pin: checked_at === error_at cannot prove supersession (strict >) on the derived path', () => {
+    const body = fixture('provider-reauth-recovered.json');
+    delete body['reauth_required']; // force the enum-derived fallback
+    const tc = body['turn_capability'] as Record<string, unknown>;
+    tc['model_usable_checked_at'] = tc['last_turn_error_at']; // equal timestamps — not strictly newer
+    expect(classifyProviderReauthSignal(body).confirmed).toBe(true);
+  });
 });
 
 describe('providerReauthClearProof', () => {
@@ -55,5 +83,25 @@ describe('providerReauthClearProof', () => {
   });
   it('missing turn_capability never proves the clear', () => {
     expect(providerReauthClearProof({ status: 'healthy', reauth_required: false })).toBe(false);
+  });
+
+  it('precedence pin: reauth_required=true VETOES a fully usable turn_capability', () => {
+    // The usable/fresh tc alone satisfies the clear predicate, so this test
+    // FAILS if the boolean-veto first line is deleted — it pins that a body
+    // still asserting reauth_required can never prove its own clear.
+    const body = {
+      status: 'degraded',
+      reauth_required: true,
+      turn_capability: {
+        model_usable: true,
+        model_usable_stale: false,
+        model_usable_checked_at: 1_782_435_400_000,
+        model_usability_status: 'usable',
+        last_successful_turn_at: null,
+        last_turn_error_class: null,
+        last_turn_error_at: null,
+      },
+    };
+    expect(providerReauthClearProof(body)).toBe(false);
   });
 });

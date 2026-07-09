@@ -17,6 +17,9 @@ _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
 # Copied verbatim from test_bot_errors_transient_tiering.py:17-60 (module-load +
 # env-fixture idiom), per the task brief's explicit instruction.
+# BOT_ERRORS_INHIBITION_MAP is appended (mirroring test_bot_errors_inhibition.py's
+# _ENV_KEYS) because the derived-map test below asserts on INHIBITION_MAP, which
+# merges that env override at import time — ambient env must not leak in.
 _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_TRANSIENT_TIERING",
@@ -25,6 +28,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_SEND_DAILY_HEALTH_INFO",
     "BOT_ERRORS_MAINTENANCE_WINDOWS",
     "BOT_ERRORS_INHIBITION_ENABLED",
+    "BOT_ERRORS_INHIBITION_MAP",
     "BOT_ERRORS_FLAP_DETECTION",
 ]
 
@@ -114,6 +118,16 @@ def test_provider_reauth_inhibits_only_health_body_degraded(dispatcher):
     # ambient env, for no added protection over asserting the seed directly).
     inhibition = dispatcher.SUPERSEDED_SOURCES_BY_ALERT_SOURCE
     assert inhibition["provider_reauth_required"] == {"health_body_degraded"}
+
+
+def test_derived_inhibition_map_carries_the_reauth_edge(dispatcher):
+    # Complements the seed assertion above: INHIBITION_MAP is the DERIVED
+    # module-level map (_load_inhibition_map() copies the seed and union-merges
+    # the optional BOT_ERRORS_INHIBITION_MAP env override at import time), and
+    # it — not the seed — is what stronger_open_incident_for() consults. The
+    # _clean_env fixture pops BOT_ERRORS_INHIBITION_MAP (now in _ENV_KEYS), so
+    # this locks the pure-seed derivation itself.
+    assert "health_body_degraded" in dispatcher.INHIBITION_MAP["provider_reauth_required"]
 
 
 def test_recovery_clear_closes_the_incident(dispatcher, tmp_path):

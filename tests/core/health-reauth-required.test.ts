@@ -223,6 +223,21 @@ describe('GET /health — reauth_required derivation (ALERT-07)', () => {
     } finally { db.close(); }
   });
 
+  it('boundary: usable probe checked EXACTLY at the error timestamp → TRUE (supersession is strict >)', async () => {
+    const db = makeDb();
+    try {
+      const runtime = makeAgentRuntime(turnCapability({
+        modelUsable: true,
+        modelUsabilityStatus: 'usable',
+        modelUsableCheckedAt: INCIDENT_TS, // == lastTurnErrorAt: equal is NOT strictly newer
+        lastTurnErrorClass: 'auth-required',
+        lastTurnErrorAt: INCIDENT_TS,
+      }));
+      const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+      expect(json.reauth_required).toBe(true);
+    } finally { db.close(); }
+  });
+
   it('auth-required with missing timestamps cannot prove supersession → TRUE (conservative)', async () => {
     const db = makeDb();
     try {
@@ -357,6 +372,16 @@ describe('provider-reauth health fixtures (ALERT-01/02)', () => {
       for (const p of secretPatterns) {
         expect(p.regex.test(raw), `${name} must not contain ${p.code}`).toBe(false);
       }
+    }
+  });
+
+  it('secret patterns stay non-global (lastIndex fragility guard)', () => {
+    // A /g regex is stateful: .test() advances regex.lastIndex, so the NEXT
+    // .test() on a different string starts mid-string and can silently skip a
+    // real secret. The sweep above reuses each pattern object across fixtures,
+    // so a global flag would quietly weaken it to alternating-call coverage.
+    for (const p of secretPatterns) {
+      expect(p.regex.global, `${p.code} must not use the global flag`).toBe(false);
     }
   });
 

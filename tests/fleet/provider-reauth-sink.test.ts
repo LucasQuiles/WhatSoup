@@ -136,3 +136,15 @@ it('ALERT-16: every sink record survives the canonical secret-shape taxonomy', a
     }
   }
 });
+
+it('secret patterns stay non-global (lastIndex fragility guard)', async () => {
+  // A /g regex is stateful: .test() advances regex.lastIndex, so the NEXT
+  // .test() on a different string starts mid-string and can silently skip a
+  // real secret. ALERT-16 above reuses each pattern object across sink records,
+  // so a global flag would quietly weaken the sweep to alternating-call coverage.
+  const { secretPatterns } = await import('../../scripts/repo-hygiene-guard.ts');
+  expect(secretPatterns.length).toBeGreaterThan(0); // non-vacuous
+  for (const p of secretPatterns) {
+    expect(p.regex.global, `${p.code} must not use the global flag`).toBe(false);
+  }
+});
