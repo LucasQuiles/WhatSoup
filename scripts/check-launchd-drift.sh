@@ -211,18 +211,96 @@ check_ms365_script() {
   fi
 }
 
+plist_key() { # PLIST_ABS Label|Prog0  (python3 plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
+  python3 - "$1" "$2" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    p = plistlib.load(f)
+if sys.argv[2] == 'Label':
+    sys.stdout.write(str(p.get('Label', '')))
+else:
+    args = p.get('ProgramArguments') or ['']
+    sys.stdout.write(str(args[0]))
+PY
+}
+
+check_bot_plist_structural() { # BOT — content is NEVER printed or diffed (live credentials in EnvironmentVariables)
+  local bot="$1" plist="$LAUNCHD_DIR/com.whatsoup.$bot.plist"
+  local label prog0 ok=1
+  label="$(plist_key "$plist" Label 2>/dev/null || echo "")"
+  prog0="$(plist_key "$plist" Prog0 2>/dev/null || echo "")"
+  if [ "$label" != "com.whatsoup.$bot" ]; then
+    echo "structural: $bot Label mismatch (expected com.whatsoup.$bot, got ${label:-unreadable})" >&2
+    ok=0
+  fi
+  case "$prog0" in
+    /usr/bin/env)
+      echo "structural: $bot ProgramArguments[0] is /usr/bin/env — unpinned interpreter (mini7 incident class)" >&2
+      ok=0 ;;
+    "")
+      echo "structural: $bot ProgramArguments[0] unreadable" >&2
+      ok=0 ;;
+    /*) : ;;
+    *)
+      echo "structural: $bot ProgramArguments[0] not an absolute path: $prog0" >&2
+      ok=0 ;;
+  esac
+  if [ "$ok" -eq 1 ]; then
+    echo "ok: $bot plist structural (Label + pinned interpreter; content not inspected)"
+  else
+    failures=$((failures + 1))
+  fi
+}
+
+check_fleet_console_structural() {
+  local plist="$LAUNCHD_DIR/com.whatsoup.whatsoup-fleet.plist"
+  if [ ! -f "$plist" ]; then
+    echo "skip: whatsoup-fleet (not installed on this host)"
+    return 0
+  fi
+  local label
+  label="$(plist_key "$plist" Label 2>/dev/null || echo "")"
+  if [ "$label" = "com.whatsoup.whatsoup-fleet" ]; then
+    echo "ok: whatsoup-fleet plist structural (content not inspected)"
+  else
+    echo "structural: whatsoup-fleet Label mismatch (got ${label:-unreadable})" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate before gating)
+  local f stem covered k
+  for f in "$LAUNCHD_DIR"/com.whatsoup.*.plist; do
+    [ -e "$f" ] || continue
+    stem="$(basename "$f" .plist)"
+    stem="${stem#com.whatsoup.}"
+    covered=0
+    for k in "${NON_INSTANCE_STEMS[@]}"; do
+      if [ "$stem" = "$k" ]; then covered=1; fi
+    done
+    for k in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+      if [ "$stem" = "$k" ] || [ "$stem" = "$k-watchdog" ]; then covered=1; fi
+    done
+    if [ "$covered" -eq 1 ]; then continue; fi
+    echo "warn: unmanaged launchd surface: com.whatsoup.$stem.plist (not counted as drift in v1)"
+  done
+}
+
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
 check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
 check_ms365_script
+check_fleet_console_structural
 
 if [ "${#INSTANCES[@]}" -eq 0 ]; then discover_instances; fi
 for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+  check_bot_plist_structural "$bot"
   check_template_surface "$bot-watchdog plist" "deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist" "$LAUNCHD_DIR/com.whatsoup.$bot-watchdog.plist" "$bot"
   check_watchdog_script "$bot"
 done
 check_release_drift_surface
+warn_unknown_surfaces
 
 if [ "$failures" -gt 0 ]; then
   echo "launchd drift check failed: $failures problem(s)" >&2

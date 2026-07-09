@@ -317,3 +317,53 @@ describe('verified installed scripts', () => {
     expect(result.stderr).toContain('drift: ms365-token-backup script');
   });
 });
+
+describe('structural checks and secret safety', () => {
+  it('passes structural checks and NEVER prints the planted secret (default and --show-diff)', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    for (const extra of [[], ['--show-diff']] as string[][]) {
+      const result = run(f, extra);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('ok: tbot plist structural');
+      expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
+    }
+  });
+
+  it('flags an unpinned /usr/bin/env interpreter without printing plist content', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.tbot.plist'), plistXml('com.whatsoup.tbot', '/usr/bin/env', true));
+    const result = run(f, ['--show-diff']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('mini7 incident class');
+    expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
+  });
+
+  it('flags a Label mismatch on the bot plist', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.tbot.plist'), plistXml('com.whatsoup.WRONG', '/usr/local/bin/node', true));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Label mismatch');
+  });
+
+  it('checks whatsoup-fleet structurally when installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.whatsoup-fleet.plist'), plistXml('com.whatsoup.whatsoup-fleet', '/usr/local/bin/node'));
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: whatsoup-fleet plist structural');
+  });
+
+  it('warns on unmanaged surfaces without counting them as drift', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.mystery.plist'), plistXml('com.whatsoup.mystery', '/usr/local/bin/node'));
+    const result = run(f, ['--instance', 'tbot']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('warn: unmanaged launchd surface: com.whatsoup.mystery.plist');
+  });
+});
