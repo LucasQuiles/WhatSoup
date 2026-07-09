@@ -1,7 +1,0 @@
-commit	metric	status	description
-2247fa4	10 items	keep	baseline — 10 hardcoded/unwired items remaining
-3c141e8	7 items	keep	wire real config to SummaryTab+ModeTab, remove CHAT_CONFIG/AGENT_CONFIG
-e9e093f	5 items	keep	wire send message in Inbox + History tabs
-26891fd	2 items	keep	wire Ops restart buttons, remove hardcoded sparklines
-5f428a9	1 item	keep	real messagesToday from daily DB count
-062c4d3	0 mock items	keep	pipeline nodes data-driven, all mock data eliminated

@@ -1,7 +1,0 @@
-[Unit]
-Description=WhatSoup Reply Guarantee queue drain
-Documentation=https://github.com/LucasQuiles/WhatSoup
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain

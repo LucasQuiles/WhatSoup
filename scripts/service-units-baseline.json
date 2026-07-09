@@ -1,4 +1,0 @@
-{
-  "_comment": "Grandfathered service-unit guard exceptions. Each entry is a `${repo-relative-file}::${ViolationCode}` key that scripts/check-service-units.ts will suppress. Keep this EMPTY unless a committed unit has a knowingly-accepted deviation; prefer fixing the unit. See scripts/check-service-units.ts for the ViolationCode list.",
-  "grandfathered": []
-}

@@ -1,7 +1,0 @@
-{
-  "generated": "shadow lint per-rule warning ceiling",
-  "total": 1,
-  "rules": {
-    "soup/no-utility-smell :: src/components/line-detail/GroupCard.tsx": 1
-  }
-}

@@ -1,6 +1,0 @@
-{
-  "name": "tokenomics",
-  "version": "0.1.0",
-  "description": "Token budget watchdog, browser-loop interrupt, instruction-surface gates, and observability for WhatSoup bot instances.",
-  "sourceRepo": "LAB/WhatSoup/plugins/tokenomics"
-}

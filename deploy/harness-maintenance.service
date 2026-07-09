@@ -1,7 +1,0 @@
-[Unit]
-Description=WhatSoup harness and dependency maintenance
-Documentation=https://github.com/LucasQuiles/WhatSoup
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/whatsoup-harness-maintenance

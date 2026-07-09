@@ -1,1 +1,0 @@
-cd console && npx lint-staged
