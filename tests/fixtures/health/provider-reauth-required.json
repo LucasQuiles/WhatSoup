@@ -1,0 +1,23 @@
+{
+  "status": "degraded",
+  "instance": {
+    "name": "ad-bot",
+    "mode": "agent",
+    "provider": "claude-cli",
+    "effectiveProvider": "claude-cli"
+  },
+  "whatsapp": {
+    "connected": true,
+    "account_jid": "[redacted]@s.whatsapp.net"
+  },
+  "turn_capability": {
+    "model_usable": false,
+    "model_usable_stale": false,
+    "model_usable_checked_at": 1782349000000,
+    "model_usability_status": "credential-unavailable",
+    "last_successful_turn_at": null,
+    "last_turn_error_class": "auth-required",
+    "last_turn_error_at": 1782349000000
+  },
+  "reauth_required": true
+}

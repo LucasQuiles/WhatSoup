@@ -290,16 +290,6 @@ function readFixture(name: string): { raw: string; json: Record<string, any> } {
   return { raw, json: JSON.parse(raw) };
 }
 
-const TURN_CAPABILITY_KEYS = [
-  'model_usable',
-  'model_usable_stale',
-  'model_usable_checked_at',
-  'model_usability_status',
-  'last_successful_turn_at',
-  'last_turn_error_class',
-  'last_turn_error_at',
-];
-
 // Secret shapes that must never appear in a committed health fixture.
 const SECRET_SHAPES: [RegExp, string][] = [
   [/sk-[A-Za-z0-9]{8,}/, 'api-key'],
@@ -310,37 +300,63 @@ const SECRET_SHAPES: [RegExp, string][] = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'private-key'],
 ];
 
-describe('provider-reauth health fixtures (ALERT-01/02)', () => {
-  it('provider-reauth-required.json is a mini10-like dead-credential body', () => {
-    const { json } = readFixture('provider-reauth-required.json');
-    expect(json.turn_capability.model_usability_status).toBe('credential-unavailable');
-    expect(json.reauth_required).toBe(true);
-    // The discriminator: WhatsApp is CONNECTED while the primary credential is
-    // dead — this must NOT be classified as instance_logged_out downstream.
-    expect(json.whatsapp.connected).toBe(true);
-  });
+/** snake_case fixture turn_capability → camelCase runtime shape. */
+function toRuntimeTc(tc: Record<string, any>): Record<string, unknown> {
+  return {
+    modelUsable: tc.model_usable,
+    modelUsableStale: tc.model_usable_stale,
+    modelUsableCheckedAt: tc.model_usable_checked_at,
+    modelUsabilityStatus: tc.model_usability_status,
+    lastSuccessfulTurnAt: tc.last_successful_turn_at,
+    lastTurnErrorClass: tc.last_turn_error_class,
+    lastTurnErrorAt: tc.last_turn_error_at,
+  };
+}
 
-  it('provider-reauth-recovered.json is a fresh-usable body', () => {
+async function liveBodyFor(tc: Record<string, unknown>): Promise<Record<string, any>> {
+  const db = makeDb();
+  try {
+    const runtime = makeAgentRuntime(tc);
+    const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+    return json;
+  } finally { db.close(); }
+}
+
+describe('provider-reauth health fixtures (ALERT-01/02)', () => {
+  for (const name of ['provider-reauth-required.json', 'provider-reauth-recovered.json']) {
+    it(`${name} is serializer-faithful: status, turn_capability, and reauth_required match the REAL /health body`, async () => {
+      const { json: fixture } = readFixture(name);
+      const live = await liveBodyFor(toRuntimeTc(fixture.turn_capability));
+      // The three load-bearing surfaces a poller classifier keys on (review finding 2:
+      // a fixture body the serializer cannot emit mistrains the classifier it exists to serve).
+      expect(fixture.status).toBe(live.status);
+      expect(fixture.turn_capability).toEqual(live.turn_capability);
+      expect(fixture.reauth_required).toBe(live.reauth_required);
+      // Key-set fidelity derived from the LIVE body, not a hand-copied list (finding 12).
+      expect(Object.keys(fixture.turn_capability).sort()).toEqual(Object.keys(live.turn_capability).sort());
+    });
+  }
+
+  it('recovered fixture is the recovery-window body: usable probe, LINGERING auth-required class, ordered timestamps', () => {
     const { json } = readFixture('provider-reauth-recovered.json');
     expect(json.turn_capability.model_usability_status).toBe('usable');
     expect(json.turn_capability.model_usable).toBe(true);
+    // Finding 5: the error fields are load-bearing — assert their values explicitly.
+    expect(json.turn_capability.last_turn_error_class).toBe('auth-required');
+    expect(json.turn_capability.last_turn_error_at).toBe(INCIDENT_TS);
+    expect(json.turn_capability.model_usable_checked_at).toBe(RECOVERY_TS); // RECOVERY_TS now used (finding 13)
+    expect(json.turn_capability.last_successful_turn_at).toBeNull(); // idle bot — no user turn since
+    expect(RECOVERY_TS).toBeGreaterThan(INCIDENT_TS);
     expect(json.reauth_required).toBe(false);
   });
 
-  it('recovery body is timestamped strictly after the incident', () => {
-    const required = readFixture('provider-reauth-required.json').json;
-    const recovered = readFixture('provider-reauth-recovered.json').json;
-    expect(recovered.turn_capability.model_usable_checked_at)
-      .toBeGreaterThan(required.turn_capability.last_turn_error_at);
-    expect(recovered.turn_capability.last_successful_turn_at)
-      .toBeGreaterThan(required.turn_capability.last_turn_error_at);
-  });
-
-  it('both fixtures use the exact HealthTurnCapability key set (schema-faithful)', () => {
-    for (const name of ['provider-reauth-required.json', 'provider-reauth-recovered.json']) {
-      const { json } = readFixture(name);
-      expect(Object.keys(json.turn_capability).sort()).toEqual([...TURN_CAPABILITY_KEYS].sort());
-    }
+  it('required fixture carries the incident signature: connected WhatsApp, dead credential, degraded status', () => {
+    const { json } = readFixture('provider-reauth-required.json');
+    expect(json.status).toBe('degraded'); // serializer-forced; 'healthy' is unrepresentable (finding 2)
+    expect(json.whatsapp.connected).toBe(true);
+    expect(json.turn_capability.model_usability_status).toBe('credential-unavailable');
+    expect(json.turn_capability.last_turn_error_at).toBe(INCIDENT_TS);
+    expect(json.reauth_required).toBe(true);
   });
 
   it('both fixtures are free of secret-shaped values (redaction scan)', () => {
