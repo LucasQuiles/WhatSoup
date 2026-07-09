@@ -341,6 +341,19 @@ describe('registerMessagingTools', () => {
       expect(body).toEqual({ sent: false, suppressed: true, reason: 'ack_filler' });
     });
 
+    it.each(['No action needed.', '(no action)'])(
+      'suppresses terse no-action acknowledgment filler without sending transport: %s',
+      async (text) => {
+        const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+        const result = await registry.call('send_message', { text }, session);
+
+        expect(result.isError).toBeUndefined();
+        expect(calls).toHaveLength(0);
+        const body = JSON.parse(result.content[0].text);
+        expect(body).toEqual({ sent: false, suppressed: true, reason: 'ack_filler' });
+      },
+    );
+
     it('suppresses standing-by status acknowledgment filler without sending transport', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
