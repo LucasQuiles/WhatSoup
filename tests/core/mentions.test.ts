@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it, expect, afterEach } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { buildLidMappings, formatMentions, ContactsDirectory } from '../../src/core/mentions.ts';
+import { canonicalConversationKey } from '../../src/core/access-list.ts';
 
 function openMentionsDb(): Database {
   const db = new Database(':memory:');
@@ -747,5 +748,48 @@ describe('ContactsDirectory — pushName spoofing guard (QR-044)', () => {
     dir.observe('15550100001@s.whatsapp.net', 'Robert');
     expect(dir.resolve('robert')).toBe('15550100001');
     expect(dir.resolve('bob')).toBe('15550100001');
+  });
+});
+
+// resolveConversationKey — the ingest-parity resolver the outbound-flood seam
+// wires into the detector (closes the "seam passes the real resolver" gap that a
+// pure detector unit test can't cover). A mapped @lid DM and its phone JID must
+// fold to ONE key so a mid-stream JID flip can't dodge the flood threshold.
+describe('ContactsDirectory.resolveConversationKey (PR-G seam resolver, G2/H3)', () => {
+  let db: Database | undefined;
+
+  afterEach(() => {
+    db?.close();
+    db = undefined;
+  });
+
+  it('folds a mapped @lid DM and its phone JID onto ONE conversation key', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    const dir = new ContactsDirectory(db);
+
+    const fromLid = dir.resolveConversationKey('1111111888666@lid');
+    const fromPhone = dir.resolveConversationKey('15550100001@s.whatsapp.net');
+
+    expect(fromLid).toBe('15550100001'); // resolved through lid_mappings
+    expect(fromPhone).toBe('15550100001');
+    expect(fromLid).toBe(fromPhone); // the flip cannot dodge the threshold
+  });
+
+  it('matches live ingest keying: identical to canonicalConversationKey', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    const dir = new ContactsDirectory(db);
+    // The seam resolver must equal the ingest store-side key so flood counts
+    // correlate with durability + PR-F, not just fold internally.
+    expect(dir.resolveConversationKey('1111111888666@lid')).toBe(
+      canonicalConversationKey('1111111888666@lid', db),
+    );
+  });
+
+  it('falls back to toConversationKey when no database is attached', () => {
+    const dir = new ContactsDirectory();
+    expect(dir.resolveConversationKey('15550100001@s.whatsapp.net')).toBe('15550100001');
+    expect(dir.resolveConversationKey('999888000@g.us')).toBe('999888000_at_g.us');
   });
 });

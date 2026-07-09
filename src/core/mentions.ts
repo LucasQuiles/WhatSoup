@@ -1,7 +1,8 @@
 // src/core/mentions.ts
 // Utility for detecting, resolving, and formatting @mentions in outgoing text.
 
-import { resolvePhoneFromJid, extractLocal } from './access-list.ts';
+import { resolvePhoneFromJid, extractLocal, canonicalConversationKey } from './access-list.ts';
+import { toConversationKey } from './conversation-key.ts';
 import type { Database } from './database.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { toPersonalJid, toLidJid, isLidJid, bareNumber } from './jid-constants.ts';
@@ -68,6 +69,19 @@ export class ContactsDirectory {
   getLidMappings(): LidMappings | undefined {
     if (!this.db) return undefined;
     return buildLidMappings(this.db);
+  }
+
+  /**
+   * Resolve a raw chat JID to the canonical `conversation_key` that message
+   * ingest stores under — folding a mapped `@lid` DM to its phone key via
+   * `lid_mappings`. Falls back to `toConversationKey` when no DB is wired.
+   *
+   * Used by the outbound-flood detector so a mid-stream `@lid` → phone-JID flip
+   * cannot dodge the per-destination threshold (G2/H3). Keying on the ingest
+   * identity also lets flood counts correlate with durability + PR-F.
+   */
+  resolveConversationKey(jid: string): string {
+    return this.db ? canonicalConversationKey(jid, this.db) : toConversationKey(jid);
   }
 
   /**

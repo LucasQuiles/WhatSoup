@@ -31,6 +31,10 @@ type FeedDetail =
     }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
+  // PR-G — a PR-E/PR-F prevention log (a flood that the in-band caps blocked). The
+  // in-bot seam counter is authoritative for actual floods; this surfaces PREVENTED
+  // ones cross-bot so we learn a bot is trying to flood.
+  | { type: 'outbound_flood_signal'; signal: string; chatJid?: string; conversationKey?: string; count?: number }
   | { type: 'generic' };
 
 interface FeedEvent {
@@ -229,6 +233,48 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
         chatJid,
         messageId: typeof obj.messageId === 'string' ? obj.messageId : undefined,
         conversationKey: ck,
+      },
+    };
+  }
+
+  // 5b. Outbound media (PR-G G1). The feed was text-only ("Sending message"),
+  // blind to media floods; media logs "Sending media" with a mediaType. Mirror
+  // the outbound branch so the aggregator tallies media toward the same
+  // conversation. (Best-effort cross-bot: sendRaw/poll log no uniform "Sending"
+  // line, so the in-bot seam counter — which sees all tiers — stays authoritative.)
+  if (/^Sending media$/.test(msg)) {
+    const chatJid = typeof obj.chatJid === 'string' ? obj.chatJid : undefined;
+    let ck: string | undefined;
+    if (chatJid) { try { ck = toConversationKey(chatJid); } catch { /* invalid JID */ } }
+    return {
+      ...base,
+      detail: {
+        type: 'message',
+        direction: 'outbound',
+        chatJid,
+        conversationKey: ck,
+        contentType: typeof obj.mediaType === 'string' ? obj.mediaType : 'media',
+      },
+    };
+  }
+
+  // 5c. Outbound flood PREVENTION signal (PR-G Task 4). PR-E/PR-F emit a WARN
+  // when the in-band caps block a runaway send; recognise those (string-matched,
+  // no code dependency, so G lands independently) so a prevented flood still
+  // surfaces — we learn a bot is *trying* to flood. Patterns track the design's
+  // named strings; reconcile with E/F's final log text when those PRs land.
+  if (/outbound flood-guard tripped|outbound governor ceiling exceeded|transport outbound ceiling exceeded|high-volume turn/i.test(msg)) {
+    const chatJid = typeof obj.chatJid === 'string' ? obj.chatJid : undefined;
+    let ck: string | undefined;
+    if (chatJid) { try { ck = toConversationKey(chatJid); } catch { /* invalid JID */ } }
+    return {
+      ...base,
+      detail: {
+        type: 'outbound_flood_signal',
+        signal: msg,
+        chatJid,
+        conversationKey: ck,
+        count: optionalInt(obj.count),
       },
     };
   }
