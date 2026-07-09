@@ -48,6 +48,7 @@ import {
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
+import type { BotErrorsCriticalAssetDiagnostic } from '../../lib/bot-errors-outbox.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -121,7 +122,7 @@ import { matchImperative, extractImperativeTarget } from '../../core/substrate/i
 import { createBead } from '../../core/substrate/beads.ts';
 import { mkdirSync, copyFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
@@ -856,6 +857,7 @@ export class AgentRuntime implements Runtime {
   private lastDiagnosticBundleAt = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
   private primaryModelUsabilityAlertActive = false;
+  private providerReauthAlertActive = false;
   /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
@@ -7586,10 +7588,40 @@ export class AgentRuntime implements Runtime {
         );
         this.primaryModelUsabilityAlertActive = false;
       }
+      if (this.providerReauthAlertActive) {
+        // Spec §1 / ALERT-05: the ONE clear-site for provider reauth — fresh usable
+        // primary proof, never fallback serving or restarts.
+        clearAlertSourceChecked(
+          this.instanceName,
+          'provider_reauth_required',
+          `clear_code=AGENT_PROVIDER_AUTH_RECOVERED proof=primary_model_probe_ok`
+            + ` provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`
+            + ` model_usable_checked_at=${this.primaryModelUsability?.checkedAt ?? 'null'}`,
+          this.providerReauthCriticalAsset(),
+        );
+        this.providerReauthAlertActive = false;
+      }
       return;
     }
 
     if (!primaryModelUsabilityRequiresAlert(result)) return;
+
+    if (result.status === 'credential-unavailable') {
+      // WS-ALERT: human/provider re-auth required — a distinct CRITICAL source
+      // (spec decision 1/4). Never ALSO the generic warning; transition-gated.
+      if (!this.providerReauthAlertActive) {
+        this.providerReauthAlertActive = true;
+        emitAlertChecked(
+          this.instanceName,
+          'provider_reauth_required',
+          'Primary provider requires re-authentication',
+          this.providerReauthEvidence(trigger === 'startup' ? 'startup_probe' : 'manual_probe'),
+          'critical',
+          this.providerReauthCriticalAsset(),
+        );
+      }
+      return;
+    }
 
     this.primaryModelUsabilityAlertActive = true;
     emitAlertChecked(
@@ -7615,6 +7647,46 @@ export class AgentRuntime implements Runtime {
     if (result.reason) parts.push(`reason=${alertEvidenceValue(result.reason)}`);
     if (result.suggestion) parts.push(`suggestion=${alertEvidenceValue(result.suggestion)}`);
     return parts.join(' ');
+  }
+
+  /** WS-ALERT event-field contract (spec §1, ALERT-04A). */
+  private providerReauthEvidence(trigger: 'startup_probe' | 'manual_probe' | 'turn_error'): string {
+    const u = this.primaryModelUsability;
+    const fb = this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
+    const ccdPin = Boolean(process.env.CLAUDE_CONFIG_DIR);
+    return [
+      `instance=${alertEvidenceValue(this.instanceName)}`,
+      `bot=${alertEvidenceValue(this.instanceName)}`,
+      `host=${alertEvidenceValue(hostname())}`,
+      `provider=${alertEvidenceValue(this.agentProvider)}`,
+      `model=${alertEvidenceValue(this.model ?? 'default')}`,
+      `trigger=${trigger}`,
+      `model_usability_status=${alertEvidenceValue(u?.status ?? 'unknown')}`,
+      `last_turn_error_class=${trigger === 'turn_error' ? 'auth-required' : 'none'}`,
+      `model_usable_checked_at=${u?.checkedAt ?? 'null'}`,
+      `model_usable_stale=${u ? String(u.probeInFlight === true) : 'unknown'}`,
+      `fallback_active=${this.isFallbackWindowActive}`,
+      `fallback_provider=${alertEvidenceValue(fb?.provider ?? 'none')}`,
+      `fallback_model=${alertEvidenceValue(fb?.model ?? 'none')}`,
+      `cred_source=${ccdPin ? 'file-store' : 'native-keychain'}`,
+      `ccd_pin=${ccdPin}`,
+      'evidence_schema_version=1',
+    ].join(' ');
+  }
+
+  /** Cross-rail diagnostic identity — mirrors deploy/scripts/bot-errors-health-check.py:1452-1459. */
+  private providerReauthCriticalAsset(): BotErrorsCriticalAssetDiagnostic {
+    return {
+      asset: { kind: 'agent_provider', instance: this.instanceName },
+      failure: {
+        code: 'AGENT_PROVIDER_AUTH_REQUIRED',
+        domain: 'provider_access',
+        recoverability: 'operator_recoverable',
+        confidence: 'confirmed',
+        operatorAction: 'Restore provider authentication or switch to a proven fallback provider; do not mark the underlying auth failure resolved until the primary provider probe passes.',
+        clearRequirement: 'fresh usable primary-model probe after the incident (clear_code=AGENT_PROVIDER_AUTH_RECOVERED)',
+      },
+    };
   }
 
   /**

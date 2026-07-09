@@ -30,7 +30,10 @@ export type BotErrorsCriticalAssetKind =
   | 'credential'
   | 'account_linkage'
   | 'bot_errors_delivery'
-  | 'runtime_session';
+  | 'runtime_session'
+  // Cross-rail identity with the host-side daily-health diagnostics
+  // (deploy/scripts/bot-errors-health-check.py already emits asset_kind='agent_provider').
+  | 'agent_provider';
 
 export interface BotErrorsCriticalAssetDiagnostic {
   asset: {
