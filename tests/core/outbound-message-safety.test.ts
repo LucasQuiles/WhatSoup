@@ -340,6 +340,8 @@ describe('classifyAssistantTextEgress', () => {
     'No action taken.',
     'I will stay silent — the operator directive is explicit ("Do not acknowledge this status," no action until auth changes or a user asks), and there is no user request pending. No message will be sent.',
     'No action needed — staying silent per directive.',
+    'No action needed — LCP stays parked on QB Time/TSheets auth; no user ask pending. Standing by.',
+    '(No action — status noted internally, nothing to send.)',
   ])('suppresses ack/parked status filler and satisfies the reply guarantee: %s', (text) => {
     expect(classifyAssistantTextEgress(text)).toEqual({
       action: 'suppress',
