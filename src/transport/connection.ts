@@ -1336,10 +1336,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       'outbound flood detected',
     );
     const windowMin = Math.round(OUTBOUND_FLOOD_WINDOW_MS / 60_000);
+    // Dest hash in the SUMMARY (not just evidence) so two conversations flooding
+    // at once produce distinct alerts — the bot-errors dispatcher de-dups on
+    // instance|source|summary, so an identical summary would collapse them and
+    // break the spec's per-(bot, conversation, window) granularity.
     emitAlertChecked(
       config.botName,
       'outbound_flood',
-      `outbound flood: ${result.count}+ sends in ${windowMin}m to one conversation`,
+      `outbound flood: ${result.count}+ sends in ${windowMin}m to conversation ${destHash}`,
       JSON.stringify({ dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS }),
       'critical',
     );
