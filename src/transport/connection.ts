@@ -623,21 +623,26 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   /**
-   * Resolve a raw send JID to the governor's canonical destination key (H3/F3):
-   * a `@lid` JID folds to its mapped phone digits so a human reachable via both
-   * `@lid` and phone-JID cannot split a flood across two buckets, and an
-   * `updateDeliveryJid` mid-stream JID↔LID flip stays in one bucket. Non-LID
-   * JIDs (phone, group) key on their bare local part. Never throws — a
-   * resolution failure falls back to the raw JID rather than blocking a send.
+   * Resolve a raw send JID to the governor's canonical destination key (H3/F3),
+   * the SAME identity durability and PR-G key on, so all three correlate:
+   *  - a `@lid` JID folds to its mapped phone digits (durability stores the
+   *    resolved-phone key; `toConversationKey` does NOT map `@lid`→phone, so the
+   *    fold is done explicitly first) — a human reachable via both `@lid` and
+   *    phone-JID cannot split a flood across two buckets, and an
+   *    `updateDeliveryJid` mid-stream JID↔LID flip stays in one bucket;
+   *  - everything else keys on `toConversationKey`, so a group folds to its
+   *    `<local>_at_g.us` conversation key and a 1:1 phone-JID to its bare digits
+   *    (an unmapped `@lid` falls through to its lid-digit key).
+   * Never throws — a resolution failure falls back to the raw JID rather than
+   * blocking a send.
    */
   private resolveOutboundDest(jid: string): string {
     try {
-      const bare = bareNumber(jid);
       if (isLidJid(jid)) {
-        const phone = this.contactsDir.getLidMappings()?.lidToPhone.get(bare);
+        const phone = this.contactsDir.getLidMappings()?.lidToPhone.get(bareNumber(jid));
         if (phone) return phone;
       }
-      return bare || jid;
+      return toConversationKey(jid);
     } catch {
       return jid;
     }

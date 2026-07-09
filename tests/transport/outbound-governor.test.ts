@@ -41,7 +41,7 @@ describe('classifyOutbound (SS3 — default to exempt)', () => {
     // edit sends { text, edit } — the text MUST NOT make it pace-eligible.
     expect(classifyOutbound({ text: 'new', edit: { id: 'm1' } })).toBe('control');
     expect(classifyOutbound({ delete: { id: 'm1' } })).toBe('control');
-    expect(classifyOutbound({ react: { text: '👍', key: {} } })).toBe('control');
+    expect(classifyOutbound({ react: { text: '+1', key: {} } })).toBe('control');
     expect(classifyOutbound({ protocolMessage: {} })).toBe('control');
     expect(classifyOutbound({ poll: { name: 'q', values: ['a'] } })).toBe('control');
     expect(classifyOutbound({ forward: {}, force: true })).toBe('control');
@@ -237,6 +237,71 @@ describe('wrapWithOutboundGovernor — governor state survives reconnect (T2.5, 
     // The per-dest window persisted across the reconnect → still saturated → sheds.
     await expect(sock2.sendMessage('a@s.whatsapp.net', { text: 'y' }))
       .rejects.toThrow(/outbound governor ceiling exceeded/);
+  });
+});
+
+describe('wrapWithOutboundGovernor — hard ceiling tier (catastrophe backstop)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('sheds on the ceiling once a conversation exceeds it, even when pacing has room', async () => {
+    const realSend = vi.fn(async () => ({ key: { id: 'x' } }));
+    const sock = fakeSock(realSend);
+    const log = fakeLog();
+    // Pacing + global are generous; only the hard ceiling (2 / long window) bites.
+    const gov = new OutboundGovernor({
+      windowMs: 100_000,
+      maxPerWindow: 100,
+      maxWaitMs: 5_000,
+      hardCeiling: 2,
+      hardCeilingWindowMs: 3_600_000,
+      globalMaxPerWindow: 1_000,
+      globalWindowMs: 100_000,
+    });
+    wrapWithOutboundGovernor(sock, { governor: gov, resolveDest: IDENTITY, log });
+
+    await sock.sendMessage('a@s.whatsapp.net', { text: '1' });
+    await sock.sendMessage('a@s.whatsapp.net', { text: '2' });
+    await expect(sock.sendMessage('a@s.whatsapp.net', { text: '3' }))
+      .rejects.toThrow(/outbound governor ceiling exceeded/);
+    expect(realSend).toHaveBeenCalledTimes(2);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'ceiling' }),
+      'outbound governor ceiling exceeded',
+    );
+  });
+
+  it('a breadth flood shedding at the GLOBAL bucket does not burn a bystander ceiling', async () => {
+    const realSend = vi.fn(async () => ({ key: { id: 'x' } }));
+    const sock = fakeSock(realSend);
+    // Global saturates at 1; the bystander's per-dest pacing is generous and its
+    // hard ceiling is small (2) — if the ceiling were charged before the global
+    // gate, the shed attempts below would exhaust it.
+    const gov = new OutboundGovernor({
+      windowMs: 100_000,
+      maxPerWindow: 100,
+      maxWaitMs: 5_000,
+      hardCeiling: 2,
+      hardCeilingWindowMs: 3_600_000,
+      globalMaxPerWindow: 1,
+      globalWindowMs: 10_000,
+    });
+    wrapWithOutboundGovernor(sock, { governor: gov, resolveDest: IDENTITY });
+
+    // Conversation A takes the single global slot.
+    await sock.sendMessage('a@s.whatsapp.net', { text: 'a' });
+    // Bystander B is flooded-against: every send sheds at the GLOBAL bucket
+    // (never reaching B's ceiling, because the ceiling is checked LAST).
+    for (let i = 0; i < 4; i++) {
+      await expect(sock.sendMessage('b@s.whatsapp.net', { text: `b${i}` }))
+        .rejects.toThrow(/outbound governor ceiling exceeded/);
+    }
+    // Aggregate pressure clears.
+    await vi.advanceTimersByTimeAsync(10_001);
+    // B's own hour-long ceiling (2) was never charged by the shed attempts, so B
+    // can send. (If the ceiling were charged BEFORE the global gate, the 4 shed
+    // attempts would have filled B's ceiling of 2 and THIS send would shed on it.)
+    await expect(sock.sendMessage('b@s.whatsapp.net', { text: 'ok1' })).resolves.toBeDefined();
   });
 });
 

@@ -121,20 +121,33 @@ export class OutboundGovernor {
   /**
    * Gate one paced (text) send to `dest`. Resolves `null` to send now (possibly
    * after a bounded pacing delay already awaited here), or a `ShedReason` to
-   * shed (the caller throws + logs). A send must clear ALL THREE gates:
-   *   1. the hard per-conversation ceiling (sync — a runaway rejects cheaply),
-   *   2. the per-destination pacing window (bounded ≤ maxWaitMs),
-   *   3. the aggregate global bucket (bounded ≤ maxWaitMs).
+   * shed (the caller throws + logs). A send must clear ALL THREE gates, in this
+   * order:
+   *   1. the per-destination pacing window (bounded ≤ maxWaitMs),
+   *   2. the aggregate global bucket (bounded ≤ maxWaitMs),
+   *   3. the hard per-conversation ceiling (sync — a runaway rejects cheaply).
+   *
+   * The ceiling is checked LAST, and only reserves its slot when the pacing
+   * gates already passed, so its long (e.g. 1h) window counts real sends only.
+   * If it went first, a BREADTH flood that sheds at the global bucket would
+   * still burn a well-behaved bystander conversation's hour-long ceiling budget
+   * (× Tier-A's retries), shedding that conversation on its OWN ceiling for up
+   * to the ceiling window after the flood clears — cross-conversation
+   * contamination in the long-memory window. The short (few-second) pacing
+   * windows, by contrast, self-heal almost immediately, so a slot consumed by a
+   * shed there is harmless. `tryAcquireSync` still rejects without growing any
+   * wait queue, so ceiling-last does not reintroduce chain growth.
    */
   async gate(dest: string): Promise<ShedReason | null> {
-    // 1. Catastrophe ceiling first — a sync reject that never grows a wait queue.
-    if (!this.ceiling.tryAcquireSync(dest)) return 'ceiling';
-    // 2. Per-destination pacing (depth floods).
+    // 1. Per-destination pacing (depth floods) — short window, self-heals fast.
     const perDest = await this.perDest.acquireBounded(dest, this.maxWaitMs);
     if (perDest.capped) return 'pace-per-dest';
-    // 3. Aggregate per-bot pacing (breadth floods, F2).
+    // 2. Aggregate per-bot pacing (breadth floods, F2) — short window.
     const glob = await this.global.acquireBounded(GLOBAL_BUCKET_KEY, this.maxWaitMs);
     if (glob.capped) return 'pace-global';
+    // 3. Catastrophe ceiling LAST — reserves only for a send that cleared pacing,
+    //    so the long window never counts a shed bystander's attempts.
+    if (!this.ceiling.tryAcquireSync(dest)) return 'ceiling';
     return null;
   }
 }
