@@ -338,6 +338,7 @@ describe('classifyAssistantTextEgress', () => {
     'Acknowledged Lucas and confirmed delivery (landed clean). Lane stays parked on Intuit/QB Time auth — nothing further to do until Ana signs into Chrome on the mini or Lucas OKs the Keychain fallback.',
     "Acknowledged internally — no action taken. Operator's 20:34 directive is explicit: LCP lane stays parked on QB Time/TSheets auth (missing ranges 05-13..05-31 and 06-27..07-07), and no bot action until auth changes or a user asks.",
     'No action taken.',
+    'No action.',
     'I will stay silent — the operator directive is explicit ("Do not acknowledge this status," no action until auth changes or a user asks), and there is no user request pending. No message will be sent.',
     'No action needed — staying silent per directive.',
     'No action needed — LCP stays parked on QB Time/TSheets auth; no user ask pending. Standing by.',
