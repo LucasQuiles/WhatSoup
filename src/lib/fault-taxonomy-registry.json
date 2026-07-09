@@ -151,6 +151,11 @@
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_dispatcher_test_leak.py"
     },
+    "provider_reauth_required": {
+      "disposition": "hard_outage_supersedes_health_body_degraded_only",
+      "owner": "deploy/scripts/bot-errors-dispatcher.py",
+      "test": "deploy/scripts/tests/test_bot_errors_provider_reauth.py"
+    },
     "provider_transient_network": {
       "disposition": "warning_transient_provider_runtime",
       "owner": "src/runtimes/agent/runtime.ts",

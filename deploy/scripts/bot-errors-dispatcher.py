@@ -239,6 +239,13 @@ SUPERSEDED_SOURCES_BY_ALERT_SOURCE = {
     "instance_degraded": {
         "instance_never_reachable",
     },
+    "provider_reauth_required": {
+        # Spec flag 2 (owner-approved): the ONLY thing this source supersedes is
+        # its own generic symptom — a dead primary credential degrades the health
+        # body while WhatsApp stays connected. It must never inhibit (or be
+        # inhibited by) WhatsApp logout: independent fault, independent recovery.
+        "health_body_degraded",
+    },
     "whatsapp_device_bond_lost": {
         "health_body_degraded",
         "health_probe_auth_failed",
