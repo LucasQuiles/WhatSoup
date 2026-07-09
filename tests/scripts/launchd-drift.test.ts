@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -230,5 +230,19 @@ describe('static template surfaces (substitute-then-compare)', () => {
     const result = run(f);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('unsubstituted placeholder');
+  });
+
+  it('refuses to render (exit 2) when a substitution value contains sed metacharacters', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const evil = join(f.home, 'evil & repo');
+    cpSync(f.repo, evil, { recursive: true });
+    const result = spawnSync('bash', [SCRIPT,
+      '--repo-root', evil,
+      '--launchd-dir', f.launchd,
+      '--bin-dir', f.bin,
+    ], { encoding: 'utf8', env: { ...process.env, HOME: f.home } });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('unsafe character in substitution value');
   });
 });

@@ -76,6 +76,15 @@ failures=0
 
 subst_render() { # TEMPLATE_ABS DEST BOT(optional)
   local template="$1" dest="$2" bot="${3:-}"
+  local v nl
+  nl=$'\n'
+  for v in "$REPO_ROOT" "$HOME" "$bot"; do
+    case "$v" in
+      *'|'*|*'&'*|*'\'*|*"$nl"*)
+        echo "unsafe character in substitution value (| & \\ or newline); refusing to render: $1" >&2
+        return 2 ;;
+    esac
+  done
   sed -e "s|__WHATSOUP_REPO_ROOT__|$REPO_ROOT|g" \
       -e "s|__HOME__|$HOME|g" \
       -e "s|__BOT_NAME__|$bot|g" \
