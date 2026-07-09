@@ -3258,6 +3258,36 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('does not record empty-output when suppressed no-op text intentionally satisfies the turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const replyGuarantee = { notifyActivity: vi.fn(), disarm: vi.fn() };
+    mockSession.getDbRowId.mockReturnValue(78);
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'do not reply', inboundSeq: 102 }));
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    mockQueue.enqueueStreamingText.mockClear();
+    mockQueue.flush.mockClear();
+    mockRuntimeLogger.warn.mockClear();
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: 'No outbound warranted — no user ask is pending. Staying silent; sending nothing to WhatsApp.',
+    });
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(102);
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'empty-output' }),
+      expect.stringContaining('empty-output'),
+    );
+  });
+
   it('image coalescing sends one turn for multiple images in a timer batch', async () => {
     vi.useFakeTimers();
     try {
