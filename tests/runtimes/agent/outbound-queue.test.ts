@@ -2823,6 +2823,62 @@ describe('OutboundQueue', () => {
       expect(hv).toHaveLength(1);
       expect(hv[0][0]).toMatchObject({ chatJid: CHAT_JID, count: 40 });
     });
+
+    // R1 [correctness]: the status budget must advance only on an ACTUAL emit. A
+    // placeholder suppressed by the per-chat rate floor returns BEFORE the cap
+    // gate, so it must NOT consume budget — otherwise floored narration trips the
+    // cap early and the user loses ⚙️ narration sooner than intended.
+    it('does not advance the status count when the rate floor suppresses a placeholder (R1)', async () => {
+      const { messenger } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+      // Keep the per-chat rate floor ACTIVE (default > 0) so all-but-the-first
+      // placeholder in the window is floor-suppressed.
+      const state = queue as unknown as { turnStatusCount: number };
+
+      // First placeholder passes the floor and emits → counts once.
+      queue.enqueueProgressUpdate(
+        { type: 'operation_slow', toolId: 't0', toolName: 'Read', category: 'reading', elapsedMs: 9_000, expectedMs: 3_000 },
+        'Bot',
+      );
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(state.turnStatusCount).toBe(1);
+
+      // 8 more within the floor window (distinct elapsed → distinct text, so the
+      // floor — not the text window — is what suppresses them). None may count.
+      for (let i = 1; i <= 8; i++) {
+        queue.enqueueProgressUpdate(
+          { type: 'operation_slow', toolId: `t${i}`, toolName: 'Read', category: 'reading', elapsedMs: (i + 1) * 9_000, expectedMs: 3_000 },
+          'Bot',
+        );
+      }
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(state.turnStatusCount).toBe(1); // floor-suppressed placeholders did not advance the count
+
+      queue.abortTurn();
+    });
+
+    // R3: STATUS_CAP_NOTICE routes through enqueueText (content), so it must NOT
+    // count as a status message. Driving exactly cap+1 status yields exactly `cap`
+    // status messages (the notice occupies no status slot) plus one notice.
+    it('does not count STATUS_CAP_NOTICE as status narration (R3)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < MAX_STATUS_MESSAGES_PER_TURN + 1; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      const notices = calls.filter((c) => c === STATUS_CAP_NOTICE);
+      // Exactly `cap` status messages — the notice takes no status slot…
+      expect(status).toHaveLength(MAX_STATUS_MESSAGES_PER_TURN);
+      // …and is sent exactly once (it does not self-count or re-trip the cap).
+      expect(notices).toHaveLength(1);
+    });
   });
 });
 
