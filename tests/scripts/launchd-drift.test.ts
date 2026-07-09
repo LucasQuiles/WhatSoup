@@ -368,3 +368,17 @@ describe('structural checks and secret safety', () => {
     expect(result.stdout).toContain('warn: unmanaged launchd surface: com.whatsoup.mystery.plist');
   });
 });
+
+describe('manifest parity (deploy/managed-components.json)', () => {
+  it('covers every protective_services entry in the checker source', () => {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), 'deploy/managed-components.json'), 'utf8'));
+    const src = readFileSync(SCRIPT, 'utf8');
+    for (const entry of manifest.protective_services.entries) {
+      // label_pattern e.g. "com.whatsoup.{BOT_NAME}-watchdog" -> stem "-watchdog" handled per-instance;
+      // static labels must appear verbatim in the checker source.
+      const stem = String(entry.label_pattern).replace('com.whatsoup.', '');
+      const probe = stem.includes('{BOT_NAME}') ? '-watchdog' : stem;
+      expect(src, `checker must reference protective service: ${entry.name}`).toContain(probe);
+    }
+  });
+});
