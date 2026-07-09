@@ -373,12 +373,22 @@ describe('manifest parity (deploy/managed-components.json)', () => {
   it('covers every protective_services entry in the checker source', () => {
     const manifest = JSON.parse(readFileSync(join(process.cwd(), 'deploy/managed-components.json'), 'utf8'));
     const src = readFileSync(SCRIPT, 'utf8');
+    const count = (needle: string) => src.split(needle).length - 1;
+    // Discriminating probes: each entry's CHECK must actually be WIRED (call
+    // sites asserted, not just any string presence) — deleting a check while
+    // its stem survives in NON_INSTANCE_STEMS must still fail CI.
+    const WIRED: Record<string, () => boolean> = {
+      'BOT-watchdog': () => src.includes('check_watchdog_script "$bot"')
+        && src.includes('check_template_surface "$bot-watchdog plist"'),
+      'reply-guarantee': () => src.includes('check_template_surface "reply-guarantee"'),
+      'release-drift-check': () => count('check_release_drift_surface') >= 2,
+      'ms365-token-backup': () => src.includes('check_optional_template_surface "ms365-token-backup"')
+        && count('check_ms365_script') >= 2,
+    };
     for (const entry of manifest.protective_services.entries) {
-      // label_pattern e.g. "com.whatsoup.{BOT_NAME}-watchdog" -> stem "-watchdog" handled per-instance;
-      // static labels must appear verbatim in the checker source.
-      const stem = String(entry.label_pattern).replace('com.whatsoup.', '');
-      const probe = stem.includes('{BOT_NAME}') ? '-watchdog' : stem;
-      expect(src, `checker must reference protective service: ${entry.name}`).toContain(probe);
+      const probe = WIRED[entry.name];
+      expect(probe, `no parity probe defined for protective service: ${entry.name} — add one to WIRED`).toBeDefined();
+      expect(probe!(), `checker must WIRE protective service: ${entry.name}`).toBe(true);
     }
   });
 });
