@@ -362,10 +362,16 @@ describe('structural checks and secret safety', () => {
   it('warns on unmanaged surfaces without counting them as drift', () => {
     const f = makeFixture();
     installAllOk(f);
-    writeFileSync(join(f.launchd, 'com.whatsoup.mystery.plist'), plistXml('com.whatsoup.mystery', '/usr/local/bin/node'));
+    // NB: a bare base plist (e.g. "mystery") is now, by design, a discovered
+    // ALL_INSTANCES member under host-scope semantics (see F1) — it is no
+    // longer "unmanaged" just because it's outside the --instance subset.
+    // The only genuinely unmanaged com.whatsoup.* surface is an orphan
+    // watchdog: a *-watchdog plist with no corresponding base plist, since
+    // discover_instances() skips *-watchdog files when building ALL_INSTANCES.
+    writeFileSync(join(f.launchd, 'com.whatsoup.mystery-watchdog.plist'), plistXml('com.whatsoup.mystery-watchdog', '/usr/local/bin/node'));
     const result = run(f, ['--instance', 'tbot']);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('warn: unmanaged launchd surface: com.whatsoup.mystery.plist');
+    expect(result.stdout).toContain('warn: unmanaged launchd surface: com.whatsoup.mystery-watchdog.plist');
   });
 });
 
@@ -390,5 +396,42 @@ describe('manifest parity (deploy/managed-components.json)', () => {
       expect(probe, `no parity probe defined for protective service: ${entry.name} — add one to WIRED`).toBeDefined();
       expect(probe!(), `checker must WIRE protective service: ${entry.name}`).toBe(true);
     }
+  });
+});
+
+describe('host-scope checks under explicit --instance subset', () => {
+  it('does not fail release-drift-check or mislabel other bots when --instance subsets', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.obot.plist'), plistXml('com.whatsoup.obot', '/usr/local/bin/node', true));
+    writeFileSync(join(f.launchd, 'com.whatsoup.obot-watchdog.plist'), subst(WATCHDOG_TEMPLATE, f.repo, f.home, 'obot'));
+    writeFileSync(join(f.bin, 'obot-watchdog'), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, 'obot-watchdog'), 0o755);
+    const result = run(f, ['--instance', 'obot']);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain('release-drift-check matches no discovered instance render');
+    expect(result.stdout).not.toContain('warn: unmanaged launchd surface: com.whatsoup.tbot.plist');
+  });
+
+  it('reports drift when release-drift-check is installed but no instances exist at all', () => {
+    const f = makeFixture();
+    writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), subst(HARNESS_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.launchd, 'com.whatsoup.reply-guarantee.plist'), subst(REPLY_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('release-drift-check matches no discovered instance render');
+  });
+
+  it('reports a missing bot plist distinctly and exits 2 on --instance with no value', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const ghost = run(f, ['--instance', 'ghostbot']);
+    expect(ghost.status).toBe(1);
+    expect(ghost.stderr).toContain('missing installed: ghostbot plist');
+    expect(ghost.stderr).not.toContain('Label mismatch');
+    const noval = run(f, ['--instance', '--show-diff']);
+    expect(noval.status).toBe(2);
+    expect(noval.stderr).toContain('missing --instance value');
   });
 });

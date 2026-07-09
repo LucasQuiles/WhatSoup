@@ -23,6 +23,7 @@ BIN_DIR="$HOME/.local/bin"
 ALLOW_MISSING_LAUNCHD_DIR=0
 SHOW_DIFF=0
 INSTANCES=()
+ALL_INSTANCES=()
 
 # Non-instance stems: parity with deploy/managed-components.json
 # protective_services (+ the fleet console). Enforced by
@@ -59,7 +60,13 @@ while [ "$#" -gt 0 ]; do
     --show-diff) SHOW_DIFF=1; shift ;;
     --instance)
       shift
-      while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do INSTANCES+=("$1"); shift; done
+      INSTANCE_VALUES_SEEN=0
+      while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do
+        INSTANCES+=("$1"); INSTANCE_VALUES_SEEN=1; shift
+      done
+      if [ "$INSTANCE_VALUES_SEEN" -eq 0 ]; then
+        echo "missing --instance value" >&2; usage >&2; exit 2
+      fi
       ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unexpected argument: $1" >&2; usage >&2; exit 2 ;;
@@ -147,7 +154,7 @@ discover_instances() {
       if [ "$stem" = "$k" ]; then known=1; fi
     done
     if [ "$known" -eq 1 ]; then continue; fi
-    INSTANCES+=("$stem")
+    ALL_INSTANCES+=("$stem")
   done
 }
 
@@ -164,7 +171,7 @@ check_release_drift_surface() { # host-level; uses INSTANCES
   fi
   local tmpd bot out matched=0
   tmpd="$(mktemp -d "${TMPDIR:-/tmp}/launchd-drift-rd.XXXXXX")"
-  for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+  for bot in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
     out="$tmpd/render-$bot.plist"
     if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" >/dev/null 2>&1 \
        && cmp -s "$out" "$installed"; then
@@ -226,6 +233,11 @@ PY
 
 check_bot_plist_structural() { # BOT — content is NEVER printed or diffed (live credentials in EnvironmentVariables)
   local bot="$1" plist="$LAUNCHD_DIR/com.whatsoup.$bot.plist"
+  if [ ! -f "$plist" ]; then
+    echo "missing installed: $bot plist" >&2
+    failures=$((failures + 1))
+    return 0
+  fi
   local label prog0 ok=1
   label="$(plist_key "$plist" Label 2>/dev/null || echo "")"
   prog0="$(plist_key "$plist" Prog0 2>/dev/null || echo "")"
@@ -278,7 +290,7 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
     for k in "${NON_INSTANCE_STEMS[@]}"; do
       if [ "$stem" = "$k" ]; then covered=1; fi
     done
-    for k in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+    for k in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
       if [ "$stem" = "$k" ] || [ "$stem" = "$k-watchdog" ]; then covered=1; fi
     done
     if [ "$covered" -eq 1 ]; then continue; fi
@@ -286,6 +298,8 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
   done
 }
 
+# NB: the call sites below are asserted VERBATIM by the manifest-parity test in
+# tests/scripts/launchd-drift.test.ts (WIRED probes) — update both together.
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
@@ -293,7 +307,10 @@ check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whats
 check_ms365_script
 check_fleet_console_structural
 
-if [ "${#INSTANCES[@]}" -eq 0 ]; then discover_instances; fi
+discover_instances
+if [ "${#INSTANCES[@]}" -eq 0 ]; then
+  INSTANCES=(${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"})
+fi
 for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
   check_bot_plist_structural "$bot"
   check_template_surface "$bot-watchdog plist" "deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist" "$LAUNCHD_DIR/com.whatsoup.$bot-watchdog.plist" "$bot"
