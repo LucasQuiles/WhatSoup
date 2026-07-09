@@ -790,6 +790,11 @@ export class OutboundQueue implements IOutboundQueue {
     this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
     this.stopTyping(false);
+    // PR-E: crash path — reset per-turn status-cap state so the replacement/next
+    // turn starts with a full budget (same reset as endTurn()).
+    this.turnStatusCount = 0;
+    this.turnTotalCount = 0;
+    this.statusCapNoticeSent = false;
   }
 
   get targetChatJid(): string { return this.chatJid; }
@@ -868,6 +873,15 @@ export class OutboundQueue implements IOutboundQueue {
   endTurn(): void {
     this.flushStreamBuffer();
     this.stopTyping();
+    // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
+    // choke (incl. early-break provider-failure branches that never reach
+    // flush()). Resetting HERE — not in flush(), which the poll loop calls
+    // mid-turn — prevents a prior turn's exhausted budget from silently
+    // silencing the next turn (adversarial E1) and prevents a mid-turn refill
+    // (adversarial E3).
+    this.turnStatusCount = 0;
+    this.turnTotalCount = 0;
+    this.statusCapNoticeSent = false;
   }
 
   /**

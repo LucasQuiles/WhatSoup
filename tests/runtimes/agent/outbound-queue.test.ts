@@ -2751,6 +2751,56 @@ describe('OutboundQueue', () => {
       expect(calls.filter((c) => c.startsWith('answer part')).length).toBe(60);
       expect(calls).toContain('FINAL REPORT');
     });
+
+    // E1 [HIGH] leak regression: endTurn() is the unconditional turn-end choke,
+    // called on early-break provider-failure branches that never reach flush().
+    // The queue survives across turns, so if the status budget is not reset here
+    // a prior turn's exhausted count silently silences the NEXT innocent turn.
+    it('resets the status counter on endTurn so a prior turn cannot silence the next (E1)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      // Turn 1 blows past the cap.
+      for (let i = 0; i < 15; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `t1-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.endTurn(); // turn 1 ends via the early-break choke, NOT flush()
+      const afterT1 = calls.length;
+
+      // Turn 2: a single status update must NOT be suppressed by turn-1's count.
+      queue.enqueueToolUpdate({ category: 'running', detail: 't2-0' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      await queue.flush();
+
+      expect(calls.length).toBeGreaterThan(afterT1);
+    });
+
+    // E3 [MED] guard: flush() is called mid-turn by the poll loop
+    // (runtime.ts:3644/4333). Resetting the budget there would refill it
+    // mid-turn and defeat the cap. The reset must live ONLY on the real
+    // turn-end choke (endTurn/abortTurn) — a mid-turn flush leaves the count.
+    it('does not refill the status budget on a mid-turn flush (E3)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 8; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `a-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush(); // mid-turn poll flush — must NOT reset the counter
+
+      for (let i = 0; i < 8; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `b-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.endTurn();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
+    });
   });
 });
 
