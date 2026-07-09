@@ -2731,6 +2731,26 @@ describe('OutboundQueue', () => {
       // Liveness signal preserved across the suppressed window.
       expect(typingCalls).toContain(true);
     });
+
+    // The deliverable gate: E must NEVER touch content. Far more than the cap of
+    // content messages, plus the result, are ALL delivered — the cap participates
+    // only in the two status-narration paths. If this ever fails, someone added
+    // content suppression to E (the adversarial E1/E2 inversion) — do not "fix"
+    // it by gating content.
+    it('never suppresses content, however many messages a turn produces', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      for (let i = 0; i < 60; i++) {
+        queue.enqueueText(`answer part ${i}`);
+        await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+      }
+      queue.enqueueResultText('FINAL REPORT');
+      await queue.flush();
+
+      expect(calls.filter((c) => c.startsWith('answer part')).length).toBe(60);
+      expect(calls).toContain('FINAL REPORT');
+    });
   });
 });
 
