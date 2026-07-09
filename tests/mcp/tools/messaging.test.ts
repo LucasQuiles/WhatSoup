@@ -297,6 +297,22 @@ describe('registerMessagingTools', () => {
       expect(body).toEqual({ sent: false, suppressed: true, reason: 'ack_filler' });
     });
 
+    it('suppresses understood-holding status acknowledgment filler without sending transport', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      const result = await registry.call(
+        'send_message',
+        {
+          text: "Understood — holding. LCP lane parked on QB Time/TSheets auth; I'll resume the daily CSV exports (2026-05-13..05-31, 2026-06-27..07-07) the moment auth is live. No further status pings until then.",
+        },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body).toEqual({ sent: false, suppressed: true, reason: 'ack_filler' });
+    });
+
     it('suppresses meta-silence acknowledgment filler without sending transport', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
