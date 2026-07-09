@@ -180,14 +180,47 @@ check_release_drift_surface() { # host-level; uses INSTANCES
   fi
 }
 
+check_watchdog_script() { # BOT
+  local bot="$1" script="$BIN_DIR/$bot-watchdog"
+  if [ ! -x "$script" ]; then
+    echo "missing installed watchdog script: $script" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if python3 "$REPO_ROOT/deploy/scripts/render-watchdog.py" verify --script "$script" >/dev/null 2>&1; then
+    echo "ok: $bot-watchdog script (no surviving placeholders)"
+  else
+    echo "drift: $bot-watchdog script failed render-watchdog verify" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+check_ms365_script() {
+  local script="$BIN_DIR/ms365-token-backup"
+  if [ ! -f "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist" ]; then
+    return 0 # host does not run this surface; plist skip already reported
+  fi
+  if [ ! -x "$script" ]; then
+    echo "missing installed ms365-token-backup script: $script" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
+    echo "drift: ms365-token-backup script has surviving placeholders" >&2
+    failures=$((failures + 1))
+  else
+    echo "ok: ms365-token-backup script (no surviving placeholders)"
+  fi
+}
+
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
 check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
+check_ms365_script
 
 if [ "${#INSTANCES[@]}" -eq 0 ]; then discover_instances; fi
 for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
   check_template_surface "$bot-watchdog plist" "deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist" "$LAUNCHD_DIR/com.whatsoup.$bot-watchdog.plist" "$bot"
+  check_watchdog_script "$bot"
 done
 check_release_drift_surface
 

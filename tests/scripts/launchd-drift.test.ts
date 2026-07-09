@@ -285,3 +285,35 @@ describe('per-instance surfaces', () => {
     expect(result.stdout).toContain('skip: release-drift-check');
   });
 });
+
+describe('verified installed scripts', () => {
+  it('fails when the installed watchdog script has surviving placeholders', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.bin, 'tbot-watchdog'), '#!/usr/bin/env bash\ncurl __BOT_PORT__\n');
+    chmodSync(join(f.bin, 'tbot-watchdog'), 0o755);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: tbot-watchdog script');
+  });
+
+  it('fails when the watchdog script is missing while its plist is installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    rmSync(join(f.bin, 'tbot-watchdog'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing installed watchdog script');
+  });
+
+  it('fails when the installed ms365 script has surviving placeholders', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.ms365-token-backup.plist'), subst(MS365_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.bin, 'ms365-token-backup'), '#!/usr/bin/env bash\ncp __HOME__/x y\n');
+    chmodSync(join(f.bin, 'ms365-token-backup'), 0o755);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: ms365-token-backup script');
+  });
+});
