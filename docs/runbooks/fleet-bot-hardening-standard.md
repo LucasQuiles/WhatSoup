@@ -78,9 +78,11 @@ The probe must classify at least these operator-actionable states:
 - `timeout`
 - `unknown`
 
-A configured primary usability failure must emit a `primary_model_unusable`
-operator alert with safe metadata only. A bot whose primary provider is merely
-authenticated, but whose selected model cannot complete a turn, is not hardened.
+A configured primary usability failure must emit an operator alert with safe
+metadata only: `primary_model_unusable` for model-unavailable, provider-unavailable,
+timeout, and unknown; `provider_reauth_required` for credential-unavailable. A bot
+whose primary provider is merely authenticated, but whose selected model cannot
+complete a turn, is not hardened.
 
 ### C. Release Drift-Check Job
 
