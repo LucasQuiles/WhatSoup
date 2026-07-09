@@ -15,8 +15,8 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 // ─── Hoisted mocks ─────────────────────────────────────────────────────────
 
 const alertFns = vi.hoisted(() => ({
-  emitAlert: vi.fn(() => true),
-  clearAlertSource: vi.fn(() => true),
+  emitAlert: vi.fn((_instance: string, _source: string, _summary: string, _evidence: string, _severity?: string, _criticalAsset?: unknown) => true),
+  clearAlertSource: vi.fn((_instance: string, _source: string, _evidence?: string, _criticalAsset?: unknown) => true),
 }));
 
 // Shared logger spy (vi.hoisted idiom from tests/fleet/health-poller.test.ts:8-13):
