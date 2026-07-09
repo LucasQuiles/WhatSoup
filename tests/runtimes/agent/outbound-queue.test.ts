@@ -11,6 +11,8 @@ import {
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
   MAX_CHUNKS,
+  MAX_STATUS_MESSAGES_PER_TURN,
+  STATUS_CAP_NOTICE,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -2684,6 +2686,31 @@ describe('OutboundQueue', () => {
 
       // Drain the streamTimer so the leak guard passes
       await queue.flush();
+    });
+  });
+
+  // ─── PR-E: per-turn STATUS-narration cap ──────────────────────────────────
+  // Caps status narration (tool-status batches + progress placeholders) per
+  // turn; NEVER gates content; resets on the real turn-end choke (endTurn/
+  // abortTurn), not on flush() (called mid-turn by polls).
+
+  describe('PR-E status-narration cap', () => {
+    // Reproduces the 07-09 flood: a single turn emitting dozens of tool-status
+    // batches. With the cap, at most MAX_STATUS_MESSAGES_PER_TURN status
+    // messages reach the chat.
+    it('caps status narration at MAX_STATUS_MESSAGES_PER_TURN per turn', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 30; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
     });
   });
 });
