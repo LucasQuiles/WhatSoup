@@ -886,6 +886,27 @@ export const config = {
   rateLimitWindowMs: resolvedRateLimitWindowMs, // measurement window for counting responses (SP6)
   rateLimitNoticeWindowMs: (instance?.rateLimitNoticeWindowMs as number | undefined) ?? DEFAULT_RATE_WINDOW_MS, // dedup window for rate-limit notices
 
+  // Outbound socket governor (PR-F) — bounds the send RATE to any conversation
+  // across EVERY send path (runtime, MCP send tools, raw-socket tools) at the
+  // Baileys socket seam. Pace-not-drop by default: a legit multi-part answer is
+  // smoothed to a safe cadence and delivered in full. A send is SHED only past
+  // the per-conversation catastrophe ceiling or when a paced send would wait
+  // past maxWaitMs (kept < the queue's 15s SEND_TIMEOUT so pacing never turns
+  // into a timeout→retry→drop). Defaults are conservative — pure passthrough
+  // under normal load (a few messages per answer never wait) — and every field
+  // is per-instance overridable. windowMs is kept <= maxWaitMs so a full-window
+  // pacing wait for a single reservation never itself trips the shed.
+  outboundGovernor: {
+    enabled: (instance?.outboundGovernor?.enabled as boolean | undefined) ?? true,
+    windowMs: (instance?.outboundGovernor?.windowMs as number | undefined) ?? 3_000,
+    maxPerWindow: (instance?.outboundGovernor?.maxPerWindow as number | undefined) ?? 6,
+    maxWaitMs: (instance?.outboundGovernor?.maxWaitMs as number | undefined) ?? 5_000,
+    hardCeiling: (instance?.outboundGovernor?.hardCeiling as number | undefined) ?? 120,
+    hardCeilingWindowMs: (instance?.outboundGovernor?.hardCeilingWindowMs as number | undefined) ?? 3_600_000,
+    globalMaxPerWindow: (instance?.outboundGovernor?.globalMaxPerWindow as number | undefined) ?? 40,
+    globalWindowMs: (instance?.outboundGovernor?.globalWindowMs as number | undefined) ?? 3_000,
+  },
+
   // Enrichment
   enrichmentIntervalMs: resolvedMemory.enrichment.intervalMs,
   enrichmentBatchSize: resolvedMemory.enrichment.batchSize,
