@@ -354,8 +354,12 @@ describe('registerMessagingTools', () => {
       },
     );
 
-    it.each(['No response needed.', "Holding — no reply warranted per operator's control note."])(
-      'suppresses no-response/no-reply-warranted acknowledgment filler without sending transport: %s',
+    it.each([
+      'No response needed.',
+      "Holding — no reply warranted per operator's control note.",
+      "No outbound warranted — operator's control note explicitly says do not reply, do not ack, do not status-ping, and no user ask is pending. Staying silent; sending nothing to WhatsApp.",
+    ])(
+      'suppresses no-response/no-reply/no-outbound acknowledgment filler without sending transport: %s',
       async (text) => {
         const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
         const result = await registry.call('send_message', { text }, session);

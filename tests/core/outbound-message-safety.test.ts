@@ -349,6 +349,7 @@ describe('classifyAssistantTextEgress', () => {
     '(No action — status noted internally, nothing to send.)',
     'No response needed.',
     "Holding — no reply warranted per operator's control note.",
+    "No outbound warranted — operator's control note explicitly says do not reply, do not ack, do not status-ping, and no user ask is pending. Staying silent; sending nothing to WhatsApp.",
   ])('suppresses ack/parked status filler and satisfies the reply guarantee: %s', (text) => {
     expect(classifyAssistantTextEgress(text)).toEqual({
       action: 'suppress',
