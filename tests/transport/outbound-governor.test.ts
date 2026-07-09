@@ -97,7 +97,7 @@ describe('wrapWithOutboundGovernor — paces, never drops (T2.1)', () => {
 
     const sends: Promise<unknown>[] = [];
     for (let i = 0; i < 30; i++) {
-      sends.push(sock.sendMessage('a@s.whatsapp.net', { text: `m${i}` }));
+      sends.push(sock.sendMessage('a@s.whatsapp.net', { text: `m${i}` }) as Promise<unknown>);
     }
     // Before draining the pacing clock: NOT all 30 have reached the socket —
     // the governor is delaying them, proving pace (not synchronous fire).
