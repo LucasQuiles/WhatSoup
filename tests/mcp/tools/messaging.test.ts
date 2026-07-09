@@ -261,6 +261,22 @@ describe('registerMessagingTools', () => {
       expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
     });
 
+    it('suppresses parked acknowledgment filler without sending transport', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      const result = await registry.call(
+        'send_message',
+        {
+          text: "Understood — deploy 6b768363 noted. Lane parked, leak messages left in place, and I won't repost the blocker until auth is available or someone asks.",
+        },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body).toEqual({ sent: false, suppressed: true, reason: 'ack_filler' });
+    });
+
     it('does not alert ops for a mere internal-path redaction (no false claim)', async () => {
       const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call(

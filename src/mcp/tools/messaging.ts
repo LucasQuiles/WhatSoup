@@ -25,6 +25,7 @@ import {
   evaluateOutboundMessageSafety,
   redactInternalArtifacts,
   resolveOutboundAudience,
+  type AssistantTextSuppressionReason,
   type OutboundMessageSafetyDecision,
 } from '../../core/outbound-message-safety.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
@@ -83,6 +84,25 @@ function routeDivertToOps(
     decision.opsEvidence,
     'warning',
   );
+}
+
+class SuppressedOutboundMessageError extends Error {
+  readonly reason: AssistantTextSuppressionReason;
+
+  constructor(reason: AssistantTextSuppressionReason) {
+    super(`outbound message suppressed: ${reason}`);
+    this.name = 'SuppressedOutboundMessageError';
+    this.reason = reason;
+  }
+}
+
+function suppressedResult(reason: AssistantTextSuppressionReason): Record<string, unknown> {
+  return { sent: false, suppressed: true, reason };
+}
+
+function suppressionReason(decision: OutboundMessageSafetyDecision): AssistantTextSuppressionReason | null {
+  if (decision.action !== 'suppress') return null;
+  return decision.reason as AssistantTextSuppressionReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +241,8 @@ export function registerMessagingTools(
             const audience = resolveOutboundAudience(prepared.chatJid);
             const decision = evaluateOutboundMessageSafety({ text: prepared.text, audience });
             guardDecision = decision;
+            const reason = suppressionReason(decision);
+            if (reason) throw new SuppressedOutboundMessageError(reason);
             if (decision.action === 'allow') return prepared;
             return {
               ...prepared,
@@ -245,6 +267,9 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
+        if (err instanceof SuppressedOutboundMessageError) {
+          return suppressedResult(err.reason);
+        }
         if (
           err instanceof AliasNotFoundError ||
           err instanceof MissingTargetError ||
@@ -296,6 +321,8 @@ export function registerMessagingTools(
         text,
         audience: resolveOutboundAudience(chatJid),
       });
+      const replySuppressionReason = suppressionReason(replyDecision);
+      if (replySuppressionReason) return suppressedResult(replySuppressionReason);
 
       try {
         const content: Record<string, unknown> = {
@@ -425,6 +452,8 @@ export function registerMessagingTools(
         text: newText,
         audience: resolveOutboundAudience(chatJid),
       });
+      const editSuppressionReason = suppressionReason(editDecision);
+      if (editSuppressionReason) return suppressedResult(editSuppressionReason);
       const safeText = editDecision.text;
 
       try {

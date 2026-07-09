@@ -26,9 +26,10 @@ import { jidPattern } from '../lib/redaction-patterns.ts';
 
 export type OutboundAudience = 'client' | 'ops' | 'internal';
 
-export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert';
+export type OutboundMessageSafetyAction = 'allow' | 'redact' | 'divert' | 'suppress';
 
 export type AssistantTextSuppressionReason =
+  | 'ack_filler'
   | 'internal_narration'
   | 'progress_filler'
   | 'send_verification'
@@ -63,7 +64,7 @@ export interface OutboundMessageSafetyInput {
 export interface OutboundMessageSafetyDecision {
   action: OutboundMessageSafetyAction;
   text: string;
-  reason?: 'internal_artifact' | 'false_infra_block_claim';
+  reason?: 'internal_artifact' | 'false_infra_block_claim' | AssistantTextSuppressionReason;
   redactions?: Redaction[];
   /** Sanitized diagnostic for ops/BOT ERRORS — PII/secret/username-free. */
   opsEvidence?: string;
@@ -83,6 +84,13 @@ const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
   /\b(?:message|send|delivery|read-?back)\b.{0,120}\blanded cleanly\b/i,
   /^acknowledged and delivered\b.{0,120}\b(?:verified|pk\s+\d+)\b/i,
   /^intended .{0,80}\bverified\b/i,
+];
+
+const ACK_FILLER_PATTERNS: readonly RegExp[] = [
+  /^parked per\b.{0,80}\bdirective\b.{0,260}\b(?:no new evidence|no user ask|not reposting|holding until auth)\b/i,
+  /^understood\b.{0,100}\b(?:deploy\b.{0,40}\bnoted|noted)\b.{0,260}\b(?:lane parked|won(?:'|’)t repost|pick\b.{0,80}\bback up)\b/i,
+  /^acknowledged\b.{0,140}\b(?:confirmed delivery|landed clean)\b.{0,260}\b(?:lane stays parked|nothing further to do)\b/i,
+  /\blane (?:stays )?parked\b.{0,260}\b(?:nothing further to do|won(?:'|’)t repost|not reposting|holding until auth)\b/i,
 ];
 
 const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
@@ -111,8 +119,9 @@ const PROGRESS_FILLER_PATTERNS: readonly RegExp[] = [
  *
  * This is deliberately narrow: it catches process narration and send
  * verification chatter observed in the agent transport, not arbitrary
- * low-quality replies. Explicit MCP send tools bypass this classifier because
- * those payloads already carry user-visible intent.
+ * low-quality replies. The MCP text-send guard also reuses this classifier for
+ * explicit tool payloads so send_message/reply/edit cannot bypass the same
+ * known no-op/narration patterns.
  */
 export function classifyAssistantTextEgress(text: string): AssistantTextEgressDecision {
   const trimmed = text.trim();
@@ -124,6 +133,10 @@ export function classifyAssistantTextEgress(text: string): AssistantTextEgressDe
 
   if (SEND_VERIFICATION_PATTERNS.some((re) => re.test(trimmed))) {
     return { action: 'suppress', reason: 'send_verification', satisfiesReplyGuarantee: true };
+  }
+
+  if (ACK_FILLER_PATTERNS.some((re) => re.test(trimmed))) {
+    return { action: 'suppress', reason: 'ack_filler', satisfiesReplyGuarantee: true };
   }
 
   if (
@@ -339,6 +352,11 @@ export function evaluateOutboundMessageSafety(
   // Ops receives verbatim diagnostics.
   if (audience === 'ops') {
     return { action: 'allow', text };
+  }
+
+  const assistantDecision = classifyAssistantTextEgress(text);
+  if (assistantDecision.action === 'suppress') {
+    return { action: 'suppress', text: '', reason: assistantDecision.reason };
   }
 
   // Only a client send can make a false self-infra-block claim worth diverting;

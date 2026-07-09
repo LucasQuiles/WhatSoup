@@ -221,6 +221,19 @@ describe('evaluateOutboundMessageSafety', () => {
     expect(decision.text).toBe(raw);
   });
 
+  it('suppresses parked acknowledgment filler for explicit non-ops sends', () => {
+    const decision = evaluateOutboundMessageSafety({
+      text: "Understood — deploy 6b768363 noted. Lane parked, leak messages left in place, and I won't repost the blocker until auth is available or someone asks.",
+      audience: 'client',
+    });
+
+    expect(decision).toEqual({
+      action: 'suppress',
+      text: '',
+      reason: 'ack_filler',
+    });
+  });
+
   it('attaches sanitized opsEvidence on divert — no raw path username, token, JID, or phone', () => {
     const raw =
       `All my tools are blocked. creds at /Users/testuser/.claude/x, token Bearer ${FAKE_TOKEN_2}, chat ${FAKE_JID}, call ${FAKE_PHONE}`;
@@ -315,6 +328,18 @@ describe('classifyAssistantTextEgress', () => {
     expect(decision).toEqual({
       action: 'suppress',
       reason: 'send_verification',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  it.each([
+    "Parked per Lucas's 20:06 directive — LCP lane stays blocked on Intuit/QB Time auth (needs Ana to sign in on the mini's Chrome, or Lucas to OK the Keychain fallback). No new evidence and no user ask, so I'm not reposting the blocker status or touching the leak messages. Holding until auth is available.",
+    "Understood — deploy 6b768363 noted. Lane parked, leak messages left in place, and I won't repost the blocker until auth is available or someone asks. I'll pick the LCP lane back up the moment the mini's Chrome has a live Intuit/QB Time session.",
+    'Acknowledged Lucas and confirmed delivery (landed clean). Lane stays parked on Intuit/QB Time auth — nothing further to do until Ana signs into Chrome on the mini or Lucas OKs the Keychain fallback.',
+  ])('suppresses ack/parked status filler and satisfies the reply guarantee: %s', (text) => {
+    expect(classifyAssistantTextEgress(text)).toEqual({
+      action: 'suppress',
+      reason: 'ack_filler',
       satisfiesReplyGuarantee: true,
     });
   });
