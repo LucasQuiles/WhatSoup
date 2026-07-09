@@ -163,13 +163,19 @@ interface Sendable {
  * Returns the SAME socket object (reference identity preserved). Re-run on every
  * reconnect (`this.sock = sock` at connection.ts:681) to re-install on the new
  * socket; the governor STATE lives in the passed-in `governor`, not here.
+ *
+ * Generic over the concrete socket type (the real Baileys socket has a strongly
+ * typed `sendMessage` that does not unify with the internal `Sendable` shape),
+ * so the caller keeps its exact socket type on the return; the override is
+ * applied through a narrow internal cast.
  */
-export function wrapWithOutboundGovernor<S extends Sendable>(
+export function wrapWithOutboundGovernor<S extends object>(
   sock: S,
   opts: WrapOutboundGovernorOptions,
 ): S {
-  const original = sock.sendMessage;
-  const realSend = original.bind(sock);
+  const s = sock as unknown as Sendable;
+  const original = s.sendMessage;
+  const realSend = original.bind(s);
 
   const governed = async function governedSendMessage(
     jid: string,
@@ -198,6 +204,6 @@ export function wrapWithOutboundGovernor<S extends Sendable>(
     // best-effort — never let descriptor copying break send installation
   }
 
-  (sock as Sendable).sendMessage = governed as unknown as Sendable['sendMessage'];
+  s.sendMessage = governed as unknown as Sendable['sendMessage'];
   return sock;
 }
