@@ -89,6 +89,15 @@ it('mini10-class body → provider_reauth_required (NOT health_body_degraded, NO
   const reauth = emits.filter(([inst, src]) => inst === 'ad-bot' && src === 'provider_reauth_required');
   expect(reauth).toHaveLength(1);
   expect(reauth[0][4]).toBe('critical');
+  // Spec decision 2: the poller rail attaches the agent_provider criticalAsset,
+  // field-identical to the runtime rail's builder (cross-rail diagnostic identity).
+  const asset = reauth[0][5] as { asset: Record<string, unknown>; failure: Record<string, unknown> };
+  expect(asset.asset.kind).toBe('agent_provider');
+  expect(asset.asset.instance).toBe('ad-bot');
+  expect(asset.failure.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
+  expect(asset.failure.domain).toBe('provider_access');
+  expect(asset.failure.recoverability).toBe('operator_recoverable');
+  expect(asset.failure.confidence).toBe('confirmed');
   expect(emits.some(([, src]) => src === 'health_body_degraded')).toBe(false);
   expect(emits.some(([, src]) => src === 'instance_logged_out')).toBe(false);
   const status = poller.getStatus('ad-bot');
@@ -136,6 +145,26 @@ it('a CONFIRMED WhatsApp logout still pages independently (approved flag 1: no s
   poller.stop();
 });
 
+it('supersession pin: a later CONFIRMED logout leaves an already-open reauth incident active (not dropped by dropSupersededAlertSources)', async () => {
+  const logoutBody = fixture('provider-reauth-required.json');
+  (logoutBody['whatsapp'] as Record<string, unknown>)['connected'] = false;
+  (logoutBody['whatsapp'] as Record<string, unknown>)['connection'] = { state: 'close', last_status_code: 401 };
+  const mockFetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => fixture('provider-reauth-required.json') })
+    .mockResolvedValue({ ok: true, status: 200, json: async () => logoutBody });
+  vi.stubGlobal('fetch', mockFetch);
+  const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
+  const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({ status: 'healthy' }), 5_000);
+  poller.start();
+  await vi.advanceTimersByTimeAsync(0);      // poll 1: reauth incident opens
+  await vi.advanceTimersByTimeAsync(5_000);  // poll 2: confirmed WhatsApp logout (401/close)
+  expect(alertFns.emitAlert.mock.calls.some(([, s]) => s === 'instance_logged_out')).toBe(true);
+  // Independent faults, independent recoveries (approved flag 1): the logout's
+  // ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT sweep must NOT retire the reauth incident.
+  expect(poller.getStatus('ad-bot')!.activeAlertSources).toContain('provider_reauth_required');
+  poller.stop();
+});
+
 it('the failureHealth (non-200) path also confirms provider_reauth_required (Task-11 mirror branch)', async () => {
   vi.stubGlobal('fetch', fetchReturning(fixture('provider-reauth-required.json'), 503));
   const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
@@ -143,7 +172,13 @@ it('the failureHealth (non-200) path also confirms provider_reauth_required (Tas
   poller.start();
   await vi.advanceTimersByTimeAsync(0);
   const emits = alertFns.emitAlert.mock.calls;
-  expect(emits.some(([inst, src]) => inst === 'ad-bot' && src === 'provider_reauth_required')).toBe(true);
+  const reauth = emits.find(([inst, src]) => inst === 'ad-bot' && src === 'provider_reauth_required');
+  expect(reauth).toBeDefined();
+  // The mirror confirm site threads the same criticalAsset (spec decision 2).
+  expect(reauth![5]).toMatchObject({
+    asset: { kind: 'agent_provider', instance: 'ad-bot' },
+    failure: { code: 'AGENT_PROVIDER_AUTH_REQUIRED' },
+  });
   poller.stop();
 });
 
@@ -172,6 +207,14 @@ it('recovery-window body clears the incident FROM THE DEGRADED FLOW (idle bot ne
   expect(clears).toHaveLength(1);
   expect(String(clears[0][2])).toContain('clear_code=AGENT_PROVIDER_AUTH_RECOVERED');
   expect(String(clears[0][2])).toContain('proof=primary_model_probe_ok');
+  // The clear carries the same cross-rail criticalAsset as the page (spec decision 2).
+  const clearAsset = clears[0][3] as { asset: Record<string, unknown>; failure: Record<string, unknown> };
+  expect(clearAsset.asset.kind).toBe('agent_provider');
+  expect(clearAsset.asset.instance).toBe('ad-bot');
+  expect(clearAsset.failure.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
+  expect(clearAsset.failure.domain).toBe('provider_access');
+  expect(clearAsset.failure.recoverability).toBe('operator_recoverable');
+  expect(clearAsset.failure.confidence).toBe('confirmed');
   poller.stop();
 });
 

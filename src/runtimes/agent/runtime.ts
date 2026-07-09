@@ -6910,11 +6910,16 @@ export class AgentRuntime implements Runtime {
         this.recentNoFallbackReauthNotices.delete(key);
       }
     }
+    // The per-chat dedup gates ONLY the user notice. A NEW incident that begins
+    // inside a chat's notice window (the page guard was reset by a recovery
+    // clear) must still reach the operator page below — the previous early
+    // return here silenced that page entirely (final-review minor 3).
     const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
-    if (this.recentNoFallbackReauthNotices.has(noticeKey)) return;
-    this.recentNoFallbackReauthNotices.set(noticeKey, now);
-    this.capDedupeMap(this.recentNoFallbackReauthNotices);
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    if (!this.recentNoFallbackReauthNotices.has(noticeKey)) {
+      this.recentNoFallbackReauthNotices.set(noticeKey, now);
+      this.capDedupeMap(this.recentNoFallbackReauthNotices);
+      queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    }
 
     // Operator page (ALERT-06A): one per instance-incident, independent of the
     // per-chat notice dedup above. Shares the probe rail's guard so both

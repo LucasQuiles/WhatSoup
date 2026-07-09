@@ -335,10 +335,17 @@ describe('provider_reauth_required critical rail (ALERT-03/04/04A/05)', () => {
       'evidence_schema_version=1']) {
       expect(evidence).toContain(key);
     }
-    const asset = call[5] as { asset: { kind: string }; failure: { code: string; domain: string } };
+    const asset = call[5] as {
+      asset: { kind: string };
+      failure: { code: string; domain: string; recoverability: string; confidence: string };
+    };
     expect(asset.asset.kind).toBe('agent_provider');
     expect(asset.failure.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
     expect(asset.failure.domain).toBe('provider_access');
+    // Cross-rail identity pin: these two enums are part of the diagnostic
+    // contract mirrored by the poller rail's providerReauthCriticalAsset().
+    expect(asset.failure.recoverability).toBe('operator_recoverable');
+    expect(asset.failure.confidence).toBe('confirmed');
 
     // Carry-in (Task 9): model_usable_stale must be sourced from the real
     // checkedAt-age freshness derivation (MODEL_USABILITY_FRESHNESS_MS via
@@ -376,6 +383,20 @@ describe('provider_reauth_required critical rail (ALERT-03/04/04A/05)', () => {
     const pages = alertFns.emitAlert.mock.calls.filter(([, s]) => s === 'provider_reauth_required');
     expect(pages).toHaveLength(1);
     expect(String(pages[0][3])).toContain('trigger=turn_error');
+  });
+
+  it('a NEW incident inside a chat\'s notice window still pages (dedup gates the notice, not the page)', () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    const chat = makeQueue('15550100001@s.whatsapp.net');
+    notice(runtime).emitNoFallbackReauthNotice(chat);   // incident 1: notice + page
+    // Recovery clear via the usable seam resets the page guard (the one clear-site).
+    seam(runtime).recordPrimaryModelUsability({ status: 'usable', provider: 'claude-cli', model: null }, 'manual');
+    expect(alertFns.clearAlertSource.mock.calls.some(([, s]) => s === 'provider_reauth_required')).toBe(true);
+    // Incident 2, same chat, still inside the 30-min notice window.
+    notice(runtime).emitNoFallbackReauthNotice(chat);
+    expect((chat.enqueueText as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1); // notice deduped per chat
+    const pages = alertFns.emitAlert.mock.calls.filter(([, s]) => s === 'provider_reauth_required');
+    expect(pages).toHaveLength(2); // page re-emitted: the notice dedup must not swallow it (minor 3)
   });
 
   it('delivery gap: emit failure logs a typed record and never throws into the notice path (ALERT-06B)', () => {

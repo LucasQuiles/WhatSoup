@@ -17,7 +17,14 @@
  * return-to-online ladder and the degraded-flow clear): fresh usable primary
  * proof only. Fallback serving, restarts, or WhatsApp connectivity never clear
  * (IMPACT-18).
+ *
+ * providerReauthCriticalAsset / providerReauthClearEvidence — the poller rail's
+ * criticalAsset diagnostic and its proof-carrying clear-evidence string, shared
+ * by both poller confirm sites and both poller clear sites. The type-only
+ * import keeps this module pure (no runtime dependency).
  */
+
+import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 
 export interface ProviderReauthSignal {
   confirmed: boolean;
@@ -78,4 +85,42 @@ export function providerReauthClearProof(health: Record<string, unknown>): boole
     tc['model_usable'] === true &&
     tc['model_usable_stale'] !== true
   );
+}
+
+/**
+ * Poller-rail twin of AgentRuntime.providerReauthCriticalAsset()
+ * (src/runtimes/agent/runtime.ts) — every field value must stay byte-identical
+ * across the two rails so both coalesce onto one cross-rail diagnostic
+ * identity (the host-side deploy/scripts/bot-errors-health-check.py emits the
+ * same asset shape). Deliberately mirrored, NOT factored into a shared module:
+ * the deploy-pinned artifacts isolate their own copies, and duplicating the
+ * literal here keeps this signal module dependency-light (type-only import).
+ */
+export function providerReauthCriticalAsset(instance: string): BotErrorsCriticalAssetDiagnostic {
+  return {
+    asset: { kind: 'agent_provider', instance },
+    failure: {
+      code: 'AGENT_PROVIDER_AUTH_REQUIRED',
+      domain: 'provider_access',
+      recoverability: 'operator_recoverable',
+      confidence: 'confirmed',
+      operatorAction: 'Restore provider authentication or switch to a proven fallback provider; do not mark the underlying auth failure resolved until the primary provider probe passes.',
+      clearRequirement: 'fresh usable primary-model probe after the incident (clear_code=AGENT_PROVIDER_AUTH_RECOVERED)',
+    },
+  };
+}
+
+/**
+ * The one proof-carrying clear-evidence string for the poller rail, used by
+ * BOTH poller clear sites (the degraded-flow clear and the recovered-alert
+ * ladder) so the two can never drift apart. The runtime rail's clear evidence
+ * intentionally stays separate — it carries provider/model fields this rail
+ * does not have, and a fleet→runtime import is not wanted.
+ */
+export function providerReauthClearEvidence(tc: Record<string, unknown> | null): string {
+  return [
+    'clear_code=AGENT_PROVIDER_AUTH_RECOVERED',
+    'proof=primary_model_probe_ok',
+    `model_usable_checked_at=${String(tc?.['model_usable_checked_at'] ?? 'unknown')}`,
+  ].join(' ');
 }

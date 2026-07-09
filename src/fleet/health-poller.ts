@@ -8,7 +8,12 @@ import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
-import { classifyProviderReauthSignal, providerReauthClearProof } from './provider-reauth-signal.ts';
+import {
+  classifyProviderReauthSignal,
+  providerReauthClearEvidence,
+  providerReauthClearProof,
+  providerReauthCriticalAsset,
+} from './provider-reauth-signal.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 
 const log = createChildLogger('fleet:health-poller');
@@ -439,6 +444,8 @@ export class HealthPoller {
                   `whatsoup@${name} primary provider needs re-authentication`,
                   true, false, 'confirmed', 'provider_reauth_required',
                   failureProviderReauth.evidence,
+                  undefined, // loggedOutFailureCode default — not a logout path
+                  providerReauthCriticalAsset(name), // spec decision 2: cross-rail diagnostic identity
                 );
                 return;
               }
@@ -491,6 +498,8 @@ export class HealthPoller {
             'confirmed',
             'provider_reauth_required',
             providerReauth.evidence,
+            undefined, // loggedOutFailureCode default — not a logout path
+            providerReauthCriticalAsset(name), // spec decision 2: cross-rail diagnostic identity
           );
           return;
         }
@@ -1076,6 +1085,10 @@ export class HealthPoller {
     statusReason = alertSource,
     statusEvidence: string[] = evidence.split(/\s+/).filter(Boolean),
     loggedOutFailureCode: LoggedOutAlertFailureCode = 'WA_AUTH_BOND_SERVER_REVOKED',
+    // Forwarded to maybeEmitAlert on the degraded branch (the logged_out branch
+    // builds its own loggedOutCriticalAsset). Mirrors how the logged_out path
+    // threads a diagnostic; today only provider_reauth_required supplies one.
+    criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   ): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
@@ -1134,6 +1147,8 @@ export class HealthPoller {
       const emitted = this.maybeEmitAlert(name, alertSource,
         alertSummary ?? `whatsoup@${name} is degraded`,
         evidence,
+        'critical',
+        criticalAsset,
       );
       this.trackActiveAlertSource(name, alertSource, emitted);
     }
@@ -1151,12 +1166,8 @@ export class HealthPoller {
     if (!existing?.activeAlertSources.includes('provider_reauth_required')) return;
     if (!providerReauthClearProof(health)) return; // ALERT-10: withhold until fresh usable proof
     const tc = health['turn_capability'] as Record<string, unknown> | null;
-    const evidence = [
-      'clear_code=AGENT_PROVIDER_AUTH_RECOVERED',
-      'proof=primary_model_probe_ok',
-      `model_usable_checked_at=${String(tc?.['model_usable_checked_at'] ?? 'unknown')}`,
-    ].join(' ');
-    if (clearAlertSourceChecked(name, 'provider_reauth_required', evidence)) {
+    const evidence = providerReauthClearEvidence(tc);
+    if (clearAlertSourceChecked(name, 'provider_reauth_required', evidence, providerReauthCriticalAsset(name))) {
       existing.activeAlertSources = existing.activeAlertSources.filter((s) => s !== 'provider_reauth_required');
     }
   }
@@ -1209,12 +1220,13 @@ export class HealthPoller {
         const evidence = source === 'instance_logged_out' && currentHealth
           ? this.relinkRecoveryEvidence(name, currentHealth)
           : source === 'provider_reauth_required' && currentHealth
-            ? `clear_code=AGENT_PROVIDER_AUTH_RECOVERED proof=primary_model_probe_ok`
-              + ` model_usable_checked_at=${String((currentHealth['turn_capability'] as Record<string, unknown> | null)?.['model_usable_checked_at'] ?? 'unknown')}`
+            ? providerReauthClearEvidence(currentHealth['turn_capability'] as Record<string, unknown> | null)
             : `repair_lane:${name}`;
         const criticalAsset = source === 'instance_logged_out' && currentHealth
           ? this.relinkRecoveryCriticalAsset(name, currentHealth)
-          : undefined;
+          : source === 'provider_reauth_required'
+            ? providerReauthCriticalAsset(name)
+            : undefined;
         if (!clearAlertSourceChecked(name, source, evidence, criticalAsset)) {
           retainedSources.push(source);
           continue;
