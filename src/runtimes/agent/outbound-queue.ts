@@ -101,6 +101,28 @@ export const PROGRESS_TEXT_DEDUPE_WINDOW_MS = 30_000;
  * config.operationTracker.progressPlaceholderRateLimitMs (0 disables).
  */
 export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 180_000;
+/**
+ * PR-E: hard per-turn cap on STATUS NARRATION messages (the `⚙️ Working on: • …`
+ * tool batches and the `_… Still working …_` progress placeholders). Bounds the
+ * dominant chat-flood source (52/83 status on 07-09) without ever touching the
+ * user's actual content/answer/media — content paths are never gated. Tunable
+ * via config.operationTracker.maxStatusMessagesPerTurn; per-instance/test
+ * override via setMaxStatusMessagesPerTurn(). Conservative default; existing
+ * batching tests emit < 10 so there is no regression.
+ */
+export const MAX_STATUS_MESSAGES_PER_TURN = 10;
+/**
+ * PR-E: the single friendly note sent the first time a turn trips the status cap.
+ * Routed through enqueueText, so it is CONTENT (never gated) and always lands.
+ */
+export const STATUS_CAP_NOTICE =
+  "_(still working — I'll stop the step-by-step and send the result when it's ready)_";
+/**
+ * PR-E telemetry: log `high-volume turn` ONCE when a turn's total enqueued
+ * message count crosses this watermark. Observability for PR-G only — it NEVER
+ * gates or suppresses a send.
+ */
+export const HIGH_VOLUME_TURN_WATERMARK = 40;
 /** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
 const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
@@ -253,6 +275,16 @@ export class OutboundQueue implements IOutboundQueue {
   /** Per-chat progress-placeholder rate floor (ms). 0 disables. Override via config/test setter. */
   private progressFloorMs: number =
     config.operationTracker?.progressPlaceholderRateLimitMs ?? PROGRESS_PLACEHOLDER_RATE_FLOOR_MS;
+
+  /** PR-E: status-narration messages emitted this turn. Gates status ONLY, never content. */
+  private turnStatusCount = 0;
+  /** PR-E: whether the one-time STATUS_CAP_NOTICE has already been sent this turn. */
+  private statusCapNoticeSent = false;
+  /** PR-E: total messages enqueued this turn — telemetry only, NEVER gates a send. */
+  private turnTotalCount = 0;
+  /** PR-E: per-turn status-narration budget (ms n/a — a message count). Override via config/test setter. */
+  private maxStatusMessagesPerTurn: number =
+    config.operationTracker?.maxStatusMessagesPerTurn ?? MAX_STATUS_MESSAGES_PER_TURN;
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -656,6 +688,13 @@ export class OutboundQueue implements IOutboundQueue {
       log.info({ chatJid: this.chatJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
       return;
     }
+    // PR-E: hard per-turn status-narration cap. The floor + text window above
+    // already decided this placeholder WOULD emit; enforce the per-turn count
+    // now so a single turn can't flood the chat with narration. Past the cap,
+    // keep the liveness signal and drop the placeholder — content is never gated.
+    if (this.statusBudgetExhausted()) {
+      return;
+    }
     this.recentProgressTextAt.set(text, now);
     // Record the floor slot only on an ACTUAL emit (passed both floor and text window).
     this.lastProgressEmittedAt = now;
@@ -669,6 +708,15 @@ export class OutboundQueue implements IOutboundQueue {
    */
   setProgressFloorMs(ms: number): void {
     this.progressFloorMs = Math.max(0, ms);
+  }
+
+  /**
+   * Override the per-turn status-narration cap (message count). Production value
+   * comes from config.operationTracker.maxStatusMessagesPerTurn; this setter
+   * supports per-instance runtime tuning and deterministic tests.
+   */
+  setMaxStatusMessagesPerTurn(n: number): void {
+    this.maxStatusMessagesPerTurn = Math.max(0, Math.floor(n));
   }
 
   private pruneProgressTextDedupe(now: number): void {
@@ -742,6 +790,11 @@ export class OutboundQueue implements IOutboundQueue {
     this.recentProgressTextAt.clear();
     this.turnHasVisibleText = false;
     this.stopTyping(false);
+    // PR-E: crash path — reset per-turn status-cap state so the replacement/next
+    // turn starts with a full budget (same reset as endTurn()).
+    this.turnStatusCount = 0;
+    this.turnTotalCount = 0;
+    this.statusCapNoticeSent = false;
   }
 
   get targetChatJid(): string { return this.chatJid; }
@@ -820,6 +873,38 @@ export class OutboundQueue implements IOutboundQueue {
   endTurn(): void {
     this.flushStreamBuffer();
     this.stopTyping();
+    // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
+    // choke (incl. early-break provider-failure branches that never reach
+    // flush()). Resetting HERE — not in flush(), which the poll loop calls
+    // mid-turn — prevents a prior turn's exhausted budget from silently
+    // silencing the next turn (adversarial E1) and prevents a mid-turn refill
+    // (adversarial E3).
+    this.turnStatusCount = 0;
+    this.turnTotalCount = 0;
+    this.statusCapNoticeSent = false;
+  }
+
+  /**
+   * PR-E status-narration budget gate. Returns true if the caller should SKIP
+   * emitting this status narration (per-turn budget exhausted), false if it may
+   * proceed (consuming one unit of budget). ONLY the two status-narration
+   * sources — flushToolBuffer() and enqueueProgress() — call this; content
+   * paths (enqueueText/enqueueStreamingText/flushStreamBuffer/enqueueResultText)
+   * never do, so content is never gated. Past the cap the liveness signal is
+   * preserved (startTyping) so the user still sees "typing…" without the flood.
+   */
+  private statusBudgetExhausted(): boolean {
+    if (this.turnStatusCount >= this.maxStatusMessagesPerTurn) {
+      this.startTyping(); // keep the liveness signal, drop the narration
+      if (!this.statusCapNoticeSent) {
+        this.statusCapNoticeSent = true;
+        // CONTENT — routed through enqueueText so it is never gated and always lands.
+        this.enqueueText(STATUS_CAP_NOTICE);
+      }
+      return true;
+    }
+    this.turnStatusCount++;
+    return false;
   }
 
   private flushToolBuffer(): void {
@@ -861,6 +946,15 @@ export class OutboundQueue implements IOutboundQueue {
       return;
     }
 
+    // PR-E: cap status narration per turn (the ⚙️ Working on: batches). Past the
+    // per-turn budget, keep typing alive and DROP this batch — content paths are
+    // never gated. Placed after the redirect early-return so an operator status-
+    // log redirect stays uncapped and the user-facing notice never misfires
+    // into the redirect JID.
+    if (this.statusBudgetExhausted()) {
+      return;
+    }
+
     // Typing indicator stays active — the turn is still in progress.
     // WhatsApp clears the composing state on delivery, but the heartbeat
     // will re-assert it within TYPING_REFRESH_MS.
@@ -870,6 +964,14 @@ export class OutboundQueue implements IOutboundQueue {
   private enqueue(chunk: string): void {
     if (this.suppressDuplicateTerminalText(chunk)) {
       return;
+    }
+    // PR-E telemetry: count every message actually enqueued this turn (content
+    // AND status). NEVER gates a send — crossing the high-volume watermark logs
+    // ONCE for PR-G/observability so a pure-content runaway is visible even
+    // though E deliberately never drops content.
+    this.turnTotalCount++;
+    if (this.turnTotalCount === HIGH_VOLUME_TURN_WATERMARK) {
+      log.warn({ chatJid: this.chatJid, count: this.turnTotalCount }, 'high-volume turn');
     }
     this.lastActivity = Date.now();
     this.sendQueue.push(chunk);

@@ -61,6 +61,12 @@ function bench(mode: 'full' | 'minimal' | 'friendly'): Bench {
   // persistent per-chat rate floor (covered in progress-placeholder-rate-floor.test.ts),
   // which would otherwise dominate these sub-180s scenarios.
   queue.setProgressFloorMs(0);
+  // Likewise neutralise the orthogonal PR-E per-turn status-narration cap (covered
+  // in outbound-queue.test.ts › PR-E status-narration cap): it resets only on
+  // endTurn()/abortTurn() — NOT flush() (E3) — so the high-fan-out and
+  // flush()-as-turn-boundary stress scenarios here would otherwise trip it. This
+  // bench measures coalescing, not the cap; lifting the cap keeps that layer isolated.
+  queue.setMaxStatusMessagesPerTurn(Number.MAX_SAFE_INTEGER);
   return {
     queue,
     calls,

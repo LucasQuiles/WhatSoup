@@ -136,6 +136,12 @@ export interface OperationTrackerConfig {
    * uniqueness or turn boundaries. 0 disables the floor. Default 180_000.
    */
   progressPlaceholderRateLimitMs: number;
+  /**
+   * PR-E: hard per-turn cap on STATUS-NARRATION messages (tool-status batches +
+   * progress placeholders). Bounds the dominant chat-flood source without ever
+   * gating the user's content/answer/media. Default 10 (MAX_STATUS_MESSAGES_PER_TURN).
+   */
+  maxStatusMessagesPerTurn: number;
   toolThresholds: Record<string, ToolThreshold>;
 }
 
@@ -920,6 +926,10 @@ export const config = {
     thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 300_000,
     progressPlaceholderRateLimitMs:
       (instance?.operationTracker?.progressPlaceholderRateLimitMs as number | undefined) ?? 180_000,
+    // PR-E status-narration cap default; literal mirrors MAX_STATUS_MESSAGES_PER_TURN
+    // in outbound-queue.ts (kept literal here to avoid a config↔queue import cycle).
+    maxStatusMessagesPerTurn:
+      (instance?.operationTracker?.maxStatusMessagesPerTurn as number | undefined) ?? 10,
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
