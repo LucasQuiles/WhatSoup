@@ -20,6 +20,7 @@ const FAKE_TOKEN = `sk-${'abc123def456ghi789'}`;
 const FAKE_TOKEN_2 = `sk-${'zzz999yyy888'}`;
 const FAKE_EMAIL = ['ops', 'example.test'].join('@');
 const FAKE_JID = `${'12345678901'}@${'s.whatsapp.net'}`;
+const FAKE_GROUP_JID = `${'120363000000000000'}@${'g.us'}`;
 // Device-suffixed (`:N`) JIDs — the dimension the old local regex dropped, so
 // they leaked verbatim before folding onto the SSOT `jidPattern()` (BEAD-048).
 const FAKE_JID_DEVICE = `${'123456789'}:6@${'s.whatsapp.net'}`;
@@ -420,6 +421,27 @@ describe('redactInternalArtifacts — audience scoping', () => {
     // operator path preserved for the internal group
     expect(text).toContain('/home/testuser/.claude/settings.json');
     expect(redactions.map((r) => r.category)).toContain('provider_secret');
+  });
+
+  it('internal audience preserves WhatsApp JIDs used as operational identifiers', () => {
+    const { text, redactions } = redactInternalArtifacts(
+      `FINBOT target ${FAKE_GROUP_JID}; repo at /home/testuser/LAB/WhatSoup`,
+      'internal',
+    );
+    expect(text).toContain(FAKE_GROUP_JID);
+    expect(text).toContain('/home/testuser/LAB/WhatSoup');
+    expect(redactions).toHaveLength(0);
+  });
+
+  it('internal audience still masks auth material and key-file paths', () => {
+    const { text, redactions } = redactInternalArtifacts(
+      'creds at /home/testuser/.config/whatsoup/instances/q/auth/creds.json and key /home/testuser/.ssh/id_ed25519',
+      'internal',
+    );
+    expect(text).not.toContain('/home/testuser/.config/whatsoup/instances/q/auth/creds.json');
+    expect(text).not.toContain('/home/testuser/.ssh/id_ed25519');
+    expect(text).toContain('[sensitive-path]');
+    expect(redactions.map((r) => r.category)).toContain('sensitive_path');
   });
 
   it('ops audience is fully verbatim', () => {
