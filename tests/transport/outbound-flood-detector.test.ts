@@ -116,3 +116,41 @@ describe('OutboundFloodDetector — lid-resolved keying (T1.3, G2/H3)', () => {
     expect(d.isFlooding(PHONE, 4)).toBe(false);
   });
 });
+
+// Edge-triggered trip dedup (T3.1). record() reports a rising edge (`tripped`)
+// only on the false→true crossing, so the caller alerts ONCE per flood — a
+// SUSTAINED flood must not self-flood the alert plane (the alert plane must not
+// share the failure mode it monitors — 07-08 lesson). A fresh burst after the
+// window drains re-arms. The detector owns the dedup so it is unit-testable.
+describe('OutboundFloodDetector — edge-triggered trip dedup (T3.1)', () => {
+  it('reports tripped exactly once while a flood is sustained across many windows', () => {
+    const d = new OutboundFloodDetector({ windowMs: 1_000, threshold: 3 });
+    const dest = 'a@s.whatsapp.net';
+    let trips = 0;
+    // One send every 200ms for 5 windows. In-window count stabilises at ~5
+    // (>= threshold) and never drops below it, so the edge fires once and latches.
+    for (let t = 0; t <= 5_000; t += 200) {
+      if (d.record(dest, t).tripped) trips += 1;
+    }
+    expect(trips).toBe(1);
+    expect(d.isFlooding(dest, 5_000)).toBe(true);
+  });
+
+  it('re-arms after the flood drains below threshold so a fresh burst re-alerts', () => {
+    const d = new OutboundFloodDetector({ windowMs: 1_000, threshold: 3 });
+    const dest = 'a@s.whatsapp.net';
+    let trips = 0;
+    // First burst → one rising edge.
+    for (const t of [0, 1, 2]) if (d.record(dest, t).tripped) trips += 1;
+    expect(trips).toBe(1);
+    // Long silence: the first burst ages out. Second burst → a second edge.
+    for (const t of [10_000, 10_001, 10_002]) if (d.record(dest, t).tripped) trips += 1;
+    expect(trips).toBe(2);
+  });
+
+  it('record() returns the resolved key and in-window count', () => {
+    const d = new OutboundFloodDetector({ windowMs: 1_000, threshold: 3 });
+    const r = d.record('a@s.whatsapp.net', 0);
+    expect(r).toEqual({ flooding: false, tripped: false, key: 'a@s.whatsapp.net', count: 1 });
+  });
+});

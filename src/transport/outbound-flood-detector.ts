@@ -16,6 +16,21 @@ export const OUTBOUND_FLOOD_WINDOW_MS = 300_000; // 5 minutes
 /** Send count within the window that trips the flood flag for a destination. */
 export const OUTBOUND_FLOOD_THRESHOLD = 20;
 
+export interface OutboundFloodRecordResult {
+  /** True when this destination is at/over threshold after this send. */
+  flooding: boolean;
+  /**
+   * Rising edge: this send is the false→true crossing of the flood flag for
+   * this destination. Alert ONLY on a rising edge so a sustained flood raises
+   * exactly one alert. Re-arms once the destination drains below threshold.
+   */
+  tripped: boolean;
+  /** Resolved destination key (RAW — redact at the surfacing boundary). */
+  key: string;
+  /** In-window send count for this destination after recording. */
+  count: number;
+}
+
 export interface OutboundFloodStats {
   /** Rolling window width in ms. */
   windowMs: number;
@@ -53,6 +68,11 @@ export class OutboundFloodDetector {
   private readonly resolveKey: (dest: string) => string;
   /** resolved key → in-window send timestamps (ascending). */
   private readonly sends = new Map<string, number[]>();
+  /**
+   * Keys currently latched as flooding — so the rising-edge dedup fires one
+   * `tripped` per flood. Cleared when a key drains below threshold or ages out.
+   */
+  private readonly alerted = new Set<string>();
 
   constructor(opts: OutboundFloodDetectorOptions = {}) {
     this.windowMs = opts.windowMs ?? OUTBOUND_FLOOD_WINDOW_MS;
@@ -60,16 +80,33 @@ export class OutboundFloodDetector {
     this.resolveKey = opts.resolveKey ?? ((dest) => dest);
   }
 
-  /** Record one outbound send to `dest` at `tsMs` (default: now). */
-  record(dest: string, tsMs: number = Date.now()): void {
+  /**
+   * Record one outbound send to `dest` at `tsMs` (default: now). Returns the
+   * post-record flood state including the rising-edge `tripped` flag the caller
+   * uses to alert exactly once per flood.
+   */
+  record(dest: string, tsMs: number = Date.now()): OutboundFloodRecordResult {
     const key = this.resolveKey(dest);
-    const arr = this.sends.get(key);
+    let arr = this.sends.get(key);
     if (arr) {
       arr.push(tsMs);
       this.prune(key, arr, tsMs);
     } else {
-      this.sends.set(key, [tsMs]);
+      arr = [tsMs];
+      this.sends.set(key, arr);
     }
+    const count = arr.length;
+    const flooding = count >= this.threshold;
+    let tripped = false;
+    if (flooding) {
+      if (!this.alerted.has(key)) {
+        tripped = true; // false→true rising edge
+        this.alerted.add(key);
+      }
+    } else {
+      this.alerted.delete(key); // drained below threshold — re-arm
+    }
+    return { flooding, tripped, key, count };
   }
 
   /** True when `dest`'s in-window send count is at/over the threshold. */
@@ -95,6 +132,7 @@ export class OutboundFloodDetector {
       this.prune(key, arr, nowMs);
       if (arr.length === 0) {
         this.sends.delete(key);
+        this.alerted.delete(key);
         continue;
       }
       destCount += 1;
