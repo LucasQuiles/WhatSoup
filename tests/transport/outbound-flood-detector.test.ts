@@ -4,6 +4,7 @@ import {
   OUTBOUND_FLOOD_WINDOW_MS,
   OUTBOUND_FLOOD_THRESHOLD,
 } from '../../src/transport/outbound-flood-detector.ts';
+import { toConversationKey } from '../../src/core/conversation-key.ts';
 
 // T1.1 — the sliding-window per-destination counter, mirrored on the
 // `recentDisconnects` window in src/core/health.ts (window + count + threshold).
@@ -75,5 +76,43 @@ describe('OutboundFloodDetector — sliding window (T1.1)', () => {
     expect(s.worstKey).toBe('a@s.whatsapp.net'); // raw key; redacted at the boundary
     expect(s.worstCount).toBe(4);
     expect(s.destCount).toBe(2);
+  });
+});
+
+// T1.3 — lid-resolved dest keying (G2/H3). The seam wires in the ingest-parity
+// resolver (`canonicalConversationKey`) so an `@lid` DM and its resolved phone
+// JID fold onto ONE per-dest counter — a mid-stream JID flip can't reset the
+// count and dodge the threshold. Here a fake resolver stands in for
+// canonicalConversationKey (unit-isolated; the real wiring is covered at the seam).
+describe('OutboundFloodDetector — lid-resolved keying (T1.3, G2/H3)', () => {
+  const LID = '81536414179557@lid';
+  const PHONE = '15551234567@s.whatsapp.net';
+  const FOLDED = '15551234567'; // what the lid_mappings resolver yields for both
+  const fold = (dest: string): string => (dest === LID ? FOLDED : toConversationKey(dest));
+
+  it('folds @lid and phone-JID sends onto ONE destination counter', () => {
+    const d = new OutboundFloodDetector({ windowMs: 1_000, threshold: 4, resolveKey: fold });
+    d.record(LID, 0);
+    d.record(LID, 1);
+    d.record(PHONE, 2); // mid-stream flip from @lid to phone-JID addressing
+    d.record(PHONE, 3);
+    // 2 + 2 = 4 >= threshold — the flip did not dodge the trip.
+    expect(d.isFlooding(LID, 4)).toBe(true);
+    expect(d.isFlooding(PHONE, 4)).toBe(true);
+    // Either raw address resolves to the same folded counter (== 4).
+    expect(d.count(PHONE, 4)).toBe(4);
+    expect(d.count(LID, 4)).toBe(4);
+  });
+
+  it('proves the fold is load-bearing: without the resolver the same flip DODGES the threshold', () => {
+    const d = new OutboundFloodDetector({ windowMs: 1_000, threshold: 4 }); // identity keying
+    d.record(LID, 0);
+    d.record(LID, 1);
+    d.record(PHONE, 2);
+    d.record(PHONE, 3);
+    // Split across two raw keys, neither reaches threshold — the dodge the
+    // resolver closes.
+    expect(d.isFlooding(LID, 4)).toBe(false);
+    expect(d.isFlooding(PHONE, 4)).toBe(false);
   });
 });
