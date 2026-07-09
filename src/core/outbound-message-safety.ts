@@ -89,6 +89,7 @@ const SEND_VERIFICATION_PATTERNS: readonly RegExp[] = [
 const ACK_FILLER_PATTERNS: readonly RegExp[] = [
   /^parked per\b.{0,80}\bdirective\b.{0,260}\b(?:no new evidence|no user ask|not reposting|holding until auth)\b/i,
   /^understood\b.{0,100}\b(?:deploy\b.{0,40}\bnoted|noted)\b.{0,260}\b(?:lane parked|won(?:'|’)t repost|pick\b.{0,80}\bback up)\b/i,
+  /^understood\b.{0,80}\bholding\b.{0,260}\b(?:lcp\s+)?lane parked\b.{0,260}\bno further status pings\b/i,
   /^acknowledged\b.{0,140}\b(?:confirmed delivery|landed clean)\b.{0,260}\b(?:lane stays parked|nothing further to do)\b/i,
   /^acknowledged internally\b.{0,100}\bno action taken\b.{0,260}\b(?:directive is explicit|auth changes|user asks|lane (?:stays )?parked)\b/i,
   /^no action(?: taken)?[.!]?$/i,

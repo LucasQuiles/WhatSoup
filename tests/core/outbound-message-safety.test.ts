@@ -335,6 +335,7 @@ describe('classifyAssistantTextEgress', () => {
   it.each([
     "Parked per Lucas's 20:06 directive — LCP lane stays blocked on Intuit/QB Time auth (needs Ana to sign in on the mini's Chrome, or Lucas to OK the Keychain fallback). No new evidence and no user ask, so I'm not reposting the blocker status or touching the leak messages. Holding until auth is available.",
     "Understood — deploy 6b768363 noted. Lane parked, leak messages left in place, and I won't repost the blocker until auth is available or someone asks. I'll pick the LCP lane back up the moment the mini's Chrome has a live Intuit/QB Time session.",
+    "Understood — holding. LCP lane parked on QB Time/TSheets auth; I'll resume the daily CSV exports (2026-05-13..05-31, 2026-06-27..07-07) the moment auth is live. No further status pings until then.",
     'Acknowledged Lucas and confirmed delivery (landed clean). Lane stays parked on Intuit/QB Time auth — nothing further to do until Ana signs into Chrome on the mini or Lucas OKs the Keychain fallback.',
     "Acknowledged internally — no action taken. Operator's 20:34 directive is explicit: LCP lane stays parked on QB Time/TSheets auth (missing ranges 05-13..05-31 and 06-27..07-07), and no bot action until auth changes or a user asks.",
     'No action taken.',
