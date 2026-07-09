@@ -159,6 +159,42 @@ tests/runtimes/agent/outbound-queue.test.ts            → No findings.
 tests/runtimes/agent/progress-coalescing.bench.test.ts → No findings.
 ```
 
+## Call-site verification — E1 fix works end-to-end (not just the unit)
+
+The E1 reset only helps if `endTurn()` is actually invoked on the turn-end paths.
+Verified against `src/runtimes/agent/runtime.ts` (the design claimed it but the unit
+test only proves the reset *given* endTurn fires):
+
+- Both `result`-event handlers call `queue.endTurn()` **unconditionally at the top**,
+  before any early-break branch: per-chat `runtime.ts:4732`, global/shared
+  `runtime.ts:9165`. The in-code comment states it is the choke "so no early-break
+  branch below can leave 'composing' asserted."
+- Every provider-failure early-break the design names (context-overflow, policy-block,
+  usage-limit, auth-required, rate-limit, model-unavailable) is downstream of that
+  endTurn(): the inline branches call `cleanupUsageLimitTurn()`
+  (`runtime.ts:4806-4932`, `9242-9369`), and the registry-dispatch path
+  `dispatchProviderFailureResult` → `handleProviderFailureResult` (`runtime.ts:4766`,
+  `9200` → `7661`) both dispatch *after* the top-of-handler endTurn(). So
+  `cleanupUsageLimitTurn`'s `queue.flush()` (`runtime.ts:9638`) always runs with the
+  counters already reset.
+- The only turn-end `flush()` sites without a preceding endTurn are non-leaking:
+  `runtime.ts:3644`/`4333` are the mid-turn poll-loop flushes the design cites for E3
+  (turn still open — correctly NOT a reset point); crash paths reset via `abortTurn()`
+  (`runtime.ts:8295/8420/8520/8554/8610`) with `handleCrashNotify` (`8772`) only
+  delivering the notice; the dying-session buffer flush (`3530`) is followed by a
+  respawn that builds a replacement queue (QR-069 → fresh counter). Normal-path flushes
+  (`5121`, `9543`) follow endTurn.
+
+Conclusion: `endTurn()`/`abortTurn()` covers every genuine turn-end that reuses the
+queue, so `turnStatusCount` cannot leak across turns. No design↔code mismatch found.
+
+## File-size ratchet (CLAUDE.md local-green/CI-red trap)
+
+The ~150-line test-file growth stays within the fitness budget:
+```
+tests/scripts/fitness-file-size-warning-budget.test.ts → 3 passed (3)
+```
+
 ## Design ↔ code notes
 
 - DESIGN-E cites `flushToolBuffer()` at l.825, `enqueueProgress()` at l.626,
