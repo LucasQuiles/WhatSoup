@@ -195,6 +195,26 @@ The ~150-line test-file growth stays within the fitness budget:
 tests/scripts/fitness-file-size-warning-budget.test.ts → 3 passed (3)
 ```
 
+## Adversarial sign-off corrections (R1 / R2 / R3)
+
+- **R1 [folded in]** — `turnStatusCount` advances ONLY on an actual emit. Already true
+  in code: in `enqueueProgress` the increment lives inside `statusBudgetExhausted()`
+  (outbound-queue.ts:695/906), which is called AFTER the floor guard (:671) and the
+  text-dedupe guard (:684), adjacent to `lastProgressEmittedAt = now` (:700). Added the
+  requested regression guard: with the rate floor actively suppressing, `turnStatusCount`
+  does not advance (a floored placeholder takes no budget) — test "does not advance the
+  status count when the rate floor suppresses a placeholder (R1)".
+- **R3 [folded in]** — `STATUS_CAP_NOTICE` never self-counts. It routes through
+  `enqueueText` (content), which does not touch `turnStatusCount`. Added the assertion:
+  drive exactly cap+1 status → exactly `cap` status messages + one notice — test "does
+  not count STATUS_CAP_NOTICE as status narration (R3)".
+- **R2 [declined, optional]** — the cap gate is deliberately placed AFTER the
+  `toolUpdateRedirectJid` branch (outbound-queue.ts, `flushToolBuffer`), so operator
+  status-log redirects stay uncapped. Hoisting it above the redirect would (a) cap
+  operator observability and (b) misfire the user-facing notice (sent via `enqueueText`)
+  into the operator JID. Matches DESIGN-E's literal "before `enqueueText(statusText)`"
+  (the redirect returns before that line). Kept as-is.
+
 ## Design ↔ code notes
 
 - DESIGN-E cites `flushToolBuffer()` at l.825, `enqueueProgress()` at l.626,
