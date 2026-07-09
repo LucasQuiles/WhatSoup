@@ -15,6 +15,11 @@ export type ErrorCode =
   | 'SEND_FAILED'
   | 'SEND_TIMEOUT'
   | 'SEND_UNCERTAIN'
+  // PR-F: the socket-seam outbound governor shed a text send (past the
+  // per-conversation ceiling or the bounded pacing wait). A deliberate
+  // rate/safety cap — NOT retryable (mirrors RATE_LIMITED), so it is not added
+  // to the RETRYABLE set below.
+  | 'OUTBOUND_GOVERNOR_SHED'
   | 'ENRICHMENT_ERROR'
   | 'INTERNAL_ERROR'
   | 'LOCK_CONTENTION';

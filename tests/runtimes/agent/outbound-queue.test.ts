@@ -11,6 +11,8 @@ import {
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
   MAX_CHUNKS,
+  MAX_STATUS_MESSAGES_PER_TURN,
+  STATUS_CAP_NOTICE,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -2684,6 +2686,198 @@ describe('OutboundQueue', () => {
 
       // Drain the streamTimer so the leak guard passes
       await queue.flush();
+    });
+  });
+
+  // ─── PR-E: per-turn STATUS-narration cap ──────────────────────────────────
+  // Caps status narration (tool-status batches + progress placeholders) per
+  // turn; NEVER gates content; resets on the real turn-end choke (endTurn/
+  // abortTurn), not on flush() (called mid-turn by polls).
+
+  describe('PR-E status-narration cap', () => {
+    // Reproduces the 07-09 flood: a single turn emitting dozens of tool-status
+    // batches. With the cap, at most MAX_STATUS_MESSAGES_PER_TURN status
+    // messages reach the chat.
+    it('caps status narration at MAX_STATUS_MESSAGES_PER_TURN per turn', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 30; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
+    });
+
+    // When the cap trips, the user gets exactly ONE friendly notice (content,
+    // so it always lands) and the typing indicator keeps signalling liveness.
+    it('sends exactly one STATUS_CAP_NOTICE and keeps the typing indicator alive when the cap trips', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 30; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const notices = calls.filter((c) => c === STATUS_CAP_NOTICE);
+      expect(notices).toHaveLength(1);
+      // Liveness signal preserved across the suppressed window.
+      expect(typingCalls).toContain(true);
+    });
+
+    // The deliverable gate: E must NEVER touch content. Far more than the cap of
+    // content messages, plus the result, are ALL delivered — the cap participates
+    // only in the two status-narration paths. If this ever fails, someone added
+    // content suppression to E (the adversarial E1/E2 inversion) — do not "fix"
+    // it by gating content.
+    it('never suppresses content, however many messages a turn produces', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      for (let i = 0; i < 60; i++) {
+        queue.enqueueText(`answer part ${i}`);
+        await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+      }
+      queue.enqueueResultText('FINAL REPORT');
+      await queue.flush();
+
+      expect(calls.filter((c) => c.startsWith('answer part')).length).toBe(60);
+      expect(calls).toContain('FINAL REPORT');
+    });
+
+    // E1 [HIGH] leak regression: endTurn() is the unconditional turn-end choke,
+    // called on early-break provider-failure branches that never reach flush().
+    // The queue survives across turns, so if the status budget is not reset here
+    // a prior turn's exhausted count silently silences the NEXT innocent turn.
+    it('resets the status counter on endTurn so a prior turn cannot silence the next (E1)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      // Turn 1 blows past the cap.
+      for (let i = 0; i < 15; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `t1-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.endTurn(); // turn 1 ends via the early-break choke, NOT flush()
+      const afterT1 = calls.length;
+
+      // Turn 2: a single status update must NOT be suppressed by turn-1's count.
+      queue.enqueueToolUpdate({ category: 'running', detail: 't2-0' });
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      await queue.flush();
+
+      expect(calls.length).toBeGreaterThan(afterT1);
+    });
+
+    // E3 [MED] guard: flush() is called mid-turn by the poll loop
+    // (runtime.ts:3644/4333). Resetting the budget there would refill it
+    // mid-turn and defeat the cap. The reset must live ONLY on the real
+    // turn-end choke (endTurn/abortTurn) — a mid-turn flush leaves the count.
+    it('does not refill the status budget on a mid-turn flush (E3)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 8; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `a-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush(); // mid-turn poll flush — must NOT reset the counter
+
+      for (let i = 0; i < 8; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `b-${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      queue.endTurn();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
+    });
+
+    // Telemetry (feeds PR-G): a high-volume turn is logged ONCE past the
+    // watermark for observability — it NEVER gates or suppresses a send.
+    it('logs a high-volume turn once past the watermark without suppressing content', async () => {
+      mockLog.warn.mockClear();
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      for (let i = 0; i < 45; i++) {
+        queue.enqueueText(`content ${i}`);
+        await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+      }
+      await queue.flush();
+
+      // Every content message delivered — telemetry never suppresses.
+      expect(calls.filter((c) => c.startsWith('content ')).length).toBe(45);
+
+      // The watermark fired exactly once, with chatJid + count.
+      const hv = mockLog.warn.mock.calls.filter((c) => c[1] === 'high-volume turn');
+      expect(hv).toHaveLength(1);
+      expect(hv[0][0]).toMatchObject({ chatJid: CHAT_JID, count: 40 });
+    });
+
+    // R1 [correctness]: the status budget must advance only on an ACTUAL emit. A
+    // placeholder suppressed by the per-chat rate floor returns BEFORE the cap
+    // gate, so it must NOT consume budget — otherwise floored narration trips the
+    // cap early and the user loses ⚙️ narration sooner than intended.
+    it('does not advance the status count when the rate floor suppresses a placeholder (R1)', async () => {
+      const { messenger } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+      // Keep the per-chat rate floor ACTIVE (default > 0) so all-but-the-first
+      // placeholder in the window is floor-suppressed.
+      const state = queue as unknown as { turnStatusCount: number };
+
+      // First placeholder passes the floor and emits → counts once.
+      queue.enqueueProgressUpdate(
+        { type: 'operation_slow', toolId: 't0', toolName: 'Read', category: 'reading', elapsedMs: 9_000, expectedMs: 3_000 },
+        'Bot',
+      );
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(state.turnStatusCount).toBe(1);
+
+      // 8 more within the floor window (distinct elapsed → distinct text, so the
+      // floor — not the text window — is what suppresses them). None may count.
+      for (let i = 1; i <= 8; i++) {
+        queue.enqueueProgressUpdate(
+          { type: 'operation_slow', toolId: `t${i}`, toolName: 'Read', category: 'reading', elapsedMs: (i + 1) * 9_000, expectedMs: 3_000 },
+          'Bot',
+        );
+      }
+      await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+      expect(state.turnStatusCount).toBe(1); // floor-suppressed placeholders did not advance the count
+
+      queue.abortTurn();
+    });
+
+    // R3: STATUS_CAP_NOTICE routes through enqueueText (content), so it must NOT
+    // count as a status message. Driving exactly cap+1 status yields exactly `cap`
+    // status messages (the notice occupies no status slot) plus one notice.
+    it('does not count STATUS_CAP_NOTICE as status narration (R3)', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < MAX_STATUS_MESSAGES_PER_TURN + 1; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
+      const notices = calls.filter((c) => c === STATUS_CAP_NOTICE);
+      // Exactly `cap` status messages — the notice takes no status slot…
+      expect(status).toHaveLength(MAX_STATUS_MESSAGES_PER_TURN);
+      // …and is sent exactly once (it does not self-count or re-trip the cap).
+      expect(notices).toHaveLength(1);
     });
   });
 });

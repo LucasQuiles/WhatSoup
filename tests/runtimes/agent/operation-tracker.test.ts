@@ -25,6 +25,7 @@ const DEFAULT_CONFIG: OperationTrackerConfig = {
   thinkingLongMs: 45_000,
   thinkingStallMs: 300_000,
   progressPlaceholderRateLimitMs: 180_000,
+  maxStatusMessagesPerTurn: Number.MAX_SAFE_INTEGER,
   toolThresholds: {
     agent:   { expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3 },
     bash:    { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },

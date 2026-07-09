@@ -49,6 +49,7 @@ import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-par
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
+import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
@@ -590,6 +591,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private identityStore: IdentityStore | null = null;
   private identityMode: GuardMode = 'log-only';
 
+  /**
+   * PR-F socket-seam outbound governor. Created ONCE here (SS2) and reused
+   * across every reconnect via wrapWithOutboundGovernor at connect() — a
+   * reconnect must NOT reset the rate budget (the 07-08 flood condition).
+   * `null` when disabled by config (pure passthrough, no wrap installed).
+   */
+  private readonly outboundGovernor: OutboundGovernor | null;
+
   setIdentityStore(store: IdentityStore, mode: GuardMode): void {
     this.identityStore = store;
     this.identityMode = mode;
@@ -625,9 +634,50 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   constructor() {
     super();
     // authDir is sourced from config — no constructor parameters needed
+    // Production config always defines this block; the `?.` guard means a
+    // partial/legacy config (e.g. a test mock without it) cleanly disables the
+    // governor (pure passthrough, no wrap) rather than throwing at construction.
+    const govCfg = config.outboundGovernor;
+    this.outboundGovernor = govCfg?.enabled
+      ? new OutboundGovernor({
+          windowMs: govCfg.windowMs,
+          maxPerWindow: govCfg.maxPerWindow,
+          maxWaitMs: govCfg.maxWaitMs,
+          hardCeiling: govCfg.hardCeiling,
+          hardCeilingWindowMs: govCfg.hardCeilingWindowMs,
+          globalMaxPerWindow: govCfg.globalMaxPerWindow,
+          globalWindowMs: govCfg.globalWindowMs,
+        })
+      : null;
     this.on('exhausted', () => {
       void this.handleExhausted();
     });
+  }
+
+  /**
+   * Resolve a raw send JID to the governor's canonical destination key (H3/F3),
+   * the SAME identity durability and PR-G key on, so all three correlate:
+   *  - a `@lid` JID folds to its mapped phone digits (durability stores the
+   *    resolved-phone key; `toConversationKey` does NOT map `@lid`→phone, so the
+   *    fold is done explicitly first) — a human reachable via both `@lid` and
+   *    phone-JID cannot split a flood across two buckets, and an
+   *    `updateDeliveryJid` mid-stream JID↔LID flip stays in one bucket;
+   *  - everything else keys on `toConversationKey`, so a group folds to its
+   *    `<local>_at_g.us` conversation key and a 1:1 phone-JID to its bare digits
+   *    (an unmapped `@lid` falls through to its lid-digit key).
+   * Never throws — a resolution failure falls back to the raw JID rather than
+   * blocking a send.
+   */
+  private resolveOutboundDest(jid: string): string {
+    try {
+      if (isLidJid(jid)) {
+        const phone = this.contactsDir.getLidMappings()?.lidToPhone.get(bareNumber(jid));
+        if (phone) return phone;
+      }
+      return toConversationKey(jid);
+    } catch {
+      return jid;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -710,7 +760,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       });
 
-      this.sock = sock;
+      // PR-F: install the outbound governor at the socket seam by IN-PLACE
+      // override of sock.sendMessage (SS1 — NOT a Proxy: the guards below and in
+      // registerEventHandlers compare `this.sock !== sock`, so the wrapped object
+      // MUST stay `=== sock` or every inbound event/keepalive would bail and the
+      // bot goes deaf). wrapWithOutboundGovernor mutates + returns the same
+      // object; re-running here on every reconnect re-installs on the new socket
+      // while the governor STATE persists (created once in the constructor, SS2).
+      this.sock = this.outboundGovernor
+        ? wrapWithOutboundGovernor(sock, {
+            governor: this.outboundGovernor,
+            resolveDest: (jid) => this.resolveOutboundDest(jid),
+            log: this.log,
+          })
+        : sock;
       this.recordCredentialLifecycle('socket_created', { baileysVersion: this.latestBaileysVersion });
       this.registerEventHandlers(sock, async () => {
         await saveCredsAtomically();
