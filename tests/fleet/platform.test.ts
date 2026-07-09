@@ -114,6 +114,41 @@ describe('platform', () => {
       }
     });
   });
+
+  describe('buildPlist native-keychain credential default', () => {
+    // The generated bot plist MUST NOT set CLAUDE_CONFIG_DIR. Its presence switches
+    // claude-cli from native login-keychain reads to file-store reads
+    // ($DIR/.credentials.json) — a mode that (a) needs a file fresh hosts lack and
+    // (b) hit an unresolved ~/.claude token-rejection on ar-bot (2026-07-05) and a
+    // strip clobber on rb-bot (2026-06-24). Native-keychain is the fleet standard
+    // (mini1/3/4/8/27). This locks the generator default so a future edit cannot
+    // silently reintroduce the file-store pin (reversing runbook A2's 07-02 direction).
+    it('does NOT emit a CLAUDE_CONFIG_DIR launchd key (native-keychain default)', () => {
+      const plist = buildPlist('any-instance');
+      // Key-form assertion: the rendered plist interpolates $PATH/$WHATSOUP_NODE,
+      // so a whole-plist substring scan is environment-dependent (a PATH entry
+      // containing the literal string false-reds the suite — review finding 7).
+      expect(plist).not.toContain('<key>CLAUDE_CONFIG_DIR</key>');
+    });
+
+    it('stays green when the runtime PATH itself contains the literal string (env-poison regression)', () => {
+      const origPath = process.env.PATH;
+      process.env.PATH = `/opt/backups/CLAUDE_CONFIG_DIR-migration/bin:${origPath}`;
+      try {
+        const plist = buildPlist('any-instance');
+        expect(plist).not.toContain('<key>CLAUDE_CONFIG_DIR</key>');
+      } finally {
+        process.env.PATH = origPath;
+      }
+    });
+
+    it('DOES emit the expected launchd env keys (keeps the assertion non-vacuous)', () => {
+      const plist = buildPlist('any-instance');
+      expect(plist).toContain('<key>PATH</key>');
+      expect(plist).toContain('<key>HOME</key>');
+      expect(plist).toContain('<key>TMPDIR</key>');
+    });
+  });
 });
 
 describe('systemdUnitName', () => {
