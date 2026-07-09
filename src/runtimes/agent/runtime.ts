@@ -49,6 +49,12 @@ import {
 } from '../../core/reply-guarantee.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import {
+  requiredMcpServerNames,
+  resolveInstanceMcpServers,
+  type InstanceMcpServerSpec,
+  type ResolvedMcpServerConfig,
+} from '../../core/instance-mcp-servers.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -421,6 +427,13 @@ export interface AgentRuntimeOptions {
   pluginDirs?: string[];
   /** Per-instance plugin enablement. Written to project settings.json to override global. */
   enabledPlugins?: Record<string, boolean>;
+  /**
+   * Instance-declared MCP servers merged into every generated MCP config
+   * (global, per-chat strict, and sandbox workspace). Resolved ONCE at
+   * start() — a keyring miss fails the boot loudly instead of degrading any
+   * session to a partial tool surface.
+   */
+  additionalMcpServers?: InstanceMcpServerSpec[];
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
   allowM365Mutations?: boolean;
   /** Automatically run a silent /compact after this many input tokens since the last compact. */
@@ -766,6 +779,9 @@ export class AgentRuntime implements Runtime {
   private nlRoutingEnabled: boolean = config.nlRouting === true;
   private readonly serviceRestarter: ServiceRestarter | undefined;
   private readonly pluginDirs: string[];
+  private readonly additionalMcpServerSpecs: InstanceMcpServerSpec[];
+  private resolvedAdditionalMcpServers: ResolvedMcpServerConfig[] = [];
+  private requiredMcpNames: readonly string[] = ['whatsoup'];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly autoCompactInputTokens: number | undefined;
@@ -1847,6 +1863,7 @@ export class AgentRuntime implements Runtime {
       (workspaceKey) => this.chatSessions.get(workspaceKey)?.getStatus().active === true,
     );
     this.pluginDirs = options?.pluginDirs ?? [];
+    this.additionalMcpServerSpecs = options?.additionalMcpServers ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
     this.autoCompactInputTokens =
@@ -2137,6 +2154,14 @@ export class AgentRuntime implements Runtime {
     // injection itself is flag-gated (WHATSOUP_HANDOFF_CONTEXT); creating the
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
+    // Resolve instance-declared MCP servers ONCE, before any config write or
+    // session spawn path can run. A keyring miss or path escape throws here —
+    // the instance refuses to boot rather than running with a partial surface.
+    this.resolvedAdditionalMcpServers = resolveInstanceMcpServers(this.additionalMcpServerSpecs, {
+      instanceName: this.instanceName,
+      lookup: (service) => lookupCredential(service),
+    });
+    this.requiredMcpNames = requiredMcpServerNames(this.additionalMcpServerSpecs);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
     if (config.nlRouting) {
@@ -2266,6 +2291,8 @@ export class AgentRuntime implements Runtime {
             socketPath,
             mcpServerScript,
             providerConfig,
+            this.resolvedAdditionalMcpServers,
+            this.requiredMcpNames,
           );
           if (written) {
             writtenTargets.add(written);
@@ -5771,7 +5798,14 @@ export class AgentRuntime implements Runtime {
     mkdirSync(join(this.cwd ?? homedir(), '.claude'), { recursive: true, mode: 0o700 });
     const cfgPath = socketPath.replace(/\.sock$/, '.mcp.json');
     const proxyScriptPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
-    writeMcpConfigToPath('claude-cli', cfgPath, socketPath, proxyScriptPath);
+    writeMcpConfigToPath(
+      'claude-cli',
+      cfgPath,
+      socketPath,
+      proxyScriptPath,
+      this.resolvedAdditionalMcpServers,
+      this.requiredMcpNames,
+    );
     const socketServer = new WhatSoupSocketServer(
       socketPath,
       this.registry,
@@ -8357,6 +8391,8 @@ export class AgentRuntime implements Runtime {
           mcpServerPath,
           sendMediaServerPath,
           chatScopedToolNames,
+          additionalMcpServers: this.resolvedAdditionalMcpServers,
+          requiredMcpServerNames: this.requiredMcpNames,
         });
 
         // Start chat-scoped WhatSoup socket server + media bridge for this workspace if not already running

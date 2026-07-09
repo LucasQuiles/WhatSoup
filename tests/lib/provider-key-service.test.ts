@@ -12,6 +12,7 @@ describe('provider key service mapping', () => {
       pinecone: 'PINECONE_API_KEY',
       'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
       whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
+      'ms365-hub': 'MS365_HUB_API_KEY',
     });
   });
 
@@ -42,6 +43,7 @@ describe('provider key service mapping', () => {
       elevenlabs: 'ELEVENLABS_API_KEY',
       'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
       whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
+      'ms365-hub': 'MS365_HUB_API_KEY',
     });
   });
 

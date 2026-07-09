@@ -85,6 +85,10 @@ export interface ProvisionOptions {
   pollLintHookPath?: string;     // absolute path to poll-interaction-lint.mjs (optional diagnostics hook)
   postToolUseLogHookPath?: string; // absolute path to post-tool-use-log hook (optional failure alert hook)
   chatScopedToolNames?: string[];  // chat-scoped tool names from registry (used to auto-generate allowedMcpTools)
+  /** Instance-declared MCP servers (already resolved), appended after send-media. NOT auto-mirrored into allowedMcpTools — operators enumerate sandbox.allowedMcpTools themselves. */
+  additionalMcpServers?: AdditionalMcpServerConfig[];
+  /** Names asserted present in the written workspace MCP config (fail-closed). */
+  requiredMcpServerNames?: readonly string[];
 }
 
 /**
@@ -108,6 +112,8 @@ function writeWorkspaceMcpConfig(
   mediaBridgeSocketPath: string,
   sendMediaServerPath?: string,
   providerConfig?: OpencodeProviderConfig,
+  instanceServers: AdditionalMcpServerConfig[] = [],
+  requiredMcpServerNames: readonly string[] = [],
 ): void {
   const additionalServers: AdditionalMcpServerConfig[] = [];
   if (sendMediaServerPath) {
@@ -117,7 +123,19 @@ function writeWorkspaceMcpConfig(
       env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
     });
   }
-  writeProviderMcpConfig(provider, workspacePath, socketPath, mcpServerPath, providerConfig, additionalServers);
+  additionalServers.push(...instanceServers);
+  const required = new Set<string>(requiredMcpServerNames);
+  required.add('whatsoup');
+  if (sendMediaServerPath) required.add('send-media');
+  writeProviderMcpConfig(
+    provider,
+    workspacePath,
+    socketPath,
+    mcpServerPath,
+    providerConfig,
+    additionalServers,
+    [...required],
+  );
 }
 
 /**
@@ -341,7 +359,17 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
 
     // 4. Write provider-specific MCP config — whatsoup-proxy + optional send-media entry
     const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
-    writeWorkspaceMcpConfig(provider, workspacePath, socketPath, mcpServerPath, mediaBridgeSocketPath, sendMediaServerPath, providerConfig);
+    writeWorkspaceMcpConfig(
+      provider,
+      workspacePath,
+      socketPath,
+      mcpServerPath,
+      mediaBridgeSocketPath,
+      sendMediaServerPath,
+      providerConfig,
+      opts.additionalMcpServers,
+      opts.requiredMcpServerNames,
+    );
 
     // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
     const symlinkPath = join(workspacePath, 'CLAUDE.md');

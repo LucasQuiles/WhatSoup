@@ -488,6 +488,9 @@ export async function handleConfigUpdate(
       if (Array.isArray(mergedAo?.pluginDirs)) {
         if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
       }
+      if (Array.isArray(mergedAo?.additionalMcpServers)) {
+        if (!validateAdditionalMcpServerPaths(mergedAo!.additionalMcpServers as unknown[], res)) haltConfigUpdateAfterResponse();
+      }
       if (patch.claudeMd && merged.type === 'agent') {
         const ao = merged.agentOptions as Record<string, unknown> | undefined;
         if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
@@ -764,6 +767,32 @@ function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
       return false;
     }
     if (resolveHomeConfinedPath(dir, res, 'pluginDirs entries must be within the home directory') === null) return false;
+  }
+  return true;
+}
+
+/**
+ * Home-confine the launch paths of agentOptions.additionalMcpServers entries
+ * (fs-aware counterpart of the shared validator's pure string checks — the
+ * same route/validator split as pluginDirs). Shape violations are rejected
+ * earlier by the shared validator; this guards only the paths a CREATE/PATCH
+ * could point outside the home directory.
+ */
+function validateAdditionalMcpServerPaths(entries: unknown[], res: ServerResponse): boolean {
+  const MSG = 'additionalMcpServers launch paths must be within the home directory';
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const server = entry as Record<string, unknown>;
+    const command = server.command;
+    if (typeof command === 'string' && command !== 'node') {
+      if (resolveHomeConfinedPath(command, res, MSG) === null) return false;
+    }
+    if (command === 'node' && Array.isArray(server.args) && typeof server.args[0] === 'string') {
+      if (resolveHomeConfinedPath(server.args[0], res, MSG) === null) return false;
+    }
+    if (typeof server.proxyScriptPath === 'string') {
+      if (resolveHomeConfinedPath(server.proxyScriptPath, res, MSG) === null) return false;
+    }
   }
   return true;
 }
@@ -1049,6 +1078,10 @@ export async function handleCreateLine(
     // Confine pluginDirs to user home directory
     if (Array.isArray(ao.pluginDirs)) {
       if (!validatePluginDirs(ao.pluginDirs as unknown[], res)) return;
+    }
+    // Confine declared MCP server launch paths likewise
+    if (Array.isArray(ao.additionalMcpServers)) {
+      if (!validateAdditionalMcpServerPaths(ao.additionalMcpServers as unknown[], res)) return;
     }
   }
 

@@ -41,7 +41,20 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   elevenlabs: 'ELEVENLABS_API_KEY',
   'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
   whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
+  'ms365-hub': 'MS365_HUB_API_KEY',
 };
+
+/**
+ * Keyring services an instance config may hand to a declared MCP server via
+ * agentOptions.additionalMcpServers[].envFromKeyring. DELIBERATELY DISJOINT
+ * from PROVIDER_API_KEY_SERVICES: inference keys must never flow into an
+ * operator-declared local process, and non-provider secrets must never be
+ * namable as a BYOK endpoint bearer token — two lists, two threat models.
+ * Growing this set is a code change + review, same as the precedent below.
+ */
+export const MCP_ENV_KEY_SERVICES: ReadonlySet<string> = new Set([
+  'ms365-hub',
+]);
 
 /**
  * The inference-provider subset of SERVICE_ENV_MAP that may legitimately

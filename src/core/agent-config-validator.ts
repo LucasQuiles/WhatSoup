@@ -17,7 +17,14 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
+import { MCP_ENV_KEY_SERVICES, PROVIDER_API_KEY_SERVICES } from '../lib/provider-key-service.ts';
+import {
+  FORBIDDEN_MCP_ENV_KEYS,
+  MAX_ADDITIONAL_MCP_SERVERS,
+  MCP_ENV_VAR_RE,
+  MCP_SERVER_NAME_RE,
+  RESERVED_MCP_SERVER_NAMES,
+} from './instance-mcp-servers.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
@@ -548,6 +555,146 @@ function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationE
   );
 }
 
+/**
+ * agentOptions.additionalMcpServers: instance-declared MCP servers merged into
+ * every generated (strict) MCP config. Pure string/shape checks only — fs-aware
+ * home-confinement is route-side (ops.ts), and keyring resolution happens at
+ * instance startup (src/core/instance-mcp-servers.ts). envFromKeyring services
+ * are allowlisted against MCP_ENV_KEY_SERVICES with the same rationale as
+ * PROVIDER_API_KEY_SERVICES: a config must not be able to name an arbitrary
+ * keyring secret.
+ */
+function validateAdditionalMcpServers(opts: Record<string, unknown>): ValidationError | null {
+  const FIELD = 'agentOptions.additionalMcpServers';
+  const raw = opts['additionalMcpServers'];
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) {
+    return err(FIELD, `${FIELD} must be an array when provided`);
+  }
+  if (raw.length > MAX_ADDITIONAL_MCP_SERVERS) {
+    return err(FIELD, `${FIELD} allows at most ${MAX_ADDITIONAL_MCP_SERVERS} entries`);
+  }
+  const providerConfig = opts['providerConfig'];
+  if (
+    raw.length > 0 &&
+    providerConfig &&
+    typeof providerConfig === 'object' &&
+    !Array.isArray(providerConfig) &&
+    ((providerConfig as Record<string, unknown>)['mcpConfig'] !== undefined ||
+      (providerConfig as Record<string, unknown>)['strictMcpConfig'] !== undefined)
+  ) {
+    return err(
+      FIELD,
+      `${FIELD} supersedes hand-built providerConfig.mcpConfig/strictMcpConfig — remove the override (per-chat strictness is code-owned)`,
+    );
+  }
+  const seenNames = new Set<string>();
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return err(FIELD, `${FIELD} entries must be objects`);
+    }
+    const server = entry as Record<string, unknown>;
+    const name = server['name'];
+    if (typeof name !== 'string' || !MCP_SERVER_NAME_RE.test(name)) {
+      return err(FIELD, `${FIELD} entry name must match ${String(MCP_SERVER_NAME_RE)}`);
+    }
+    const lowered = name.toLowerCase();
+    if (RESERVED_MCP_SERVER_NAMES.has(lowered)) {
+      return err(FIELD, `${FIELD}: '${name}' is a reserved platform server name`);
+    }
+    if (seenNames.has(lowered)) {
+      return err(FIELD, `${FIELD}: duplicate server name '${name}' (case-insensitive)`);
+    }
+    seenNames.add(lowered);
+
+    const command = server['command'];
+    const proxy = server['proxyScriptPath'];
+    const hasCommand = command !== undefined;
+    const hasProxy = proxy !== undefined;
+    if (hasCommand === hasProxy) {
+      return err(FIELD, `${FIELD}['${name}']: exactly one of command or proxyScriptPath must be set`);
+    }
+    if (hasCommand) {
+      if (typeof command !== 'string' || command.length === 0) {
+        return err(FIELD, `${FIELD}['${name}'].command must be a non-empty string`);
+      }
+      if (command !== 'node' && !command.startsWith('/') && !command.startsWith('~/')) {
+        return err(FIELD, `${FIELD}['${name}'].command must be 'node', absolute, or ~/-relative`);
+      }
+      const args = server['args'];
+      if (args !== undefined && (!Array.isArray(args) || !args.every((a) => typeof a === 'string'))) {
+        return err(FIELD, `${FIELD}['${name}'].args must be an array of strings`);
+      }
+      if (command === 'node') {
+        const script = Array.isArray(args) ? (args as string[])[0] : undefined;
+        if (typeof script !== 'string' || script.length === 0 || script.startsWith('-')) {
+          return err(FIELD, `${FIELD}['${name}']: command 'node' requires args[0] to be the script path (flags are not allowed first)`);
+        }
+        if (!/\.(js|mjs|cjs)$/.test(script)) {
+          return err(FIELD, `${FIELD}['${name}']: node-lane args[0] must end in .js, .mjs, or .cjs`);
+        }
+      }
+    } else {
+      if (typeof proxy !== 'string' || (!proxy.startsWith('/') && !proxy.startsWith('~/'))) {
+        return err(FIELD, `${FIELD}['${name}'].proxyScriptPath must be an absolute or ~/-relative path`);
+      }
+      if (!/\.(ts|js|mjs)$/.test(proxy)) {
+        return err(FIELD, `${FIELD}['${name}'].proxyScriptPath must end in .ts, .js, or .mjs`);
+      }
+    }
+
+    const envErr = validateMcpEnvBlock(FIELD, name, server['env'], 'env', undefined);
+    if (envErr) return envErr;
+    const plainKeys =
+      typeof server['env'] === 'object' && server['env'] !== null && !Array.isArray(server['env'])
+        ? new Set(Object.keys(server['env'] as Record<string, unknown>))
+        : new Set<string>();
+    const keyringErr = validateMcpEnvBlock(FIELD, name, server['envFromKeyring'], 'envFromKeyring', plainKeys);
+    if (keyringErr) return keyringErr;
+
+    if (server['required'] !== undefined && typeof server['required'] !== 'boolean') {
+      return err(FIELD, `${FIELD}['${name}'].required must be a boolean when provided`);
+    }
+  }
+  return null;
+}
+
+function validateMcpEnvBlock(
+  field: string,
+  serverName: string,
+  block: unknown,
+  label: 'env' | 'envFromKeyring',
+  collideWith: Set<string> | undefined,
+): ValidationError | null {
+  if (block === undefined) return null;
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) {
+    return err(field, `${field}['${serverName}'].${label} must be an object when provided`);
+  }
+  for (const [key, value] of Object.entries(block as Record<string, unknown>)) {
+    if (!MCP_ENV_VAR_RE.test(key)) {
+      return err(field, `${field}['${serverName}'].${label} key '${key}' must be SCREAMING_SNAKE_CASE`);
+    }
+    if (FORBIDDEN_MCP_ENV_KEYS.has(key)) {
+      return err(field, `${field}['${serverName}'].${label} key '${key}' is forbidden (loader/search-path hijack vector)`);
+    }
+    if (typeof value !== 'string') {
+      return err(field, `${field}['${serverName}'].${label}.${key} must be a string`);
+    }
+    if (label === 'envFromKeyring') {
+      if (collideWith?.has(key)) {
+        return err(field, `${field}['${serverName}']: env key '${key}' is declared in both env and envFromKeyring`);
+      }
+      if (!MCP_ENV_KEY_SERVICES.has(value)) {
+        return err(
+          field,
+          `${field}['${serverName}'].envFromKeyring.${key}: '${value}' is not an allowed MCP env key service (allowed: ${[...MCP_ENV_KEY_SERVICES].join(', ')})`,
+        );
+      }
+    }
+  }
+  return null;
+}
+
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -595,6 +742,9 @@ function validateAgentOptions(
       return err('agentOptions.pluginDirs', 'agentOptions.pluginDirs must be an array of strings');
     }
   }
+
+  const mcpServersErr = validateAdditionalMcpServers(opts);
+  if (mcpServersErr) return mcpServersErr;
 
   // sandboxPerChat requires sessionScope 'per_chat'.
   if (opts['sandboxPerChat'] === true && opts['sessionScope'] !== 'per_chat') {

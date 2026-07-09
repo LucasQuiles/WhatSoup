@@ -1071,6 +1071,53 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 
 **Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
 
+#### `agentOptions.additionalMcpServers`
+
+Instance-declared MCP servers, merged into **every** generated MCP config: the
+global `.mcp.json`, the strict per-chat actor config (QR-247), and sandbox
+workspace configs. This is the only sanctioned way an instance requires an MCP
+server beyond the platform's own `whatsoup` (and sandbox `send-media`):
+per-chat sessions run under `--strict-mcp-config`, which suppresses ALL
+plugin-provided MCP servers — `pluginDirs`/`enabledPlugins` deliver skills,
+commands, and hooks, but never MCP tools, to per-chat sessions.
+
+```json
+"additionalMcpServers": [
+  {
+    "name": "microsoft_365",
+    "command": "node",
+    "args": ["~/.claude/plugins/microsoft-365/mcp-server/dist/index.js"],
+    "env": {
+      "MS365_CLIENT_ID": "<app-client-id>",
+      "MS365_TENANT_ID": "<tenant-id>",
+      "MS365_HUB_URL": "https://<hub-host>:10000"
+    },
+    "envFromKeyring": { "MS365_HUB_API_KEY": "ms365-hub" }
+  }
+]
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; `whatsoup` and `send-media` are reserved. Tools surface as `mcp__<name>__<tool>`. |
+| `command` | string | `'node'` (substituted with the pinned runtime at startup), absolute, or `~/`-relative. Mutually exclusive with `proxyScriptPath`. Home-confined. |
+| `args` | string[] | With `command: "node"`, `args[0]` must be the script path (`.js`/`.mjs`/`.cjs`), home-confined, must exist. |
+| `proxyScriptPath` | string | tsx-runner lane (same launcher as the whatsoup proxy). `.ts`/`.js`/`.mjs`, home-confined, must exist. |
+| `env` | Record | Plain env for the server process. Keys SCREAMING_SNAKE; loader-hijack keys (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, …) rejected. |
+| `envFromKeyring` | Record | `ENV_VAR -> keyring service`. Services allowlisted in `MCP_ENV_KEY_SERVICES` (currently `ms365-hub`); resolved ONCE at startup — a missing secret fails the boot loudly. The secret lands only in the 0600 generated config, never in `config.json`. |
+| `required` | boolean | Default `true`: the server's presence is asserted after every config write; a spawn that cannot include it fails closed instead of degrading to "No such tool available". |
+
+**Constraints:** at most 16 entries; declaring `additionalMcpServers` alongside
+`providerConfig.mcpConfig`/`strictMcpConfig` is rejected — the hand-built
+static-config pattern is retired by this feature (per-chat strictness is
+code-owned and unaffected). Sandbox note: declared servers are attached to the
+workspace config but NOT auto-added to `sandbox.allowedMcpTools` — enumerate
+`mcp__<server>__<tool>` entries there yourself (the sandbox hook matches
+exactly, fail-closed).
+
+To seed the keyring secret: macOS `security add-generic-password -s ms365-hub -a "$USER" -w`;
+Linux `secret-tool store --label='ms365-hub' service ms365-hub`.
+
 ### `chatOptions`
 
 Chat-specific settings. Currently the only field is `openaiProviderConfig`,

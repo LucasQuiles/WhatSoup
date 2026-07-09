@@ -1,0 +1,28 @@
+{
+  "name": "m365-agent",
+  "type": "agent",
+  "accessMode": "self_only",
+  "adminPhones": ["<owner-e164>"],
+  "agentOptions": {
+    "sessionScope": "per_chat",
+    "cwd": "~",
+    "enabledPlugins": {
+      "microsoft-365@local": true
+    },
+    "pluginDirs": ["~/.claude/plugins/microsoft-365"],
+    "additionalMcpServers": [
+      {
+        "name": "microsoft_365",
+        "command": "node",
+        "args": ["~/.claude/plugins/microsoft-365/mcp-server/dist/index.js"],
+        "env": {
+          "MS365_CLIENT_ID": "<app-client-id>",
+          "MS365_TENANT_ID": "<tenant-id>",
+          "MS365_READ_ONLY": "true",
+          "MS365_HUB_URL": "https://<hub-host>:10000"
+        },
+        "envFromKeyring": { "MS365_HUB_API_KEY": "ms365-hub" }
+      }
+    ]
+  }
+}

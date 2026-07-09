@@ -24,8 +24,77 @@ export interface OpencodeProviderConfig {
 
 export interface AdditionalMcpServerConfig {
   name: string;
-  proxyScriptPath: string;
+  /** tsx-runner lane (whatsoup proxy, send-media). Mutually exclusive with command. */
+  proxyScriptPath?: string;
+  /** Explicit-binary lane (e.g. `node <plugin>/mcp-server/dist/index.js`); paths arrive already resolved (src/core/instance-mcp-servers.ts). */
+  command?: string;
+  args?: readonly string[];
   env: Record<string, string>;
+}
+
+function resolveServerLaunch(server: AdditionalMcpServerConfig): { command: string; args: readonly string[] } {
+  return server.command !== undefined
+    ? { command: server.command, args: server.args ?? [] }
+    : buildMcpLaunchCommand(server.proxyScriptPath!);
+}
+
+/** Thrown when a just-written MCP config does not contain a required server — the fail-closed layer behind QR-254's strict-drop residual. */
+export class McpSurfaceAssertionError extends Error {
+  // Explicit fields, not TS parameter properties — the repo runs native
+  // --experimental-strip-types, which cannot erase parameter properties.
+  readonly cfgPath: string;
+  readonly missing: string[];
+  readonly providerId: string;
+
+  constructor(cfgPath: string, missing: string[], providerId: string) {
+    super(
+      `MCP surface assertion failed for ${providerId} config ${cfgPath}: missing required server(s) ${missing.join(', ')}`,
+    );
+    this.name = 'McpSurfaceAssertionError';
+    this.cfgPath = cfgPath;
+    this.missing = missing;
+    this.providerId = providerId;
+  }
+}
+
+/**
+ * Re-read a written MCP config and throw unless every required server name is
+ * present in the provider's server map. Fail-closed: an unreadable or
+ * unparseable file throws too — a partial write must never pass as a surface.
+ */
+/** Platform-written server names whose presence needs no re-read proof — the generators emit them unconditionally. Asserting them for undeclared instances would change legacy behavior (and break fs-mocked callers) for no signal. */
+const PLATFORM_MCP_SERVER_NAMES: ReadonlySet<string> = new Set(['whatsoup', 'send-media']);
+
+export function assertWrittenMcpSurface(
+  providerId: string,
+  cfgPath: string,
+  requiredNames: readonly string[],
+): void {
+  // Only a config that declares servers beyond the platform's own gets the
+  // post-write re-read; undeclared instances keep byte- AND behavior-identical
+  // legacy semantics (see the QR-254 regression pin).
+  if (!requiredNames.some((n) => !PLATFORM_MCP_SERVER_NAMES.has(n))) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  } catch (err) {
+    throw new Error(
+      `MCP surface assertion could not re-read ${cfgPath} for ${providerId}: ${(err as Error).message}`,
+    );
+  }
+  const mapKey = providerId === 'opencode-cli' ? 'mcp' : 'mcpServers';
+  const serverMap =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)[mapKey]
+      : undefined;
+  const present =
+    serverMap && typeof serverMap === 'object' && !Array.isArray(serverMap)
+      ? new Set(Object.keys(serverMap as Record<string, unknown>))
+      : new Set<string>();
+  const missing = requiredNames.filter((n) => !present.has(n));
+  if (missing.length > 0) {
+    throw new McpSurfaceAssertionError(cfgPath, missing, providerId);
+  }
 }
 
 const DEFAULT_OPENCODE_PROVIDER_ID = 'whatsoup-cloud';
@@ -71,7 +140,7 @@ export function generateMcpConfigFile(
           servers.map((server) => [
             server.name,
             {
-              ...buildMcpLaunchCommand(server.proxyScriptPath),
+              ...resolveServerLaunch(server),
               env: server.env,
             },
           ]),
@@ -82,7 +151,7 @@ export function generateMcpConfigFile(
       return {
         mcp: Object.fromEntries(
           servers.map((server) => {
-            const { command, args } = buildMcpLaunchCommand(server.proxyScriptPath);
+            const { command, args } = resolveServerLaunch(server);
             return [
               server.name,
               {
@@ -113,11 +182,16 @@ export function writeMcpConfigToPath(
   absPath: string,
   socketPath: string,
   proxyScriptPath: string,
-  additionalServers: AdditionalMcpServerConfig[] = [],
+  // No defaults: every write-site must decide its surface explicitly — a new
+  // caller that forgets threading fails to compile instead of silently
+  // shipping a whatsoup-only config (the ana-bot/eh-bot failure class).
+  additionalServers: AdditionalMcpServerConfig[],
+  requiredServerNames: readonly string[],
 ): string | null {
   const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath, additionalServers);
   if (generated === null) return null;
   writePrivateFileSync(absPath, JSON.stringify(generated, null, 2));
+  assertWrittenMcpSurface(providerId, absPath, requiredServerNames);
   return absPath;
 }
 
@@ -206,8 +280,22 @@ export function writeProviderMcpConfig(
   socketPath: string,
   proxyScriptPath: string,
   providerConfig?: OpencodeProviderConfig,
+  // Defaults preserve exact legacy behavior for instances that declare
+  // nothing; runtime/workspace callers thread resolved instance values.
   additionalServers: AdditionalMcpServerConfig[] = [],
+  requiredServerNames: readonly string[] = [],
 ): string | null {
+  // A "skipped" write is a silent surface loss for an instance that DECLARED
+  // required servers beyond the platform's own — fail closed for those; keep
+  // the historical warn-and-skip for undeclared instances (whose required set
+  // is only ever the platform-injected whatsoup/send-media).
+  const declaredRequired = requiredServerNames.filter((n) => !PLATFORM_MCP_SERVER_NAMES.has(n));
+  const failClosedSkip = (reason: string): never => {
+    throw new Error(
+      `opencode MCP config write skipped (${reason}) but required MCP server(s) ${declaredRequired.join(', ')} are declared for this instance — refusing to start with a partial surface`,
+    );
+  };
+
   const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath, additionalServers);
   if (generated === null) return null;
 
@@ -218,12 +306,14 @@ export function writeProviderMcpConfig(
     try {
       const stat = lstatSync(target);
       if (stat.isSymbolicLink()) {
+        if (declaredRequired.length > 0) failClosedSkip('opencode.json is a symlink');
         log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
         return null;
       }
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ELOOP') {
+        if (declaredRequired.length > 0) failClosedSkip('file stat failed with ELOOP');
         log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
         return null;
       }
@@ -249,15 +339,24 @@ export function writeProviderMcpConfig(
       writePrivateFileSync(target, JSON.stringify(merged, null, 2));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        if (declaredRequired.length > 0) failClosedSkip('write failed with ELOOP');
         log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
         return null;
       }
       throw err;
     }
+    assertWrittenMcpSurface(providerId, target, requiredServerNames);
     return target;
   }
 
-  // claude / gemini / codex: overwrite .mcp.json with the mcpServers shape.
-  writePrivateFileSync(target, JSON.stringify(generated, null, 2));
-  return target;
+  // claude / gemini / codex: overwrite .mcp.json with the mcpServers shape
+  // via the single write+assert choke point (QR-254 dedup).
+  return writeMcpConfigToPath(
+    providerId,
+    target,
+    socketPath,
+    proxyScriptPath,
+    additionalServers,
+    requiredServerNames,
+  );
 }

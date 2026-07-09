@@ -269,6 +269,7 @@ if (instanceType === 'agent') {
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
     autoCompactInputTokens?: number;
+    additionalMcpServers?: import('./core/instance-mcp-servers.ts').InstanceMcpServerSpec[];
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
@@ -294,6 +295,9 @@ if (instanceType === 'agent') {
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
+    // Raw pass-through; tilde-expansion + keyring resolution happen once in
+    // AgentRuntime.start() (src/core/instance-mcp-servers.ts).
+    additionalMcpServers: agentOpts?.additionalMcpServers,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),

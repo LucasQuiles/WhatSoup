@@ -48,6 +48,8 @@ interface AgentOptions {
   sandboxPerChat?: boolean;
   enabledPlugins?: Record<string, boolean>;
   autoCompactInputTokens?: number;
+  /** Instance-declared MCP servers; shape enforced by the shared validator. */
+  additionalMcpServers?: unknown;
   /** Provider identifier — maps to the registry. Defaults to 'claude-cli'. */
   provider?: string;
   /** Provider-specific configuration overrides. */
