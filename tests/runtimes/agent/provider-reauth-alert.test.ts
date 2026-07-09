@@ -10,12 +10,26 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 
 // ─── Hoisted mocks ─────────────────────────────────────────────────────────
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(() => true),
   clearAlertSource: vi.fn(() => true),
+}));
+
+// Shared logger spy (vi.hoisted idiom from tests/fleet/health-poller.test.ts:8-13):
+// the previous logger mock's factory returned a FRESH `{ error: vi.fn(), ... }`
+// object with no reference retained anywhere the test body could reach, so
+// `logger.error` assertions had nothing to target. Hoisting the object once and
+// having the mock factory return it (instead of building a new one) exposes a
+// stable spy.
+const logger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
 }));
 
 const { mockSession, mockQueue } = vi.hoisted(() => {
@@ -86,12 +100,7 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({
 }));
 
 vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => logger,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -262,9 +271,17 @@ function makeMessenger(): Messenger {
 // this test suite uses throughout runtime.test.ts is `(runtime as unknown as
 // {...}).method(...)`; this helper just packages that cast once.
 type UsabilityResult = { status: string; provider: string; model: string | null; reason?: string };
+type RecordedUsability = UsabilityResult & { checkedAt: number | null; probeInFlight: boolean };
 const seam = (runtime: unknown) => runtime as unknown as {
   recordPrimaryModelUsability(result: UsabilityResult, trigger: 'startup' | 'manual'): void;
+  providerReauthEvidence(trigger: 'startup_probe' | 'manual_probe' | 'turn_error'): string;
+  primaryModelUsability: RecordedUsability | null;
 };
+
+function makeQueue(chatJid = '15550100001@s.whatsapp.net') {
+  return { targetChatJid: chatJid, enqueueText: vi.fn() } as unknown as IOutboundQueue; // mirror the queue stub idiom in runtime.test.ts
+}
+const notice = (runtime: unknown) => runtime as unknown as { emitNoFallbackReauthNotice(q: unknown): void };
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
@@ -322,6 +339,18 @@ describe('provider_reauth_required critical rail (ALERT-03/04/04A/05)', () => {
     expect(asset.asset.kind).toBe('agent_provider');
     expect(asset.failure.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
     expect(asset.failure.domain).toBe('provider_access');
+
+    // Carry-in (Task 9): model_usable_stale must be sourced from the real
+    // checkedAt-age freshness derivation (MODEL_USABILITY_FRESHNESS_MS via
+    // deriveModelUsable), not the probeInFlight stand-in — a `turn_error`
+    // trigger (unlike startup_probe/manual_probe) can read a probe recorded
+    // long ago. A last-known-usable probe well past the freshness window must
+    // report stale=true.
+    seam(runtime).primaryModelUsability = {
+      status: 'usable', provider: 'claude-cli', model: null,
+      checkedAt: Date.now() - 40 * 60_000, probeInFlight: false,
+    };
+    expect(seam(runtime).providerReauthEvidence('turn_error')).toContain('model_usable_stale=true');
   });
 
   it('a proven-usable fallback recovery probe clears the reauth incident (centralized clear-site)', async () => {
@@ -334,5 +363,34 @@ describe('provider_reauth_required critical rail (ALERT-03/04/04A/05)', () => {
       .probePrimaryProviderRecovered();
     expect(recovered).toBe(true);
     expect(alertFns.clearAlertSource.mock.calls.some(([, s]) => s === 'provider_reauth_required')).toBe(true);
+  });
+
+  it('turn trigger: ONE page per instance-incident, notices stay per-chat (ALERT-06/06A)', () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    const chatA = makeQueue('15550100001@s.whatsapp.net');
+    const chatB = makeQueue('15550100002@s.whatsapp.net');
+    notice(runtime).emitNoFallbackReauthNotice(chatA);
+    notice(runtime).emitNoFallbackReauthNotice(chatB); // second chat: notice yes, page no
+    expect((chatA.enqueueText as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect((chatB.enqueueText as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    const pages = alertFns.emitAlert.mock.calls.filter(([, s]) => s === 'provider_reauth_required');
+    expect(pages).toHaveLength(1);
+    expect(String(pages[0][3])).toContain('trigger=turn_error');
+  });
+
+  it('delivery gap: emit failure logs a typed record and never throws into the notice path (ALERT-06B)', () => {
+    alertFns.emitAlert.mockReturnValueOnce(false);
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    const q = makeQueue();
+    expect(() => notice(runtime).emitNoFallbackReauthNotice(q)).not.toThrow();
+    expect((q.enqueueText as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1); // user notice unaffected
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ alertDeliveryGap: true, source: 'provider_reauth_required' }),
+      expect.stringContaining('alert_delivery_gap'),
+    );
+    // Transition semantics: the guard stays set even though delivery failed —
+    // a failed page is not retried within the same incident (the poller rail
+    // is the redundancy; brief comment at runtime.ts's ALERT-06B block).
+    expect((runtime as unknown as { providerReauthAlertActive: boolean }).providerReauthAlertActive).toBe(true);
   });
 });

@@ -6896,6 +6896,12 @@ export class AgentRuntime implements Runtime {
    * independent call sites and must not spam one notice per turn during a
    * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
    * prune→check→set→capDedupeMap idiom, reusing PROVIDER_FALLBACK_NOTICE_DEDUP_MS.
+   *
+   * Also the operator-facing choke point (ALERT-06/06A/06B): since all three
+   * call sites funnel through here, this is the one place that can page
+   * `provider_reauth_required` once per instance-incident for the turn-time
+   * auth-required path — sharing `providerReauthAlertActive` with the probe
+   * rail (Task 7) so both trigger kinds coalesce into a single incident.
    */
   private emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
     const now = Date.now();
@@ -6909,6 +6915,29 @@ export class AgentRuntime implements Runtime {
     this.recentNoFallbackReauthNotices.set(noticeKey, now);
     this.capDedupeMap(this.recentNoFallbackReauthNotices);
     queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+
+    // Operator page (ALERT-06A): one per instance-incident, independent of the
+    // per-chat notice dedup above. Shares the probe rail's guard so both
+    // triggers coalesce into one incident, cleared at the one usable clear-site.
+    if (!this.providerReauthAlertActive) {
+      this.providerReauthAlertActive = true;
+      const delivered = emitAlertChecked(
+        this.instanceName,
+        'provider_reauth_required',
+        'Agent turn failed auth-required with no fallback armed — provider re-authentication needed',
+        this.providerReauthEvidence('turn_error'),
+        'critical',
+        this.providerReauthCriticalAsset(),
+      );
+      if (!delivered) {
+        // ALERT-06B: typed delivery-gap evidence; the user-notice path never throws.
+        // The guard stays set — transition semantics; the poller rail is the redundancy.
+        log.error(
+          { alertDeliveryGap: true, instance: this.instanceName, source: 'provider_reauth_required', trigger: 'turn_error' },
+          'provider_reauth_required alert failed in every channel (alert_delivery_gap)',
+        );
+      }
+    }
   }
 
   /**
@@ -7664,7 +7693,12 @@ export class AgentRuntime implements Runtime {
       `model_usability_status=${alertEvidenceValue(u?.status ?? 'unknown')}`,
       `last_turn_error_class=${trigger === 'turn_error' ? 'auth-required' : 'none'}`,
       `model_usable_checked_at=${u?.checkedAt ?? 'null'}`,
-      `model_usable_stale=${u ? String(u.probeInFlight === true) : 'unknown'}`,
+      // Task 9 carry-in: sourced from the real checkedAt-age freshness derivation
+      // (deriveModelUsable / MODEL_USABILITY_FRESHNESS_MS) rather than the
+      // probeInFlight stand-in — harmless while only probe triggers (startup_probe/
+      // manual_probe) called this right after a fresh recordPrimaryModelUsability,
+      // but 'turn_error' can read a probe recorded long before the failing turn.
+      `model_usable_stale=${u ? String(deriveModelUsable(u, Date.now()).modelUsableStale) : 'unknown'}`,
       `fallback_active=${this.isFallbackWindowActive}`,
       `fallback_provider=${alertEvidenceValue(fb?.provider ?? 'none')}`,
       `fallback_model=${alertEvidenceValue(fb?.model ?? 'none')}`,
