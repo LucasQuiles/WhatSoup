@@ -7701,6 +7701,11 @@ export class AgentRuntime implements Runtime {
       { provider: this.agentProvider, model: this.model ?? null },
       createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
     );
+    // Centralized-clear invariant (spec §1): every probe result funnels through
+    // recordPrimaryModelUsability, so a proven-usable recovery clears BOTH
+    // primary_model_unusable and provider_reauth_required at the one clear-site,
+    // and a still-dead result stays guard-gated (no re-emit spam).
+    this.recordPrimaryModelUsability(result, 'manual');
     return result.status === 'usable';
   }
 

@@ -227,6 +227,18 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, mkdirSync: vi.fn(), writeFileSync: vi.fn() };
 });
 
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => {
+  const actual = await importOriginal() as typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts');
+  return {
+    ...actual,
+    probePrimaryModelUsability: vi.fn(async () => ({ status: 'usable', provider: 'claude-cli', model: null })),
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
+  createPrimaryModelProbeAdapters: vi.fn(() => ({})),
+}));
+
 // ─── Import after mocks ───────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -310,5 +322,17 @@ describe('provider_reauth_required critical rail (ALERT-03/04/04A/05)', () => {
     expect(asset.asset.kind).toBe('agent_provider');
     expect(asset.failure.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
     expect(asset.failure.domain).toBe('provider_access');
+  });
+
+  it('a proven-usable fallback recovery probe clears the reauth incident (centralized clear-site)', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    seam(runtime).recordPrimaryModelUsability({ status: 'credential-unavailable', provider: 'claude-cli', model: null }, 'startup');
+    // Drive the recovery probe with a stubbed usable result. Mirror the module-mock
+    // idiom the file already uses for emit-alert: vi.mock the providers module and
+    // make probePrimaryModelUsability resolve { status: 'usable', provider: 'claude-cli', model: null }.
+    const recovered = await (runtime as unknown as { probePrimaryProviderRecovered(): Promise<boolean> })
+      .probePrimaryProviderRecovered();
+    expect(recovered).toBe(true);
+    expect(alertFns.clearAlertSource.mock.calls.some(([, s]) => s === 'provider_reauth_required')).toBe(true);
   });
 });
