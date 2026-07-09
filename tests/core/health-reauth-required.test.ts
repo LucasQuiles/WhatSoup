@@ -50,6 +50,7 @@ vi.mock('../../src/logger.ts', () => ({
 // Imports
 // ---------------------------------------------------------------------------
 
+import { secretPatterns } from '../../scripts/repo-hygiene-guard.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import { makeDb, makeDeps, makeAgentRuntime, getHealth } from './_helpers/health-server.ts';
 
@@ -290,16 +291,6 @@ function readFixture(name: string): { raw: string; json: Record<string, any> } {
   return { raw, json: JSON.parse(raw) };
 }
 
-// Secret shapes that must never appear in a committed health fixture.
-const SECRET_SHAPES: [RegExp, string][] = [
-  [/sk-[A-Za-z0-9]{8,}/, 'api-key'],
-  [/\bBearer\s+\S+/i, 'bearer-token'],
-  [/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, 'jwt'],
-  [/\b\d{11,}@s\.whatsapp\.net/, 'real-phone-jid'],
-  [/"?(access|refresh|session|oauth)[-_]?token"?\s*[:=]/i, 'token-field'],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'private-key'],
-];
-
 /** snake_case fixture turn_capability → camelCase runtime shape. */
 function toRuntimeTc(tc: Record<string, any>): Record<string, unknown> {
   return {
@@ -359,12 +350,19 @@ describe('provider-reauth health fixtures (ALERT-01/02)', () => {
     expect(json.reauth_required).toBe(true);
   });
 
-  it('both fixtures are free of secret-shaped values (redaction scan)', () => {
+  it('both fixtures are free of secret-shaped values (canonical hygiene-guard taxonomy)', () => {
+    expect(secretPatterns.length).toBeGreaterThan(0); // non-vacuous: the import carries real patterns
     for (const name of ['provider-reauth-required.json', 'provider-reauth-recovered.json']) {
       const { raw } = readFixture(name);
-      for (const [shape, label] of SECRET_SHAPES) {
-        expect(shape.test(raw), `${name} must not contain ${label}`).toBe(false);
+      for (const p of secretPatterns) {
+        expect(p.regex.test(raw), `${name} must not contain ${p.code}`).toBe(false);
       }
     }
+  });
+
+  it('the canonical taxonomy catches an Anthropic-format key the old private scan missed (finding 6)', () => {
+    // Runtime-constructed so the hygiene guard can never match this test file itself.
+    const synthetic = ['sk', 'ant', 'oat01'].join('-') + '-' + 'A'.repeat(24);
+    expect(secretPatterns.some((p) => p.regex.test(`token=${synthetic}`))).toBe(true);
   });
 });

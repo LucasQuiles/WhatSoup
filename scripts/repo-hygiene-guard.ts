@@ -678,7 +678,7 @@ const secretPatternCodes = new Set([
   'personal-email',
 ]);
 
-const secretPatterns = addedLinePatterns.filter((pattern) => secretPatternCodes.has(pattern.code));
+export const secretPatterns = addedLinePatterns.filter((pattern) => secretPatternCodes.has(pattern.code));
 
 /**
  * Advisory-only: scan added lines of recent commits for leaked secret shapes.
