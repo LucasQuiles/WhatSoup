@@ -135,10 +135,61 @@ check_optional_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS
   check_template_surface "$name" "$rel" "$installed"
 }
 
+discover_instances() {
+  local f stem k known
+  for f in "$LAUNCHD_DIR"/com.whatsoup.*.plist; do
+    [ -e "$f" ] || continue
+    stem="$(basename "$f" .plist)"
+    stem="${stem#com.whatsoup.}"
+    case "$stem" in *-watchdog) continue ;; esac
+    known=0
+    for k in "${NON_INSTANCE_STEMS[@]}"; do
+      if [ "$stem" = "$k" ]; then known=1; fi
+    done
+    if [ "$known" -eq 1 ]; then continue; fi
+    INSTANCES+=("$stem")
+  done
+}
+
+check_release_drift_surface() { # host-level; uses INSTANCES
+  local installed="$LAUNCHD_DIR/com.whatsoup.release-drift-check.plist"
+  if [ ! -f "$installed" ]; then
+    echo "skip: release-drift-check (not installed on this host)"
+    return 0
+  fi
+  local render="$REPO_ROOT/deploy/scripts/render-release-drift-launchd.sh"
+  if [ ! -f "$render" ]; then
+    echo "missing repo render script: deploy/scripts/render-release-drift-launchd.sh" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  local tmpd bot out matched=0
+  tmpd="$(mktemp -d "${TMPDIR:-/tmp}/launchd-drift-rd.XXXXXX")"
+  for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+    out="$tmpd/render-$bot.plist"
+    if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" >/dev/null 2>&1 \
+       && cmp -s "$out" "$installed"; then
+      matched=1
+      echo "ok: release-drift-check (renders for instance $bot)"
+      break
+    fi
+  done
+  rm -rf "$tmpd"
+  if [ "$matched" -eq 0 ]; then
+    echo "drift: release-drift-check matches no discovered instance render" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
 check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
+
+if [ "${#INSTANCES[@]}" -eq 0 ]; then discover_instances; fi
+for bot in ${INSTANCES[@]+"${INSTANCES[@]}"}; do
+  check_template_surface "$bot-watchdog plist" "deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist" "$LAUNCHD_DIR/com.whatsoup.$bot-watchdog.plist" "$bot"
+done
+check_release_drift_surface
 
 if [ "$failures" -gt 0 ]; then
   echo "launchd drift check failed: $failures problem(s)" >&2

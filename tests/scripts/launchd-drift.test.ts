@@ -246,3 +246,42 @@ describe('static template surfaces (substitute-then-compare)', () => {
     expect(result.stderr).toContain('unsafe character in substitution value');
   });
 });
+
+describe('per-instance surfaces', () => {
+  it('discovers instances and validates the watchdog plist render', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: tbot-watchdog plist');
+    expect(result.stdout).toContain('ok: release-drift-check');
+  });
+
+  it('fails when the installed watchdog plist drifted from its template render', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.tbot-watchdog.plist'),
+      subst(WATCHDOG_TEMPLATE, f.repo, f.home, 'tbot').replace('-watchdog</string>', '-TAMPERED</string>'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: tbot-watchdog plist');
+  });
+
+  it('fails when release-drift-check matches no instance render', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for someone-else\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('release-drift-check matches no discovered instance render');
+  });
+
+  it('skips release-drift-check when not installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    rmSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'));
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('skip: release-drift-check');
+  });
+});
