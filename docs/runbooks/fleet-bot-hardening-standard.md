@@ -84,6 +84,15 @@ timeout, and unknown; `provider_reauth_required` for credential-unavailable. A b
 whose primary provider is merely authenticated, but whose selected model cannot
 complete a turn, is not hardened.
 
+`provider_reauth_required` has a second trigger beyond the probe: a user turn
+that fails auth-required with no fallback armed pages the same source, once per
+incident. Recovery clears only on a fresh usable primary-model probe, and the
+clear must carry `clear_code=AGENT_PROVIDER_AUTH_RECOVERED
+proof=primary_model_probe_ok`. Fallback serving, process restarts, and WhatsApp
+reconnects never clear it. The fleet health poller pages and clears the same
+source independently from the `/health` body as the redundancy rail; both rails
+coalesce on the `(instance, source)` incident.
+
 ### C. Release Drift-Check Job
 
 Each live bot must have source/live drift visibility for the release snapshot it
