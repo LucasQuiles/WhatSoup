@@ -8,6 +8,7 @@ import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { classifyProviderReauthSignal, providerReauthClearProof } from './provider-reauth-signal.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
 
 const log = createChildLogger('fleet:health-poller');
@@ -429,6 +430,18 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
+              const failureProviderReauth = classifyProviderReauthSignal(failureHealth);
+              if (failureProviderReauth.confirmed) {
+                this.updateDegraded(
+                  name, failureHealth, 'degraded',
+                  failureProviderReauth.evidence.join(' '), true,
+                  'provider_reauth_required',
+                  `whatsoup@${name} primary provider needs re-authentication`,
+                  true, false, 'confirmed', 'provider_reauth_required',
+                  failureProviderReauth.evidence,
+                );
+                return;
+              }
               const classification = classifyHealthSnapshot(failureHealth);
               if (isNonOnlineClassification(classification)) {
                 this.updateFromHealthSnapshot(name, failureHealth, classification);
@@ -458,6 +471,31 @@ export class HealthPoller {
           this.updateFromHealthSnapshot(name, health, classification);
           return;
         }
+
+        // WS-ALERT (spec §2): a confirmed provider-reauth body must page as its
+        // own critical source, not fall into the generic health_body_degraded
+        // path (which the dispatcher tiers as transient while WhatsApp stays
+        // connected — the exact mechanism that buried the mini10 outage).
+        const providerReauth = classifyProviderReauthSignal(health);
+        if (providerReauth.confirmed) {
+          this.updateDegraded(
+            name,
+            health,
+            'degraded',
+            providerReauth.evidence.join(' '),
+            true,
+            'provider_reauth_required',
+            `whatsoup@${name} primary provider needs re-authentication`,
+            true,
+            false,
+            'confirmed',
+            'provider_reauth_required',
+            providerReauth.evidence,
+          );
+          return;
+        }
+        this.maybeClearProviderReauth(name, health); // degraded-flow clear (Task 12)
+
         if (healthStatus === 'unhealthy' || healthStatus === 'degraded') {
           const degradedEvidence = `Health body reports status=${healthStatus}`;
           const degradedAlert = healthStatus === 'degraded'
@@ -1089,7 +1127,7 @@ export class HealthPoller {
       newStatus === 'degraded'
       && (
         prevStatus !== 'degraded'
-        || alertSource !== 'instance_degraded'
+        || (alertSource !== 'instance_degraded' && alertSource !== 'provider_reauth_required')
         || !this.hasConfirmedAlert(name, alertSource)
       )
     ) {
@@ -1099,6 +1137,10 @@ export class HealthPoller {
       );
       this.trackActiveAlertSource(name, alertSource, emitted);
     }
+  }
+
+  private maybeClearProviderReauth(_name: string, _health: Record<string, unknown>): void {
+    // Implemented with the clear guard (spec §2 degraded-flow clear).
   }
 
 
