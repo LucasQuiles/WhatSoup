@@ -804,6 +804,7 @@ export class AgentRuntime implements Runtime {
   // Spawn-per-turn providers route through handleEventWithContext which does not
   // use this flag. The "(no response)" fallback only exists in handleEvent.
   private turnHadVisibleOutput = false;
+  private turnHadSuppressedReplySatisfaction = false;
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceSweeper: WorkspaceSweeper;
@@ -1489,6 +1490,7 @@ export class AgentRuntime implements Runtime {
   private currentTurnAssistantItemText: Map<string, string> = new Map();
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
+  private perChatTurnSuppressedReplySatisfaction: Set<string> = new Set();
   private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
   // R1 streaming marker scan: hold the FIRST line of a turn's assistant text
   // until it is resolvable (a newline arrived, or it can no longer be a
@@ -1563,6 +1565,7 @@ export class AgentRuntime implements Runtime {
     this.pendingSystemResults.counts.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
+    this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
@@ -1692,6 +1695,7 @@ export class AgentRuntime implements Runtime {
       // Set state for this turn
       this.perChatTurnContentType.set(mapKey, 'image');
       this.perChatTurnText.set(mapKey, '');
+      this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
       this.perChatAssistantItemText.delete(mapKey);
 
       // Combine all image references into one turn
@@ -1718,6 +1722,7 @@ export class AgentRuntime implements Runtime {
       this.pendingTurnActorJid.delete(mapKey);
       this.perChatTurnContentType.delete(mapKey);
       this.perChatTurnText.delete(mapKey);
+      this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
       this.perChatAssistantItemText.delete(mapKey);
       log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
     }
@@ -1751,6 +1756,7 @@ export class AgentRuntime implements Runtime {
     text: string,
     queue: IOutboundQueue,
     inboundSeq: number | undefined,
+    mapKey?: string,
   ): string | null {
     const decision = classifyAssistantTextEgress(text);
     if (decision.action === 'allow') return text;
@@ -1767,6 +1773,8 @@ export class AgentRuntime implements Runtime {
 
     if (decision.satisfiesReplyGuarantee) {
       this.replyGuarantee?.disarm(inboundSeq);
+      if (mapKey !== undefined) this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+      else this.turnHadSuppressedReplySatisfaction = true;
     }
     return null;
   }
@@ -2070,6 +2078,10 @@ export class AgentRuntime implements Runtime {
           if (turnText !== undefined) {
             this.perChatTurnText.delete(lidKey);
             this.perChatTurnText.set(canonical, turnText);
+          }
+          if (this.perChatTurnSuppressedReplySatisfaction.has(lidKey)) {
+            this.perChatTurnSuppressedReplySatisfaction.delete(lidKey);
+            this.perChatTurnSuppressedReplySatisfaction.add(canonical);
           }
           const itemText = this.perChatAssistantItemText.get(lidKey);
           if (itemText) {
@@ -3379,6 +3391,7 @@ export class AgentRuntime implements Runtime {
         // Track inbound contentType for voice reply (SP4)
         this.perChatTurnContentType.set(mapKey, msg.contentType);
         this.perChatTurnText.set(mapKey, '');
+        this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
         this.perChatAssistantItemText.delete(mapKey);
         // Arm the R1 first-line marker scan for this turn (flag-gated).
         if (config.nlRouting) this.perChatRouteMarkerHold.set(mapKey, '');
@@ -3393,6 +3406,7 @@ export class AgentRuntime implements Runtime {
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
+      this.turnHadSuppressedReplySatisfaction = false;
       this.currentTurnAssistantItemText.clear();
       // Arm the R1 first-line marker scan for this turn (flag-gated).
       this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
@@ -3432,6 +3446,7 @@ export class AgentRuntime implements Runtime {
     this.bindActiveGlobalMcpConversation(chatJid);
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+    this.turnHadSuppressedReplySatisfaction = false;
     // Arm the R1 first-line marker scan for this shared turn (flag-gated).
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
     this.currentTurnReplayText = prefixedText;
@@ -4589,7 +4604,7 @@ export class AgentRuntime implements Runtime {
           // matching no failure pattern, are delivered — dropping them is the QR-209
           // silent-reply defect. See suppressStreamedProviderFailure.
           if (this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid)) break;
-          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq);
+          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           // Reply-guarantee: visible output reached the user, so reset the
@@ -5045,6 +5060,9 @@ export class AgentRuntime implements Runtime {
           const chatJidForVoice = queue.targetChatJid;
           const inboundContentType = mapKey !== undefined ? (this.perChatTurnContentType.get(mapKey) ?? null) : null;
           const responseText = !wasSilentCompact && mapKey !== undefined ? (this.perChatTurnText.get(mapKey) ?? '') : '';
+          const hadSuppressedReplySatisfaction = mapKey !== undefined
+            ? this.perChatTurnSuppressedReplySatisfaction.delete(mapKey)
+            : false;
           // Clean up per-chat voice state
           if (mapKey !== undefined) {
             this.perChatTurnContentType.delete(mapKey);
@@ -5059,13 +5077,18 @@ export class AgentRuntime implements Runtime {
             // result through the outbound channel. Only fire the notice and
             // increment the empty counter when neither text nor tool work occurred.
             // turnHadToolWork was captured before clearToolNames above.
-            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork, session);
+            this.recordFallbackTurnOutcome(
+              queue,
+              hadVisible || hadSuppressedReplySatisfaction,
+              turnHadToolWork,
+              session,
+            );
             // Empty/tool-only turn: surface any still-pending handoff notice
             // standalone rather than deferring it to the next reply.
             this.flushPendingHandoffNotice(queue);
             let armedFallbackNow = false;
             if (!turnCapabilityFailureRecorded) {
-              if (hadVisible || turnHadToolWork) {
+              if (hadVisible || turnHadToolWork || hadSuppressedReplySatisfaction) {
                 this.recordTurnCapabilitySuccess(true);
               } else {
                 this.recordTurnCapabilityFailure(true, 'empty-output');
@@ -5080,7 +5103,13 @@ export class AgentRuntime implements Runtime {
                 armedFallbackNow = this.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey);
               }
             }
-            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive && !armedFallbackNow) {
+            if (
+              !hadVisible &&
+              !turnHadToolWork &&
+              !hadSuppressedReplySatisfaction &&
+              this.isFallbackWindowActive &&
+              !armedFallbackNow
+            ) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
               // Suppressed when we JUST armed the provider fallback above: the
@@ -5654,6 +5683,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnAssistantItemText.clear();
     this.perChatTurnContentType.clear();
     this.perChatTurnText.clear();
+    this.perChatTurnSuppressedReplySatisfaction.clear();
     this.perChatAssistantItemText.clear();
     this.pendingTurnText.clear();
     this.pendingTurnActorJid.clear();
@@ -8669,6 +8699,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadToolActivity.clear();
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
+    this.turnHadSuppressedReplySatisfaction = false;
     this.currentTurnChatJid = null;
     this.currentTurnReplayText = null;
     this.currentTurnReplayActorJid = undefined;
@@ -8702,6 +8733,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnChatJid = null;
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
+    this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
     // Persist baseline first if compact_boundary was observed — see
     // cleanupSharedCrashTurnState for rationale.
@@ -9382,14 +9414,21 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
+        const hadSuppressedReplySatisfaction = this.turnHadSuppressedReplySatisfaction;
+        this.turnHadSuppressedReplySatisfaction = false;
         let armedFallbackNow = false;
         if (!wasSilentCompact && !isSystemResult) {
-          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork, this.session);
+          this.recordFallbackTurnOutcome(
+            queue,
+            this.turnHadVisibleOutput || hadSuppressedReplySatisfaction,
+            turnHadToolWork,
+            this.session,
+          );
           // Empty/tool-only turn: surface any still-pending handoff notice
           // standalone rather than deferring it to the next reply.
           this.flushPendingHandoffNotice(queue);
           if (!turnCapabilityFailureRecorded) {
-            if (this.turnHadVisibleOutput || turnHadToolWork) {
+            if (this.turnHadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
               this.recordTurnCapabilitySuccess(true);
             } else {
               this.recordTurnCapabilityFailure(true, 'empty-output');
@@ -9413,7 +9452,7 @@ export class AgentRuntime implements Runtime {
         // If nothing visible was emitted this turn, send an explicit fallback —
         // unless we just armed the provider fallback (its activation notice has
         // already informed the user and the turn is being replayed on the backup).
-        if (!this.turnHadVisibleOutput && !wasSilentCompact && !armedFallbackNow) {
+        if (!this.turnHadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentCompact && !armedFallbackNow) {
           queue.enqueueText('_(no response)_');
         }
         this.turnHadVisibleOutput = false;
@@ -9566,6 +9605,7 @@ export class AgentRuntime implements Runtime {
     this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
+    this.turnHadSuppressedReplySatisfaction = false
     this.currentTurnReplayText = null
     this.currentTurnReplayActorJid = undefined
 
@@ -9576,6 +9616,7 @@ export class AgentRuntime implements Runtime {
     if (mapKey !== undefined) {
       this.perChatTurnContentType.delete(mapKey)
       this.perChatTurnText.delete(mapKey)
+      this.perChatTurnSuppressedReplySatisfaction.delete(mapKey)
       this.perChatAssistantItemText.delete(mapKey)
     }
 
