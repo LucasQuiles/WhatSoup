@@ -189,6 +189,94 @@ describe('GET /health — reauth_required derivation (ALERT-07)', () => {
       db.close();
     }
   });
+
+  it('recovery window: usable probe FRESHER than a lingering auth-required class → FALSE (idle-bot unlatch)', async () => {
+    const db = makeDb();
+    try {
+      const runtime = makeAgentRuntime(turnCapability({
+        modelUsable: true,
+        modelUsabilityStatus: 'usable',
+        modelUsableCheckedAt: INCIDENT_TS + 86_400_000, // probe AFTER the error
+        lastSuccessfulTurnAt: null,                     // idle: no user turn since
+        lastTurnErrorClass: 'auth-required',
+        lastTurnErrorAt: INCIDENT_TS,
+      }));
+      const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+      expect(json.turn_capability.last_turn_error_class).toBe('auth-required');
+      expect(json.reauth_required).toBe(false);
+    } finally { db.close(); }
+  });
+
+  it('stale usable probe OLDER than a new auth-required error → TRUE', async () => {
+    const db = makeDb();
+    try {
+      const runtime = makeAgentRuntime(turnCapability({
+        modelUsable: true,
+        modelUsabilityStatus: 'usable',
+        modelUsableCheckedAt: INCIDENT_TS - 86_400_000, // probe BEFORE the error
+        lastTurnErrorClass: 'auth-required',
+        lastTurnErrorAt: INCIDENT_TS,
+      }));
+      const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+      expect(json.reauth_required).toBe(true);
+    } finally { db.close(); }
+  });
+
+  it('auth-required with missing timestamps cannot prove supersession → TRUE (conservative)', async () => {
+    const db = makeDb();
+    try {
+      const runtime = makeAgentRuntime(turnCapability({
+        modelUsable: true,
+        modelUsabilityStatus: 'usable',
+        modelUsableCheckedAt: null,
+        lastTurnErrorClass: 'auth-required',
+        lastTurnErrorAt: INCIDENT_TS,
+      }));
+      const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+      expect(json.reauth_required).toBe(true);
+    } finally { db.close(); }
+  });
+
+  // Finding 4: lock ALL never-page statuses and ALL non-auth error classes.
+  for (const status of ['model-unavailable', 'provider-unavailable', 'timeout', 'unknown'] as const) {
+    it(`never-page status '${status}' → FALSE`, async () => {
+      const db = makeDb();
+      try {
+        const runtime = makeAgentRuntime(turnCapability({
+          modelUsable: false, modelUsabilityStatus: status,
+          lastSuccessfulTurnAt: null, lastTurnErrorClass: null,
+        }));
+        const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+        expect(json.reauth_required).toBe(false);
+      } finally { db.close(); }
+    });
+  }
+  for (const cls of ['usage-limit', 'rate-limit', 'model-unavailable', 'policy-block', 'context-overflow', 'unknown-terminal', 'empty-output'] as const) {
+    it(`non-auth error class '${cls}' → FALSE`, async () => {
+      const db = makeDb();
+      try {
+        const runtime = makeAgentRuntime(turnCapability({
+          modelUsabilityStatus: 'unknown', lastTurnErrorClass: cls, lastTurnErrorAt: INCIDENT_TS,
+        }));
+        const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+        expect(json.reauth_required).toBe(false);
+      } finally { db.close(); }
+    });
+  }
+
+  it('out-of-enum values normalize to null and → FALSE (normalizer interaction)', async () => {
+    const db = makeDb();
+    try {
+      const runtime = makeAgentRuntime(turnCapability({
+        modelUsabilityStatus: 'credential-unavailable-EXTREME', // not in enum → null
+        lastTurnErrorClass: 'auth-required-ish',                // not in enum → null
+      }));
+      const { json } = await getHealth(makeDeps(db, { instanceType: 'agent', runtime: runtime as unknown as HealthDeps['runtime'] }));
+      expect(json.turn_capability.model_usability_status).toBeNull();
+      expect(json.turn_capability.last_turn_error_class).toBeNull();
+      expect(json.reauth_required).toBe(false);
+    } finally { db.close(); }
+  });
 });
 
 // ---------------------------------------------------------------------------

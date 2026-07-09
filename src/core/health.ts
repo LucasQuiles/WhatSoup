@@ -196,6 +196,40 @@ function agentRuntimeDetailsForHealth(
   };
 }
 
+/**
+ * ALERT-07 (WS-ALERT): derive a deterministic provider-reauth signal from the
+ * existing turn_capability enums, so downstream consumers (the fleet
+ * health-poller's provider-auth classifier, the fleet matrix) share one
+ * derivation instead of each re-deriving it and drifting.
+ *
+ * TRUE when a probe/turn proved the primary needs human/provider re-auth:
+ * model_usability_status==='credential-unavailable', or a last_turn_error_class
+ * of 'auth-required' that has NOT been superseded by a fresher usable probe.
+ *
+ * Freshness supersession (fleet-cred spec decision 8): lastTurnErrorClass is
+ * nulled only by a successful USER turn — never by the usability probe — so on
+ * an idle bot the class would latch this flag true forever after the owner
+ * re-authenticates (review wf_dc1654c1 finding 1). A usable probe strictly
+ * newer than the auth error supersedes it; missing timestamps cannot prove
+ * supersession and stay true (conservative).
+ *
+ * Everything else is FALSE — null turn_capability, null/'unknown' status, and
+ * non-auth degradations (model-unavailable / provider-unavailable / timeout)
+ * are provider_probe_inconclusive-class conditions and must never page reauth.
+ */
+function turnCapabilityReauthRequired(tc: HealthTurnCapability | null): boolean {
+  if (tc === null) return false;
+  if (tc.model_usability_status === 'credential-unavailable') return true;
+  if (tc.last_turn_error_class !== 'auth-required') return false;
+  return !(
+    tc.model_usability_status === 'usable' &&
+    tc.model_usable === true &&
+    tc.model_usable_checked_at !== null &&
+    tc.last_turn_error_at !== null &&
+    tc.model_usable_checked_at > tc.last_turn_error_at
+  );
+}
+
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 // #1433 — a post-first-turn `empty-output` is benign-by-default (the model
@@ -1257,6 +1291,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         model_advisories: getModelAdvisories(),
         durability: deps.durability?.getHealthStats() ?? null,
         turn_capability: turnCapability,
+        // ALERT-07 (WS-ALERT): deterministic top-level provider-reauth signal.
+        // A sibling of turn_capability (NOT a field inside it) so the many
+        // `toEqual(turn_capability)` assertions stay exact-match. Consumers read
+        // this instead of each re-deriving from the enums.
+        reauth_required: turnCapabilityReauthRequired(turnCapability),
         runtime: runtimeBlock,
       });
 
