@@ -347,6 +347,7 @@ describe('structural checks and secret safety', () => {
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Label mismatch');
+    expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
   });
 
   it('checks whatsoup-fleet structurally when installed', () => {
