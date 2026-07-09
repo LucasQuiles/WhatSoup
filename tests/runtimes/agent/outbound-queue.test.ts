@@ -2712,6 +2712,25 @@ describe('OutboundQueue', () => {
       const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
       expect(status.length).toBeLessThanOrEqual(MAX_STATUS_MESSAGES_PER_TURN);
     });
+
+    // When the cap trips, the user gets exactly ONE friendly notice (content,
+    // so it always lands) and the typing indicator keeps signalling liveness.
+    it('sends exactly one STATUS_CAP_NOTICE and keeps the typing indicator alive when the cap trips', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      for (let i = 0; i < 30; i++) {
+        queue.enqueueToolUpdate({ category: 'running', detail: `step ${i}` });
+        await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+      }
+      await queue.flush();
+
+      const notices = calls.filter((c) => c === STATUS_CAP_NOTICE);
+      expect(notices).toHaveLength(1);
+      // Liveness signal preserved across the suppressed window.
+      expect(typingCalls).toContain(true);
+    });
   });
 });
 

@@ -882,6 +882,11 @@ export class OutboundQueue implements IOutboundQueue {
   private statusBudgetExhausted(): boolean {
     if (this.turnStatusCount >= this.maxStatusMessagesPerTurn) {
       this.startTyping(); // keep the liveness signal, drop the narration
+      if (!this.statusCapNoticeSent) {
+        this.statusCapNoticeSent = true;
+        // CONTENT — routed through enqueueText so it is never gated and always lands.
+        this.enqueueText(STATUS_CAP_NOTICE);
+      }
       return true;
     }
     this.turnStatusCount++;
