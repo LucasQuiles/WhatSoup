@@ -95,7 +95,7 @@ const ACK_FILLER_PATTERNS: readonly RegExp[] = [
   /^no action(?: taken)?[.!]?$/i,
   /^\(?no action\b.{0,260}\b(?:status noted internally|nothing to send|no user ask pending|standing by|(?:lcp|lane) stays parked)\b/i,
   /^i(?:\s+will|(?:'|’)?ll)\s+stay silent\b.{0,300}\b(?:directive is explicit|do not acknowledge|no action until|no user request pending|no message will be sent)\b/i,
-  /^no action (?:needed|required)\b.{0,160}\bstaying silent\b.{0,120}\b(?:directive|no message|no user request|auth changes|user asks)\b/i,
+  /^no (?:action|acknowledg(?:e)?ment) (?:needed|required)\b.{0,160}\bstaying silent\b(?:[.!]?$|.{0,120}\b(?:directive|no message|no user request|auth changes|user asks)\b)/i,
   /^staying silent\b.{0,120}\b(?:per directive|do not acknowledge|no message will be sent|no user request)\b/i,
   /\blane (?:stays )?parked\b.{0,260}\b(?:nothing further to do|won(?:'|’)t repost|not reposting|holding until auth)\b/i,
 ];
