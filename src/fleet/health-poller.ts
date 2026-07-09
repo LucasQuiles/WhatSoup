@@ -1139,8 +1139,26 @@ export class HealthPoller {
     }
   }
 
-  private maybeClearProviderReauth(_name: string, _health: Record<string, unknown>): void {
-    // Implemented with the clear guard (spec §2 degraded-flow clear).
+  /**
+   * Degraded-flow clear (spec §2): the recovery-window body keeps status
+   * 'degraded' (a lingering non-null error class degrades regardless of
+   * recency — src/core/health.ts:999-1005), so an idle recovered bot NEVER
+   * reaches the return-to-online clear ladder. Clear this one source here,
+   * proof-gated, leaving all other active sources untouched.
+   */
+  private maybeClearProviderReauth(name: string, health: Record<string, unknown>): void {
+    const existing = this.statuses.get(name);
+    if (!existing?.activeAlertSources.includes('provider_reauth_required')) return;
+    if (!providerReauthClearProof(health)) return; // ALERT-10: withhold until fresh usable proof
+    const tc = health['turn_capability'] as Record<string, unknown> | null;
+    const evidence = [
+      'clear_code=AGENT_PROVIDER_AUTH_RECOVERED',
+      'proof=primary_model_probe_ok',
+      `model_usable_checked_at=${String(tc?.['model_usable_checked_at'] ?? 'unknown')}`,
+    ].join(' ');
+    if (clearAlertSourceChecked(name, 'provider_reauth_required', evidence)) {
+      existing.activeAlertSources = existing.activeAlertSources.filter((s) => s !== 'provider_reauth_required');
+    }
   }
 
 
@@ -1190,7 +1208,10 @@ export class HealthPoller {
       try {
         const evidence = source === 'instance_logged_out' && currentHealth
           ? this.relinkRecoveryEvidence(name, currentHealth)
-          : `repair_lane:${name}`;
+          : source === 'provider_reauth_required' && currentHealth
+            ? `clear_code=AGENT_PROVIDER_AUTH_RECOVERED proof=primary_model_probe_ok`
+              + ` model_usable_checked_at=${String((currentHealth['turn_capability'] as Record<string, unknown> | null)?.['model_usable_checked_at'] ?? 'unknown')}`
+            : `repair_lane:${name}`;
         const criticalAsset = source === 'instance_logged_out' && currentHealth
           ? this.relinkRecoveryCriticalAsset(name, currentHealth)
           : undefined;
@@ -1215,8 +1236,13 @@ export class HealthPoller {
     previous: InstanceStatus | undefined,
     currentHealth: Record<string, unknown> | undefined,
   ): boolean {
-    if (source !== 'instance_logged_out') return true;
-    return this.hasVerifiedRelinkRecovery(previous, currentHealth);
+    if (source === 'instance_logged_out') {
+      return this.hasVerifiedRelinkRecovery(previous, currentHealth);
+    }
+    if (source === 'provider_reauth_required') {
+      return currentHealth !== undefined && providerReauthClearProof(currentHealth);
+    }
+    return true;
   }
 
   private hasVerifiedRelinkRecovery(

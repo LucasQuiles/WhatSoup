@@ -123,7 +123,6 @@ it('a persistent incident does not re-page past the 15-minute alert throttle win
 it('a CONFIRMED WhatsApp logout still pages independently (approved flag 1: no supersession)', async () => {
   const body = fixture('provider-reauth-required.json');
   (body['whatsapp'] as Record<string, unknown>)['connected'] = false;
-  ((body['whatsapp'] as Record<string, unknown>)['connection'] as Record<string, unknown> | undefined);
   (body['whatsapp'] as Record<string, unknown>)['connection'] = { state: 'close', last_status_code: 401 };
   vi.stubGlobal('fetch', fetchReturning(body));
   const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
@@ -134,5 +133,58 @@ it('a CONFIRMED WhatsApp logout still pages independently (approved flag 1: no s
   expect(alertFns.emitAlert.mock.calls.some(([, s]) => s === 'instance_logged_out')).toBe(true);
   const dropped = poller.getStatus('ad-bot');
   expect(dropped!.status).toBe('logged_out');
+  poller.stop();
+});
+
+it('the failureHealth (non-200) path also confirms provider_reauth_required (Task-11 mirror branch)', async () => {
+  vi.stubGlobal('fetch', fetchReturning(fixture('provider-reauth-required.json'), 503));
+  const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
+  const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({ status: 'healthy' }));
+  poller.start();
+  await vi.advanceTimersByTimeAsync(0);
+  const emits = alertFns.emitAlert.mock.calls;
+  expect(emits.some(([inst, src]) => inst === 'ad-bot' && src === 'provider_reauth_required')).toBe(true);
+  poller.stop();
+});
+
+it('clear is WITHHELD while the body still confirms reauth', async () => {
+  vi.stubGlobal('fetch', fetchReturning(fixture('provider-reauth-required.json')));
+  const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
+  const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({ status: 'healthy' }), 5_000);
+  poller.start();
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(alertFns.clearAlertSource.mock.calls.some(([, s]) => s === 'provider_reauth_required')).toBe(false);
+  poller.stop();
+});
+
+it('recovery-window body clears the incident FROM THE DEGRADED FLOW (idle bot never returns online)', async () => {
+  const mockFetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => fixture('provider-reauth-required.json') })
+    .mockResolvedValue({ ok: true, status: 200, json: async () => fixture('provider-reauth-recovered.json') });
+  vi.stubGlobal('fetch', mockFetch);
+  const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
+  const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({ status: 'healthy' }), 5_000);
+  poller.start();
+  await vi.advanceTimersByTimeAsync(0);      // poll 1: incident → page
+  await vi.advanceTimersByTimeAsync(5_000);  // poll 2: recovery-window (status STILL degraded) → clear
+  const clears = alertFns.clearAlertSource.mock.calls.filter(([, s]) => s === 'provider_reauth_required');
+  expect(clears).toHaveLength(1);
+  expect(String(clears[0][2])).toContain('clear_code=AGENT_PROVIDER_AUTH_RECOVERED');
+  expect(String(clears[0][2])).toContain('proof=primary_model_probe_ok');
+  poller.stop();
+});
+
+it('fallback serving never satisfies the clear (IMPACT-18)', async () => {
+  const body = fixture('provider-reauth-required.json');
+  (body['instance'] as Record<string, unknown>)['effectiveProvider'] = 'opencode';
+  (body['instance'] as Record<string, unknown>)['fallbackActiveUntil'] = 9_999_999_999_999;
+  vi.stubGlobal('fetch', fetchReturning(body));
+  const instances = makeInstances(['ad-bot', makeInstance({ name: 'ad-bot' })]);
+  const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({ status: 'healthy' }), 5_000);
+  poller.start();
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(alertFns.clearAlertSource.mock.calls.some(([, s]) => s === 'provider_reauth_required')).toBe(false);
   poller.stop();
 });
