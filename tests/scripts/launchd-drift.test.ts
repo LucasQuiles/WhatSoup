@@ -172,3 +172,63 @@ describe('check-launchd-drift.sh CLI + dir gate', () => {
     expect(result.stdout).toContain('SKIP:');
   });
 });
+
+describe('static template surfaces (substitute-then-compare)', () => {
+  it('passes and reports ok for matching substituted surfaces', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: harness-maintenance');
+    expect(result.stdout).toContain('ok: reply-guarantee');
+    expect(result.stdout).toContain('all managed launchd surfaces match');
+  });
+
+  it('reports drift WITHOUT a diff body by default', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'),
+      subst(HARNESS_TEMPLATE, f.repo, f.home).replace('harness.sh', 'TAMPERED.sh'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: harness-maintenance');
+    expect(result.stderr).not.toContain('TAMPERED');
+  });
+
+  it('prints the diff body only with --show-diff', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'),
+      subst(HARNESS_TEMPLATE, f.repo, f.home).replace('harness.sh', 'TAMPERED.sh'));
+    const result = run(f, ['--show-diff']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('TAMPERED');
+  });
+
+  it('fails on a missing installed required surface', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    rmSync(join(f.launchd, 'com.whatsoup.reply-guarantee.plist'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing installed: reply-guarantee');
+  });
+
+  it('skips ms365-token-backup when not installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('skip: ms365-token-backup');
+  });
+
+  it('exits 2 fail-closed when a placeholder survives substitution', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.repo, 'deploy/com.whatsoup.harness-maintenance.plist'),
+      HARNESS_TEMPLATE.replace('harness.sh', '__NEW_UNKNOWN_TOKEN__/harness.sh'));
+    const result = run(f);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('unsubstituted placeholder');
+  });
+});

@@ -74,5 +74,65 @@ fi
 
 failures=0
 
+subst_render() { # TEMPLATE_ABS DEST BOT(optional)
+  local template="$1" dest="$2" bot="${3:-}"
+  sed -e "s|__WHATSOUP_REPO_ROOT__|$REPO_ROOT|g" \
+      -e "s|__HOME__|$HOME|g" \
+      -e "s|__BOT_NAME__|$bot|g" \
+      -e "s|__INSTANCE__|$bot|g" \
+      "$template" > "$dest"
+  if grep -qE '__[A-Z][A-Z_]*__' "$dest"; then
+    echo "unsubstituted placeholder survived render of: $template" >&2
+    return 2
+  fi
+  return 0
+}
+
+check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
+  local name="$1" rel="$2" installed="$3" bot="${4:-}"
+  local repo_template="$REPO_ROOT/$rel"
+  if [ ! -f "$repo_template" ]; then
+    echo "missing repo template: $rel" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -f "$installed" ]; then
+    echo "missing installed: $name" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  local rendered
+  rendered="$(mktemp "${TMPDIR:-/tmp}/launchd-drift.XXXXXX")"
+  if ! subst_render "$repo_template" "$rendered" "$bot"; then
+    rm -f "$rendered"
+    exit 2
+  fi
+  if cmp -s "$rendered" "$installed"; then
+    echo "ok: $name"
+  else
+    echo "drift: $name" >&2
+    if [ "$SHOW_DIFF" -eq 1 ]; then
+      diff -u "$rendered" "$installed" | sed -n '1,80p' >&2 || true
+    fi
+    failures=$((failures + 1))
+  fi
+  rm -f "$rendered"
+}
+
+check_optional_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS
+  local name="$1" rel="$2" installed="$3"
+  if [ ! -f "$installed" ]; then
+    echo "skip: $name (not installed on this host)"
+    return 0
+  fi
+  check_template_surface "$name" "$rel" "$installed"
+}
+
 # --- main ---
+check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
+check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
+check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
+
+if [ "$failures" -gt 0 ]; then
+  echo "launchd drift check failed: $failures problem(s)" >&2
+  exit 1
+fi
 echo "all managed launchd surfaces match"
