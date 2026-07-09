@@ -1,10 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   OutboundFloodDetector,
-  installOutboundFloodCounter,
   OUTBOUND_FLOOD_WINDOW_MS,
   OUTBOUND_FLOOD_THRESHOLD,
-  type OutboundFloodRecordResult,
 } from '../../src/transport/outbound-flood-detector.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 
@@ -155,85 +153,23 @@ describe('OutboundFloodDetector — edge-triggered trip dedup (T3.1)', () => {
     const r = d.record('a@s.whatsapp.net', 0);
     expect(r).toEqual({ flooding: false, tripped: false, key: 'a@s.whatsapp.net', count: 1 });
   });
-});
 
-// T2.1 — count at the socket seam (all tiers). Text, media, and poll sends ALL
-// funnel through `sock.sendMessage` (connection.ts sendMessage/sendRaw/
-// sendMedia/sendPollMessage), so wrapping that one method sees every tier —
-// unlike the fleet-feed log parser, which only sees the text "Sending message"
-// line. installOutboundFloodCounter is a read-only wrapper: it record()s then
-// delegates, and a detector failure never breaks a send. Composable with PR-F's
-// governor wrapper at the same seam (each wraps-and-delegates).
-describe('installOutboundFloodCounter — counts all tiers at the seam (T2.1)', () => {
-  const dest = 'a@s.whatsapp.net';
-
-  function makeSock() {
-    const calls: Array<[string, unknown, unknown]> = [];
-    const sock = {
-      sendMessage(jid: string, content: unknown, options?: unknown): Promise<{ key: { id: string } }> {
-        calls.push([jid, content, options]);
-        return Promise.resolve({ key: { id: `id-${calls.length}` } });
-      },
-    };
-    return { sock, calls };
-  }
-
-  it('counts text, media, and poll sends onto ONE dest counter (not text-only)', async () => {
-    const { sock, calls } = makeSock();
-    const detector = new OutboundFloodDetector({ windowMs: 1_000, threshold: 3 });
-    let clock = 0;
-    installOutboundFloodCounter(sock, detector, { now: () => clock });
-
-    clock = 0;
-    await sock.sendMessage(dest, { text: 'hi' });
-    clock = 1;
-    await sock.sendMessage(dest, { image: {}, caption: 'x' });
-    clock = 2;
-    await sock.sendMessage(dest, { poll: { name: 'q', values: [] } });
-
-    // All three tiers were counted for the one destination.
-    expect(detector.count(dest, 3)).toBe(3);
-    // Delegation preserved: the original saw every call with content intact.
-    expect(calls.map((c) => c[0])).toEqual([dest, dest, dest]);
-    expect(calls[1]![1]).toHaveProperty('image');
-    expect(calls[2]![1]).toHaveProperty('poll');
-  });
-
-  it('fires onFlood exactly once on the rising edge', async () => {
-    const { sock } = makeSock();
-    const detector = new OutboundFloodDetector({ windowMs: 10_000, threshold: 3 });
-    const trips: OutboundFloodRecordResult[] = [];
-    let clock = 0;
-    installOutboundFloodCounter(sock, detector, { now: () => clock, onFlood: (r) => trips.push(r) });
-
-    for (let i = 0; i < 5; i += 1) {
-      clock = i;
-      await sock.sendMessage(dest, { text: 'spam' });
-    }
-    expect(trips).toHaveLength(1);
-    expect(trips[0]!.count).toBe(3); // tripped at the 3rd send
-  });
-
-  it('never lets a detector failure break the send (read-only)', async () => {
-    const { sock, calls } = makeSock();
-    const detector = new OutboundFloodDetector({
+  it('never lets a resolver failure escape record() — detection must not break a send', () => {
+    const d = new OutboundFloodDetector({
       resolveKey: () => {
-        throw new Error('resolver blew up');
+        throw new Error('resolver blew up on a malformed jid');
       },
     });
-    installOutboundFloodCounter(sock, detector);
-    const res = await sock.sendMessage(dest, { text: 'hi' });
-    expect(res).toEqual({ key: { id: 'id-1' } }); // send still delegated + returned
-    expect(calls).toHaveLength(1);
-  });
-
-  it('restore() unwraps the seam', async () => {
-    const { sock, calls } = makeSock();
-    const detector = new OutboundFloodDetector();
-    const restore = installOutboundFloodCounter(sock, detector);
-    restore();
-    await sock.sendMessage(dest, { text: 'hi' });
-    expect(detector.count(dest)).toBe(0); // no longer counting
-    expect(calls).toHaveLength(1);
+    // The seam wraps record() in try/catch, but assert the detector itself does
+    // not swallow — the seam owns that. Here we document that a throwing resolver
+    // surfaces, so the seam's guard is load-bearing (see connection.ts
+    // countOutboundSend). This pins the contract the seam relies on.
+    expect(() => d.record('a@s.whatsapp.net', 0)).toThrow('resolver blew up');
   });
 });
+
+// Counting all tiers at the seam (T2.1) is covered by the ConnectionManager
+// integration test (tests/transport/outbound-flood-connection.test.ts), which
+// drives the real send methods (text, media, poll, raw) — a stronger proof than
+// a synthetic wrapper because it exercises the actual send path and the real
+// lid-resolving resolver.

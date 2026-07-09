@@ -346,6 +346,61 @@ describe('GET /health', () => {
     });
   });
 
+  it('marks a connected instance degraded and surfaces outbound_flood when a flood is active (T3.3)', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      connectionManager: {
+        botJid: '15555550123@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-04-05T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          recentDisconnects: {
+            windowMs: 600_000,
+            count: 0, // no churn — only the flood should drive 'degraded'
+            lastAt: null,
+            lastReason: null,
+            lastStatusCode: null,
+            byReason: {},
+          },
+          outboundFlood: {
+            windowMs: 300_000,
+            threshold: 20,
+            flooding: true,
+            destCount: 1,
+            worstDestHash: 'abc123def456',
+            worstCount: 42,
+          },
+        }),
+      } as unknown as ConnectionManager,
+    })));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded'); // the active flood degrades health
+    expect(json.whatsapp.connection.outbound_flood).toEqual({
+      window_ms: 300_000,
+      threshold: 20,
+      flooding: true,
+      dest_count: 1,
+      worst_dest_hash: 'abc123def456', // redacted hash, never a raw number
+      worst_count: 42,
+    });
+  });
+
   it('reports pending_polls_total reflecting live rows in the pending_polls table', async () => {
     // Empty table → 0
     const empty = await httpReq(port, '/health', 'GET');

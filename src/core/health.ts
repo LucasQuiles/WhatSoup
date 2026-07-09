@@ -1016,6 +1016,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
       const connectionChurnIsDegraded =
         isConnected && recentDisconnects.count >= RECENT_DISCONNECT_DEGRADED_THRESHOLD;
+      // PR-G — an active outbound flood degrades health so fleet pollers see it.
+      const outboundFlood = connectionState.outboundFlood ?? null;
+      const outboundFloodIsDegraded = isConnected && (outboundFlood?.flooding ?? false);
       const isRecoveringConnection =
         connectionState.state === 'connecting'
         || connectionState.state === 'reconnecting'
@@ -1091,6 +1094,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         enrichmentIsStale ||
         enrichmentStats.runtimeDegraded ||
         connectionChurnIsDegraded ||
+        outboundFloodIsDegraded ||
         agentRuntimeStatus === 'degraded' ||
         turnCapabilityIsDegraded
       ) {
@@ -1225,6 +1229,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               last_status_code: recentDisconnects.lastStatusCode,
               by_reason: recentDisconnects.byReason,
             },
+            // PR-G — outbound-flood detector surface (dest is a short hash,
+            // never a raw number). `flooding` drives the degraded flag above.
+            outbound_flood: outboundFlood
+              ? {
+                  window_ms: outboundFlood.windowMs,
+                  threshold: outboundFlood.threshold,
+                  flooding: outboundFlood.flooding,
+                  dest_count: outboundFlood.destCount,
+                  worst_dest_hash: outboundFlood.worstDestHash,
+                  worst_count: outboundFlood.worstCount,
+                }
+              : null,
             disconnect_class: disconnectClass,
             auth_failure_class: authFailureClass,
           },

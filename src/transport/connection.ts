@@ -32,6 +32,13 @@ import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import type { IdentityStore, GuardMode } from '../core/outbound-identity/types.ts';
 import { applyOutboundIdentityGuard } from '../core/outbound-identity/guard.ts';
 import { formatMentions, buildLidMappings, ContactsDirectory } from '../core/mentions.ts';
+import {
+  OutboundFloodDetector,
+  OUTBOUND_FLOOD_WINDOW_MS,
+  OUTBOUND_FLOOD_THRESHOLD,
+  type OutboundFloodRecordResult,
+  type OutboundFloodStats,
+} from './outbound-flood-detector.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
@@ -64,6 +71,20 @@ export interface ConnectionRecentDisconnects {
   byReason: Record<string, number>;
 }
 
+/**
+ * Redacted outbound-flood surface, mirroring {@link ConnectionRecentDisconnects}.
+ * `worstDestHash` is a short hash of the worst offender's conversation_key — a
+ * DM key is the bare phone number, so it is NEVER surfaced raw.
+ */
+export interface ConnectionOutboundFlood {
+  windowMs: number;
+  threshold: number;
+  flooding: boolean;
+  destCount: number;
+  worstDestHash: string | null;
+  worstCount: number;
+}
+
 export interface ConnectionStateSnapshot {
   state: ConnectionLifecycleState;
   connected: boolean;
@@ -76,6 +97,7 @@ export interface ConnectionStateSnapshot {
   lastDisconnectReason: string | null;
   lastStatusCode: number | null;
   recentDisconnects: ConnectionRecentDisconnects;
+  outboundFlood?: ConnectionOutboundFlood;
   authBond?: AuthBondSnapshot;
   credentialLifecycle: CredentialLifecycleSnapshot;
 }
@@ -552,6 +574,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   /** Contacts directory built from incoming messages — maps names → phone numbers for @mention resolution. */
   readonly contactsDir = new ContactsDirectory();
 
+  /**
+   * Outbound-flood detector (PR-G). Counts sends per resolved destination at the
+   * send seam and trips a redacted `outboundFlood` flag surfaced in the health
+   * payload. Keyed on the ingest conversation_key (folds @lid → phone) so a
+   * mid-stream JID flip cannot dodge the threshold. Pure observability.
+   */
+  private readonly outboundFloodDetector = new OutboundFloodDetector({
+    resolveKey: (jid) => this.contactsDir.resolveConversationKey(jid),
+  });
+
   /** In-memory cache of the most recent presence status per JID. */
   readonly presenceCache = new PresenceCache();
 
@@ -705,6 +737,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // trusted infra (health admin /send via sendTracked) sets opts.caller;
     // every other path leaves it undefined → 'agent' → full cold-floor.
     applyOutboundIdentityGuard(chatJid, { caller: opts?.caller ?? 'agent', mode: this.identityMode }, this.identityStore);
+    this.countOutboundSend(chatJid); // PR-G: flood detection at the send seam (all tiers)
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
@@ -768,6 +801,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
+    this.countOutboundSend(chatJid); // PR-G: MCP-raw sends count toward the flood threshold too
     const autoTyping = typeof content['text'] === 'string' && config.autoTyping !== 'off'
       ? config.autoTyping
       : 'off';
@@ -805,6 +839,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
+    this.countOutboundSend(chatJid); // PR-G: poll sends count toward the flood threshold too
 
     const result = await withSendTimeout(
       this.sock.sendMessage(chatJid, {
@@ -855,6 +890,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
     applyOutboundIdentityGuard(chatJid, { caller: 'mcp', mode: this.identityMode }, this.identityStore);
+    // PR-G: count once per logical media send (before the retry loop, so
+    // connection retries don't inflate the count and false-trip the detector).
+    this.countOutboundSend(chatJid);
     for (let attempt = 0; ; attempt += 1) {
       this.log.info({ chatJid, mediaType: media.type, attempt }, 'Sending media');
       const upload = mediaUpload(media);
@@ -1264,8 +1302,59 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
       recentDisconnects: this.getRecentDisconnectStats(),
+      outboundFlood: this.getOutboundFloodStats(),
       authBond,
       credentialLifecycle: this.getCredentialLifecycleSnapshot(authBond),
+    };
+  }
+
+  /**
+   * Count one outbound send to `chatJid` at the seam (called by every send
+   * method — text, media, poll, raw — so ALL tiers are seen). On a rising-edge
+   * trip, alert once. Read-only: any failure is swallowed so detection can never
+   * break a send. This one hook is the PR-F merge point — F's future
+   * `sock.sendMessage` wrapper calls it in place of the per-method calls.
+   */
+  private countOutboundSend(chatJid: string): void {
+    try {
+      const result = this.outboundFloodDetector.record(chatJid);
+      if (result.tripped) this.handleOutboundFlood(result);
+    } catch {
+      // Detection is best-effort; never let it perturb the send path.
+    }
+  }
+
+  /**
+   * Fire on the false→true flood edge (de-duped by the detector, so exactly once
+   * per flood — a sustained flood must not self-flood the alert plane). Logs a
+   * redacted WARN and routes one alert through the existing fleet alert plane.
+   */
+  private handleOutboundFlood(result: OutboundFloodRecordResult): void {
+    const destHash = shortHash(result.key);
+    this.log.warn(
+      { dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS, threshold: OUTBOUND_FLOOD_THRESHOLD },
+      'outbound flood detected',
+    );
+    const windowMin = Math.round(OUTBOUND_FLOOD_WINDOW_MS / 60_000);
+    emitAlertChecked(
+      config.botName,
+      'outbound_flood',
+      `outbound flood: ${result.count}+ sends in ${windowMin}m to one conversation`,
+      JSON.stringify({ dest: destHash, count: result.count, windowMs: OUTBOUND_FLOOD_WINDOW_MS }),
+      'critical',
+    );
+  }
+
+  /** Redacted flood snapshot for the health payload (dest as short hash). */
+  private getOutboundFloodStats(): ConnectionOutboundFlood {
+    const stats: OutboundFloodStats = this.outboundFloodDetector.stats();
+    return {
+      windowMs: stats.windowMs,
+      threshold: stats.threshold,
+      flooding: stats.flooding,
+      destCount: stats.destCount,
+      worstDestHash: stats.worstKey ? shortHash(stats.worstKey) : null,
+      worstCount: stats.worstCount,
     };
   }
 
