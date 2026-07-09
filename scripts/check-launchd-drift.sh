@@ -46,9 +46,15 @@ USAGE
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo-root) REPO_ROOT="${2:?missing --repo-root value}"; shift 2 ;;
-    --launchd-dir) LAUNCHD_DIR="${2:?missing --launchd-dir value}"; shift 2 ;;
-    --bin-dir) BIN_DIR="${2:?missing --bin-dir value}"; shift 2 ;;
+    --repo-root)
+      if [ "$#" -lt 2 ]; then echo "missing --repo-root value" >&2; usage >&2; exit 2; fi
+      REPO_ROOT="$2"; shift 2 ;;
+    --launchd-dir)
+      if [ "$#" -lt 2 ]; then echo "missing --launchd-dir value" >&2; usage >&2; exit 2; fi
+      LAUNCHD_DIR="$2"; shift 2 ;;
+    --bin-dir)
+      if [ "$#" -lt 2 ]; then echo "missing --bin-dir value" >&2; usage >&2; exit 2; fi
+      BIN_DIR="$2"; shift 2 ;;
     --allow-missing-launchd-dir) ALLOW_MISSING_LAUNCHD_DIR=1; shift ;;
     --show-diff) SHOW_DIFF=1; shift ;;
     --instance)

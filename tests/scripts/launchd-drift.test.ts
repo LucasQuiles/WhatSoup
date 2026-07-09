@@ -157,6 +157,13 @@ describe('check-launchd-drift.sh CLI + dir gate', () => {
     expect(result.stdout).toContain('LaunchAgents directory not found');
   });
 
+  it('exits 2 when a flag is missing its value', () => {
+    const f = makeFixture();
+    const result = run(f, ['--launchd-dir']);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('missing --launchd-dir value');
+  });
+
   it('exits 0 with SKIP: when dir absent and --allow-missing-launchd-dir passed', () => {
     const f = makeFixture();
     rmSync(f.launchd, { recursive: true, force: true });
