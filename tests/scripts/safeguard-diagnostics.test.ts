@@ -81,14 +81,17 @@ const requiredPackageScripts = {
     'npm run verify:console-design',
   ].join(' && '),
   'verify:release': [
+    'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
     'npm run guard:repo:release-hygiene',
     'npm run guard:repo:commit-authors',
     'npm run guard:publication:all',
     'npm run guard:doc-drift',
     'npm run guard:public-surface-drift',
     'npm run guard:work-index',
+    'npm run guard:doc-tally',
     'npm run guard:node-pin-consistency',
     'npm run guard:source-runtime-drift',
+    'npm run guard:arc-binding-drift',
     'npm run guard:fleet-bot-hardening-parity',
     'npm run guard:bot-errors-runtime-manifest',
     'npm run guard:bot-errors-simulation-matrix',
@@ -97,15 +100,21 @@ const requiredPackageScripts = {
     'npm run guard:safeguard-diagnostics',
     'npm run guard:test-integrity',
     'npm run guard:boundaries',
+    'npm run guard:fail-closed-gate',
+    'npm run guard:service-units',
+    'npm run guard:insecure-tempfile',
+    'npm run guard:instance-config',
+    'npm run guard:guard-test-coverage',
     'npm run guard:lint:src',
+    'npm run test:tokenomics',
+    'npm run test:drills',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard test',
     'bash scripts/run-with-pinned-npm.sh --prefix console ci',
     'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
     'npm run typecheck:all',
-    'npm test',
-    'npm run coverage:check',
+    'npm run coverage:check -- --pool=forks --fileParallelism=false',
     'bash scripts/run-with-pinned-npm.sh --prefix console run build',
     'npm run verify:console-design',
     'npm run verify:console-browser',
@@ -476,6 +485,125 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
       .toContain('missing npm run verify:console-browser');
+  });
+
+  it('accepts serialized coverage as the only root full-suite release command', () => {
+    const fixture = makeRepo();
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'pass',
+    });
+  });
+
+  it('rejects a separate root test pass before release coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          'npm run coverage:check',
+          'npm test -- --pool=forks --fileParallelism=false && npm run coverage:check',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('forbidden npm test');
+  });
+
+  it('rejects duplicate release coverage executions', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          'npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check -- --pool=forks --fileParallelism=false && npm run coverage:check -- --pool=forks --fileParallelism=false',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('expected exactly one npm run coverage:check; found 2');
+  });
+
+  it('rejects release coverage without serialized runner flags', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          'npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+  });
+
+  it('rejects release coverage with altered runner flags', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          '--pool=forks --fileParallelism=false',
+          '--pool=threads --fileParallelism=false',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+  });
+
+  it('rejects release coverage without file parallelism disabled', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          'npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check -- --pool=forks',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+  });
+
+  it.each([
+    ['npm run test', 'npm run test -- --pool=forks --fileParallelism=false', 'forbidden npm run test'],
+    ['npm run coverage', 'npm run coverage -- --pool=forks --fileParallelism=false', 'forbidden npm run coverage'],
+    ['direct coverage script', 'bash scripts/run-coverage-check.sh --pool=forks --fileParallelism=false', 'forbidden bash scripts/run-coverage-check.sh'],
+  ])('rejects an extra full-suite launcher via %s', (_name, extraCommand, expectedEvidence) => {
+    const canonical = 'npm run coverage:check -- --pool=forks --fileParallelism=false';
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          canonical,
+          `${extraCommand} && ${canonical}`,
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain(expectedEvidence);
+  });
+
+  it('rejects any unexpected command in the canonical release sequence', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release'].replace(
+          'npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'node scripts/unexpected-release-step.mjs && npm run coverage:check -- --pool=forks --fileParallelism=false',
+        ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('exact command sequence mismatch');
   });
 
   it('fails when a new non-capture console design script is not wired into shared verification', () => {

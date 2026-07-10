@@ -172,6 +172,24 @@ describe('verify chain composition (package.json)', () => {
     expect(release).toMatch(/\bnpm run verify:console-browser\b/);
   });
 
+  it('verify:release runs the root full suite once through serialized coverage', () => {
+    const release = packageJson.scripts['verify:release'];
+    expect(release, 'verify:release script must exist').toBeDefined();
+
+    const rootFullSuitePatterns = [
+      /^npm (?:test|run test)(?:\s|$)/,
+      /^npm run coverage(?::check)?(?:\s|$)/,
+      /^bash scripts\/run-coverage-check\.sh(?:\s|$)/,
+    ];
+    const rootFullSuiteCommands = release
+      .split(/\s*&&\s*/)
+      .filter((command) => rootFullSuitePatterns.some((pattern) => pattern.test(command)));
+
+    expect(rootFullSuiteCommands).toEqual([
+      'npm run coverage:check -- --pool=forks --fileParallelism=false',
+    ]);
+  });
+
   it('shared console design verification invokes design guard fixture tests', () => {
     const chain = packageJson.scripts['verify:console-design'];
     expect(chain, 'verify:console-design script must exist').toBeDefined();
