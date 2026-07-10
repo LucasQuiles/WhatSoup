@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -4252,17 +4253,22 @@ def read_fleet_token_text(path: Path) -> tuple[str | None, str | None]:
     common_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     parent_fd = os.open(parts[0], common_flags | directory_flag)
     try:
-        for part in parts[1:-1]:
+        for depth, part in enumerate(parts[1:-1], start=1):
             try:
                 next_fd = os.open(part, common_flags | directory_flag | no_follow, dir_fd=parent_fd)
             except OSError as exc:
-                return None, f"token_parent_refused error={redact_evidence_string(str(exc), 160)}"
+                error_name = errno.errorcode.get(exc.errno, "UNKNOWN")
+                return None, f"token_parent_refused errno={error_name} depth={depth}"
             os.close(parent_fd)
             parent_fd = next_fd
 
         leaf = parts[-1]
         try:
-            file_fd = os.open(leaf, common_flags | no_follow, dir_fd=parent_fd)
+            file_fd = os.open(
+                leaf,
+                common_flags | no_follow | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_fd,
+            )
         except OSError as exc:
             try:
                 leaf_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)

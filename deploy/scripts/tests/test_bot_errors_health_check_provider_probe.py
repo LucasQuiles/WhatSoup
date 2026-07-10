@@ -4,8 +4,6 @@ import importlib.util
 import os
 from pathlib import Path
 
-import pytest
-
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
 
 
@@ -240,18 +238,18 @@ def test_load_fleet_api_token_expands_tilde_from_profile(monkeypatch, tmp_path):
     assert error is None
 
 
-@pytest.mark.parametrize("mode", [0o404, 0o440, 0o444])
-def test_load_fleet_api_token_rejects_group_or_other_permissions(monkeypatch, tmp_path, mode):
-    token_file = tmp_path / "fleet-tokens.json"
-    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
-    token_file.chmod(mode)
-    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
-    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
+def test_load_fleet_api_token_rejects_group_or_other_permissions(monkeypatch, tmp_path):
+    for mode in (0o404, 0o440, 0o444):
+        token_file = tmp_path / f"fleet-tokens-{mode:o}.json"
+        token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+        token_file.chmod(mode)
+        monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+        monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
 
-    token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+        token, _source, _accept_count, error = _mod.load_fleet_api_token({})
 
-    assert token is None
-    assert error == f"token_mode_too_open mode={mode:o}"
+        assert token is None
+        assert error == f"token_mode_too_open mode={mode:o}"
 
 
 def test_load_fleet_api_token_rejects_a_symlinked_parent(monkeypatch, tmp_path):
@@ -269,7 +267,34 @@ def test_load_fleet_api_token_rejects_a_symlinked_parent(monkeypatch, tmp_path):
 
     assert token is None
     assert error is not None
-    assert error.startswith("token_parent_refused")
+    assert error.startswith("token_parent_refused errno=")
+    assert " depth=" in error
+    assert any(f"errno={name}" in error for name in ("ELOOP", "ENOTDIR"))
+    assert linked_config.name not in error
+
+
+def test_load_fleet_api_token_refuses_fifo_without_blocking(monkeypatch, tmp_path):
+    import signal
+
+    token_file = tmp_path / "fleet-tokens.json"
+    os.mkfifo(token_file, 0o600)
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
+    prior_handler = signal.getsignal(signal.SIGALRM)
+
+    def timeout_handler(_signum, _frame):
+        raise TimeoutError("FIFO open blocked")
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prior_handler)
+
+    assert token is None
+    assert error == "token_non_regular_refused"
 
 
 def test_load_fleet_api_token_refuses_a_leaf_swapped_to_a_symlink(monkeypatch, tmp_path):
@@ -300,6 +325,60 @@ def test_load_fleet_api_token_refuses_a_leaf_swapped_to_a_symlink(monkeypatch, t
     assert token is None
     assert error is not None
     assert error.startswith("token_symlink_refused")
+
+
+def test_load_fleet_api_token_reads_from_the_validated_descriptor(monkeypatch, tmp_path):
+    token_file = tmp_path / "fleet-tokens.json"
+    moved_file = tmp_path / "opened-token.json"
+    replacement = tmp_path / "replacement.json"
+    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    replacement.write_text('{"active":"replacement-token","accept":[]}\n', encoding="utf-8")
+    token_file.chmod(0o600)
+    replacement.chmod(0o600)
+    real_open = os.open
+    swapped = False
+
+    def swapping_after_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == token_file.name and dir_fd is not None and not swapped:
+            swapped = True
+            token_file.rename(moved_file)
+            replacement.rename(token_file)
+        return fd
+
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(_mod.os, "open", swapping_after_open)
+
+    token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+
+    assert swapped is True
+    assert token == "fixture-active-token"
+    assert error is None
+
+
+def test_read_fleet_token_requires_owner_read_permission(monkeypatch, tmp_path):
+    real_open = os.open
+    for mode in (0o000, 0o200):
+        token_file = tmp_path / f"fleet-tokens-{mode:o}.json"
+        token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+        token_file.chmod(mode)
+
+        def opening_then_restricting(path, flags, open_mode=0o777, *, dir_fd=None):
+            if path != token_file.name or dir_fd is None:
+                return real_open(path, flags, open_mode, dir_fd=dir_fd)
+            token_file.chmod(0o600)
+            fd = real_open(path, flags, open_mode, dir_fd=dir_fd)
+            token_file.chmod(mode)
+            return fd
+
+        monkeypatch.setattr(_mod.os, "open", opening_then_restricting)
+        raw, error = _mod.read_fleet_token_text(token_file)
+        monkeypatch.setattr(_mod.os, "open", real_open)
+
+        assert raw is None
+        assert error == f"token_owner_read_required mode={mode:o}"
 
 
 def test_required_credential_inventory_rejects_group_read_permissions(tmp_path):
