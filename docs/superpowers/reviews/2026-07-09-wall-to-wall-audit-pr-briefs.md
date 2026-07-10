@@ -2,7 +2,7 @@
 
 **Status:** Completed locally; no implementation branch has been pushed and no pull request has been opened from this artifact.
 
-**Audited code base:** `origin/main` at `7330bafbe77d7a15febce32eb09b304e8778862f` on 2026-07-09. Refreshed against current main `46f64eb7b8a21274a16dfd657515afc995c33e66`; the intervening merge is documentation-only.
+**Audited code base:** `origin/main` at `7330bafbe77d7a15febce32eb09b304e8778862f` on 2026-07-09. The documentation branch was rebased on `d04ab3e9a2ea3b1f04f458528600af9ce758c2fd` on 2026-07-10; the intervening redaction, health/deploy, and test-harness changes are dispositioned below, and each implementation branch must refresh evidence from its then-current main.
 
 **Purpose:** These briefs turn the audit findings into small, sequenced pull requests. Each implementation branch must start from a freshly fetched current main; line numbers below describe the audited base and may move.
 
