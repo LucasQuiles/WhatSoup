@@ -2307,62 +2307,74 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     expect(event.diagnostics.logHints.some((hint) => hint.includes('journalctl'))).toBe(false);
   });
 
-  it('uses read-only macOS sntp probing and treats systemsetup permission limits as context', () => {
-    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
-    const binDir = join(tmpRoot, 'bin');
-    mkdirSync(binDir, { recursive: true });
-    writeFileSync(
-      join(binDir, 'systemsetup'),
-      '#!/bin/sh\necho "You need administrator access to run this tool... exiting!"\nexit 1\n',
-    );
-    chmodSync(join(binDir, 'systemsetup'), 0o755);
-    writeFileSync(
-      join(binDir, 'sntp'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" > "${join(tmpRoot, 'sntp-args.txt')}"\necho "+0.008500 +/- 0.016000 time.apple.com 17.253.2.43"\n`,
-    );
-    chmodSync(join(binDir, 'sntp'), 0o755);
+  it('uses read-only macOS clock commands and treats systemsetup permission limits as context', () => {
+    const result = JSON.parse(python(`
+import json
+import os
+from types import SimpleNamespace
+from unittest.mock import patch
+for key in list(os.environ):
+    if key.startswith("BOT_ERRORS_"):
+        del os.environ[key]
+os.environ["BOT_ERRORS_DRY_PLATFORM"] = "darwin"
+${importHealthModulePrelude()}
+responses = [
+    SimpleNamespace(
+        returncode=1,
+        stdout="You need administrator access to run this tool... exiting!\\n",
+        stderr="",
+    ),
+    SimpleNamespace(
+        returncode=0,
+        stdout="+0.008500 +/- 0.016000 time.apple.com 17.253.2.43\\n",
+        stderr="",
+    ),
+]
+with patch.object(m.subprocess, "run", side_effect=responses) as run:
+    lines = m.clock_inventory()
+commands = [call.args[0] for call in run.call_args_list]
+failures = [
+    line for line in lines
+    if line.startswith("FAIL ") or " FAIL " in line
+]
+warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
+severity = m.daily_summary_severity(failures, warnings)
+print(json.dumps({"commands": commands, "lines": lines, "severity": severity}))
+`)) as { commands: string[][]; lines: string[]; severity: string };
 
-    const env = { ...process.env };
-    for (const key of Object.keys(env)) {
-      if (key.startsWith('BOT_ERRORS_')) delete env[key];
-    }
+    expect(result.commands).toEqual([
+      ['systemsetup', '-getusingnetworktime'],
+      ['sntp', 'time.apple.com'],
+    ]);
+    expect(result.lines).toEqual([
+      'clock_network_time: unavailable_without_admin rc=1 sample=You need administrator access to run this tool... exiting!',
+      'clock_sntp: rc=0 offset_ms=8.5 sample=+0.008500 +/- 0.016000 time.apple.com 17.253.2.43',
+    ]);
+    expect(result.severity).toBe('info');
+  });
 
-    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
-      cwd: process.cwd(),
-      env: {
-        ...env,
-        HOME: tmpRoot,
-        TMPDIR: tmpRoot,
-        PATH: `${binDir}:${process.env.PATH ?? ''}`,
-        BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_DRY_PLATFORM: 'darwin',
-        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
-        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
-        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
-        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
-          role: 'darwin-clock',
-          expectDispatcher: false,
-          expectQLoop: false,
-          expectPersonalSocket: false,
-          expectPersonalTools: false,
-          expectConfigInventory: false,
-          expectPluginInventory: false,
-        }),
-      },
-    });
+  it('reports macOS clock command timeouts and missing sntp as warnings', () => {
+    const lines = JSON.parse(python(`
+import json
+import os
+import subprocess
+from unittest.mock import patch
+for key in list(os.environ):
+    if key.startswith("BOT_ERRORS_"):
+        del os.environ[key]
+os.environ["BOT_ERRORS_DRY_PLATFORM"] = "darwin"
+${importHealthModulePrelude()}
+failures = [
+    subprocess.TimeoutExpired(cmd=["systemsetup", "-getusingnetworktime"], timeout=3),
+    FileNotFoundError("sntp unavailable"),
+]
+with patch.object(m.subprocess, "run", side_effect=failures):
+    print(json.dumps(m.clock_inventory()))
+`)) as string[];
 
-    const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
-      severity: string;
-      evidence: string;
-    };
-    expect(event.severity).toBe('info');
-    expect(event.evidence).toContain('clock_network_time: unavailable_without_admin rc=1');
-    expect(event.evidence).toContain('clock_sntp: rc=0 offset_ms=8.5');
-    expect(event.evidence).not.toContain('Operation not permitted');
-    expect(readFileSync(join(tmpRoot, 'sntp-args.txt'), 'utf8').trim()).toBe('time.apple.com');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^WARN clock_network_time: unavailable /);
+    expect(lines[1]).toMatch(/^WARN clock_sntp: unavailable /);
   });
 
   it('uses local log paths for WSL-origin daily health diagnostics', () => {
