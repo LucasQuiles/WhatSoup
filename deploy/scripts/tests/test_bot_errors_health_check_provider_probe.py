@@ -216,6 +216,26 @@ def test_fleet_api_inventory_explicit_url_still_wins(monkeypatch):
     assert "instances=1" in lines[0]
 
 
+def test_load_fleet_api_token_expands_tilde_from_profile(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    token_file = home / ".config" / "whatsoup" / "fleet-tokens.json"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_FLEET_TOKEN_FILE", raising=False)
+
+    token, source, accept_count, error = _mod.load_fleet_api_token(
+        {"fleetApiTokenFile": "~/.config/whatsoup/fleet-tokens.json"}
+    )
+
+    assert token == "fixture-active-token"
+    assert source == "file token_source_path_redacted=true"
+    assert accept_count == 0
+    assert error is None
+
+
 # --- provider_credential_presence: mirror lookupCredential (env -> keyring + migration -> .key store) ---
 # 2026-06-23 fleet audit: provider keys live in ~/.config/whatsoup/credentials/<svc>.key (the file
 # store lookupCredential consults after a keyring miss, keyring.ts:209), NOT the keychain, and NOT
