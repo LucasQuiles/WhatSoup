@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -96,21 +97,23 @@ function makeFixtureTree(
   return root;
 }
 
-const GIT_FIXTURE_ENV = {
-  ...process.env,
-  GIT_AUTHOR_NAME: 'Fixture',
-  GIT_AUTHOR_EMAIL: 'fixture@local',
-  GIT_COMMITTER_NAME: 'Fixture',
-  GIT_COMMITTER_EMAIL: 'fixture@local',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_SYSTEM: '/dev/null',
-};
+function gitFixtureEnv(): NodeJS.ProcessEnv {
+  return {
+    ...cleanGitEnv(),
+    GIT_AUTHOR_NAME: 'Fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@local',
+    GIT_COMMITTER_NAME: 'Fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@local',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  };
+}
 
 function gitFixture(repoRoot: string, args: string[]): void {
   const result = spawnSync('git', args, {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: GIT_FIXTURE_ENV,
+    env: gitFixtureEnv(),
     timeout: SPAWN_TIMEOUT_MS,
   });
   expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -123,7 +126,7 @@ function runPreflight(
 ): { status: number; stderr: string; stdout: string } {
   const result = spawnSync('bash', [PREFLIGHT, repoRoot, instance], {
     encoding: 'utf8',
-    env: { ...process.env, WHATSOUP_NODE: PINNED_NODE, ...env },
+    env: { ...cleanGitEnv(), WHATSOUP_NODE: PINNED_NODE, ...env },
     timeout: SPAWN_TIMEOUT_MS,
   });
   return {
@@ -224,6 +227,46 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     expect(status).toBe(3);
     expect(stderr).toContain('tracked file drift');
     expect(stderr).toContain('git diff HEAD --exit-code');
+  });
+
+  it('keeps fixture commits inside the fixture when hook Git variables target another repository', () => {
+    const ambient = makeFixtureTree('export const ambient = true;\n');
+    gitFixture(ambient, ['init', '-q']);
+    gitFixture(ambient, ['add', '.']);
+    gitFixture(ambient, ['commit', '-m', 'ambient-base']);
+    const ambientHead = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: ambient,
+      encoding: 'utf8',
+      env: gitFixtureEnv(),
+    }).stdout.trim();
+
+    const fixtureRoot = makeFixtureTree('export const fixture = true;\n');
+    const prior = {
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+      GIT_INDEX_FILE: process.env.GIT_INDEX_FILE,
+    };
+    process.env.GIT_DIR = join(ambient, '.git');
+    process.env.GIT_WORK_TREE = ambient;
+    process.env.GIT_INDEX_FILE = join(ambient, '.git', 'index');
+    try {
+      gitFixture(fixtureRoot, ['init', '-q']);
+      gitFixture(fixtureRoot, ['add', '.']);
+      gitFixture(fixtureRoot, ['commit', '-m', 'fixture-base']);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    expect(existsSync(join(fixtureRoot, '.git'))).toBe(true);
+    const ambientAfter = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: ambient,
+      encoding: 'utf8',
+      env: gitFixtureEnv(),
+    }).stdout.trim();
+    expect(ambientAfter).toBe(ambientHead);
   });
 
   it('refuses a lockfile-backed tree when root node_modules is absent', () => {
