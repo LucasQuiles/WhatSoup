@@ -15,11 +15,11 @@
 - Audited base is `7330bafbe77d7a15febce32eb09b304e8778862f`; fetch `origin` immediately before creating each branch and record the actual base SHA in the PR receipt.
 - Publication boundary is local branch and commits only; publishing a branch or Draft PR requires explicit approval.
 - Preserve one coherent behavioral idea per PR and keep every PR independently revertible.
-- The numbered schema sequence is WS-A02 migration 37, WS-A04 migration 38, WS-A05 migration 39, then WS-A07 migration 40; if current main has advanced, reserve fresh consecutive versions and update all four plan references before implementation.
+- The numbered schema sequence is WS-A02 migration 37, WS-A01 migration 38, WS-A04 migration 39, WS-A05 migration 40, then WS-A07 migration 41; if current main has advanced, reserve fresh consecutive versions and update every downstream plan reference before implementation.
 - Use the repository-pinned Node.js `24.15.0` and npm `11.12.1` through `scripts/run-with-pinned-npm.sh`; never use the workstation's ambient Node/npm for evidence.
-- WS-A06 starts only after PR #1714 lands or closes because #1714 may move outbound-redaction contracts; rebase the log work onto its final form rather than editing #1714's branch.
-- PR #1715 does not block WS-A06/A07/A08, but every branch still starts from main after its current disposition is known so deploy-script changes are not accidentally overwritten.
-- PR #1716 does not block WS-A06/A07/A08, but rerun the full release gate after rebasing because it changes runtime/health/hygiene surfaces used by the same test program.
+- PR #1714 is merged; WS-A06 starts from current main and preserves its final outbound-redaction contracts.
+- PR #1715 is merged; every branch starts from current main so its deploy-script changes are retained.
+- PR #1716 closed unmerged. It does not block WS-A06/A07/A08, but compare any preserved provider-recovery replacement before overlapping runtime/health work and rerun the full release gate after every rebase.
 - Before treating any existing branch as superseded, run `git range-diff` and `git cherry -v`; do not delete a branch in this program.
 - No private message/model-output preview, raw JID, raw phone, access token, URL userinfo/query/fragment, or malformed MCP request bytes may enter routine logs.
 - Synthetic privacy canaries must be invented test values; tests must not use real chats, phones, credentials, media, providers, or keychains.
@@ -46,7 +46,7 @@
 
 ### WS-A07 — erasure propagation
 
-- Modify `src/core/database.ts`: migration 40 scrubs historical tool content; deletion methods become atomic message-plus-secondary-store operations.
+- Modify `src/core/database.ts`: migration 41 scrubs historical tool content; deletion methods become atomic message-plus-secondary-store operations.
 - Modify `src/core/durability.ts`: discard tool input/result content at the storage boundary.
 - Modify `src/mcp/registry.ts`: stop serializing parameters/results for durability telemetry.
 - Create `src/core/erasure.ts`: local fact-queue erasure and message-liveness helpers.
@@ -55,7 +55,7 @@
 - Modify `src/runtimes/chat/enrichment/poller.ts`: revalidate before extraction, validation, and export.
 - Modify `tests/core/migration-safety.test.ts`, `tests/core/durability-tools.test.ts`, `tests/mcp/registry-erasure-redaction.test.ts`, `tests/core/messages.test.ts`, `tests/core/database.test.ts`, `tests/runtimes/chat/enrichment/fact-export-queue.test.ts`, and `tests/runtimes/chat/enrichment/poller.test.ts`: historical scrub, deletion, and race proofs.
 - Modify `docs/durability.md`: append the explicit local/remote erasure matrix and residual boundary.
-- Modify `docs/configuration.md`: migration 40 and telemetry lifecycle.
+- Modify `docs/configuration.md`: migration 41 and telemetry lifecycle.
 
 ### WS-A08 — cached-media confinement
 
@@ -641,7 +641,7 @@ git commit -m "security(logging): remove content from routine call sites"
 
 **Interfaces:**
 - Consumes: existing `recordToolCall` and `markToolComplete` call graph.
-- Produces: persisted `tool_input` values only `[metadata-only]`; persisted `result` values only `[complete]` or `[error]`; migration 40 irreversibly scrubs all pre-existing content.
+- Produces: persisted `tool_input` values only `[metadata-only]`; persisted `result` values only `[complete]` or `[error]`; migration 41 irreversibly scrubs all pre-existing content.
 
 - [ ] **Step 1: Write the failing durability-boundary test**
 
@@ -749,12 +749,12 @@ this.durability!.markToolComplete(durabilityId, TOOL_ERROR_MARKER);
 
 Keep `text` only for the immediate MCP response returned to the authorized caller. Delete `ERASURE_SENSITIVE_TOOL_NAMES`, its comments, and the old redacted marker because every tool now receives the stronger default.
 
-- [ ] **Step 5: Add migration 40 and its historical-canary test**
+- [ ] **Step 5: Add migration 41 and its historical-canary test**
 
 Add to `src/core/database.ts`:
 
 ```ts
-function runMigration40(db: DatabaseSync): void {
+function runMigration41(db: DatabaseSync): void {
   const table = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'")
     .get() as { name: string } | undefined;
@@ -771,14 +771,14 @@ function runMigration40(db: DatabaseSync): void {
 }
 ```
 
-Append `[40, runMigration40]` to `MIGRATIONS` after the inbound, delivery-audit, and scheduler-identity migrations. Change `ALL_MIGRATION_VERSIONS` in `tests/core/migration-safety.test.ts` to `Array.from({ length: 40 }, ...)` and add:
+Append `[41, runMigration41]` to `MIGRATIONS` after the inbound, delivery-audit, and scheduler-identity migrations. Change `ALL_MIGRATION_VERSIONS` in `tests/core/migration-safety.test.ts` to `Array.from({ length: 41 }, ...)` and add:
 
 ```ts
-it('migration 40 irreversibly scrubs historical tool input and result content', () => {
+it('migration 41 irreversibly scrubs historical tool input and result content', () => {
   const path = tmpFile();
   const initial = new Database(path);
   initial.open();
-  initial.raw.prepare('DELETE FROM schema_migrations WHERE version = 40').run();
+  initial.raw.prepare('DELETE FROM schema_migrations WHERE version = 41').run();
   initial.raw.prepare(`
     INSERT INTO tool_calls
       (conversation_key, tool_name, tool_input, status, result, replay_policy)
@@ -844,12 +844,12 @@ Run: `bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-safety.te
 
 Expected: PASS; crash recovery still uses status/replay policy/outbound linkage and never requires stored arguments/results.
 
-- [ ] **Step 8: Document migration 40 and commit**
+- [ ] **Step 8: Document migration 41 and commit**
 
 Append to the migration table in `docs/configuration.md`:
 
 ```markdown
-| 40 | Irreversibly replaces historical `tool_calls.tool_input`/`result` content with metadata-only outcome markers. Future writes persist only `[metadata-only]`, `[complete]`, or `[error]`; recovery continues to use tool name, status, replay policy, checkpoint, and outbound linkage. |
+| 41 | Irreversibly replaces historical `tool_calls.tool_input`/`result` content with metadata-only outcome markers. Future writes persist only `[metadata-only]`, `[complete]`, or `[error]`; recovery continues to use tool name, status, replay policy, checkpoint, and outbound linkage. |
 ```
 
 Run: `bash scripts/run-with-pinned-npm.sh run typecheck:all`
@@ -1329,7 +1329,7 @@ Append this complete policy table and operator statement to `docs/durability.md`
 | Surface | Normal content policy | Deletion behavior |
 |---|---|---|
 | `messages` | Primary local message record | `deleted_at` tombstone; excluded from reads, FTS, enrichment, and counts |
-| `tool_calls` | Tool name/status/replay policy/timestamps only | Parameters/results are never stored; migration 40 scrubs historical rows |
+| `tool_calls` | Tool name/status/replay policy/timestamps only | Parameters/results are never stored; migration 41 scrubs historical rows |
 | `fact_export_queue` pending row | Fact payload awaiting the deployment-owned bridge | Row is deleted in the same transaction as message deletion |
 | `fact_export_queue` terminal row | Local export audit | Identity/content is irreversibly replaced with `status=erased` and `{"erased":true}` |
 | Remote vector store | Deployment-owned bridge outside this repository | A local erasure proves only that WhatSoup no longer selects, queues, or retains content. Operators must run the remote store's deletion procedure before claiming end-to-end erasure. |
@@ -1715,7 +1715,7 @@ git rev-parse origin/main
 git status --short
 ```
 
-Expected: a recorded 40-character main SHA and an empty status. If #1714 landed after WS-A06 began, rebase WS-A06 and rerun its canaries. If #1715 or #1716 landed, rebase every not-yet-final branch and rerun its focused suites.
+Expected: a recorded 40-character main SHA and an empty status. Current main must contain merged #1714 and #1715. Because #1716 closed unmerged, record whether any preserved replacement affects the branch; after any rebase or replacement decision, rerun every focused suite.
 
 - [ ] **Step 2: Run the full focused privacy receipt**
 
@@ -1792,4 +1792,4 @@ Expected: clean worktree, only the intended commits, and no whitespace errors. S
 - Type consistency: `EnqueueFactsResult.erased` is introduced once and included in poller accounting and every expected object; media error codes are a closed union shared by helper and tests.
 - Data-boundary honesty: exported remote facts are explicitly a deployment-owned residual; this plan does not label local redaction as remote deletion.
 - Prohibited-token scan: run `rg -n '[T]BD|[T]ODO|implement[ ]later|fill[ ]in|similar[ ]to[ ]Task|appropriate[ ]error[ ]handling' docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md`; expected result is no matches.
-- Open-PR sequencing: #1714 blocks the logging branch start; #1715/#1716 require fresh-main rebases and release reruns but do not authorize editing their branches.
+- Predecessor sequencing: merged #1714/#1715 are inherited from current main; closed-unmerged #1716 requires an explicit replacement-history disposition before overlapping work, and no plan step edits its old branch.

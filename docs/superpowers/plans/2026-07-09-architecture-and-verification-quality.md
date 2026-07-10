@@ -13,8 +13,8 @@
 ## Global Constraints
 
 - Start every PR from a freshly fetched `origin/main`; the audited base was `7330bafb`.
-- Do not begin WS-D01 until PR #1716 and the reconstructed replacement for PR #1717 have landed or been closed.
-- Do not begin WS-D02 until PRs #1715 and #1716 have landed or been closed.
+- PRs #1716 and #1717 are closed unmerged; do not begin WS-D01 until their preserved replacement histories are explicitly merged, reimplemented, or abandoned with range-diff/cherry evidence.
+- PR #1715 is merged. Before WS-D02 touches overlapping deploy helpers, compare and disposition any preserved #1716 replacement rather than assuming the closed PR landed.
 - Before declaring an existing branch superseded, run both `git range-diff` and `git cherry -v`; no branch deletion belongs to these plans.
 - Preserve observable behavior in WS-D01, WS-D02, WS-D04, and WS-D05. A behavior correction discovered during characterization gets its own PR.
 - Keep WS-D01 through WS-D07 as seven independently reviewable PRs. Use the commit boundaries named below.

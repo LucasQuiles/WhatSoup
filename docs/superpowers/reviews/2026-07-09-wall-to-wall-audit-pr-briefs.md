@@ -11,8 +11,7 @@
 - W0-01 is a closed-PR recovery prerequisite, not a new remediation PR.
 - Keep each WS identifier as its own PR. Do not bundle the 27 briefs into one branch.
 - Before superseding any existing branch, compare it with `git range-diff` and `git cherry -v`; preserve unique commits.
-- Recheck overlaps with open PRs #1714 through #1716 and the closed #1717 source branch immediately before branching.
-- Rename #1714 before ready-for-review: its current draft title contains an agent-attribution tag prohibited by public-repo policy.
+- Treat the original PR overlap list as an audit-time snapshot: #1714 and #1715 are merged, while #1716 and #1717 are closed unmerged. Recheck current PRs and preserved replacement histories immediately before branching.
 - Every PR starts with a deterministic red test or probe at the failure seam.
 - Before marking ready, run the focused tests, type/lint checks, relevant security guards, and the full pinned `verify:release` gate.
 - A missing dependency, killed process, skipped load-bearing check, or zero-test browser tail is inconclusive, not green.
@@ -136,7 +135,7 @@ The main risk is shutdown hang. Use one bounded coordinator and preserve durable
 ### WS-A04 — `fix(send): separate transport delivery from audit finalization`
 
 **Priority:** P0 delivery correctness
-**Depends on:** None; coordinate with #1714 if shared redaction code moves
+**Depends on:** None; start from main containing merged #1714 and preserve its final redaction contracts
 **Implementation plan:** `docs/superpowers/plans/2026-07-09-delivery-audit-and-idempotency.md`
 
 #### Problem
@@ -196,7 +195,7 @@ Stable IDs affect transport metadata and stored rows. Migrate additively and kee
 ### WS-A06 — `security(logging): enforce metadata-only logs at the central sink and content call sites`
 
 **Priority:** P0 privacy/security
-**Depends on:** Land or close #1714, then branch from its final main state
+**Depends on:** Satisfied by merged #1714; branch from current main
 **Implementation plan:** `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md`
 
 #### Problem
@@ -292,7 +291,7 @@ Canonicalization can reject legacy cache paths. Detect and report them without r
 ### WS-B01 — `fix(health): fail closed on critical DB and recovery-verification failures`
 
 **Priority:** P0 readiness/recovery
-**Depends on:** Land or close #1715 and #1716 first
+**Depends on:** #1715 is merged; #1716 closed unmerged, so resolve any preserved provider-recovery replacement before assuming its fields
 **Implementation plan:** `docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md`
 
 #### Problem
@@ -625,7 +624,7 @@ A failed DB read becomes null markers and emits false message/access changes. Ty
 ### WS-D01 — `refactor(agent): converge duplicate event handlers on one reducer`
 
 **Priority:** P1 architectural risk reduction
-**Depends on:** Land/close #1716; repair/replace #1717
+**Depends on:** Resolve the preserved replacement histories for closed-unmerged #1716 and #1717
 **Implementation plan:** `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md`
 
 #### Problem
@@ -655,7 +654,7 @@ This is intentionally last-wave work. Roll back to legacy dispatch while retaini
 ### WS-D02 — `refactor(bot-errors): centralize Python private filesystem operations`
 
 **Priority:** P1 security maintainability
-**Depends on:** Land/close #1715 and #1716
+**Depends on:** Start from main containing merged #1715 and compare any preserved #1716 replacement before touching overlapping helpers
 **Implementation plan:** `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md`
 
 #### Problem
@@ -817,7 +816,7 @@ Incorrect range selection can block unrelated work or miss a landed commit. Test
 2. Run WS-A02 → WS-A03 → WS-A01 for the inbound/reply foundation, then WS-A04 → WS-A05 → WS-A06 → WS-A07 → WS-A08; WS-A05 must precede B05.
 3. Run WS-B01 before B02/B03; B04 and B06 can proceed independently.
 4. Run WS-C01 before C02 before C03; C04 through C06 can proceed independently.
-5. Run WS-D04 and WS-D05 at any low-conflict point; defer D01/D02 until their overlapping open PRs settle.
+5. Run WS-D04 and WS-D05 at any low-conflict point; defer D01/D02 until the overlapping closed-PR replacement histories are explicitly resolved.
 6. Run WS-D03, D06, and D07 as isolated quality/hygiene changes with their own negative controls.
 
 ## Shared Ready-for-Review Evidence

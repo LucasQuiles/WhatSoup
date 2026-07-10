@@ -16,9 +16,9 @@
 - Publication boundary is local branch and commits only; publishing a branch or Draft PR requires explicit approval.
 - Preserve one coherent behavioral idea per PR and keep every PR independently revertible.
 - Use the repository-pinned Node.js `24.15.0` and npm `11.12.1` through `scripts/run-with-pinned-npm.sh`; never use ambient Node/npm for evidence or self-update installs.
-- WS-B01 starts only after PR #1716 lands or closes because #1716 changes provider recovery, health, runtime, deploy, and hygiene surfaces. Rebase onto its final main result and retain every new provider-health field.
-- PR #1715 must land or close before final WS-B01 verification because it changes bot-errors health/deploy behavior consumed by the release drills; it does not authorize editing #1715's branch.
-- PR #1714 does not overlap WS-B01/B02 code, but every branch still starts from freshly fetched main after its disposition and reruns the full release gate.
+- PR #1716 closed unmerged. WS-B01 may start, but it must compare any preserved repaired history and explicitly decide whether provider-recovery fields are still required; it may not assume they landed.
+- PR #1715 is merged; WS-B01 starts from current main and preserves its bot-errors health/deploy behavior.
+- PR #1714 is merged and does not overlap WS-B01/B02 code; every branch still starts from freshly fetched main and reruns the full release gate.
 - Before treating any branch as superseded, run `git range-diff` and `git cherry -v`; no branch deletion belongs to this plan.
 - Critical database read failure is never represented as zero, empty, or healthy; readiness is HTTP 503 while process liveness remains independently observable.
 - Recovery verification or breaker-state failure preserves `outbound_quarantined`; recovery reconciliation continues and emits a bounded failure alert.
@@ -758,7 +758,7 @@ git rev-parse origin/main
 git status --short
 ```
 
-Expected: recorded 40-character main SHA and empty status. Do not finalize WS-B01 until #1716 and #1715 have landed or closed. Rebase from their final main result and retain their health/provider/deploy behavior. #1714 requires a fresh-main rebase/release rerun but no semantic merge into this work.
+Expected: recorded 40-character main SHA and empty status. Main must contain merged #1714/#1715. Record the explicit disposition of any preserved #1716 replacement before finalizing WS-B01; closed-unmerged work is not inherited implicitly. Rerun the full release gate after the final rebase.
 
 - [ ] **Step 2: Run the complete focused receipt**
 
@@ -841,4 +841,4 @@ Expected: clean worktree, intended commits only, and no whitespace errors. Stop 
 - Type consistency: `HealthDbProbe<T>` carries one `errorType` vocabulary into JSON `error_type`; update events use `previousSha` and `targetSha` consistently from inspection through recovery guidance.
 - Recovery honesty: the updater does not claim atomic checkout rollback or restart completion. The residual note explicitly states the on-disk post-pull state and staging requirement.
 - Prohibited-token scan: run `rg -n '[T]BD|[T]ODO|implement[ ]later|fill[ ]in|similar[ ]to[ ]Task|appropriate[ ]error[ ]handling' docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md`; expected result is no matches.
-- Open-PR sequencing: #1716 and #1715 gate WS-B01 finalization; #1714 requires a fresh-main rebase/release rerun; no plan step edits or publishes those branches.
+- Predecessor sequencing: current main contains merged #1714/#1715; any preserved #1716 replacement must be explicitly dispositioned before WS-B01 finalization, and no plan step edits or publishes the closed branch.

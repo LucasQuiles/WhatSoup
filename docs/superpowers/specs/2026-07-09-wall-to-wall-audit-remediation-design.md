@@ -6,7 +6,7 @@
 
 **Audited code base:** `7330bafbe77d7a15febce32eb09b304e8778862f` (`origin/main` at audit time)
 
-**Current-main refresh:** `46f64eb7b8a21274a16dfd657515afc995c33e66` (`origin/main`); the intervening merged delta is documentation-only, so the code findings and line-level evidence remain applicable.
+**Documentation-branch refresh:** rebased on `d04ab3e9a2ea3b1f04f458528600af9ce758c2fd` (`origin/main` on 2026-07-10). The intervening redaction, health/deploy, and test-harness changes are dispositioned in Section 7; every implementation branch still refreshes line evidence and prerequisite behavior from its then-current main.
 
 **Publication boundary:** Local branch and commits only. Publishing branches or Draft PRs still requires explicit approval.
 
@@ -233,7 +233,7 @@ Evidence: `safeDbQuery` substitutes fallbacks (`src/core/health.ts:75-85`); a te
 
 Acceptance: typed probe results carry `ok`, value, and low-cardinality error; unreadable core tables degrade/503 readiness; liveness remains separately available; verification failure preserves quarantine while recovery continues.
 
-Sequence after PRs #1715 and #1716 because the former changes health/deploy verification and the latter touches health/provider recovery.
+Audit-time sequencing depended on PRs #1715 and #1716. PR #1715 is now merged; PR #1716 closed unmerged, so WS-B01 must start from current main and explicitly decide whether any preserved provider-recovery replacement is still required rather than assuming those fields landed.
 
 **WS-B02 — `fix(update): make self-update a fail-closed verified transaction`**
 
@@ -307,13 +307,13 @@ Acceptance: creation schema exposes only wired kinds; legacy rows continue fail-
 
 Evidence: `handleEventWithContext` (`src/runtimes/agent/runtime.ts:4561`) and `handleEvent` (`:8984`) duplicate the same event state machine across roughly 1,200 lines. The declarative response registry remains opt-in and legacy ladders remain default.
 
-Acceptance: first characterize both contexts; introduce a context adapter and one reducer; run shadow parity counters; default only after zero unexplained divergence. Sequence after PR #1716 and repaired #1717 because both overlap runtime code.
+Acceptance: first characterize both contexts; introduce a context adapter and one reducer; run shadow parity counters; default only after zero unexplained divergence. Before WS-D01, resolve the preserved replacement histories for closed-unmerged PRs #1716 and #1717 because both overlap runtime code; neither closed PR may be treated as landed.
 
 **WS-D02 — `refactor(bot-errors): centralize Python private filesystem operations`**
 
 Evidence: `ensure_private_dir` and `atomic_write_json` are copied across at least nine deployment scripts. The current guard requires each script to contain local function text, reinforcing drift.
 
-Acceptance: one importable deployment library owns no-follow, mode, fsync, replace, and append behavior; the guard tests behavior/parity instead of local-copy substrings. Sequence after PRs #1715/#1716.
+Acceptance: one importable deployment library owns no-follow, mode, fsync, replace, and append behavior; the guard tests behavior/parity instead of local-copy substrings. Start from main containing merged #1715 and compare any preserved #1716 replacement before changing overlapping deploy helpers.
 
 **WS-D03 — `fix(quality): make orphan and guard-coverage checks semantic`**
 
@@ -343,13 +343,13 @@ Evidence: current main contains a squash-generated prohibited attribution traile
 
 Acceptance: document and mechanically validate a merge procedure that produces only approved author identity and no co-author/model/internal attribution. Do not claim server-side prevention without an enforceable mechanism.
 
-## 7. Current PR Coordination
+## 7. PR Coordination — Audit Snapshot and Current Disposition
 
 | PR | Current scope | Remediation sequencing |
 |---|---|---|
-| #1714 | Outbound message-safety redaction | Keep its behavior review separate. Its current draft title carries an agent-attribution tag prohibited by public-repo policy; rename it before ready-for-review. Rebase logging/privacy PR after its final form if shared redaction contracts move. |
-| #1715 | Bot-errors health/deploy scripts | Land or close before Python private-FS consolidation. |
-| #1716 | Provider reauth across health/runtime/deploy/hygiene | Land or close before health recovery, event-handler convergence, Python helper, and hygiene work. |
+| #1714 (merged as `8a13991c`) | Outbound message-safety redaction | Final title and landed history satisfy public hygiene. Start logging/privacy work from current main so it inherits the final redaction contracts. |
+| #1715 (merged as `b48896ee`) | Bot-errors health/deploy scripts | Its prerequisite is satisfied on main; Python private-FS work must preserve the landed behavior. |
+| #1716 (closed unmerged) | Provider reauth across health/runtime/deploy/hygiene | No open PR or landed provider-recovery delta remains. Compare any preserved repaired history before overlapping work and explicitly merge, reimplement, or abandon it; do not assume its fields exist on main. |
 | #1717 (closed unmerged) | Instance MCP; the closed diff deleted most of the repository | Merge hazard removed; reconstruct and compare the intended delta on fresh main before overlapping runtime work. |
 
 Every new branch starts from a freshly fetched `origin/main`. Before superseding a branch, use `git range-diff` and `git cherry -v`. No branch deletion is part of this design.

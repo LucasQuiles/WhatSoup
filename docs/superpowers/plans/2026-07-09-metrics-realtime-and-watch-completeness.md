@@ -20,13 +20,13 @@
 - Metrics labels remain low-cardinality and never use raw conversation identities.
 - Creation schema exposes only wired kinds; legacy rows continue fail-closed/TTL behavior.
 - Add no runtime dependency; use `scripts/run-with-pinned-npm.sh` for every command.
-- Migration 41 follows the Wave-1 sequence through migration 40; if current main has advanced, reserve the next free version and update this plan atomically before implementation.
+- Migration 42 follows the Wave-1 sequence through migration 41; if current main has advanced, reserve the next free version and update this plan atomically before implementation.
 
 ---
 
 ## File Structure
 
-- `src/core/database.ts` and `metrics-collector.ts` own migration 41 and the receipt.
+- `src/core/database.ts` and `metrics-collector.ts` own migration 42 and the receipt.
 - `src/fleet/db-reader.ts` and metric routes carry quality/freshness.
 - `console/src/lib/metrics-quality.ts` and `MetricsCompletenessNotice.tsx` prevent false-zero rendering.
 - `src/fleet/realtime-event-poller.ts` owns per-probe LKG and health.
@@ -91,12 +91,12 @@ bash scripts/run-with-pinned-npm.sh test -- tests/core/metrics-collector.test.ts
 
 Expected: FAIL because migration/helper are absent and the prior bucket is stale.
 
-- [ ] **Step 2: Add migration 41**
+- [ ] **Step 2: Add migration 42**
 
-Register `[41, runMigration41]` after the Wave-1 migrations:
+Register `[42, runMigration42]` after the Wave-1 migrations:
 
 ~~~ts
-function runMigration41(db: DatabaseSync): void {
+function runMigration42(db: DatabaseSync): void {
   db.exec(String.raw`
     CREATE TABLE IF NOT EXISTS metrics_collection_state (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

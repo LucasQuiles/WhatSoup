@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Start from audited base `7330bafbe77d7a15febce32eb09b304e8778862f`; rebase after the durable-inbound train if migration 37 lands first.
+- Start from audited base `7330bafbe77d7a15febce32eb09b304e8778862f`; rebase after the complete durable-inbound train reserves migrations 37 and 38.
 - Local branch and commits only; pushing or opening Draft PRs requires explicit approval.
 - Keep WS-A04 and WS-A05 independently revertible.
 - A transport receipt must never become caller failure, `markFailure`, or resend because audit finalization failed.
@@ -36,7 +36,7 @@
 
 **Files:**
 - Modify: `src/core/database.ts:556-737, after runMigration37`
-- Create: `tests/core/migration-38-outbound-audit-reconciliation.test.ts`
+- Create: `tests/core/migration-39-outbound-audit-reconciliation.test.ts`
 - Modify: `docs/configuration.md:1430-1475`
 
 **Interfaces:**
@@ -46,16 +46,16 @@
 - [ ] **Step 1: Write the failing migration test**
 
 ```ts
-// tests/core/migration-38-outbound-audit-reconciliation.test.ts
+// tests/core/migration-39-outbound-audit-reconciliation.test.ts
 import { describe, expect, it } from 'vitest';
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 
-describe('migration 38', () => {
+describe('migration 39', () => {
   it('creates a content-free due-ordered audit reconciliation table', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(38);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(39);
       const columns = db.raw.prepare(
         "PRAGMA table_info('outbound_audit_reconciliation')",
       ).all() as Array<{ name: string }>;
@@ -78,14 +78,14 @@ describe('migration 38', () => {
 
 - [ ] **Step 2: Verify the red state**
 
-Run: `bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-38-outbound-audit-reconciliation.test.ts --pool=forks`
+Run: `bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-39-outbound-audit-reconciliation.test.ts --pool=forks`
 
-Expected: FAIL because schema 38/table is absent; runner/setup failure is inconclusive.
+Expected: FAIL because schema 39/table is absent; runner/setup failure is inconclusive.
 
-- [ ] **Step 3: Implement migration 38**
+- [ ] **Step 3: Implement migration 39**
 
 ```ts
-function runMigration38(db: DatabaseSync): void {
+function runMigration39(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS outbound_audit_reconciliation (
       audit_id INTEGER PRIMARY KEY REFERENCES outbound_sends(id) ON DELETE CASCADE,
@@ -102,20 +102,20 @@ function runMigration38(db: DatabaseSync): void {
 }
 ```
 
-Add `[38, runMigration38]` after `[37, runMigration37]`. Add:
+Add `[39, runMigration39]` after `[38, runMigration38]`. Add:
 
 ```markdown
-| 38 | Adds content-free `outbound_audit_reconciliation` for transport-delivered sends whose audit finalization is pending. |
+| 39 | Adds content-free `outbound_audit_reconciliation` for transport-delivered sends whose audit finalization is pending. |
 ```
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-38-outbound-audit-reconciliation.test.ts tests/core/migration-safety.test.ts tests/core/database.test.ts --pool=forks`
+Run: `bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-39-outbound-audit-reconciliation.test.ts tests/core/migration-safety.test.ts tests/core/database.test.ts --pool=forks`
 
 Expected: PASS.
 
 ```bash
-git add src/core/database.ts tests/core/migration-38-outbound-audit-reconciliation.test.ts docs/configuration.md
+git add src/core/database.ts tests/core/migration-39-outbound-audit-reconciliation.test.ts docs/configuration.md
 git commit -m "feat(audit): add delivery reconciliation journal"
 ```
 
@@ -605,7 +605,7 @@ git commit -m "fix(chat): reuse delivery identity across retries"
 
 **Files:**
 - Modify: `src/core/database.ts`, `src/core/scheduler.ts`, runtime transport interfaces/implementations, focused tests, `docs/configuration.md`.
-- Create: `tests/core/migration-39-scheduled-delivery-identity.test.ts`.
+- Create: `tests/core/migration-40-scheduled-delivery-identity.test.ts`.
 
 **Interfaces:**
 - Produces: `scheduled_messages.delivery_message_id`; `sendRaw(..., opts?: Pick<SendOptions,'messageId'>)`.
@@ -613,16 +613,16 @@ git commit -m "fix(chat): reuse delivery identity across retries"
 - [ ] **Step 1: Write migration and semantic retry tests**
 
 ```ts
-// tests/core/migration-39-scheduled-delivery-identity.test.ts
+// tests/core/migration-40-scheduled-delivery-identity.test.ts
 import { describe, expect, it } from 'vitest';
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 
-describe('migration 39', () => {
+describe('migration 40', () => {
   it('adds nullable scheduled delivery identity', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(39);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(40);
       expect((db.raw.prepare("PRAGMA table_info('scheduled_messages')").all() as
         Array<{ name: string }>).map((c) => c.name)).toContain('delivery_message_id');
     } finally { db.close(); }
@@ -678,12 +678,12 @@ it('quarantines ambiguous scheduled send without idempotency', async () => {
 });
 ```
 
-- [ ] **Step 2: Verify red and implement migration 39**
+- [ ] **Step 2: Verify red and implement migration 40**
 
 Expected: FAIL because column/options are absent.
 
 ```ts
-function runMigration39(db: DatabaseSync): void {
+function runMigration40(db: DatabaseSync): void {
   const table = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_messages'",
   ).get() as { name: string } | undefined;
@@ -695,10 +695,10 @@ function runMigration39(db: DatabaseSync): void {
 }
 ```
 
-Add `[39, runMigration39]` and:
+Add `[40, runMigration40]` after `[39, runMigration39]` and:
 
 ```markdown
-| 39 | Adds `scheduled_messages.delivery_message_id`; retries preserve it and each completed recurring occurrence clears it. |
+| 40 | Adds `scheduled_messages.delivery_message_id`; retries preserve it and each completed recurring occurrence clears it. |
 ```
 
 - [ ] **Step 3: Extend and implement `sendRaw` identity**
@@ -759,10 +759,10 @@ Set `delivery_message_id=NULL` in recurring-success, recurring-retry-exhaustion 
 
 - [ ] **Step 5: Verify and commit**
 
-Run migration 39, scheduler, Baileys raw-send, Twilio bridge, delivery helper tests, then `typecheck:all`. Expected: PASS with one ID across ticks and one non-idempotent ambiguous provider call.
+Run migration 40, scheduler, Baileys raw-send, Twilio bridge, delivery helper tests, then `typecheck:all`. Expected: PASS with one ID across ticks and one non-idempotent ambiguous provider call.
 
 ```bash
-git add src/core/database.ts src/core/scheduler.ts src/transport/runtime-connection.ts src/transport/connection.ts src/transport/twilio/connection-bridge.ts tests/core/migration-39-scheduled-delivery-identity.test.ts tests/core/scheduler.test.ts tests/transport/connection-branches.test.ts docs/configuration.md
+git add src/core/database.ts src/core/scheduler.ts src/transport/runtime-connection.ts src/transport/connection.ts src/transport/twilio/connection-bridge.ts tests/core/migration-40-scheduled-delivery-identity.test.ts tests/core/scheduler.test.ts tests/transport/connection-branches.test.ts docs/configuration.md
 git commit -m "fix(scheduler): persist delivery identity across retries"
 ```
 
@@ -791,7 +791,7 @@ Document in the Twilio runbook that a post-handoff network failure is `SendAmbig
 - [ ] **Step 2: Run WS-A04 focused verification**
 
 ```bash
-bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-38-outbound-audit-reconciliation.test.ts tests/core/outbound-sends.test.ts tests/core/send-pipeline.test.ts tests/core/health.test.ts --pool=forks
+bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-39-outbound-audit-reconciliation.test.ts tests/core/outbound-sends.test.ts tests/core/send-pipeline.test.ts tests/core/health.test.ts --pool=forks
 bash scripts/run-with-pinned-npm.sh run typecheck:all
 bash scripts/run-with-pinned-npm.sh run guard:lint:src
 ```
@@ -801,7 +801,7 @@ Expected: exit 0 and exactly one transport invocation in the audit-fault probe.
 - [ ] **Step 3: Run WS-A05 focused verification**
 
 ```bash
-bash scripts/run-with-pinned-npm.sh test -- tests/core/delivery-identity.test.ts tests/core/migration-39-scheduled-delivery-identity.test.ts tests/core/scheduler.test.ts tests/runtimes/chat/runtime.test.ts tests/runtimes/agent/outbound-queue-idempotency.test.ts tests/transport/connection-branches.test.ts tests/transport/twilio/adapter-send.test.ts tests/transport/twilio/connection-bridge.test.ts --pool=forks
+bash scripts/run-with-pinned-npm.sh test -- tests/core/delivery-identity.test.ts tests/core/migration-40-scheduled-delivery-identity.test.ts tests/core/scheduler.test.ts tests/runtimes/chat/runtime.test.ts tests/runtimes/agent/outbound-queue-idempotency.test.ts tests/transport/connection-branches.test.ts tests/transport/twilio/adapter-send.test.ts tests/transport/twilio/connection-bridge.test.ts --pool=forks
 bash scripts/run-with-pinned-npm.sh run typecheck:all
 ```
 
@@ -835,5 +835,5 @@ git commit -m "docs(send): define retry identity and ambiguity"
 - **Spec coverage:** Tasks 1-3 cover WS-A04 receipt truth, content-free repair, health, and reconciliation. Tasks 4-6 cover WS-A05 shared identity, chat/agent, scheduler persistence, and transport exceptions. Task 7 covers focused/full proof.
 - **No-placeholder scan:** No deferred implementation instruction remains; every mutation step includes exact TypeScript, SQL, Markdown, or replacement behavior.
 - **Type consistency:** Capability is optional `'message_id' | 'none'` with absence interpreted as `none`; all retry paths use `createStableMessageId`; raw-send options are `Pick<SendOptions, 'messageId'>` end to end.
-- **Migration dependency:** 38/39 assume the inbound plan owns 37. If landing order changes, reserve fresh numbers and update schema tests/docs atomically.
+- **Migration dependency:** 39/40 assume the durable-inbound train owns 37/38. If landing order changes, reserve fresh numbers and update schema tests/docs atomically.
 - **Residual uncertainty:** Health coverage uses the exact existing `tests/core/health.test.ts` helpers `makeDb`, `makeDeps`, `buildTestServer`, and `httpReq`. Twilio exposes no provider idempotency key, Baileys dedup needs staging confirmation, and scheduled media intentionally remains outside stable text identity.
