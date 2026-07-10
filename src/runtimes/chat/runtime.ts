@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type { Database } from '../../core/database.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
-import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
+import type {
+  IncomingMessage,
+  Messenger,
+  RuntimeHealth,
+  SubmissionReceipt,
+} from '../../core/types.ts';
 import type { LLMProvider, GenerateRequest, ChatMessage } from './providers/types.ts';
 import type { PineconeMemory } from './providers/pinecone.ts';
 import type { Runtime } from '../types.ts';
@@ -479,6 +484,7 @@ export class ChatRuntime implements Runtime {
       this.durability.markSending(mainOpId);
     }
     let sendSucceeded = false;
+    let outboundReceipt: SubmissionReceipt | null = null;
     const MAX_SEND_ATTEMPTS = 3;
     let lastSendErr: unknown;
     for (let attempt = 0; attempt < MAX_SEND_ATTEMPTS; attempt++) {
@@ -488,10 +494,7 @@ export class ChatRuntime implements Runtime {
         await sleep(delay);
       }
       try {
-        const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
-        if (mainOpId !== undefined && this.durability) {
-          this.durability.markSubmitted(mainOpId, receipt.waMessageId);
-        }
+        outboundReceipt = await this.messenger.sendMessage(msg.chatJid, responseText);
         sendSucceeded = true;
         break;
       } catch (err) {
@@ -514,6 +517,18 @@ export class ChatRuntime implements Runtime {
         await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
       } catch { /* best-effort, don't retry the notification */ }
       return;
+    }
+    if (mainOpId !== undefined && this.durability && outboundReceipt !== null) {
+      try {
+        this.durability.markSubmitted(mainOpId, outboundReceipt.waMessageId);
+      } catch (settlementErr) {
+        log.error({
+          event: 'chat_runtime_post_send_settlement_failed',
+          outboundOpId: mainOpId,
+          hasWaMessageId: outboundReceipt.waMessageId !== null,
+          settlementErrorKind: settlementErr instanceof Error ? 'error' : 'non_error',
+        }, 'chat runtime: reply transport succeeded but durability settlement failed');
+      }
     }
     const sendDurationMs = Date.now() - sendStart;
 

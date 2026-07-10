@@ -1608,6 +1608,73 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(7, 'response_sent');
   });
 
+  it('does not retry a confirmed reply when durability settlement fails', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockResolvedValueOnce({ waMessageId: 'wamid.confirmed' });
+    vi.mocked(durability.markSubmitted).mockImplementation(() => {
+      throw new Error('injected durability settlement failure');
+    });
+
+    const msg = makeIncomingMessage({ inboundSeq: 7 });
+    await handler.handleMessage(msg);
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      expect.any(String),
+      '⚠️ My last response may not have been delivered. Please ask me again.',
+    );
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.confirmed');
+    expect(mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1] === 'send_retry',
+    )).toHaveLength(0);
+    expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(7, 'response_sent');
+    expect(mockRecordResponse).toHaveBeenCalledOnce();
+
+    const settlementErrors = mockLogError().mock.calls.filter(
+      (c: unknown[]) => (c[0] as Record<string, unknown>).event === 'chat_runtime_post_send_settlement_failed',
+    );
+    expect(settlementErrors).toHaveLength(1);
+    const settlementMeta = settlementErrors[0]![0] as Record<string, unknown>;
+    expect(settlementMeta).toEqual({
+      event: 'chat_runtime_post_send_settlement_failed',
+      outboundOpId: 42,
+      hasWaMessageId: true,
+      settlementErrorKind: 'error',
+    });
+    expect(settlementMeta).not.toHaveProperty('chatJid');
+    expect(settlementMeta).not.toHaveProperty('responseText');
+    expect(settlementMeta).not.toHaveProperty('err');
+  });
+
+  it('settles only the resolving receipt after a genuine transport retry', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage
+      .mockRejectedValueOnce(new Error('transient transport failure'))
+      .mockResolvedValueOnce({ waMessageId: 'wamid.after-retry' });
+
+    await handler.handleMessage(makeIncomingMessage({ inboundSeq: 8 }));
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, 'wamid.after-retry');
+    expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
+    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(8, 'response_sent');
+    expect(mockRecordResponse).toHaveBeenCalledOnce();
+  });
+
   it('completeInbound NOT called when inboundSeq is undefined', async () => {
     const { handler } = makeHandler();
     const durability = makeDurability();

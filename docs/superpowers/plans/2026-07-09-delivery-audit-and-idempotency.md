@@ -590,7 +590,9 @@ const receipt = canRetryAmbiguous
 }
 ```
 
-Keep `markMaybeSent` and the uncertainty notice. In agent `OutboundQueue`, replace its inline UUID transformation with `createStableMessageId()`.
+Keep `markMaybeSent` and the uncertainty notice for genuine transport exhaustion only, and keep `markSubmitted` outside the transport retry catch so a confirmed send receipt cannot trigger additional transport attempts when local settlement fails.
+In agent `OutboundQueue`, replace its inline UUID transformation with `createStableMessageId()`.
+Retain the regression test for post-send settlement failure (`does not retry a confirmed reply when durability settlement fails`) so this boundary remains covered.
 
 - [ ] **Step 3: Verify and commit**
 
