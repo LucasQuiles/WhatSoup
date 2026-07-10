@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-10T14:42:16Z",
+  "generated_at": "2026-07-10T14:44:51Z",
   "repo": "WhatSoup",
-  "git_head": "9c0cd4b34e0a64bfd519ba22f1d79a2792940e1a",
+  "git_head": "a8b0fe22c4aea3d30844feee2018b0b971fef3bc",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 52,
   "schema_version": 5,
@@ -460,7 +460,7 @@
       "canonical_parent": "docs/superpowers/reviews",
       "supersedes_hint": null,
       "last_modified": "2026-07-10",
-      "size_bytes": 39180
+      "size_bytes": 39218
     },
     {
       "path": "docs/superpowers/specs/2026-04-04-colony-orchestration-design.md",

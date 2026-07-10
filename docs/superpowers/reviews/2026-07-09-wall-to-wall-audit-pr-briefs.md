@@ -1,6 +1,6 @@
 # Wall-to-Wall Audit: Copy-Ready PR Briefs
 
-**Status:** Completed locally; no implementation branch has been pushed and no pull request has been opened from this artifact.
+**Status:** Completed locally and published only as part of the documentation PR; no WS implementation branch or implementation PR has been opened from these briefs.
 
 **Audited code base:** `origin/main` at `7330bafbe77d7a15febce32eb09b304e8778862f` on 2026-07-09. The documentation branch was rebased on `d04ab3e9a2ea3b1f04f458528600af9ce758c2fd` on 2026-07-10; the intervening redaction, health/deploy, and test-harness changes are dispositioned below, and each implementation branch must refresh evidence from its then-current main.
 

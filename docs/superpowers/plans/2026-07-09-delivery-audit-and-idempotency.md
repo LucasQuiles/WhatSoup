@@ -35,7 +35,7 @@
 ### Task 1: Add the audit-reconciliation schema (WS-A04, commit 1)
 
 **Files:**
-- Modify: `src/core/database.ts:556-737, after runMigration37`
+- Modify: `src/core/database.ts:556-737, after runMigration38`
 - Create: `tests/core/migration-39-outbound-audit-reconciliation.test.ts`
 - Modify: `docs/configuration.md:1430-1475`
 
