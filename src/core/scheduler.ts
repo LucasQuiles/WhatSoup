@@ -203,159 +203,221 @@ export class MessageScheduler {
       .all(...ids) as unknown as ScheduledRow[];
 
     for (const row of rows) {
+      const sendStartedAt = nowUnixSec();
+      const marked = this.db.raw
+        .prepare(
+          `UPDATE scheduled_messages
+           SET send_started_at = ?
+           WHERE id = ? AND status = 'processing'`,
+        )
+        .run(sendStartedAt, row.id).changes;
+      if (marked === 0) continue;
+
       try {
-        const sendStartedAt = nowUnixSec();
-        const marked = this.db.raw
+        await this.executeSend(row);
+      } catch (err) {
+        this.handleSendFailure(row, err);
+        continue;
+      }
+
+      const sentAt = nowUnixSec();
+      try {
+        this.persistConfirmedSend(row, sentAt, sendStartedAt);
+      } catch (err) {
+        log.error(
+          { event: 'scheduler_post_send_settlement_failed', id: row.id,
+            recurring: row.recurrence !== null, attempts: 2, err },
+          'scheduler: transport succeeded but SQLite settlement failed; retained processing marker',
+        );
+      }
+    }
+  }
+
+  private runSettlementWithRetry(
+    settle: () => number,
+    alreadyApplied: () => boolean,
+  ): void {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const changes = settle();
+        if (changes === 1 || (changes === 0 && alreadyApplied())) return;
+        throw new Error('scheduler: confirmed-send settlement ownership lost');
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError;
+  }
+
+  private persistConfirmedSend(row: ScheduledRow, sentAt: number, sendStartedAt: number): void {
+    if (row.recurrence) {
+      let nextRun: number;
+      let skippedOccurrences = 0;
+      let skippedOccurrencesCapped = false;
+      try {
+        const advanced = advanceRecurringRun(
+          row.recurrence,
+          row.next_run_at ?? sentAt,
+          sentAt,
+          row.timezone ?? 'UTC',
+        );
+        nextRun = advanced.nextRun;
+        skippedOccurrences = advanced.skippedOccurrences;
+        skippedOccurrencesCapped = advanced.capped;
+      } catch (cronErr) {
+        const error = `Invalid recurrence after send: ${errorMessage(cronErr)}`;
+        const settle = () => Number(this.db.raw
           .prepare(
             `UPDATE scheduled_messages
-             SET send_started_at = ?
-             WHERE id = ? AND status = 'processing'`,
+             SET status = 'failed', sent_at = ?, error = ?, send_started_at = NULL
+             WHERE id = ? AND status = 'processing' AND send_started_at = ?`,
           )
-          .run(sendStartedAt, row.id).changes;
-        if (marked === 0) continue;
-
-        await this.executeSend(row);
-        const sentAt = nowUnixSec();
-        if (row.recurrence) {
-          // Recurring: stay pending with updated next_run_at and run_count.
-          // Wrap nextCronRun separately — if a bad cron slipped into the DB,
-          // mark it permanently failed rather than entering a send-retry loop.
-          let nextRun: number;
-          let skippedOccurrences = 0;
-          let skippedOccurrencesCapped = false;
-          try {
-            const advanced = advanceRecurringRun(
-              row.recurrence,
-              row.next_run_at ?? sentAt,
-              sentAt,
-              row.timezone ?? 'UTC',
-            );
-            nextRun = advanced.nextRun;
-            skippedOccurrences = advanced.skippedOccurrences;
-            skippedOccurrencesCapped = advanced.capped;
-          } catch (cronErr) {
-            this.db.raw
-              .prepare(
-                `UPDATE scheduled_messages
-                 SET status = 'failed', sent_at = ?, error = ?, send_started_at = NULL
-                 WHERE id = ?`,
-              )
-              .run(sentAt, `Invalid recurrence after send: ${errorMessage(cronErr)}`, row.id);
-            log.error({ id: row.id, recurrence: row.recurrence, err: cronErr }, 'scheduler: invalid cron in DB, marked failed after send');
-            continue;
-          }
-          this.db.raw
-            .prepare(
-              `UPDATE scheduled_messages
-               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?, retry_count = 0, send_started_at = NULL
-               WHERE id = ?`,
-            )
-            .run(sentAt, row.run_count + 1, nextRun, row.id);
-          if (skippedOccurrences > 0) {
-            log.warn(
-              {
-                id: row.id,
-                chatJid: row.chat_jid,
-                previousNextRun: row.next_run_at,
-                sentAt,
-                nextRun,
-                skippedOccurrences,
-                skippedOccurrencesCapped,
-              },
-              'scheduler: recurring message skipped missed occurrences after downtime',
-            );
-          }
-          log.info({ id: row.id, chatJid: row.chat_jid, nextRun }, 'scheduler: recurring message sent, rescheduled');
-        } else {
-          // One-shot: mark as sent
-          this.db.raw
-            .prepare(
-              `UPDATE scheduled_messages
-               SET status = 'sent', sent_at = ?, send_started_at = NULL
-               WHERE id = ?`,
-            )
-            .run(sentAt, row.id);
-          log.info({ id: row.id, chatJid: row.chat_jid }, 'scheduler: message sent');
-        }
-      } catch (err) {
-        const newRetryCount = row.retry_count + 1;
-        const errorMsg = errorMessage(err);
-        if (newRetryCount >= this.config.maxRetries) {
-          if (row.recurrence) {
-            // Recurring: a recurring schedule must not be permanently destroyed by
-            // transient per-occurrence failures. Skip the current occurrence, advance to
-            // the next cron slot, and reset retry_count so failures don't accumulate
-            // across occurrences. Only mark 'failed' if the next slot is uncomputable.
-            let nextRun: number | null = null;
-            let skippedOccurrences = 0;
-            let skippedOccurrencesCapped = false;
-            try {
-              const now = nowUnixSec();
-              const advanced = advanceRecurringRun(
-                row.recurrence,
-                row.next_run_at ?? now,
-                now,
-                row.timezone ?? 'UTC',
-              );
-              nextRun = advanced.nextRun;
-              skippedOccurrences = advanced.skippedOccurrences;
-              skippedOccurrencesCapped = advanced.capped;
-            } catch {
-              nextRun = null;
-            }
-            if (nextRun !== null) {
-              this.db.raw
-                .prepare(
-                  `UPDATE scheduled_messages
-                   SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?, send_started_at = NULL
-                   WHERE id = ?`,
-                )
-                .run(nextRun, `Occurrence skipped after ${newRetryCount} failures: ${errorMsg}`, row.id);
-              log.warn(
-                {
-                  id: row.id,
-                  retries: newRetryCount,
-                  nextRun,
-                  skippedOccurrences,
-                  skippedOccurrencesCapped,
-                  err,
-                },
-                'scheduler: recurring occurrence failed, skipped to next slot',
-              );
-            } else {
-              this.db.raw
-                .prepare(
-                  `UPDATE scheduled_messages
-                   SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
-                   WHERE id = ?`,
-                )
-                .run(newRetryCount, `Recurring failed (cannot compute next slot): ${errorMsg}`, row.id);
-              log.warn(
-                { id: row.id, retries: newRetryCount, err },
-                'scheduler: recurring message permanently failed (invalid cron)',
-              );
-            }
-          } else {
-            this.db.raw
-              .prepare(
-                `UPDATE scheduled_messages
-                 SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
-                 WHERE id = ?`,
-              )
-              .run(newRetryCount, errorMsg, row.id);
-            log.warn({ id: row.id, retries: newRetryCount, err }, 'scheduler: message permanently failed');
-          }
-        } else {
-          this.db.raw
-            .prepare(
-              `UPDATE scheduled_messages
-               SET status = 'pending', retry_count = ?, send_started_at = NULL
-               WHERE id = ?`,
-            )
-            .run(newRetryCount, row.id);
-          log.warn({ id: row.id, retryCount: newRetryCount, err }, 'scheduler: message send failed, will retry');
-        }
+          .run(sentAt, error, row.id, sendStartedAt).changes);
+        const alreadyApplied = () => {
+          const current = this.db.raw.prepare(
+            'SELECT status, sent_at, error, send_started_at FROM scheduled_messages WHERE id = ?',
+          ).get(row.id) as { status: string; sent_at: number | null; error: string | null; send_started_at: number | null } | undefined;
+          return current?.status === 'failed' && current.sent_at === sentAt && current.error === error && current.send_started_at === null;
+        };
+        this.runSettlementWithRetry(settle, alreadyApplied);
+        log.error({ id: row.id, recurrence: row.recurrence, err: cronErr }, 'scheduler: invalid cron in DB, marked failed after send');
+        return;
       }
+
+      const settle = () => Number(this.db.raw
+        .prepare(
+          `UPDATE scheduled_messages
+           SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?, retry_count = 0, send_started_at = NULL
+           WHERE id = ? AND status = 'processing' AND send_started_at = ?`,
+        )
+        .run(sentAt, row.run_count + 1, nextRun, row.id, sendStartedAt).changes);
+      const alreadyApplied = () => {
+        const current = this.db.raw.prepare(
+          'SELECT status, sent_at, run_count, next_run_at, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
+        ).get(row.id) as {
+          status: string;
+          sent_at: number | null;
+          run_count: number;
+          next_run_at: number | null;
+          retry_count: number;
+          send_started_at: number | null;
+        } | undefined;
+        return current?.status === 'pending' && current.sent_at === sentAt && current.run_count === row.run_count + 1 && current.next_run_at === nextRun && current.retry_count === 0 && current.send_started_at === null;
+      };
+      this.runSettlementWithRetry(settle, alreadyApplied);
+      if (skippedOccurrences > 0) {
+        log.warn(
+          {
+            id: row.id,
+            chatJid: row.chat_jid,
+            previousNextRun: row.next_run_at,
+            sentAt,
+            nextRun,
+            skippedOccurrences,
+            skippedOccurrencesCapped,
+          },
+          'scheduler: recurring message skipped missed occurrences after downtime',
+        );
+      }
+      log.info({ id: row.id, chatJid: row.chat_jid, nextRun }, 'scheduler: recurring message sent, rescheduled');
+      return;
+    }
+
+    const settle = () => Number(this.db.raw
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'sent', sent_at = ?, send_started_at = NULL
+         WHERE id = ? AND status = 'processing' AND send_started_at = ?`,
+      )
+      .run(sentAt, row.id, sendStartedAt).changes);
+    const alreadyApplied = () => {
+      const current = this.db.raw.prepare(
+        'SELECT status, sent_at, send_started_at FROM scheduled_messages WHERE id = ?',
+      ).get(row.id) as { status: string; sent_at: number | null; send_started_at: number | null } | undefined;
+      return current?.status === 'sent' && current.sent_at === sentAt && current.send_started_at === null;
+    };
+    this.runSettlementWithRetry(settle, alreadyApplied);
+    log.info({ id: row.id, chatJid: row.chat_jid }, 'scheduler: message sent');
+  }
+
+  private handleSendFailure(row: ScheduledRow, err: unknown): void {
+    const newRetryCount = row.retry_count + 1;
+    const errorMsg = errorMessage(err);
+    if (newRetryCount >= this.config.maxRetries) {
+      if (row.recurrence) {
+        // Recurring: a recurring schedule must not be permanently destroyed by
+        // transient per-occurrence failures. Skip the current occurrence, advance to
+        // the next cron slot, and reset retry_count so failures don't accumulate
+        // across occurrences. Only mark 'failed' if the next slot is uncomputable.
+        let nextRun: number | null = null;
+        let skippedOccurrences = 0;
+        let skippedOccurrencesCapped = false;
+        try {
+          const now = nowUnixSec();
+          const advanced = advanceRecurringRun(
+            row.recurrence,
+            row.next_run_at ?? now,
+            now,
+            row.timezone ?? 'UTC',
+          );
+          nextRun = advanced.nextRun;
+          skippedOccurrences = advanced.skippedOccurrences;
+          skippedOccurrencesCapped = advanced.capped;
+        } catch {
+          nextRun = null;
+        }
+        if (nextRun !== null) {
+          this.db.raw
+            .prepare(
+              `UPDATE scheduled_messages
+               SET status = 'pending', retry_count = 0, next_run_at = ?, error = ?, send_started_at = NULL
+               WHERE id = ?`,
+            )
+            .run(nextRun, `Occurrence skipped after ${newRetryCount} failures: ${errorMsg}`, row.id);
+          log.warn(
+            {
+              id: row.id,
+              retries: newRetryCount,
+              nextRun,
+              skippedOccurrences,
+              skippedOccurrencesCapped,
+              err,
+            },
+            'scheduler: recurring occurrence failed, skipped to next slot',
+          );
+        } else {
+          this.db.raw
+            .prepare(
+              `UPDATE scheduled_messages
+               SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
+               WHERE id = ?`,
+            )
+            .run(newRetryCount, `Recurring failed (cannot compute next slot): ${errorMsg}`, row.id);
+          log.warn(
+            { id: row.id, retries: newRetryCount, err },
+            'scheduler: recurring message permanently failed (invalid cron)',
+          );
+        }
+      } else {
+        this.db.raw
+          .prepare(
+            `UPDATE scheduled_messages
+             SET status = 'failed', retry_count = ?, error = ?, send_started_at = NULL
+             WHERE id = ?`,
+          )
+          .run(newRetryCount, errorMsg, row.id);
+        log.warn({ id: row.id, retries: newRetryCount, err }, 'scheduler: message permanently failed');
+      }
+    } else {
+      this.db.raw
+        .prepare(
+          `UPDATE scheduled_messages
+           SET status = 'pending', retry_count = ?, send_started_at = NULL
+           WHERE id = ?`,
+        )
+        .run(newRetryCount, row.id);
+      log.warn({ id: row.id, retryCount: newRetryCount, err }, 'scheduler: message send failed, will retry');
     }
   }
 
