@@ -4249,7 +4249,7 @@ def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int,
         if dry is not None:
             raw = dry
         else:
-            path = Path(os.path.expandvars(os.path.expanduser(token_path)))
+            path = Path(token_path).expanduser()
             st = path.lstat()
             mode = stat.S_IMODE(st.st_mode)
             if stat.S_ISLNK(st.st_mode):

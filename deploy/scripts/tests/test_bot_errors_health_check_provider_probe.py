@@ -231,7 +231,8 @@ def test_load_fleet_api_token_expands_tilde_from_profile(monkeypatch, tmp_path):
     )
 
     assert token == "fixture-active-token"
-    assert source == "file token_source_path_redacted=true"
+    assert source.startswith("file token_source_path_redacted=true")
+    assert "token_source_path_basename=fleet-tokens.json" in source
     assert accept_count == 0
     assert error is None
 

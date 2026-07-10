@@ -11,10 +11,8 @@
       "instances": [
         {
           "name": "agent",
-          "expected": "on_demand",
-          "service": "com.whatsoup.agent",
-          "healthPort": 9095,
-          "reason": "MACLAB agent launchd label is loaded but RunAtLoad=false; down is healthy until invoked"
+          "expected": "none",
+          "reason": "agent launchd label not deployed; relay-only host has no bot instance"
         }
       ]
     },
