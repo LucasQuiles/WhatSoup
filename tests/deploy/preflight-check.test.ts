@@ -28,9 +28,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import {
+  gitFixture,
+  gitFixtureEnv,
+} from './preflight-git-fixture-helper.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -95,28 +99,6 @@ function makeFixtureTree(
     writeFileSync(abs, contents, 'utf8');
   }
   return root;
-}
-
-function gitFixtureEnv(): NodeJS.ProcessEnv {
-  return {
-    ...cleanGitEnv(),
-    GIT_AUTHOR_NAME: 'Fixture',
-    GIT_AUTHOR_EMAIL: 'fixture@local',
-    GIT_COMMITTER_NAME: 'Fixture',
-    GIT_COMMITTER_EMAIL: 'fixture@local',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
-  };
-}
-
-function gitFixture(repoRoot: string, args: string[]): void {
-  const result = spawnSync('git', args, {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    env: gitFixtureEnv(),
-    timeout: SPAWN_TIMEOUT_MS,
-  });
-  expect(result.status, result.stderr || result.stdout).toBe(0);
 }
 
 function runPreflight(
@@ -241,26 +223,42 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     }).stdout.trim();
 
     const fixtureRoot = makeFixtureTree('export const fixture = true;\n');
-    const prior = {
-      GIT_DIR: process.env.GIT_DIR,
-      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
-      GIT_INDEX_FILE: process.env.GIT_INDEX_FILE,
-    };
-    process.env.GIT_DIR = join(ambient, '.git');
-    process.env.GIT_WORK_TREE = ambient;
-    process.env.GIT_INDEX_FILE = join(ambient, '.git', 'index');
-    try {
-      gitFixture(fixtureRoot, ['init', '-q']);
-      gitFixture(fixtureRoot, ['add', '.']);
-      gitFixture(fixtureRoot, ['commit', '-m', 'fixture-base']);
-    } finally {
-      for (const [key, value] of Object.entries(prior)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    const helperUrl = pathToFileURL(
+      join(__dirname, 'preflight-git-fixture-helper.ts'),
+    ).href;
+    const childProgram = `
+      const { gitFixture } = await import(${JSON.stringify(helperUrl)});
+      const root = process.env.WHATSOUP_TEST_FIXTURE_ROOT;
+      if (!root) throw new Error('missing fixture root');
+      gitFixture(root, ['init', '-q']);
+      gitFixture(root, ['add', '.']);
+      gitFixture(root, ['commit', '-m', 'fixture-base']);
+    `;
+    const child = spawnSync(
+      PINNED_NODE,
+      ['--input-type=module', '--eval', childProgram],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        timeout: SPAWN_TIMEOUT_MS,
+        env: {
+          ...cleanGitEnv(),
+          WHATSOUP_TEST_FIXTURE_ROOT: fixtureRoot,
+          GIT_DIR: join(ambient, '.git'),
+          GIT_WORK_TREE: ambient,
+          GIT_INDEX_FILE: join(ambient, '.git', 'index'),
+        },
+      },
+    );
+    expect(child.status, child.stderr || child.stdout || child.error?.message).toBe(0);
 
     expect(existsSync(join(fixtureRoot, '.git'))).toBe(true);
+    const fixtureHead = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: fixtureRoot,
+      encoding: 'utf8',
+      env: gitFixtureEnv(),
+    });
+    expect(fixtureHead.status, fixtureHead.stderr).toBe(0);
     const ambientAfter = spawnSync('git', ['rev-parse', 'HEAD'], {
       cwd: ambient,
       encoding: 'utf8',
