@@ -478,6 +478,8 @@ describe('redactInternalArtifacts — audience scoping', () => {
       '/home/testuser/fleet-tokens.json.',
       '~/fleet-tokens.json:',
       '`~/fleet-tokens.json`',
+      '_~/fleet-tokens.json_',
+      '~~/fleet-tokens.json~',
       '/tmp/client.key.',
       'https://host/fleet-tokens.json?x=1',
     ]) {

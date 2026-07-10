@@ -228,7 +228,7 @@ const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
 // Tailnet / CGNAT shared address space (100.64.0.0/10).
 const TAILNET_IP =
   /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/g;
-const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9._~-])(?:~|\/)[^\s"',;}\])>]+/g;
+const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9.-])(?:~|\/)[^\s"',;}\])>]+/g;
 const CREDENTIAL_FILE_NAMES = new Set([
   'bot-errors.env',
   'fleet-token',
@@ -237,7 +237,7 @@ const CREDENTIAL_FILE_NAMES = new Set([
   'tokens.env',
   'secrets.env',
 ]);
-const TRAILING_PATH_PUNCTUATION: ReadonlySet<string> = new Set(['.', ':', '`', '!', '?', '*']);
+const TRAILING_PATH_PUNCTUATION: ReadonlySet<string> = new Set(['.', ':', '`', '!', '?', '*', '_', '~']);
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
