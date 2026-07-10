@@ -67,7 +67,12 @@ function insertScheduledMessage(
 
 type SettlementFaultMode = 'throw_before_once' | 'commit_then_throw_once' | 'throw_before_always';
 
-function injectSettlementFault(db: Database, mode: SettlementFaultMode): () => void {
+interface SettlementFault {
+  restore: () => void;
+  getCalls: () => number;
+}
+
+function injectSettlementFault(db: Database, mode: SettlementFaultMode): SettlementFault {
   const realPrepare = db.raw.prepare.bind(db.raw);
   let calls = 0;
   db.raw.prepare = ((sql: string) => {
@@ -98,7 +103,10 @@ function injectSettlementFault(db: Database, mode: SettlementFaultMode): () => v
     });
   }) as typeof db.raw.prepare;
 
-  return () => { db.raw.prepare = realPrepare; };
+  return {
+    restore: () => { db.raw.prepare = realPrepare; },
+    getCalls: () => calls,
+  };
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -130,16 +138,17 @@ describe('MessageScheduler — tick()', () => {
 
   it('does not resend a one-shot when the first post-send settlement attempt fails', async () => {
     const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
-    const restore = injectSettlementFault(db, 'throw_before_once');
+    const fault = injectSettlementFault(db, 'throw_before_once');
     const scheduler = new MessageScheduler(db, conn as ConnectionManager,
       { intervalMs: 60_000, maxRetries: 3 });
 
     try {
       await scheduler.tick();
       await scheduler.tick();
-    } finally { restore(); }
+    } finally { fault.restore(); }
 
     expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
     expect(db.raw.prepare(
       'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
     ).get(id)).toEqual({ status: 'sent', retry_count: 0, send_started_at: null });
@@ -147,12 +156,13 @@ describe('MessageScheduler — tick()', () => {
 
   it('accepts an already-applied one-shot settlement after an ambiguous local result', async () => {
     const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
-    const restore = injectSettlementFault(db, 'commit_then_throw_once');
+    const fault = injectSettlementFault(db, 'commit_then_throw_once');
     const scheduler = new MessageScheduler(db, conn as ConnectionManager,
       { intervalMs: 60_000, maxRetries: 3 });
-    try { await scheduler.tick(); } finally { restore(); }
+    try { await scheduler.tick(); } finally { fault.restore(); }
 
     expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
     expect(db.raw.prepare(
       'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
     ).get(id)).toEqual({ status: 'sent', retry_count: 0, send_started_at: null });
@@ -160,16 +170,17 @@ describe('MessageScheduler — tick()', () => {
 
   it('fails closed after persistent one-shot settlement failures', async () => {
     const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
-    const restore = injectSettlementFault(db, 'throw_before_always');
+    const fault = injectSettlementFault(db, 'throw_before_always');
     const scheduler = new MessageScheduler(db, conn as ConnectionManager,
       { intervalMs: 60_000, maxRetries: 3 });
 
     try {
       await scheduler.tick();
       await scheduler.tick();
-    } finally { restore(); }
+    } finally { fault.restore(); }
 
     expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
     expect(db.raw.prepare(
       'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
     ).get(id)).toMatchObject({ status: 'processing', retry_count: 0 });
@@ -206,16 +217,17 @@ describe('MessageScheduler — tick()', () => {
       now - 60,
       0,
     ).lastInsertRowid);
-    const restore = injectSettlementFault(db, 'throw_before_always');
+    const fault = injectSettlementFault(db, 'throw_before_always');
     const scheduler = new MessageScheduler(db, conn as ConnectionManager,
       { intervalMs: 60_000, maxRetries: 3 });
 
     try {
       await scheduler.tick();
       await scheduler.tick();
-    } finally { restore(); }
+    } finally { fault.restore(); }
 
     expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
     const processingRow = db.raw.prepare(
       'SELECT status, retry_count, run_count, send_started_at FROM scheduled_messages WHERE id = ?',
     ).get(id) as { status: string; retry_count: number; run_count: number; send_started_at: number | null };
@@ -241,6 +253,42 @@ describe('MessageScheduler — tick()', () => {
     expect(recoveredRow.send_started_at).toBeNull();
     expect(recoveredRow.next_run_at).toBeGreaterThan(now);
     expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues later claimed rows after a persistent post-send settlement failure', async () => {
+    const firstId = insertScheduledMessage(db.raw, {
+      chatJid: '15550100003@s.whatsapp.net',
+      status: 'pending',
+    });
+    const secondId = insertScheduledMessage(db.raw, {
+      chatJid: '15550100004@s.whatsapp.net',
+      status: 'pending',
+    });
+    const fault = injectSettlementFault(db, 'throw_before_always');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+    } finally { fault.restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(2);
+    expect(fault.getCalls()).toBe(4);
+    const rows = db.raw.prepare(
+      `SELECT id, status, retry_count, send_started_at
+       FROM scheduled_messages WHERE id IN (?, ?) ORDER BY id`,
+    ).all(firstId, secondId) as unknown as Array<{
+      id: number;
+      status: string;
+      retry_count: number;
+      send_started_at: number | null;
+    }>;
+    expect(rows).toEqual([
+      { id: firstId, status: 'processing', retry_count: 0,
+        send_started_at: expect.any(Number) },
+      { id: secondId, status: 'processing', retry_count: 0,
+        send_started_at: expect.any(Number) },
+    ]);
   });
 
   it('ignores messages scheduled in the future', async () => {
