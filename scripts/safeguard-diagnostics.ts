@@ -46,6 +46,9 @@ interface ChainRequirement {
   scriptName: string;
   orderedSteps: string[];
   forbiddenSteps?: string[];
+  exactSteps?: string[];
+  singleRunSteps?: string[];
+  exactSequence?: boolean;
 }
 
 interface AnchorRequirement {
@@ -151,14 +154,17 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
     id: 'release-chain',
     scriptName: 'verify:release',
     orderedSteps: [
+      'unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK WHATSOUP_SKIP_BOUNDARY_CHECK',
       'npm run guard:repo:release-hygiene',
       'npm run guard:repo:commit-authors',
       'npm run guard:publication:all',
       'npm run guard:doc-drift',
       'npm run guard:public-surface-drift',
       'npm run guard:work-index',
+      'npm run guard:doc-tally',
       'npm run guard:node-pin-consistency',
       'npm run guard:source-runtime-drift',
+      'npm run guard:arc-binding-drift',
       'npm run guard:fleet-bot-hardening-parity',
       'npm run guard:bot-errors-runtime-manifest',
       'npm run guard:bot-errors-simulation-matrix',
@@ -167,19 +173,26 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:safeguard-diagnostics',
       'npm run guard:test-integrity',
       'npm run guard:boundaries',
+      'npm run guard:fail-closed-gate',
+      'npm run guard:service-units',
+      'npm run guard:insecure-tempfile',
+      'npm run guard:instance-config',
+      'npm run guard:guard-test-coverage',
       'npm run guard:lint:src',
+      'npm run test:tokenomics',
+      'npm run test:drills',
       'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci',
       'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck',
       'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard test',
       'bash scripts/run-with-pinned-npm.sh --prefix console ci',
       'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
       'npm run typecheck:all',
-      'npm test',
-      'npm run coverage:check',
+      'npm run coverage:check -- --pool=forks --fileParallelism=false',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design',
       'npm run verify:console-browser',
     ],
+    exactSequence: true,
     forbiddenSteps: [
       'npm --prefix tools/whatsoup_guard ci',
       'npm --prefix tools/whatsoup_guard run typecheck',
@@ -187,6 +200,16 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm --prefix console ci',
       'npm --prefix console run lint',
       'npm --prefix console run build',
+      'npm test',
+      'npm run test',
+      'npm run coverage',
+      'bash scripts/run-coverage-check.sh',
+    ],
+    exactSteps: [
+      'npm run coverage:check -- --pool=forks --fileParallelism=false',
+    ],
+    singleRunSteps: [
+      'npm run coverage:check',
     ],
   },
   {
@@ -575,6 +598,17 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
   const chainSteps = chain.split(/\s+&&\s+/).map((step) => step.trim()).filter(Boolean);
   const missing = requirement.orderedSteps.filter((step) => findCommandIndex(chainSteps, step) < 0);
   const forbiddenPresent = (requirement.forbiddenSteps ?? []).filter((step) => findCommandIndex(chainSteps, step) >= 0);
+  const missingExact = (requirement.exactSteps ?? []).filter((step) => !chainSteps.includes(step));
+  const wrongCardinality = (requirement.singleRunSteps ?? [])
+    .map((step) => ({
+      step,
+      count: chainSteps.filter((actual) => commandMatches(step, actual)).length,
+    }))
+    .filter(({ count }) => count !== 1);
+  const exactSequenceMismatch = requirement.exactSequence === true && (
+    chainSteps.length !== requirement.orderedSteps.length
+    || chainSteps.some((step, index) => step !== requirement.orderedSteps[index])
+  );
   const outOfOrder: string[] = [];
   let previousIndex = -1;
   for (const step of requirement.orderedSteps) {
@@ -586,8 +620,11 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
 
   const failures = [
     ...missing.map((step) => `missing ${step}`),
+    ...missingExact.map((step) => `missing exact ${step}`),
     ...outOfOrder.map((step) => `out-of-order ${step}`),
     ...forbiddenPresent.map((step) => `forbidden ${step}`),
+    ...wrongCardinality.map(({ step, count }) => `expected exactly one ${step}; found ${count}`),
+    ...(exactSequenceMismatch ? ['exact command sequence mismatch'] : []),
   ];
 
   return {
