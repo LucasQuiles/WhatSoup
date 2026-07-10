@@ -48,6 +48,7 @@ export type RedactionCategory =
   | 'internal_path'
   | 'internal_identifier'
   | 'tailnet_ip'
+  | 'sensitive_path'
   | 'provider_secret';
 
 export interface Redaction {
@@ -227,6 +228,17 @@ const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
 // Tailnet / CGNAT shared address space (100.64.0.0/10).
 const TAILNET_IP =
   /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/g;
+const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9.-])(?:~\/|\/)[^\s"',;}\])>]+/g;
+const CREDENTIAL_FILE_NAMES = new Set([
+  'bot-errors.env',
+  'fleet-token',
+  'fleet.env',
+  'fleet-tokens.json',
+  'tokens.env',
+  'secrets.env',
+]);
+const TRAILING_PATH_PUNCTUATION: ReadonlySet<string> = new Set(['.', ':', '`', '!', '?', '*', '_', '~']);
+const TRAILING_PATH_UNICODE_PUNCTUATION = /[\p{P}\p{Cf}]/u;
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
@@ -242,13 +254,78 @@ function maskPhoneLike(value: string): string {
   });
 }
 
+function hasPathSegmentAfter(path: string, segment: string, start: number): boolean {
+  let index = path.indexOf(`/${segment}`, start);
+  while (index !== -1) {
+    const end = index + segment.length + 1;
+    if (end === path.length || path[end] === '/') return true;
+    index = path.indexOf(`/${segment}`, end);
+  }
+  return false;
+}
+
+function sensitivePathLabel(path: string): string | null {
+  const normalized = path.toLowerCase();
+  const basename = normalized.slice(normalized.lastIndexOf('/') + 1);
+  const configRoot = normalized.indexOf('/.config/whatsoup/');
+  const stateRoot = normalized.indexOf('/.local/share/whatsoup/instances/');
+
+  if (
+    normalized.includes('/.config/secrets/')
+    || normalized.includes('/auth-bond-backups/')
+    || (configRoot !== -1 && hasPathSegmentAfter(normalized, 'auth', configRoot))
+    || (stateRoot !== -1 && hasPathSegmentAfter(normalized, 'auth', stateRoot))
+    || CREDENTIAL_FILE_NAMES.has(basename)
+    || basename === '.env'
+    || basename.startsWith('.env.')
+  ) {
+    return 'credential-path';
+  }
+  if (
+    normalized.includes('/.ssh/')
+    && (basename.startsWith('id_') || basename.endsWith('.pem') || basename.endsWith('.key'))
+  ) {
+    return 'ssh-key-path';
+  }
+  if (basename.endsWith('.pem') || basename.endsWith('.key')) return 'key-file-path';
+  return null;
+}
+
+function redactSensitivePaths(text: string, redactions: Redaction[]): string {
+  const labels = new Set<string>();
+  const out = text.replace(SENSITIVE_PATH_TOKEN, (match) => {
+    const queryIndex = match.search(/[?#]/);
+    let end = queryIndex === -1 ? match.length : queryIndex;
+    while (
+      end > 1
+      && (
+        TRAILING_PATH_PUNCTUATION.has(match[end - 1]!)
+        || (
+          match[end - 1] !== '/'
+          && TRAILING_PATH_UNICODE_PUNCTUATION.test(match[end - 1]!)
+        )
+      )
+    ) {
+      end -= 1;
+    }
+    const candidate = match.slice(0, end);
+    const suffix = match.slice(end);
+    const label = sensitivePathLabel(candidate);
+    if (!label) return match;
+    labels.add(label);
+    return `[sensitive-path]${suffix}`;
+  });
+  for (const label of labels) redactions.push({ category: 'sensitive_path', label });
+  return out;
+}
+
 /**
  * Mask internal artifacts in outbound text, scaled to `audience`:
  *   - `client`   — full scrub: secrets/emails, then operator paths, runtime
  *                  identifiers, and tailnet IPs.
- *   - `internal` — secrets/emails only; operator vocabulary is legitimate
- *                  content in operator-owned agent groups, so masking it there
- *                  is over-redaction.
+ *   - `internal` — secrets/emails/sensitive credential paths only; operator
+ *                  vocabulary is legitimate content in operator-owned agent
+ *                  groups, so masking it there is over-redaction.
  *   - `ops`      — verbatim (BOT ERRORS needs raw diagnostics; its outbox
  *                  redactor scrubs secrets downstream).
  * Defaults to `client`, so existing single-arg callers are unchanged.
@@ -267,8 +344,12 @@ export function redactInternalArtifacts(
 
   // Secret/token/email masking applies to client AND internal: WhatsApp is a
   // third-party transport, so a leaked credential is exposure even in an
-  // operator-owned group.
-  const sanitized = sanitizeProviderPreviewText(out);
+  // operator-owned group. Internal WhatsApp JIDs are protected before this pass
+  // because the generic email sanitizer otherwise treats `120...@g.us` as email.
+  const sanitized = sanitizeProviderPreviewText(out, {
+    preserveWhatsAppJids: audience === 'internal',
+    preserveWhatsAppMentions: true,
+  });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-email' });
     out = sanitized;
@@ -277,7 +358,10 @@ export function redactInternalArtifacts(
   // Operator-artifact masking (home/tilde paths, the WhatSoup config tree,
   // runtime identifiers, tailnet IPs) is CLIENT-only. In internal agent groups
   // these strings are the coordination vocabulary itself.
-  if (audience === 'internal') return { text: out, redactions };
+  if (audience === 'internal') {
+    out = redactSensitivePaths(out, redactions);
+    return { text: out, redactions };
+  }
 
   // Full paths first so a path + dotfile tail collapses to one marker before the
   // standalone-identifier pass can fire inside it. Order: absolute home paths,
