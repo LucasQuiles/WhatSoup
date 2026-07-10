@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
 
@@ -235,6 +238,80 @@ def test_load_fleet_api_token_expands_tilde_from_profile(monkeypatch, tmp_path):
     assert "token_source_path_basename=fleet-tokens.json" in source
     assert accept_count == 0
     assert error is None
+
+
+@pytest.mark.parametrize("mode", [0o404, 0o440, 0o444])
+def test_load_fleet_api_token_rejects_group_or_other_permissions(monkeypatch, tmp_path, mode):
+    token_file = tmp_path / "fleet-tokens.json"
+    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    token_file.chmod(mode)
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
+
+    token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+
+    assert token is None
+    assert error == f"token_mode_too_open mode={mode:o}"
+
+
+def test_load_fleet_api_token_rejects_a_symlinked_parent(monkeypatch, tmp_path):
+    real_config = tmp_path / "real-config"
+    token_file = real_config / "whatsoup" / "fleet-tokens.json"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    token_file.chmod(0o600)
+    linked_config = tmp_path / "linked-config"
+    linked_config.symlink_to(real_config, target_is_directory=True)
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(linked_config / "whatsoup" / "fleet-tokens.json"))
+
+    token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+
+    assert token is None
+    assert error is not None
+    assert error.startswith("token_parent_refused")
+
+
+def test_load_fleet_api_token_refuses_a_leaf_swapped_to_a_symlink(monkeypatch, tmp_path):
+    token_file = tmp_path / "fleet-tokens.json"
+    replacement = tmp_path / "replacement.json"
+    token_file.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    replacement.write_text('{"active":"replacement-token","accept":[]}\n', encoding="utf-8")
+    token_file.chmod(0o600)
+    replacement.chmod(0o600)
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == token_file.name and dir_fd is not None and not swapped:
+            swapped = True
+            token_file.unlink()
+            token_file.symlink_to(replacement)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.delenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_FLEET_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(_mod.os, "open", swapping_open)
+
+    token, _source, _accept_count, error = _mod.load_fleet_api_token({})
+
+    assert swapped is True
+    assert token is None
+    assert error is not None
+    assert error.startswith("token_symlink_refused")
+
+
+def test_required_credential_inventory_rejects_group_read_permissions(tmp_path):
+    credential = tmp_path / "fleet-tokens.json"
+    credential.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")
+    credential.chmod(0o440)
+
+    lines = _mod.required_credential_inventory({"requiredCredentialFiles": [str(credential)]})
+
+    assert len(lines) == 1
+    assert lines[0].startswith("FAIL credential:")
+    assert "mode=440" in lines[0]
 
 
 # --- provider_credential_presence: mirror lookupCredential (env -> keyring + migration -> .key store) ---

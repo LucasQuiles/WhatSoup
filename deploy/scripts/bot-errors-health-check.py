@@ -4237,6 +4237,60 @@ def fleet_api_default_url(profile: dict[str, Any]) -> str:
     return f"http://{bind}:{port}"
 
 
+def read_fleet_token_text(path: Path) -> tuple[str | None, str | None]:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if len(absolute.parts) >= 2:
+        platform_root = Path(absolute.parts[0]) / absolute.parts[1]
+        if platform_root in {Path("/tmp"), Path("/var")} and platform_root.is_symlink():
+            absolute = Path(os.path.realpath(platform_root)).joinpath(*absolute.parts[2:])
+    parts = absolute.parts
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if no_follow is None or directory_flag is None or len(parts) < 2:
+        return None, "token_secure_open_unavailable"
+
+    common_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_fd = os.open(parts[0], common_flags | directory_flag)
+    try:
+        for part in parts[1:-1]:
+            try:
+                next_fd = os.open(part, common_flags | directory_flag | no_follow, dir_fd=parent_fd)
+            except OSError as exc:
+                return None, f"token_parent_refused error={redact_evidence_string(str(exc), 160)}"
+            os.close(parent_fd)
+            parent_fd = next_fd
+
+        leaf = parts[-1]
+        try:
+            file_fd = os.open(leaf, common_flags | no_follow, dir_fd=parent_fd)
+        except OSError as exc:
+            try:
+                leaf_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError:
+                leaf_stat = None
+            if leaf_stat is not None and stat.S_ISLNK(leaf_stat.st_mode):
+                return None, "token_symlink_refused"
+            return None, f"token_unreadable error={redact_evidence_string(str(exc), 160)}"
+
+        try:
+            st = os.fstat(file_fd)
+            mode = stat.S_IMODE(st.st_mode)
+            if not stat.S_ISREG(st.st_mode):
+                return None, "token_non_regular_refused"
+            if mode & 0o077:
+                return None, f"token_mode_too_open mode={mode:o}"
+            if not mode & 0o400:
+                return None, f"token_owner_read_required mode={mode:o}"
+            with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
+                file_fd = -1
+                return handle.read(), None
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int, str | None]:
     dry = os.environ.get("BOT_ERRORS_DRY_FLEET_TOKEN_JSON")
     token_path = (
@@ -4250,15 +4304,10 @@ def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int,
             raw = dry
         else:
             path = Path(token_path).expanduser()
-            st = path.lstat()
-            mode = stat.S_IMODE(st.st_mode)
-            if stat.S_ISLNK(st.st_mode):
-                return None, source, 0, "token_symlink_refused"
-            if not stat.S_ISREG(st.st_mode):
-                return None, source, 0, "token_non_regular_refused"
-            if mode > 0o600:
-                return None, source, 0, f"token_mode_too_open mode={mode:o}"
-            raw = path.read_text(encoding="utf-8")
+            raw, read_error = read_fleet_token_text(path)
+            if read_error is not None:
+                return None, source, 0, read_error
+            assert raw is not None
         loaded = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - health evidence should include token-source failures.
         return None, source, 0, f"token_unreadable error={redact_evidence_string(str(exc), 160)}"
@@ -4435,8 +4484,8 @@ def required_credential_inventory(profile: dict[str, Any]) -> list[str]:
                 lines.append(f"FAIL credential: {requirement_ref} unreadable {path_ref} mode={mode:o} age_days={age_days}")
             elif mode & 0o022:
                 lines.append(f"FAIL credential: {requirement_ref} world_writable {path_ref} mode={mode:o} age_days={age_days}")
-            elif mode > 0o600:
-                lines.append(f"FAIL credential: {requirement_ref} mode>{0o600:o} {path_ref} mode={mode:o} age_days={age_days}")
+            elif mode & 0o077:
+                lines.append(f"FAIL credential: {requirement_ref} non_private {path_ref} mode={mode:o} age_days={age_days}")
             elif parent_issues:
                 continue
             else:
