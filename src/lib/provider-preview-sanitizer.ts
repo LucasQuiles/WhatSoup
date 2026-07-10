@@ -3,7 +3,11 @@
 // runtime providers and core guardrails can reuse one sanitizer — SSOT, no
 // duplicated token/secret regex islands.
 
-export function sanitizeProviderPreviewText(text: string): string {
+import { jidPattern } from './redaction-patterns.ts';
+
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\b/g;
+
+function sanitizeProviderSecrets(text: string): string {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(
@@ -18,7 +22,28 @@ export function sanitizeProviderPreviewText(text: string): string {
       /\b((?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\s*[:=]\s*['"]?)[^'"\s]{8,}/gi,
       '$1[REDACTED]',
     )
-    .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]')
+    .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]');
+}
+
+function redactEmailsPreservingJids(text: string): string {
+  let cursor = 0;
+  let out = '';
+  for (const match of text.matchAll(jidPattern())) {
+    const index = match.index;
+    out += text.slice(cursor, index).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
+    out += match[0];
+    cursor = index + match[0].length;
+  }
+  return out + text.slice(cursor).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
+}
+
+export function sanitizeProviderPreviewText(
+  text: string,
+  options: { preserveWhatsAppJids?: boolean } = {},
+): string {
+  const sanitized = sanitizeProviderSecrets(text);
+  if (options.preserveWhatsAppJids) return redactEmailsPreservingJids(sanitized);
+  return sanitized
     // QR-128: the prior domain pattern `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` overlaps its own
     // class (`.` is in `[A-Za-z0-9.-]`) with the required TLD dot, so a crafted
     // local-part + a long `a.a.a…`/`a-a-a…` run drives quadratic backtracking (~5.5s at
@@ -31,7 +56,7 @@ export function sanitizeProviderPreviewText(text: string): string {
     // class and re-introduces the same overlap (empirically still quadratic). This makes
     // redaction slightly broader (bare `user@host`/`user@10.0.0.1` also redact), which is
     // strictly safe for a redactor — it never under-redacts a real e-mail.
-    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\b/g, '[REDACTED_EMAIL]');
+    .replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
 }
 
 export function providerPreview(text: string, maxLength: number): string {

@@ -440,6 +440,18 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
   });
 
+  it('internal audience redacts keyed secret values that contain a WhatsApp JID', () => {
+    for (const input of [
+      `password=abc/${FAKE_GROUP_JID}/def`,
+      `client_secret=abc-${FAKE_GROUP_JID}-def`,
+    ]) {
+      const { text, redactions } = redactInternalArtifacts(input, 'internal');
+      expect(text).toContain('[REDACTED]');
+      expect(text).not.toContain(FAKE_GROUP_JID);
+      expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+    }
+  });
+
   it('scans internal sensitive paths in linear time on slash-heavy input', () => {
     const input = '/'.repeat(64 * 1024);
     const startedAt = performance.now();
@@ -459,6 +471,22 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(text).not.toContain('/home/testuser/.ssh/id_ed25519');
     expect(text).toContain('[sensitive-path]');
     expect(redactions.map((r) => r.category)).toContain('sensitive_path');
+  });
+
+  it('masks sensitive paths before terminal punctuation and Markdown delimiters', () => {
+    for (const input of [
+      '/home/testuser/fleet-tokens.json.',
+      '~/fleet-tokens.json:',
+      '`~/fleet-tokens.json`',
+      '/tmp/client.key.',
+      'https://host/fleet-tokens.json?x=1',
+    ]) {
+      const { text, redactions } = redactInternalArtifacts(input, 'internal');
+      expect(text).not.toContain('fleet-tokens.json');
+      expect(text).not.toContain('client.key');
+      expect(text).toContain('[sensitive-path]');
+      expect(redactions.map((redaction) => redaction.category)).toContain('sensitive_path');
+    }
   });
 
   it('ops audience is fully verbatim', () => {

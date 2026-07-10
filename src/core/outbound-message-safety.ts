@@ -237,6 +237,7 @@ const CREDENTIAL_FILE_NAMES = new Set([
   'tokens.env',
   'secrets.env',
 ]);
+const TRAILING_PATH_PUNCTUATION: ReadonlySet<string> = new Set(['.', ':', '`', '!', '?', '*']);
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
@@ -250,18 +251,6 @@ function maskPhoneLike(value: string): string {
       ? `${prefix}[redacted-phone]`
       : match;
   });
-}
-
-function sanitizeProviderPreviewTextPreservingJids(text: string): string {
-  let cursor = 0;
-  let out = '';
-  for (const match of text.matchAll(jidPattern())) {
-    const index = match.index;
-    out += sanitizeProviderPreviewText(text.slice(cursor, index));
-    out += match[0];
-    cursor = index + match[0].length;
-  }
-  return out + sanitizeProviderPreviewText(text.slice(cursor));
 }
 
 function hasPathSegmentAfter(path: string, segment: string, start: number): boolean {
@@ -304,10 +293,15 @@ function sensitivePathLabel(path: string): string | null {
 function redactSensitivePaths(text: string, redactions: Redaction[]): string {
   const labels = new Set<string>();
   const out = text.replace(SENSITIVE_PATH_TOKEN, (match) => {
-    const label = sensitivePathLabel(match);
+    const queryIndex = match.search(/[?#]/);
+    let end = queryIndex === -1 ? match.length : queryIndex;
+    while (end > 1 && TRAILING_PATH_PUNCTUATION.has(match[end - 1]!)) end -= 1;
+    const candidate = match.slice(0, end);
+    const suffix = match.slice(end);
+    const label = sensitivePathLabel(candidate);
     if (!label) return match;
     labels.add(label);
-    return '[sensitive-path]';
+    return `[sensitive-path]${suffix}`;
   });
   for (const label of labels) redactions.push({ category: 'sensitive_path', label });
   return out;
@@ -340,9 +334,9 @@ export function redactInternalArtifacts(
   // third-party transport, so a leaked credential is exposure even in an
   // operator-owned group. Internal WhatsApp JIDs are protected before this pass
   // because the generic email sanitizer otherwise treats `120...@g.us` as email.
-  const sanitized = audience === 'internal'
-    ? sanitizeProviderPreviewTextPreservingJids(out)
-    : sanitizeProviderPreviewText(out);
+  const sanitized = sanitizeProviderPreviewText(out, {
+    preserveWhatsAppJids: audience === 'internal',
+  });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-email' });
     out = sanitized;
