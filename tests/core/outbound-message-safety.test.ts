@@ -433,6 +433,23 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
+  it('internal audience does not reinterpret literal JID placeholder-shaped text', () => {
+    const placeholder = '__WHATSOUP_JID_0__';
+    const input = `${FAKE_GROUP_JID} literal ${placeholder}`;
+
+    expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
+  });
+
+  it('scans internal sensitive paths in linear time on slash-heavy input', () => {
+    const input = '/'.repeat(64 * 1024);
+    const startedAt = performance.now();
+    const { text } = redactInternalArtifacts(input, 'internal');
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(text).toBe(input);
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
   it('internal audience still masks auth material and key-file paths', () => {
     const { text, redactions } = redactInternalArtifacts(
       'creds at /home/testuser/.config/whatsoup/instances/q/auth/creds.json and key /home/testuser/.ssh/id_ed25519',

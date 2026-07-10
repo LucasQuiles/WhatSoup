@@ -228,17 +228,15 @@ const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
 // Tailnet / CGNAT shared address space (100.64.0.0/10).
 const TAILNET_IP =
   /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/g;
-const SENSITIVE_PATHS: ReadonlyArray<{ re: RegExp; label: string }> = [
-  {
-    re: /(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])\/)[^\s"',;}]*?(?:\.config\/secrets\/[^\s"',;}]+|\.config\/whatsoup\/[^\s"',;}]*\/auth(?:\/[^\s"',;}]+)?|\.local\/share\/whatsoup\/instances\/[^\s"',;}]*\/auth(?:\/[^\s"',;}]+)?|auth-bond-backups\/[^\s"',;}]+|\/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s"',;}]+)?))\b/gi,
-    label: 'credential-path',
-  },
-  {
-    re: /(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])\/)[^\s"',;}]*?\/\.ssh\/(?:id_[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\.(?:pem|key))\b/gi,
-    label: 'ssh-key-path',
-  },
-  { re: /(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])\/)[^\s"',;}]*?\.(?:pem|key)\b/gi, label: 'key-file-path' },
-];
+const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9._~-])(?:~|\/)[^\s"',;}\])>]+/g;
+const CREDENTIAL_FILE_NAMES = new Set([
+  'bot-errors.env',
+  'fleet-token',
+  'fleet.env',
+  'fleet-tokens.json',
+  'tokens.env',
+  'secrets.env',
+]);
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
@@ -255,28 +253,63 @@ function maskPhoneLike(value: string): string {
 }
 
 function sanitizeProviderPreviewTextPreservingJids(text: string): string {
-  const preserved: string[] = [];
-  const protectedText = text.replace(jidPattern(), (match) => {
-    const index = preserved.length;
-    preserved.push(match);
-    return `__WHATSOUP_JID_${index}__`;
-  });
+  let cursor = 0;
+  let out = '';
+  for (const match of text.matchAll(jidPattern())) {
+    const index = match.index;
+    out += sanitizeProviderPreviewText(text.slice(cursor, index));
+    out += match[0];
+    cursor = index + match[0].length;
+  }
+  return out + sanitizeProviderPreviewText(text.slice(cursor));
+}
 
-  return sanitizeProviderPreviewText(protectedText).replace(
-    /__WHATSOUP_JID_(\d+)__/g,
-    (match, rawIndex: string) => preserved[Number(rawIndex)] ?? match,
-  );
+function hasPathSegmentAfter(path: string, segment: string, start: number): boolean {
+  let index = path.indexOf(`/${segment}`, start);
+  while (index !== -1) {
+    const end = index + segment.length + 1;
+    if (end === path.length || path[end] === '/') return true;
+    index = path.indexOf(`/${segment}`, end);
+  }
+  return false;
+}
+
+function sensitivePathLabel(path: string): string | null {
+  const normalized = path.toLowerCase();
+  const basename = normalized.slice(normalized.lastIndexOf('/') + 1);
+  const configRoot = normalized.indexOf('/.config/whatsoup/');
+  const stateRoot = normalized.indexOf('/.local/share/whatsoup/instances/');
+
+  if (
+    normalized.includes('/.config/secrets/')
+    || normalized.includes('/auth-bond-backups/')
+    || (configRoot !== -1 && hasPathSegmentAfter(normalized, 'auth', configRoot))
+    || (stateRoot !== -1 && hasPathSegmentAfter(normalized, 'auth', stateRoot))
+    || CREDENTIAL_FILE_NAMES.has(basename)
+    || basename === '.env'
+    || basename.startsWith('.env.')
+  ) {
+    return 'credential-path';
+  }
+  if (
+    normalized.includes('/.ssh/')
+    && (basename.startsWith('id_') || basename.endsWith('.pem') || basename.endsWith('.key'))
+  ) {
+    return 'ssh-key-path';
+  }
+  if (basename.endsWith('.pem') || basename.endsWith('.key')) return 'key-file-path';
+  return null;
 }
 
 function redactSensitivePaths(text: string, redactions: Redaction[]): string {
-  let out = text;
-  for (const { re, label } of SENSITIVE_PATHS) {
-    const next = out.replace(re, '[sensitive-path]');
-    if (next !== out) {
-      redactions.push({ category: 'sensitive_path', label });
-      out = next;
-    }
-  }
+  const labels = new Set<string>();
+  const out = text.replace(SENSITIVE_PATH_TOKEN, (match) => {
+    const label = sensitivePathLabel(match);
+    if (!label) return match;
+    labels.add(label);
+    return '[sensitive-path]';
+  });
+  for (const label of labels) redactions.push({ category: 'sensitive_path', label });
   return out;
 }
 
