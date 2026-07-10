@@ -79,7 +79,8 @@ function injectSettlementFault(db: Database, mode: SettlementFaultMode): Settlem
     const statement = realPrepare(sql);
     const isSettlement =
       sql.includes("SET status = 'sent', sent_at") ||
-      sql.includes("SET status = 'pending', sent_at");
+      sql.includes("SET status = 'pending', sent_at") ||
+      sql.includes("SET status = 'failed', sent_at");
     if (!isSettlement) return statement;
 
     return new Proxy(statement, {
@@ -107,6 +108,25 @@ function injectSettlementFault(db: Database, mode: SettlementFaultMode): Settlem
     restore: () => { db.raw.prepare = realPrepare; },
     getCalls: () => calls,
   };
+}
+
+function insertInvalidRecurringMessage(raw: DatabaseSync): number {
+  const now = Math.floor(Date.now() / 1000);
+  return Number(raw.prepare(
+    `INSERT INTO scheduled_messages
+       (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    '15550100005@s.whatsapp.net',
+    'text',
+    JSON.stringify({ text: 'invalid recurring settlement' }),
+    now - 120,
+    'pending',
+    0,
+    '99 99 99 99 99',
+    now - 60,
+    0,
+  ).lastInsertRowid);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -289,6 +309,84 @@ describe('MessageScheduler — tick()', () => {
       { id: secondId, status: 'processing', retry_count: 0,
         send_started_at: expect.any(Number) },
     ]);
+  });
+
+  it('accepts an already-applied invalid-cron settlement after an ambiguous local result', async () => {
+    const id = insertInvalidRecurringMessage(db.raw);
+    const fault = injectSettlementFault(db, 'commit_then_throw_once');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+    } finally { fault.restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
+    const row = db.raw.prepare(
+      `SELECT status, sent_at, error, retry_count, run_count, send_started_at
+       FROM scheduled_messages WHERE id = ?`,
+    ).get(id) as {
+      status: string;
+      sent_at: number;
+      error: string;
+      retry_count: number;
+      run_count: number;
+      send_started_at: number | null;
+    };
+    expect(row).toMatchObject({
+      status: 'failed',
+      sent_at: expect.any(Number),
+      error: expect.stringContaining('Invalid recurrence after send:'),
+      retry_count: 0,
+      run_count: 0,
+      send_started_at: null,
+    });
+  });
+
+  it('fails closed after persistent invalid-cron settlement failures', async () => {
+    const id = insertInvalidRecurringMessage(db.raw);
+    const fault = injectSettlementFault(db, 'throw_before_always');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally { fault.restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(fault.getCalls()).toBe(2);
+    expect(db.raw.prepare(
+      `SELECT status, sent_at, error, retry_count, run_count, send_started_at
+       FROM scheduled_messages WHERE id = ?`,
+    ).get(id)).toMatchObject({
+      status: 'processing',
+      sent_at: null,
+      error: null,
+      retry_count: 0,
+      run_count: 0,
+      send_started_at: expect.any(Number),
+    });
+
+    scheduler.recoverStale();
+
+    const recovered = db.raw.prepare(
+      `SELECT status, error, retry_count, run_count, send_started_at
+       FROM scheduled_messages WHERE id = ?`,
+    ).get(id) as {
+      status: string;
+      error: string;
+      retry_count: number;
+      run_count: number;
+      send_started_at: number | null;
+    };
+    expect(recovered.status).toBe('failed');
+    expect(recovered.error).toMatch(/cannot compute next slot/i);
+    expect(recovered.retry_count).toBe(0);
+    expect(recovered.run_count).toBe(0);
+    expect(recovered.send_started_at).toBeNull();
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
   });
 
   it('ignores messages scheduled in the future', async () => {
