@@ -433,6 +433,21 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
+  it('internal audience does not preserve a JID-shaped substring inside an email-like token', () => {
+    const jid = `${'12345'}@${'g.us'}`;
+    for (const input of [
+      `${jid}.evil.test`,
+      `${jid}-evil.test`,
+      `+${jid}`,
+      `x.${jid}`,
+    ]) {
+      const { text, redactions } = redactInternalArtifacts(input, 'internal');
+      expect(text).not.toBe(input);
+      expect(text).toContain('[REDACTED_EMAIL]');
+      expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+    }
+  });
+
   it('internal audience does not reinterpret literal JID placeholder-shaped text', () => {
     const placeholder = '__WHATSOUP_JID_0__';
     const input = `${FAKE_GROUP_JID} literal ${placeholder}`;

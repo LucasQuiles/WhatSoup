@@ -6,6 +6,8 @@
 import { jidPattern } from './redaction-patterns.ts';
 
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\b/g;
+const EMAIL_LOCAL_ADJACENCY = /[A-Za-z0-9._%+-]/;
+const EMAIL_DOMAIN_CONTINUATION = /[A-Za-z0-9]/;
 
 function sanitizeProviderSecrets(text: string): string {
   return text
@@ -30,9 +32,18 @@ function redactEmailsPreservingJids(text: string): string {
   let out = '';
   for (const match of text.matchAll(jidPattern())) {
     const index = match.index;
+    const end = index + match[0].length;
+    const before = index > 0 ? text[index - 1] : undefined;
+    const after = text[end];
+    const afterNext = text[end + 1];
+    const embeddedInEmailLikeToken =
+      (before !== undefined && EMAIL_LOCAL_ADJACENCY.test(before))
+      || (after !== undefined && EMAIL_LOCAL_ADJACENCY.test(after)
+        && (after !== '.' && after !== '-' || (afterNext !== undefined && EMAIL_DOMAIN_CONTINUATION.test(afterNext))));
+    if (embeddedInEmailLikeToken) continue;
     out += text.slice(cursor, index).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
     out += match[0];
-    cursor = index + match[0].length;
+    cursor = end;
   }
   return out + text.slice(cursor).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
 }
