@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 85
+**Total classification rows:** 95
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 85 |
+| PRIVATE-ARCHIVE | 95 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 85 |
+| Total | 95 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -82,8 +82,17 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-16-handoff-distiller-wiring.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-console-truthful-session-update-and-send-ux.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-delivery-audit-and-idempotency.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-durable-inbound-and-reply-guarantee.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | PRIVATE-ARCHIVE | Internal audit remediation plan; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -97,6 +106,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | PRIVATE-ARCHIVE | Internal audit remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
