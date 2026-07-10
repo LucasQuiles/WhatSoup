@@ -18,21 +18,27 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 42
+**Total entries:** 52
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=22, review=2, spec=13, state=1 |
-| Status | closed=4, completed=30, deferred=7, pending=1 |
-| Status source | body-marker=41, state-md-status=1 |
+| Kind | handoff=4, plan=30, review=3, spec=14, state=1 |
+| Status | active=1, closed=4, completed=31, deferred=7, pending=9 |
+| Status source | body-marker=51, state-md-status=1 |
 
 ## Inconsistencies
 
 0 detected.
 
 ## Synthesis
+
+### Active (1)
+
+| Path | Kind | Topic | Status source |
+|------|------|-------|---------------|
+| `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 
 ### Cross-tree topic clusters (1)
 
@@ -62,7 +68,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(22 entries)_
+### docs/superpowers/plans  _(30 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -88,15 +94,24 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | completed | body-marker | python-deploy-redaction-ssot | 2026-06-20 |  |
 | `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | completed | body-marker | verification-reliability-residuals | 2026-06-20 |  |
 | `docs/superpowers/plans/2026-06-16-handoff-distiller-wiring.md` | plan | completed | body-marker | handoff-distiller-wiring | 2026-06-20 |  |
+| `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md` | plan | pending | body-marker | architecture-and-verification-quality | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-console-truthful-session-update-and-send-ux.md` | plan | pending | body-marker | console-truthful-session-update-and-send-ux | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-delivery-audit-and-idempotency.md` | plan | pending | body-marker | delivery-audit-and-idempotency | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-durable-inbound-and-reply-guarantee.md` | plan | pending | body-marker | durable-inbound-and-reply-guarantee | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md` | plan | pending | body-marker | health-recovery-and-self-update | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
 
-### docs/superpowers/reviews  _(2 entries)_
+### docs/superpowers/reviews  _(3 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-06-12 |  |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
+| `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(13 entries)_
+### docs/superpowers/specs  _(14 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -113,8 +128,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | spec | completed | body-marker | operation-tracker-design | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | completed | body-marker | pr-0a-aqs | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
+| `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | active | body-marker | wall-to-wall-audit-remediation-design | 2026-07-10 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-21T01:36:48Z from commit `fd807a3ccab4cd6d3734e29bde3aa2e410b9372c`
+- Generated at 2026-07-10T14:44:51Z from commit `a8b0fe22c4aea3d30844feee2018b0b971fef3bc`
