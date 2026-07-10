@@ -314,3 +314,27 @@ jobs:
             tests/browser/__screenshots__
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
+
+  bot-errors-health-macos:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: BOT ERRORS macOS health hermeticity
+        run: npm run test:bot-errors-health:hermeticity
