@@ -65,6 +65,42 @@ function insertScheduledMessage(
   return result.lastInsertRowid as number;
 }
 
+type SettlementFaultMode = 'throw_before_once' | 'commit_then_throw_once' | 'throw_before_always';
+
+function injectSettlementFault(db: Database, mode: SettlementFaultMode): () => void {
+  const realPrepare = db.raw.prepare.bind(db.raw);
+  let calls = 0;
+  db.raw.prepare = ((sql: string) => {
+    const statement = realPrepare(sql);
+    const isSettlement =
+      sql.includes("SET status = 'sent', sent_at") ||
+      sql.includes("SET status = 'pending', sent_at");
+    if (!isSettlement) return statement;
+
+    return new Proxy(statement, {
+      get(target, property) {
+        if (property !== 'run') {
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (...args: Parameters<typeof target.run>) => {
+          calls += 1;
+          if (mode === 'throw_before_always' || (mode === 'throw_before_once' && calls === 1)) {
+            throw new Error('injected post-send settlement failure');
+          }
+          const result = target.run(...args);
+          if (mode === 'commit_then_throw_once' && calls === 1) {
+            throw new Error('injected ambiguous local settlement result');
+          }
+          return result;
+        };
+      },
+    });
+  }) as typeof db.raw.prepare;
+
+  return () => { db.raw.prepare = realPrepare; };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe('MessageScheduler — tick()', () => {
@@ -90,6 +126,121 @@ describe('MessageScheduler — tick()', () => {
       .prepare('SELECT status FROM scheduled_messages WHERE id = ?')
       .get(id) as { status: string };
     expect(row.status).toBe('sent');
+  });
+
+  it('does not resend a one-shot when the first post-send settlement attempt fails', async () => {
+    const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
+    const restore = injectSettlementFault(db, 'throw_before_once');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally { restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(db.raw.prepare(
+      'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
+    ).get(id)).toEqual({ status: 'sent', retry_count: 0, send_started_at: null });
+  });
+
+  it('accepts an already-applied one-shot settlement after an ambiguous local result', async () => {
+    const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
+    const restore = injectSettlementFault(db, 'commit_then_throw_once');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+    try { await scheduler.tick(); } finally { restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(db.raw.prepare(
+      'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
+    ).get(id)).toEqual({ status: 'sent', retry_count: 0, send_started_at: null });
+  });
+
+  it('fails closed after persistent one-shot settlement failures', async () => {
+    const id = insertScheduledMessage(db.raw, { status: 'pending', retryCount: 0 });
+    const restore = injectSettlementFault(db, 'throw_before_always');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally { restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    expect(db.raw.prepare(
+      'SELECT status, retry_count, send_started_at FROM scheduled_messages WHERE id = ?',
+    ).get(id)).toMatchObject({ status: 'processing', retry_count: 0 });
+    expect((db.raw.prepare(
+      'SELECT send_started_at FROM scheduled_messages WHERE id = ?',
+    ).get(id) as { send_started_at: number | null }).send_started_at).not.toBeNull();
+
+    scheduler.recoverStale();
+
+    expect(db.raw.prepare(
+      'SELECT status, retry_count, send_started_at, error FROM scheduled_messages WHERE id = ?',
+    ).get(id)).toEqual({
+      status: 'failed',
+      retry_count: 0,
+      send_started_at: null,
+      error: 'Recovered after crash during scheduled send; manual verification required before retry',
+    });
+  });
+
+  it('fails closed after persistent recurring settlement failures', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const id = Number(db.raw.prepare(
+      `INSERT INTO scheduled_messages
+         (chat_jid, content_type, payload, scheduled_at, status, retry_count, recurrence, next_run_at, run_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      '15550100002@s.whatsapp.net',
+      'text',
+      JSON.stringify({ text: 'recurring' }),
+      now - 60,
+      'pending',
+      0,
+      '* * * * *',
+      now - 60,
+      0,
+    ).lastInsertRowid);
+    const restore = injectSettlementFault(db, 'throw_before_always');
+    const scheduler = new MessageScheduler(db, conn as ConnectionManager,
+      { intervalMs: 60_000, maxRetries: 3 });
+
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally { restore(); }
+
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
+    const processingRow = db.raw.prepare(
+      'SELECT status, retry_count, run_count, send_started_at FROM scheduled_messages WHERE id = ?',
+    ).get(id) as { status: string; retry_count: number; run_count: number; send_started_at: number | null };
+    expect(processingRow.status).toBe('processing');
+    expect(processingRow.retry_count).toBe(0);
+    expect(processingRow.run_count).toBe(0);
+    expect(processingRow.send_started_at).not.toBeNull();
+
+    scheduler.recoverStale();
+
+    const recoveredRow = db.raw.prepare(
+      'SELECT status, retry_count, run_count, send_started_at, next_run_at FROM scheduled_messages WHERE id = ?',
+    ).get(id) as {
+      status: string;
+      retry_count: number;
+      run_count: number;
+      send_started_at: number | null;
+      next_run_at: number;
+    };
+    expect(recoveredRow.status).toBe('pending');
+    expect(recoveredRow.retry_count).toBe(0);
+    expect(recoveredRow.run_count).toBe(0);
+    expect(recoveredRow.send_started_at).toBeNull();
+    expect(recoveredRow.next_run_at).toBeGreaterThan(now);
+    expect(conn.sendRaw).toHaveBeenCalledTimes(1);
   });
 
   it('ignores messages scheduled in the future', async () => {
