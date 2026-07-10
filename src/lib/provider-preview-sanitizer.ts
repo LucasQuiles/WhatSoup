@@ -5,17 +5,50 @@
 
 import { jidPattern } from './redaction-patterns.ts';
 
-const KEYED_SECRET_PREFIX = /(?<![A-Za-z0-9_.-])(["']?)(?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\1(?![A-Za-z0-9_.-])\s*[:=]\s*/gi;
+const ASSIGNMENT_DELIMITER = /[:=]/g;
 const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
+
+function isSecretKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[.-]+/g, '_');
+  const apiKeyMarker = /api_?key/g;
+  for (const match of normalized.matchAll(apiKeyMarker)) {
+    const prefixLength = match.index;
+    const suffixLength = normalized.length - match.index - match[0].length;
+    if (prefixLength <= 20 && suffixLength <= 20) return true;
+  }
+  return /(?:token|secret|password|passphrase|api_?key)$/.test(normalized)
+    || /(?:^|_)(?:private_?key|signing_?key|secret_?access_?key|cookie|credential|session|pat)$/.test(normalized);
+}
+
+function keyedValueStart(text: string, delimiterIndex: number): number | null {
+  let keyEnd = delimiterIndex;
+  while (keyEnd > 0 && /\s/.test(text[keyEnd - 1]!)) keyEnd -= 1;
+  let keyStart = keyEnd;
+  const closingQuote = text[keyEnd - 1];
+  if (closingQuote === '"' || closingQuote === "'") {
+    let contentStart = keyEnd - 1;
+    while (contentStart > 0 && /[A-Za-z0-9_.-]/.test(text[contentStart - 1]!)) contentStart -= 1;
+    if (text[contentStart - 1] !== closingQuote) return null;
+    keyStart = contentStart - 1;
+    if (!isSecretKey(text.slice(contentStart, keyEnd - 1))) return null;
+  } else {
+    while (keyStart > 0 && /[A-Za-z0-9_.-]/.test(text[keyStart - 1]!)) keyStart -= 1;
+    if (keyStart === keyEnd || !isSecretKey(text.slice(keyStart, keyEnd))) return null;
+  }
+  if (keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
+  let valueStart = delimiterIndex + 1;
+  while (valueStart < text.length && /\s/.test(text[valueStart]!)) valueStart += 1;
+  return valueStart;
+}
 
 function redactKeyedSecretValues(text: string): string {
   let cursor = 0;
   let out = '';
-  for (const match of text.matchAll(KEYED_SECRET_PREFIX)) {
-    const index = match.index;
-    if (index < cursor) continue;
-    const valueStart = index + match[0].length;
+  for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
+    if (match.index < cursor) continue;
+    const valueStart = keyedValueStart(text, match.index);
+    if (valueStart === null) continue;
     out += text.slice(cursor, valueStart);
     const quote = text[valueStart];
     if (quote === '"' || quote === "'") {
@@ -71,14 +104,17 @@ function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): str
       }
       if (text[quoteEnd] === openingQuote && text[quoteEnd + 1] === '@') {
         let emailEnd = quoteEnd + 2;
-        while (emailEnd < text.length && /[A-Za-z0-9.-]/.test(text[emailEnd]!)) emailEnd += 1;
-        if (emailEnd > quoteEnd + 2) {
-          out += text.slice(cursor, index);
-          out += '[REDACTED_EMAIL]';
-          cursor = emailEnd;
-          index = emailEnd;
-          continue;
+        if (text[emailEnd] === '[') {
+          const bracketEnd = text.indexOf(']', emailEnd + 1);
+          emailEnd = bracketEnd === -1 ? text.length : bracketEnd + 1;
+        } else {
+          while (emailEnd < text.length && /[A-Za-z0-9.-]/.test(text[emailEnd]!)) emailEnd += 1;
         }
+        out += text.slice(cursor, index);
+        out += '[REDACTED_EMAIL]';
+        cursor = emailEnd;
+        index = emailEnd;
+        continue;
       }
     }
     if (!EMAIL_TOKEN_CHAR.test(text[index]!)) {
@@ -86,20 +122,17 @@ function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): str
       continue;
     }
     const start = index;
-    let numericPrefix = true;
     while (index < text.length) {
       const char = text[index]!;
       if (EMAIL_TOKEN_CHAR.test(char)) {
-        if (char < '0' || char > '9') numericPrefix = false;
         index += 1;
         continue;
       }
-      if (char === ':' && numericPrefix) {
+      if (char === ':' && /^\d{5,}(?:-\d+)?$/.test(text.slice(start, index))) {
         let deviceEnd = index + 1;
         while (deviceEnd < text.length && /[0-9]/.test(text[deviceEnd]!)) deviceEnd += 1;
         if (deviceEnd > index + 1 && text[deviceEnd] === '@') {
           index = deviceEnd;
-          numericPrefix = false;
           continue;
         }
       }

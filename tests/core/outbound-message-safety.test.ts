@@ -470,6 +470,15 @@ describe('redactInternalArtifacts — audience scoping', () => {
     { input: `{"password":"abc ${FAKE_GROUP_JID} def"}`, expected: '{"password":"[REDACTED]"}' },
     { input: `password="abc\n${FAKE_GROUP_JID} def"`, expected: 'password="[REDACTED]"' },
     { input: `password="abc\n${FAKE_GROUP_JID} def`, expected: 'password="[REDACTED]' },
+    { input: `config.password=abc/${FAKE_GROUP_JID}/def`, expected: 'config.password=[REDACTED]' },
+    { input: `db-password=abc/${FAKE_GROUP_JID}/def`, expected: 'db-password=[REDACTED]' },
+    { input: `obj.client_secret=abc/${FAKE_GROUP_JID}/def`, expected: 'obj.client_secret=[REDACTED]' },
+    { input: `{"config.password":"abc ${FAKE_GROUP_JID} def"}`, expected: '{"config.password":"[REDACTED]"}' },
+    { input: `x-api-key-header=abc/${FAKE_GROUP_JID}/def`, expected: 'x-api-key-header=[REDACTED]' },
+    { input: `api_key_value=abc/${FAKE_GROUP_JID}/def`, expected: 'api_key_value=[REDACTED]' },
+    { input: `myapikeyprod=abc/${FAKE_GROUP_JID}/def`, expected: 'myapikeyprod=[REDACTED]' },
+    { input: `company_service_environment_openai_api_key=abc/${FAKE_GROUP_JID}/def`, expected: 'company_service_environment_openai_api_key=[REDACTED]' },
+    { input: `abcdefghijklmnopqrstuapi_key=abc/${FAKE_GROUP_JID}/def`, expected: 'abcdefghijklmnopqrstuapi_key=[REDACTED]' },
   ])('internal audience redacts the entire quoted keyed value in $input', ({ input, expected }) => {
     const { text, redactions } = redactInternalArtifacts(input, 'internal');
     expect(text).toBe(expected);
@@ -479,8 +488,10 @@ describe('redactInternalArtifacts — audience scoping', () => {
 
   it.each([
     { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: '[REDACTED_EMAIL]' },
+    { label: 'quoted domain literal', input: `"${FAKE_GROUP_JID}"@[127.0.0.1]`, expected: '[REDACTED_EMAIL]' },
     { label: 'label delimiter', input: `target:${FAKE_GROUP_JID}`, expected: `target:${FAKE_GROUP_JID}` },
     { label: 'device JID', input: '12345:6@g.us', expected: '12345:6@g.us' },
+    { label: 'agent and device JID', input: '12345-2:6@g.us', expected: '12345-2:6@g.us' },
   ])('classifies complete JIDs without preserving an enclosing email: $label', ({ input, expected }) => {
     expect(redactInternalArtifacts(input, 'internal').text).toBe(expected);
   });
