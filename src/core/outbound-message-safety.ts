@@ -348,6 +348,7 @@ export function redactInternalArtifacts(
   // because the generic email sanitizer otherwise treats `120...@g.us` as email.
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
+    preserveWhatsAppMentions: true,
   });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-email' });

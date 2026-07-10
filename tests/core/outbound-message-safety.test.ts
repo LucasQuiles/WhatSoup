@@ -433,6 +433,11 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
+  it('client audience preserves outbound WhatsApp phone mentions', () => {
+    expect(redactInternalArtifacts('Hi @15555550001!', 'client').text).toBe('Hi @15555550001!');
+    expect(redactInternalArtifacts('Hi @alice!', 'client').text).toBe('Hi @alice!');
+  });
+
   it.each([
     { label: 'nested domain', input: `${FAKE_GROUP_JID}.evil.test` },
     { label: 'hyphenated domain', input: `${FAKE_GROUP_JID}-evil.test` },
@@ -479,6 +484,8 @@ describe('redactInternalArtifacts — audience scoping', () => {
     { input: `myapikeyprod=abc/${FAKE_GROUP_JID}/def`, expected: 'myapikeyprod=[REDACTED]' },
     { input: `company_service_environment_openai_api_key=abc/${FAKE_GROUP_JID}/def`, expected: 'company_service_environment_openai_api_key=[REDACTED]' },
     { input: `abcdefghijklmnopqrstuapi_key=abc/${FAKE_GROUP_JID}/def`, expected: 'abcdefghijklmnopqrstuapi_key=[REDACTED]' },
+    { input: 'password=@alice', expected: 'password=[REDACTED]' },
+    { input: 'token=@12345', expected: 'token=[REDACTED]' },
   ])('internal audience redacts the entire quoted keyed value in $input', ({ input, expected }) => {
     const { text, redactions } = redactInternalArtifacts(input, 'internal');
     expect(text).toBe(expected);

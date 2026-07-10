@@ -74,7 +74,7 @@ function redactKeyedSecretValues(text: string): string {
     let end = valueStart;
     while (end < text.length && !/\s/.test(text[end]!)) end += 1;
     const value = text.slice(valueStart, end);
-    out += value.length >= 8 ? '[REDACTED]' : value;
+    out += value.length > 0 ? '[REDACTED]' : value;
     cursor = end;
   }
   return out + text.slice(cursor);
@@ -86,7 +86,11 @@ function sanitizeProviderSecrets(text: string): string {
     .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]');
 }
 
-function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): string {
+function redactEmailLikeTokens(
+  text: string,
+  preserveWhatsAppJids: boolean,
+  preserveWhatsAppMentions: boolean,
+): string {
   let cursor = 0;
   let out = '';
   let index = 0;
@@ -146,7 +150,11 @@ function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): str
     const core = token.slice(0, coreEnd);
     const suffix = token.slice(coreEnd);
     const jidMatch = preserveWhatsAppJids ? jidPattern().exec(core) : null;
-    const preserve = jidMatch?.index === 0 && jidMatch[0].length === core.length;
+    const preserve = (jidMatch?.index === 0 && jidMatch[0].length === core.length)
+      || (
+        preserveWhatsAppMentions
+        && /^@(?:\+?\d{5,}|[A-Za-z][A-Za-z0-9_-]*)$/.test(core)
+      );
 
     out += text.slice(cursor, start);
     out += preserve ? `${core}${suffix}` : `[REDACTED_EMAIL]${suffix}`;
@@ -157,10 +165,14 @@ function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): str
 
 export function sanitizeProviderPreviewText(
   text: string,
-  options: { preserveWhatsAppJids?: boolean } = {},
+  options: { preserveWhatsAppJids?: boolean; preserveWhatsAppMentions?: boolean } = {},
 ): string {
   const sanitized = sanitizeProviderSecrets(text);
-  return redactEmailLikeTokens(sanitized, options.preserveWhatsAppJids === true);
+  return redactEmailLikeTokens(
+    sanitized,
+    options.preserveWhatsAppJids === true,
+    options.preserveWhatsAppMentions === true,
+  );
 }
 
 export function providerPreview(text: string, maxLength: number): string {
