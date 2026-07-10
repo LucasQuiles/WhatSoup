@@ -6,15 +6,15 @@
 
 **Goal:** Make accepted inbound messages atomically durable and replayable, ensure queue shedding and shutdown have durable lifecycle outcomes, and make a Reply Guarantee turn terminal only after a tracked visible interruption reaches its configured delivery proof.
 
-**Architecture:** WS-A02 first establishes one SQLite transaction for the message record and inbound admission row, with a lease that distinguishes a live duplicate from reclaimable work. WS-A03 moves capacity gates after durable admission, represents rejected work as `deferred`, and drains it through one bounded replay worker while shutdown stops admission before draining or deferring. WS-A01 then uses a two-stage watchdog: a soft presence signal keeps the inbound open, while the hard interruption travels through `outbound_ops`; the default WhatsApp terminal criterion is the existing echo correlation.
+**Architecture:** WS-A02 first establishes one SQLite transaction for the message record and inbound admission row, with state-aware claims that distinguish safe redelivery from live or delivery-pending work. WS-A03 moves the remaining runtime-queue capacity gates behind durable admission, represents rejected work as `deferred`, and drains it through one bounded replay worker while shutdown stops admission before draining or deferring. WS-A01 then uses a two-stage watchdog: a soft presence signal keeps the inbound open, while the hard interruption travels through `outbound_ops`; the default WhatsApp terminal criterion is the existing echo correlation.
 
 **Tech Stack:** TypeScript ESM, Node.js 24.15.0, npm 11.12.1, `node:sqlite`, Vitest fake timers and fault triggers, Pino, existing `DurabilityEngine`, `Messenger`, and `Runtime` contracts.
 
 ## Global Constraints
 
-- Start implementation branches from audited base `7330bafbe77d7a15febce32eb09b304e8778862f` only after a fresh `git fetch origin` confirms the intended base.
+- Start every implementation branch from the then-current `origin/main` only after a fresh fetch; recheck the next free migration number immediately before implementation and merge.
 - Local branch and commits only; publishing a branch or Draft PR requires explicit user approval.
-- Keep WS-A01, WS-A02, and WS-A03 as three independently revertible PRs in that order; do not combine them into a runtime rewrite.
+- Keep WS-A02, WS-A03, and WS-A01 as three independently revertible PRs in that dependency order; do not combine them into a runtime rewrite.
 - Typing/presence is soft liveness and never terminal delivery.
 - A hard-deadline interruption must use the existing `outbound_ops` journal and must not create a parallel audit store.
 - A duplicate delivery may not suppress work when the message exists but its inbound admission is absent or reclaimable.
@@ -22,6 +22,142 @@
 - Metrics and logs use low-cardinality reasons only; raw JIDs and message content are never metric labels.
 - Preserve the repository engine floor `>=24.0.0 <26` and run every command through `scripts/run-with-pinned-npm.sh` or `scripts/run-with-pinned-node.sh`.
 - Before any PR is ready, run the full pinned release command and record all skipped or unavailable live-provider checks as proof gaps.
+- Preserve SSH remotes, public commit identity/hygiene, user-owned worktree changes, Google Workspace read-only boundaries, and explicit approval for live-account or other external mutations. Security/privacy, migration collision, access-control drift, data-loss/duplication, masked validation, and prohibited publication content are blockers; stylistic preferences without correctness impact are warnings.
+- Do not add a hook, security, scanner, or publication allow-list exception unless the exact false positive, narrow match, non-bypass behavior, and regression test are captured from first-hand evidence and independently reviewed.
+
+## Preimplementation Safety Corrections
+
+Repository tracing and falsification against current main found several unsafe assumptions in the first draft. These constraints override any stale example below:
+
+- Transport redelivery may repair a missing admission, reclaim an expired `pending` admission, or reclaim a due `deferred` admission. It must never reclaim `processing`, `turn_done`, terminal, or unknown states solely because wall-clock time elapsed.
+- `deferred` rows have a null processing lease by design. A null lease must not make future-deferred work immediately reclaimable; `replay_after <= now` is required.
+- A fixed processing lease is not an ownership proof. Reclaiming live `processing` work requires an ownership token plus heartbeat; WS-A02 intentionally avoids that complexity and leaves abandoned-processing conversion to explicit startup recovery.
+- WS-A02 must be independently safe: startup recovery must distinguish new lease-managed rows from legacy rows and must not terminally fail work that the new contract promises to replay.
+- Use a write-serializing SQLite transaction boundary and prove two-connection contention. A sequential duplicate test does not prove single-winner admission.
+- Preserve current control-message, outbound-echo, and durability-disabled capacity behavior. Admit-before-capacity applies only to normal durability-enabled inbound work.
+- Capacity deferral happens only after access and policy evaluation. Replay must not become an access-control bypass.
+- Update `ALL_MIGRATION_VERSIONS`, prove migration rollback/reopen/idempotency, and preserve representative legacy lifecycle rows.
+- Admission rollback proof includes message storage, the inbound row, decryption-failure resolution, and post-rollback database usability.
+- Stage telemetry must cover admitted, repaired, duplicate-rejected, deferred, and processing-claimed outcomes with bounded reason vocabularies and no raw JID or content labels.
+- Atomic admission uses `routed_to='ingest'` only as a provisional route. Every terminal policy branch must update it to the existing branch-specific value, and runtime dispatch must update it through the processing CAS.
+
+## Execution Evidence Contract
+
+This plan file is the working specification. Implementation decisions, corrections, and blocker dispositions must be written here before code changes rely on them. Run commands from the repository root and store review evidence in a scoped ignored directory; its manifest is the command, tool-version, pass, and provenance ledger. Evidence artifacts are local and reproducible, not release deliverables.
+
+Use only `Pass`, `Fail`, `Inconclusive`, or `Blocked` for validation verdicts. A missing command, unavailable tool, masked failure, stale artifact, or unverified external dependency is `Inconclusive` or `Blocked`, never `Pass`. Every readiness or completion claim must name the exact commit, command, expected result, and artifact or CI check that supports it. Sensitive data, JIDs, message content, credentials, and machine-specific private paths must not enter public plan artifacts.
+
+### Objective, Scope, and Exit
+
+- **Objective:** close the observed message-only crash window, make accepted work durably replayable through capacity and shutdown, and make Reply Guarantee completion depend on tracked delivery proof.
+- **In scope:** the files and interfaces named in Tasks 1–8, additive SQLite migrations, lifecycle telemetry, focused operator documentation, local/CI gates, and the three independently revertible PRs.
+- **Non-goals:** a general runtime rewrite, live-account drills without separate approval, processing-owner heartbeats, a second outbound journal, duplicate message-content storage, or unbounded replay.
+- **Success:** every task-specific red test fails for the intended semantic reason, its green test and owning regression suites pass, Test Integrity finds no masking, the exact branch tip passes `verify:release`, remote CI is green on that SHA, and independent review has no unresolved high-severity finding.
+- **Failure:** any split message/admission state, premature or duplicate dispatch, future-deferred reclaim, access-policy bypass, terminal completion without required proof, unbounded queue/retry behavior, migration drift, masked check, or documentation/runtime contradiction.
+- **Exit:** the three PRs merge in dependency order with rollback notes and exact-head receipts; staging-only crash/transport drills remain explicitly `Inconclusive` until actually authorized and run.
+
+### Assumption Register
+
+| ID | Assumption and evidence | Risk if false | Validation / disposition |
+|---|---|---|---|
+| A1 | Migration 37 remains free; current main ends at 36 in `src/core/database.ts`. | Collision or corrupt upgrade train. | Re-fetch and inspect the migration map immediately before branch creation and merge; `Blocked` on collision. |
+| A2 | `node:sqlite` WAL plus the configured 5-second busy timeout can serialize `BEGIN IMMEDIATE` writers. | `SQLITE_BUSY` or duplicate owner. | File-backed worker/two-connection contention test; unresolved result is `Blocked`. |
+| A3 | Transport redelivery is available but not guaranteed, especially after Twilio's in-memory seen-set update. | Durable deferred work can wait indefinitely before WS-A03. | WS-A02 preserves rather than loses work; WS-A03's bounded replay consumer is required before the train is complete. |
+| A4 | Reconstructed replay inputs contain enough metadata for runtime policy and routing. | Mention/group semantics drift or access bypass. | Trace every `IncomingMessage` consumer before WS-A03; extend metadata schema or mark `Blocked`, never infer. |
+| A5 | WhatsApp echo is the configured delivery proof for hard interruption sends. | Premature terminal completion. | Real-DB submitted/open then echo/complete integration test; live timing remains `Inconclusive` until staging. |
+| A6 | Existing control, echo, and durability-disabled paths must retain their current capacity ordering. | Unrelated regression or control-plane bypass. | Characterization tests before rewiring; any unreviewed ordering change is `Fail`. |
+
+### Primary Validation Gate
+
+Before implementation, capture the current migration/transaction/durability/ingest baseline and a direct reproduction of the message-only split. Before each PR closes, rerun its owning suites, `typecheck:all`, source lint, Test Integrity, branch hygiene, and the full pinned release command. A command passes only on exit 0 with the expected semantic assertion and unmasked output; runner, module-resolution, timeout, filtered-test, or missing-tool failures are `Inconclusive`. Record commands and findings in the scoped evidence root and identify every affected task in `primary_validation.md`.
+
+### Layered Validation
+
+- **Secondary, mandatory per PR:** independent diff/spec review plus fault injection or mutation that targets a different failure class from the primary tests. Store method, evidence, severity, disposition, residual risk, and verdict in `validation_layer2.md`.
+- **Tertiary, mandatory for migration, concurrency, shutdown, and delivery-proof claims:** file-backed contention/reopen tests, forced failure boundaries, exact-head full release, and remote CI on the reviewed SHA. Store results in `validation_layer3.md`.
+- A required layer that is unavailable or skipped makes the affected claim `Inconclusive` or `Blocked`; repeating the primary test or restating its result is not independent validation.
+
+### Logging and Observability Contract
+
+Emit structured Pino events at admission decision, claim, deferral, replay claim/result, shutdown drain/defer, Reply Guarantee stage change, tracked send submission, echo proof, and permanent failure. Each event includes timestamp, component, event name, bounded state/reason, inbound sequence or outbound operation ID when present, attempt count, and result; it excludes raw JIDs, content, credentials, and unbounded error payloads. Admission/replay counters use the same bounded vocabulary. A state transition without its expected event/counter delta, a success log before transaction commit, or a warning swallowed as normal success is `Fail`. Tests must capture and assert representative structured events and counter deltas; PR receipts link those outputs from the scoped evidence root.
+
+### Readiness Gate
+
+- `Ready` permits implementation only when the branch starts at current `origin/main`, migration/open-PR overlap is rechecked, critical assumptions have deterministic tests, and no unresolved high-severity review finding remains.
+- `Ready with Constraints` permits only the named prerequisite or RED-test work; every constraint, owner, evidence path, and next allowed action must appear in `readiness.json`.
+- `Not Ready` blocks product edits, push, and merge when scope, migration identity, transaction semantics, access-policy ordering, recovery compatibility, or required evidence is unresolved.
+
+The current planning verdict is `Ready with Constraints`: correct and merge this documentation branch on current main, then create WS-A02 from that main and establish RED tests before implementation. Exact-head release evidence, remote CI, and independent review control the later merge-ready decision.
+
+| Blocker ID | Severity | Evidence | Owner | Exit criterion / failing check |
+|---|---|---|---|---|
+| B1 | High | Documentation branch is not yet refreshed onto current `origin/main`. | Documentation PR owner | `git merge-base --is-ancestor origin/main HEAD` and ahead/behind check pass after rebase. |
+| B2 | High | Current published CI does not cover this corrected plan tree. | Documentation PR owner | Commit/push the final plan, exact-head local release passes, and required GitHub checks are green on that SHA. |
+| B3 | High, resolved in plan | First draft allowed unbounded replay failure deferral, including a transport-redelivery path around the worker-only cap. | WS-A02/WS-A03 owners | One exported `MAX_INBOUND_ATTEMPTS` is enforced inside both atomic admission and replay claim CAS, capped exponential backoff and terminal exhaustion state/health are present, transport-redelivery-at-ceiling and worker-exhaustion RED tests are load-bearing, and contradiction recheck passes. |
+| B4 | High, resolved in plan | First draft reconstructed replay with incomplete trigger metadata and called `runtime.handleMessage` directly, bypassing current pause/passive/access policy. | WS-A02/WS-A03 owners | Migration 37 preserves content-free trigger metadata, initial and replay dispatch share one admitted-message policy seam, revoked/paused-before-replay tests prove no runtime call, and policy rejection terminalizes the row without repeating approval/admin side effects. |
+| B5 | High, resolved in plan | A deferred row with null `replay_after` was visible but stranded forever. | WS-A03 owner | Invalid replay metadata is atomically terminalized with a bounded failure class/event, the active-invalid gauge returns to zero, a cumulative terminal counter remains visible, and an operator repair/requeue command is documented and tested. |
+
+Medium findings are not silently accepted: the PR receipt lists each one as closed, accepted with owner/rationale/future artifact, or `Blocked`. File/function/line evidence is required for closure and line references are refreshed after rebasing.
+
+### Atomic Task Rule
+
+Treat each numbered step below as one evidence-producing unit. Before execution, record its parent task, preconditions, inputs, owner/write scope, expected output, dependency, and blocking conditions. After execution, record the exact validation, observable signal, pass/fail threshold, artifact, failure mode, retry path, and rollback path. Split any step that produces unrelated outputs or can partially succeed without detection. Implementation and verification remain separate actions even when they are grouped under one commit boundary.
+
+### Verification Matrix Rule
+
+Maintain one row per task or state transition in `verification_matrix.md`: exact check, rationale, operator, expected output, artifact, `Pass`/`Fail`/`Inconclusive` thresholds, and escalation. Prefer state inspection, schema/diff checks, negative controls, checksums, and independent reproduction. “Looks correct,” absence of an exception, filtered tests, or a test with no threshold cannot satisfy a row.
+
+Fast blocking gates are `git diff --check`, focused Vitest with the pinned wrapper, `typecheck:all`, `guard:lint:src`, repo branch/author/message hygiene, source/runtime drift guards, migration safety, and Test Integrity. Warnings are blockers when the owning command defines them as errors; otherwise record and disposition them. `verify:release` and remote Quality/CodeQL are final gates, not substitutes for the fast loop.
+
+Capture characterization tests before moving capacity or recovery seams. Protected behavior includes control and outbound-echo interception, durability-disabled ingest, policy/admin/pause outcomes, history-placeholder upgrades, decryption-failure resolution, terminal outbound reconciliation, queue fairness, and current shutdown error visibility. Run owning suites after every commit; any unexpected baseline drift stops the PR. Roll back the smallest commit/PR when a protected behavior changes without an approved requirement and new proof.
+
+Local commit hooks enforce message/author/publication hygiene; pre-push must run the branch-diff guard and the fixed WS-A02 owning suite list added by Task 3. GitHub Quality runs full coverage on Node 24 and 25, the dedicated macOS health canary, Test Integrity/static guards, console/browser lanes, and CodeQL. No `--no-verify`, retry, `continue-on-error`, or branch-protection override may turn red into green; any authorized exceptional bypass must be explicit in the PR and independently reviewed.
+
+### Test Evidence and Anti-Fabrication
+
+Every test family records whether inputs are synthetic, captured, sampled, or production-derived; how expected results were derived; why fixtures are representative; and how to replay the command. Required categories are unit, file-backed integration, migration/upgrade, negative/fault-injection, regression, observability, adversarial concurrency, stale/deferred timing, partial-data, degraded-mode, and focused runtime wiring. A real RED phase must fail the intended semantic assertion before implementation. Preserve unabridged outputs under `test_evidence/`; record filtered, skipped, unavailable, or live-provider checks explicitly. Test Integrity, independent review, hostile-environment reruns, and mutation/removal of key integration calls guard against false positives. Only the four verdicts in this plan are allowed.
+
+A flake or “not reproduced” claim requires at least 20 focused repetitions under the triggering load class, with runtime, seed, inherited environment, concurrency, and per-run result recorded. One clean rerun or a retry-masked pass is `Inconclusive`.
+
+Implementation code may begin only after the owning RED test has been observed failing for the intended behavior, not from module resolution, syntax, timeout, or fixture failure. Make the smallest GREEN change, rerun the focused test, then the owning regression set. Mutation/counterexample checks must prove the new assertion is load-bearing before full release verification.
+
+### Fresh-Operator Handoff
+
+A fresh operator starts by reading this plan, the audit PR brief, `readiness.json`, `verification_matrix.md`, and the current evidence manifest; then fetches `origin`, verifies a clean worktree/SSH remote/current main, rechecks open-PR and migration overlap, and executes only the next dependency-ready task. The handoff includes objective, non-goals, assumptions, validation findings, task map, observability/test rules, blockers, rollback, residual risks, and exact commands. Reproduce this review with Node 24/25, the pinned npm wrapper, Python 3.12, ripgrep, GitHub CLI, and the recorded review-helper commands. SBOM/signing changes are outside these three runtime PRs; CodeQL, commit/branch hygiene, Test Integrity, and exact-head CI remain mandatory.
+
+Artifact map: the wall-to-wall design under `docs/superpowers/specs/` is the source requirement; the audit PR brief under `docs/superpowers/reviews/` owns sequencing and review receipts; this file is the executable WS-A02/WS-A03/WS-A01 plan and embeds kickoff/orchestration/handoff instructions; the scoped ignored evidence directory is reproducible local proof, not a public deliverable; implementation code/tests/docs and PR receipts are created on their named branches. No separate playbook or kickoff document is required.
+
+Documentation must rewrite, not append past, any now-false durability/recovery/Reply Guarantee wording. Configuration docs record migration and bounded tuning; durability docs record state transitions, recovery, replay, poison/quarantine, and operator inspection; Reply Guarantee docs distinguish presence, submission, echo proof, and failure. PR descriptions include rollback/partial-deploy notes, metrics/log events, CI changes, staging drills, and explicit gaps. No new dashboard is required unless the existing health/status surface cannot expose replay backlog, oldest due age, deferrals, recovery, and proof state; that determination is verified during WS-A03.
+
+### Orchestration Sequence
+
+Complete planning evidence and contradiction review first; then execute Tasks 1–3 and merge WS-A02, Tasks 4–6 and merge WS-A03, Tasks 7–8 and merge WS-A01, and finally Task 9 on the integrated train. Within each PR use RED → minimal GREEN → focused regression → static/Test Integrity gates → full release → independent review → push/remote CI → merge. A failed or inconclusive dependency blocks downstream write work; it does not get averaged with green evidence.
+
+Use isolated git worktrees and one implementation owner per PR. Parallel agents are read-only reviewers unless assigned disjoint files; each dispatch names one bounded question, exact file set, command/time budget, required artifact path, and stop condition. They return file/line evidence and never rely on inherited summaries. Appropriate skills are hypothesis-driven, brainstorming for behavior choices, TDD, database patterns, systematic debugging, Test Integrity, verification-before-completion, WhatSoup PR review, and GitHub CI/PR workflows. Local git/rg/pinned Node/npm/SQLite/Vitest/Pino and GitHub Actions are authoritative; external research or Pinecone is supplemental and cannot override current code. The synthesis owner rechecks every high-risk claim and resolves contradictions rather than averaging them.
+
+Historical context sources are current git history/blame, merged PR diffs/checks, the audit evidence packet, and optional Pinecone code/docs retrieval. Record the query/ref/SHA and verify every reused conclusion against current source. Playwright is relevant only if a dashboard surface changes; Render and live WhatsApp are staging/operations surfaces requiring separate need and authority; Google Workspace remains read-only and irrelevant to implementation.
+
+### Reuse-First Boundary
+
+Reuse `withTransaction` semantics via one immediate-mode variant, `storeMessageIfNew`, existing migration idempotency patterns, prepared statements in `DurabilityEngine`, `IncomingMessage.inboundSeq`, `acquireSlot`'s per-caller result, `drainIngest`, `outbound_ops`, runtime queue contracts, and Pino. New modules are permitted only for the single atomic admission boundary and bounded replay worker because no existing owner spans those responsibilities. Record any rejected reuse candidate and reason in `reuse_audit.md`; do not create parallel journals, transaction wrappers, lifecycle vocabularies, or logging abstractions.
+
+### Blast Radius and Rollback
+
+Direct consumers are WhatsApp and Twilio ingress, access/admin/pause policy branches, `messages`/`inbound_events`/`outbound_ops`, agent/chat queues, shutdown wiring, recovery, Reply Guarantee, health/status telemetry, migration fixtures, docs, local pre-push, and Quality CI. Trust boundaries include untrusted inbound payloads, JID identity resolution, admin/control peers, SQLite files, subprocess/runtime providers, and transport acknowledgements. Partial deployment is unsafe across schema/code rollback if new rows enter states old code cannot consume: use additive columns, keep old readers tolerant, merge in dependency order, and rollback product code only after confirming no `pending`, `deferred`, or leased `processing` rows require the removed lifecycle. Any migration collision, access-policy drift, duplicate dispatch, or unbounded replay blocks rollout; containment is stop admission, retain the DB, disable replay, and revert the independently scoped PR.
+
+Before reverting WS-A03 or WS-A02, stop ingress and capture this exact read-only receipt: `SELECT COUNT(*) AS incompatible_rows FROM inbound_events WHERE processing_status IN ('pending', 'deferred') OR (processing_status = 'processing' AND lease_until IS NOT NULL);`. The only rollback-ready threshold is `incompatible_rows = 0`; a non-zero result blocks removal of the new lifecycle until every row is drained, deliberately terminalized/migrated, or retained with a compatible consumer. Each PR receipt records the database identity/checksum, query, UTC time, result, rollback owner, owning merge SHA, and exact `git revert <merge-sha>` command. Revert only the owning merge commit on a fresh branch from current `origin/main`, run that PR's focused matrix and `verify:release`, and publish the rollback through the normal reviewed PR path. Do not reverse migration 37 or delete its columns during an emergency product-code rollback; the additive schema is retained so recovery evidence is not destroyed.
+
+### Error Model
+
+Validation/tool failure is `Inconclusive` unless it proves a semantic defect. SQLite busy/constraint/commit failure rolls back atomically, emits a bounded stage/class event without the raw error object, and never dispatches. Admission/capacity rejection becomes a durable `deferred` outcome only after policy passes. Replay claims and transport redelivery share one durable attempt ceiling and capped exponential backoff. Exhausted work becomes terminal `failed/crash_recovery`; malformed payload/trigger metadata or null replay time becomes terminal `failed/stale_reclaim`; neither can loop or remain stranded. Replay revalidates current pause/passive/access policy through the same admitted-message dispatch seam as initial delivery and never repeats admin or approval side effects. Runtime failure records a bounded failure class; ambiguous outbound submission uses existing `maybe_sent`/quarantine semantics. Shutdown timeout stops new admission and durably defers remaining work before close. A journal write failure prevents the corresponding transport send. Rollback failure, corrupt/read-only/full DB, invalid migration, access-policy ambiguity, and unbounded retry are operator-visible blockers rather than fallbacks.
+
+### Silent-Failure Rejection
+
+Tests and telemetry must make these false-green states impossible: message committed without admission; deferred row reclaimed early; processing work duplicated after lease expiry; queue eviction without a lifecycle row; policy/approval side effect before admission evidence; replay claim without dispatch/outcome; transport send without outbound journal; submission treated as echo; shutdown returning before drain/defer/close; caught exception without state/log/counter; filtered/skipped test reported as green. Each has a negative assertion and an operator-visible event or state query in `silent_failure_matrix.md`. Any success path lacking its durable evidence is `Fail`.
+
+### Error Traceability
+
+Operator errors name the failed stage and bounded reason, include `inboundSeq`/`outboundOpId`/recovery-run ID when available, distinguish retryable/deferred/quarantined/terminal outcomes, and suggest a safe next inspection. User-facing text remains generic and content-free. Never log raw JIDs, message bodies, credentials, SQL payloads, stack traces containing private paths, or interpolated untrusted input. Tests assert redaction and stable event/message shapes. The error catalog maps each class to its event, durable state, counter, and remediation; vague catches or IDs that cannot be joined to state are `Fail`.
 
 ---
 
@@ -29,9 +165,9 @@
 
 ### WS-A02 — atomic inbound admission
 
-- Modify `src/core/database.ts` to add migration 37 (`lease_until`, `replay_after`, `attempt_count`, `deferred_reason`, and the replay index).
+- Modify `src/core/database.ts` to add migration 37 (`lease_until`, `replay_after`, `attempt_count`, `deferred_reason`, content-free replay trigger metadata, and the replay index).
 - Create `src/core/inbound-admission.ts` as the single transaction boundary for `messages` plus `inbound_events` admission.
-- Modify `src/core/durability.ts` to own status transitions after admission (`markInboundProcessing`, `deferInbound`, and route-scoped shutdown deferral).
+- Modify `src/core/durability.ts` to own status transitions after admission (`markInboundProcessing`, `deferInbound`, and lease-aware startup deferral).
 - Modify `src/core/ingest.ts` to admit before capacity gating and reuse the admitted `seq` in every policy branch.
 - Create `tests/core/migration-37-inbound-replay.test.ts` for schema and upgrade proof.
 - Create `tests/core/inbound-admission.test.ts` for atomicity, missing-journal repair, leases, and duplicate behavior.
@@ -40,7 +176,7 @@
 
 ### WS-A03 — durable queue and shutdown lifecycle
 
-- Create `src/core/inbound-replay.ts` for bounded compare-and-swap claims and runtime dispatch.
+- Create `src/core/inbound-replay.ts` for bounded compare-and-swap claims and policy-revalidating admitted dispatch.
 - Modify `src/runtimes/chat/queue.ts` and `src/runtimes/chat/runtime.ts` to await queue admission, expose idle/close, and defer rejected rows.
 - Modify `src/runtimes/agent/turn-queue.ts` and `src/runtimes/agent/runtime.ts` to arm before queue wait, handle rejection, stop admission, drain, and defer on deadline.
 - Modify `src/transport/runtime-connection.ts` and `src/main.ts` so shutdown detaches ingress, stops replay, drains runtime work, and awaits asynchronous transport close.
@@ -60,11 +196,12 @@
 **Files:**
 - Modify: `src/core/database.ts:556-737, 884-902`
 - Create: `tests/core/migration-37-inbound-replay.test.ts`
+- Modify: `tests/core/migration-safety.test.ts` (`ALL_MIGRATION_VERSIONS`, named-wiring, rollback, and reopen coverage)
 - Modify: `docs/configuration.md:1430-1470`
 
 **Interfaces:**
 - Consumes: `Database.open(): void` and the existing `MIGRATIONS: Map<number, MigrationFn>`.
-- Produces: migration 37 columns `inbound_events.lease_until: INTEGER | NULL`, `replay_after: INTEGER | NULL`, `attempt_count: INTEGER NOT NULL DEFAULT 0`, `deferred_reason: TEXT | NULL`, plus `idx_inbound_events_replay(processing_status, replay_after, seq)`.
+- Produces: migration 37 columns `inbound_events.lease_until: INTEGER | NULL`, `replay_after: INTEGER | NULL`, `attempt_count: INTEGER NOT NULL DEFAULT 0`, `deferred_reason: TEXT | NULL`, `mentioned_jids_json: TEXT | NULL`, and `is_response_worthy: INTEGER | NULL`, plus `idx_inbound_events_replay(processing_status, replay_after, seq)`. The nullable trigger fields intentionally distinguish legacy rows whose replay policy cannot be reconstructed; they must fail closed rather than inherit permissive defaults.
 
 - [ ] **Step 1: Write the failing schema and legacy-upgrade tests**
 
@@ -116,6 +253,8 @@ describe('migration 37 — replayable inbound lifecycle', () => {
         dflt_value: '0',
       });
       expect(byName.get('deferred_reason')).toMatchObject({ type: 'TEXT', notnull: 0 });
+      expect(byName.get('mentioned_jids_json')).toMatchObject({ type: 'TEXT', notnull: 0 });
+      expect(byName.get('is_response_worthy')).toMatchObject({ type: 'INTEGER', notnull: 0 });
 
       const index = db.raw.prepare(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_inbound_events_replay'",
@@ -164,7 +303,8 @@ describe('migration 37 — replayable inbound lifecycle', () => {
     try {
       const row = migrated.raw.prepare(`
         SELECT processing_status, terminal_reason, attempt_count,
-               lease_until, replay_after, deferred_reason
+               lease_until, replay_after, deferred_reason,
+               mentioned_jids_json, is_response_worthy
         FROM inbound_events WHERE message_id = 'legacy-complete'
       `).get();
       expect(row).toEqual({
@@ -174,6 +314,8 @@ describe('migration 37 — replayable inbound lifecycle', () => {
         lease_until: null,
         replay_after: null,
         deferred_reason: null,
+        mentioned_jids_json: null,
+        is_response_worthy: null,
       });
       expect(
         migrated.raw.prepare('SELECT version FROM schema_migrations WHERE version = 37').get(),
@@ -223,6 +365,12 @@ function runMigration37(db: DatabaseSync): void {
   if (!names.has('deferred_reason')) {
     db.exec('ALTER TABLE inbound_events ADD COLUMN deferred_reason TEXT');
   }
+  if (!names.has('mentioned_jids_json')) {
+    db.exec('ALTER TABLE inbound_events ADD COLUMN mentioned_jids_json TEXT');
+  }
+  if (!names.has('is_response_worthy')) {
+    db.exec('ALTER TABLE inbound_events ADD COLUMN is_response_worthy INTEGER');
+  }
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_inbound_events_replay
@@ -238,10 +386,12 @@ Add this exact map entry after migration 36:
   [37, runMigration37],
 ```
 
+Advance `ALL_MIGRATION_VERSIONS` and every migration-count/current-tip assertion to 37. Add a migration-37 named-function assertion, a second-open idempotency test, and a fault-injected upgrade test proving the migration transaction rolls back without recording version 37. The preserved-row fixture must include representative `pending`, `processing`, `turn_done`, `complete`, and `failed` outcomes.
+
 Add this exact row to the schema-migration table in `docs/configuration.md`:
 
 ```markdown
-| 37 | Adds inbound admission leases (`lease_until`, `attempt_count`) and durable deferral (`replay_after`, `deferred_reason`) plus `idx_inbound_events_replay`; no message content is duplicated. |
+| 37 | Adds inbound admission leases (`lease_until`, `attempt_count`), durable deferral (`replay_after`, `deferred_reason`), content-free replay trigger metadata (`mentioned_jids_json`, `is_response_worthy`), and `idx_inbound_events_replay`; no message content is duplicated, and legacy null metadata fails closed. |
 ```
 
 - [ ] **Step 4: Run the focused schema and migration safety suites**
@@ -252,25 +402,27 @@ Run:
 bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-37-inbound-replay.test.ts tests/core/migration-safety.test.ts tests/core/database.test.ts --pool=forks
 ```
 
-Expected: PASS with all three files green and migration 37 applied once on both fresh and version-36 databases.
+Expected: PASS with all three files green and migration 37 applied once on both fresh and version-36 databases. Reopening is idempotent, a mid-migration fault records neither partial schema nor version 37, and legacy lifecycle outcomes are unchanged.
 
 - [ ] **Step 5: Commit the schema boundary**
 
 ```bash
-git add src/core/database.ts tests/core/migration-37-inbound-replay.test.ts docs/configuration.md
+git add src/core/database.ts tests/core/migration-37-inbound-replay.test.ts tests/core/migration-safety.test.ts docs/configuration.md
 git commit -m "feat(durability): add replayable inbound lifecycle schema"
 ```
 
 ### Task 2: Atomically insert the message and admission row (WS-A02, commit 2)
 
 **Files:**
+- Modify: `src/core/db-tx.ts`
+- Modify: `tests/core/db-tx.test.ts`
 - Create: `src/core/inbound-admission.ts`
 - Create: `tests/core/inbound-admission.test.ts`
 - Modify: `src/core/messages.ts:105-158` only if test injection requires exporting `toInsertParams`; prefer no change.
 
 **Interfaces:**
-- Consumes: `storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean` and `withTransaction<T>(db: Database, fn: () => T): T`.
-- Produces: `admitInboundMessage(db: Database, msg: StoreMessageInput, now?: number): InboundAdmissionResult` where `accepted` is true only for a new row, a missing-journal repair, or an expired lease reclaim.
+- Consumes: `storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean` and a new `withImmediateTransaction<T>(db: Database, fn: () => T): T` write-serializing variant of the canonical transaction helper.
+- Produces: `admitInboundMessage(db: Database, msg: InboundAdmissionInput, now?: number): InboundAdmissionResult` where `InboundAdmissionInput` adds `mentionedJids` and `isResponseWorthy` to `StoreMessageInput`; `accepted` is true only for a new row, a missing-journal repair, an expired `pending` claim, or a due `deferred` claim below the shared durable attempt ceiling.
 
 - [ ] **Step 1: Write the atomicity and lease tests**
 
@@ -279,10 +431,10 @@ Create `tests/core/inbound-admission.test.ts`:
 ```ts
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { admitInboundMessage } from '../../src/core/inbound-admission.ts';
-import { storeMessageIfNew, type StoreMessageInput } from '../../src/core/messages.ts';
+import { admitInboundMessage, type InboundAdmissionInput } from '../../src/core/inbound-admission.ts';
+import { storeMessageIfNew } from '../../src/core/messages.ts';
 
-function message(messageId: string): StoreMessageInput {
+function message(messageId: string): InboundAdmissionInput {
   return {
     chatJid: '15550100001@s.whatsapp.net',
     conversationKey: '15550100001',
@@ -296,6 +448,8 @@ function message(messageId: string): StoreMessageInput {
     timestamp: 1_800_000_000,
     quotedMessageId: null,
     rawMessage: null,
+    mentionedJids: [],
+    isResponseWorthy: true,
   };
 }
 
@@ -317,13 +471,16 @@ describe('admitInboundMessage', () => {
       "SELECT message_id FROM messages WHERE message_id = 'atomic-new'",
     ).get()).toEqual({ message_id: 'atomic-new' });
     expect(db.raw.prepare(`
-      SELECT seq, processing_status, attempt_count, lease_until
+      SELECT seq, processing_status, attempt_count, lease_until,
+             mentioned_jids_json, is_response_worthy
       FROM inbound_events WHERE message_id = 'atomic-new'
     `).get()).toEqual({
       seq: result.seq,
       processing_status: 'pending',
       attempt_count: 1,
       lease_until: 1_800_000_300,
+      mentioned_jids_json: '[]',
+      is_response_worthy: 1,
     });
   });
 
@@ -368,10 +525,68 @@ describe('admitInboundMessage', () => {
 
     expect(first.accepted).toBe(true);
     expect(liveDuplicate).toEqual({ accepted: false, seq: first.seq, state: 'duplicate_open' });
-    expect(reclaimed).toEqual({ accepted: true, seq: first.seq, state: 'reclaimed_expired_lease' });
+    expect(reclaimed).toEqual({ accepted: true, seq: first.seq, state: 'reclaimed_expired_pending' });
     expect(db.raw.prepare(`
       SELECT attempt_count, lease_until FROM inbound_events WHERE seq = ?
     `).get(first.seq)).toEqual({ attempt_count: 2, lease_until: 1_800_000_601 });
+  });
+
+  it('does not reclaim deferred work before replay_after and claims it once when due', () => {
+    const first = admitInboundMessage(db, message('deferred-due'), 1_800_000_000);
+    db.raw.prepare(`
+      UPDATE inbound_events
+      SET processing_status = 'deferred', lease_until = NULL, replay_after = 1800000600
+      WHERE seq = ?
+    `).run(first.seq);
+
+    expect(admitInboundMessage(db, message('deferred-due'), 1_800_000_599)).toEqual({
+      accepted: false,
+      seq: first.seq,
+      state: 'duplicate_open',
+    });
+    expect(admitInboundMessage(db, message('deferred-due'), 1_800_000_600)).toEqual({
+      accepted: true,
+      seq: first.seq,
+      state: 'reclaimed_due_deferred',
+    });
+  });
+
+  it('terminalizes due transport redelivery at the shared attempt ceiling', () => {
+    const first = admitInboundMessage(db, message('redelivery-exhausted'), 1_800_000_000);
+    db.raw.prepare(`
+      UPDATE inbound_events
+      SET processing_status = 'deferred', lease_until = NULL,
+          replay_after = 1800000600, attempt_count = 5
+      WHERE seq = ?
+    `).run(first.seq);
+
+    expect(admitInboundMessage(db, message('redelivery-exhausted'), 1_800_000_600)).toEqual({
+      accepted: false,
+      seq: first.seq,
+      state: 'duplicate_exhausted',
+    });
+    expect(db.raw.prepare(`
+      SELECT processing_status, terminal_reason, failure_class, attempt_count
+      FROM inbound_events WHERE seq = ?
+    `).get(first.seq)).toEqual({
+      processing_status: 'failed',
+      terminal_reason: 'error',
+      failure_class: 'crash_recovery',
+      attempt_count: 5,
+    });
+  });
+
+  it.each(['processing', 'turn_done'])('never transport-reclaims %s work', (status) => {
+    const first = admitInboundMessage(db, message(`open-${status}`), 1_800_000_000);
+    db.raw.prepare(`
+      UPDATE inbound_events SET processing_status = ?, lease_until = 1799999999 WHERE seq = ?
+    `).run(status, first.seq);
+
+    expect(admitInboundMessage(db, message(`open-${status}`), 1_800_001_000)).toEqual({
+      accepted: false,
+      seq: first.seq,
+      state: 'duplicate_open',
+    });
   });
 
   it('never reopens a terminal inbound row on transport redelivery', () => {
@@ -403,22 +618,32 @@ Expected: FAIL because `src/core/inbound-admission.ts` does not exist. No test m
 
 - [ ] **Step 3: Implement the atomic admission module**
 
+First extend `src/core/db-tx.ts` with `withImmediateTransaction`, sharing the existing commit/rollback implementation but issuing `BEGIN IMMEDIATE`. Add a file-backed, two-connection test proving simultaneous admission attempts produce one committed message/admission pair and one deterministic duplicate result rather than `SQLITE_BUSY` or two owners.
+
 Create `src/core/inbound-admission.ts`:
 
 ```ts
 import type { Database } from './database.ts';
-import { withTransaction } from './db-tx.ts';
+import { withImmediateTransaction } from './db-tx.ts';
 import { storeMessageIfNew, type StoreMessageInput } from './messages.ts';
 
 const ADMISSION_LEASE_SECONDS = 5 * 60;
-const TERMINAL_STATUSES = new Set(['complete', 'failed', 'skipped']);
+const TERMINAL_STATUSES = new Set(['complete', 'failed']);
+export const MAX_INBOUND_ATTEMPTS = 5;
+
+export interface InboundAdmissionInput extends StoreMessageInput {
+  mentionedJids: string[];
+  isResponseWorthy: boolean;
+}
 
 export type InboundAdmissionState =
   | 'new'
   | 'repaired_missing_journal'
-  | 'reclaimed_expired_lease'
+  | 'reclaimed_expired_pending'
+  | 'reclaimed_due_deferred'
   | 'duplicate_open'
-  | 'duplicate_terminal';
+  | 'duplicate_terminal'
+  | 'duplicate_exhausted';
 
 export interface InboundAdmissionResult {
   accepted: boolean;
@@ -431,34 +656,43 @@ interface ExistingAdmission {
   processing_status: string;
   lease_until: number | null;
   replay_after: number | null;
+  attempt_count: number;
 }
 
 export function admitInboundMessage(
   db: Database,
-  msg: StoreMessageInput,
+  msg: InboundAdmissionInput,
   now: number = Math.floor(Date.now() / 1000),
 ): InboundAdmissionResult {
-  return withTransaction(db, () => {
+  return withImmediateTransaction(db, () => {
     const existing = db.raw.prepare(`
-      SELECT seq, processing_status, lease_until, replay_after
+      SELECT seq, processing_status, lease_until, replay_after, attempt_count
       FROM inbound_events
       WHERE message_id = ?
     `).get(msg.messageId) as ExistingAdmission | undefined;
 
-    const messageChanged = storeMessageIfNew(db, msg);
+    const messageExists = db.raw.prepare(
+      'SELECT 1 AS present FROM messages WHERE message_id = ?',
+    ).get(msg.messageId) !== undefined;
+    storeMessageIfNew(db, msg);
     const leaseUntil = now + ADMISSION_LEASE_SECONDS;
+    const mentionedJidsJson = JSON.stringify([...new Set(msg.mentionedJids)]);
 
     if (!existing) {
       const inserted = db.raw.prepare(`
         INSERT INTO inbound_events (
           message_id, conversation_key, chat_jid, routed_to,
-          processing_status, lease_until, attempt_count
-        ) VALUES (?, ?, ?, 'ingest', 'pending', ?, 1)
-      `).run(msg.messageId, msg.conversationKey, msg.chatJid, leaseUntil);
+          processing_status, lease_until, attempt_count,
+          mentioned_jids_json, is_response_worthy
+        ) VALUES (?, ?, ?, 'ingest', 'pending', ?, 1, ?, ?)
+      `).run(
+        msg.messageId, msg.conversationKey, msg.chatJid, leaseUntil,
+        mentionedJidsJson, msg.isResponseWorthy ? 1 : 0,
+      );
       return {
         accepted: true,
         seq: Number(inserted.lastInsertRowid),
-        state: messageChanged ? 'new' : 'repaired_missing_journal',
+        state: messageExists ? 'repaired_missing_journal' : 'new',
       };
     }
 
@@ -467,9 +701,29 @@ export function admitInboundMessage(
     }
 
     const deferredDue = existing.processing_status === 'deferred'
-      && (existing.replay_after === null || existing.replay_after <= now);
-    const leaseExpired = existing.lease_until === null || existing.lease_until <= now;
-    if (deferredDue || leaseExpired) {
+      && existing.replay_after !== null
+      && existing.replay_after <= now;
+    const pendingExpired = existing.processing_status === 'pending'
+      && existing.lease_until !== null
+      && existing.lease_until <= now;
+    if (deferredDue || pendingExpired) {
+      if (existing.attempt_count >= MAX_INBOUND_ATTEMPTS) {
+        const exhausted = db.raw.prepare(`
+          UPDATE inbound_events
+          SET processing_status = 'failed', terminal_reason = 'error',
+              failure_class = 'crash_recovery', completed_at = datetime('now'),
+              lease_until = NULL, replay_after = NULL, deferred_reason = NULL
+          WHERE seq = ? AND processing_status IN ('pending', 'deferred')
+            AND attempt_count >= ?
+            AND (
+              (processing_status = 'pending' AND lease_until IS NOT NULL AND lease_until <= ?) OR
+              (processing_status = 'deferred' AND replay_after IS NOT NULL AND replay_after <= ?)
+            )
+        `).run(existing.seq, MAX_INBOUND_ATTEMPTS, now, now);
+        if (Number(exhausted.changes) === 1) {
+          return { accepted: false, seq: existing.seq, state: 'duplicate_exhausted' };
+        }
+      }
       const claimed = db.raw.prepare(`
         UPDATE inbound_events
         SET processing_status = 'pending',
@@ -480,16 +734,26 @@ export function admitInboundMessage(
             deferred_reason = NULL,
             replay_after = NULL,
             lease_until = ?,
-            attempt_count = attempt_count + 1
+            attempt_count = attempt_count + 1,
+            mentioned_jids_json = ?,
+            is_response_worthy = ?
         WHERE seq = ?
-          AND processing_status NOT IN ('complete', 'failed', 'skipped')
+          AND processing_status IN ('pending', 'deferred')
+          AND attempt_count < ?
           AND (
-            lease_until IS NULL OR lease_until <= ? OR
-            (processing_status = 'deferred' AND (replay_after IS NULL OR replay_after <= ?))
+            (processing_status = 'pending' AND lease_until IS NOT NULL AND lease_until <= ?) OR
+            (processing_status = 'deferred' AND replay_after IS NOT NULL AND replay_after <= ?)
           )
-      `).run(leaseUntil, existing.seq, now, now);
+      `).run(
+        leaseUntil, mentionedJidsJson, msg.isResponseWorthy ? 1 : 0,
+        existing.seq, MAX_INBOUND_ATTEMPTS, now, now,
+      );
       if (Number(claimed.changes) === 1) {
-        return { accepted: true, seq: existing.seq, state: 'reclaimed_expired_lease' };
+        return {
+          accepted: true,
+          seq: existing.seq,
+          state: deferredDue ? 'reclaimed_due_deferred' : 'reclaimed_expired_pending',
+        };
       }
     }
 
@@ -503,16 +767,16 @@ export function admitInboundMessage(
 Run:
 
 ```bash
-bash scripts/run-with-pinned-npm.sh test -- tests/core/inbound-admission.test.ts tests/core/decryption-failures.test.ts --pool=forks
+bash scripts/run-with-pinned-npm.sh test -- tests/core/db-tx.test.ts tests/core/inbound-admission.test.ts tests/core/decryption-failures.test.ts --pool=forks
 bash scripts/run-with-pinned-npm.sh run typecheck:all
 ```
 
-Expected: PASS. The fault-trigger case must show both table counts at zero; a passing test that only checks the thrown error is insufficient.
+Expected: PASS. The fault-trigger case must show both table counts at zero, a pre-existing decryption failure still unresolved, and a subsequent write succeeding. The two-connection test must prove one winner without masking `SQLITE_BUSY`.
 
 - [ ] **Step 5: Commit the transaction boundary**
 
 ```bash
-git add src/core/inbound-admission.ts tests/core/inbound-admission.test.ts
+git add src/core/db-tx.ts src/core/inbound-admission.ts tests/core/db-tx.test.ts tests/core/inbound-admission.test.ts
 git commit -m "fix(ingest): atomically admit inbound messages"
 ```
 
@@ -523,6 +787,8 @@ git commit -m "fix(ingest): atomically admit inbound messages"
 - Modify: `src/core/ingest.ts:115-373`
 - Modify: `tests/core/ingest.test.ts:193-360`
 - Modify: `tests/core/ingest-backpressure.test.ts:174-430`
+- Modify: `tests/core/durability.test.ts` for lease-aware restart recovery
+- Modify: `package.json` so the fixed branch pre-push suite executes the new migration/admission and owning ingest tests
 - Modify: `docs/durability.md`
 
 **Interfaces:**
@@ -599,6 +865,8 @@ Add this import beside the existing message imports:
 import { getMessagesBySender, storeMessageIfNew } from '../../src/core/messages.ts';
 ```
 
+Also add a real-SQLite lifecycle matrix proving: a live `pending` lease does not redispatch, an expired `pending` lease dispatches once with the original sequence, `processing` and `turn_done` never redispatch on transport redelivery, and terminal rows remain terminal. The queue test must inspect event B while it is still waiting for capacity, not only after `runtime.handleMessage()` begins.
+
 Replace the old overflow-drop assertion in `tests/core/ingest-backpressure.test.ts` with this durability assertion (the test setup must construct and pass a real `DurabilityEngine`):
 
 ```ts
@@ -655,6 +923,23 @@ Extend `DurabilityStatements` and the constructor in `src/core/durability.ts` wi
       `),
 ```
 
+Also change the existing skipped transition so it can atomically replace the provisional route without changing existing two-argument call sites:
+
+```ts
+      markInboundSkipped: prepare(`
+        UPDATE inbound_events
+        SET processing_status = 'complete', completed_at = datetime('now'),
+            terminal_reason = ?, routed_to = COALESCE(?, routed_to)
+        WHERE seq = ?
+      `),
+```
+
+```ts
+  markInboundSkipped(seq: number, terminalReason: string, routedTo?: string): void {
+    this.statements.markInboundSkipped.run(terminalReason, routedTo ?? null, seq);
+  }
+```
+
 Add these exported types and methods:
 
 ```ts
@@ -682,6 +967,8 @@ export type InboundDeferredReason =
     return Number(this.statements.deferInbound.run(reason, replayAfter, seq, seq).changes) === 1;
   }
 ```
+
+Make startup recovery lease-aware in the same PR. A `processing` row with a non-null WS-A02 lease is converted to immediately due `deferred/crash_recovery` through the guarded transition; a legacy `processing` row with a null lease retains the existing compatibility behavior. Add restart tests for both paths. This is the minimum compatibility needed for WS-A02 to be independently safe; the bounded consumer remains WS-A03.
 
 - [ ] **Step 4: Rewire the normal ingest path around atomic admission**
 
@@ -751,23 +1038,15 @@ In the paused, passive, admin, and access-denied branches, remove each call to `
 
 ```ts
 if (durability && seq !== undefined) {
-  durability.markInboundSkipped(seq, 'chat_paused');
+  durability.markInboundSkipped(seq, 'chat_paused', 'none');
 }
 ```
 
-Use the existing branch-specific terminal reason (`passive_instance`, `admin_command`, or `access_denied`) in the other three branches.
+Use the existing branch-specific terminal reason in the other three branches and preserve their routes: `passive_instance/passive`, `admin_command/admin`, and `access_denied/none`. Add real-row assertions for both `terminal_reason` and `routed_to`.
 
 Replace current lines 343-359 with this capacity-and-dispatch block:
 
 ```ts
-        const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
-        if (durability && seq !== undefined) {
-          if (!durability.markInboundProcessing(seq, routedTo)) {
-            log.warn({ inboundSeq: seq, routedTo }, 'ingest admission lost before runtime dispatch');
-            return;
-          }
-        }
-
         const proceed = await acquireSlot(msg);
         if (!proceed) {
           if (durability && seq !== undefined) {
@@ -776,6 +1055,14 @@ Replace current lines 343-359 with this capacity-and-dispatch block:
           return;
         }
         slotAcquired = true;
+
+        const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
+        if (durability && seq !== undefined) {
+          if (!durability.markInboundProcessing(seq, routedTo)) {
+            log.warn({ inboundSeq: seq, routedTo }, 'ingest admission lost before runtime dispatch');
+            return;
+          }
+        }
 
         try {
           await runtime.handleMessage(msg);
@@ -787,28 +1074,30 @@ Replace current lines 343-359 with this capacity-and-dispatch block:
         }
 ```
 
-Delete the original capacity gate at lines 158-161 so a message cannot be shed before its atomic admission.
+Do not delete capacity behavior globally. Preserve the original early gate for trusted control messages, outbound echoes, and durability-disabled operation. Only normal durability-enabled inbound bypasses the early gate, enters atomic admission, completes access/policy evaluation, and then uses the capacity-and-dispatch block above. A message that is evicted while waiting transitions `pending → deferred`; runtime dispatch requires winning the `pending → processing` CAS immediately before the call.
+
+Extend the ingest stats snapshot with monotonic `admitted`, `repaired`, `duplicateRejected`, `deferred`, and `processingClaimed` counters. Increment each at the state transition that proves it, test deltas rather than global absolute values, and keep message IDs, JIDs, and content out of metric dimensions.
 
 - [ ] **Step 5: Run the ingest semantic probes**
 
 Run:
 
 ```bash
-bash scripts/run-with-pinned-npm.sh test -- tests/core/inbound-admission.test.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts tests/core/ingest-control.test.ts tests/core/ingest-paused-chats.test.ts --pool=forks
+bash scripts/run-with-pinned-npm.sh test -- tests/core/inbound-admission.test.ts tests/core/durability.test.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts tests/core/ingest-control.test.ts tests/core/ingest-paused-chats.test.ts --pool=forks
 bash scripts/run-with-pinned-npm.sh run typecheck:all
 ```
 
-Expected: PASS. Inspect the overflow test output to confirm the rejected message has one `messages` row and one `inbound_events` row with `processing_status='deferred'`.
+Expected: PASS. Inspect the overflow test output to confirm the rejected message has one `messages` row and one `inbound_events` row with `processing_status='deferred'`. Confirm control, echo, and durability-disabled capacity behavior is unchanged, and confirm startup recovery defers lease-managed processing without changing legacy null-lease behavior.
 
 - [ ] **Step 6: Document and commit WS-A02**
 
-Add this state table to `docs/durability.md`:
+Rewrite the existing ordering and startup-recovery prose in `docs/durability.md` before adding this state table; do not leave text claiming `journalInbound()` is the first action or that every processing row is terminally failed at startup:
 
 ```markdown
 | Inbound state | Meaning | Replayable |
 |---|---|---|
 | `pending` | Message and admission committed atomically; runtime claim not yet won | after lease expiry |
-| `processing` | One runtime owns the current lease | after lease expiry or crash recovery |
+| `processing` | One runtime owns the current work; the timestamp is observability, not transport ownership proof | only explicit startup recovery; never transport lease expiry |
 | `deferred` | Capacity or shutdown deliberately postponed work | when `replay_after` is due |
 | `turn_done` | Runtime finished; terminal delivery reconciliation is pending | no blind replay |
 | `complete` / `failed` | Terminal lifecycle evidence recorded | no |
@@ -817,7 +1106,7 @@ Add this state table to `docs/durability.md`:
 Then commit:
 
 ```bash
-git add src/core/durability.ts src/core/ingest.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts docs/durability.md
+git add src/core/durability.ts src/core/ingest.ts tests/core/durability.test.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts package.json docs/durability.md
 git commit -m "fix(ingest): preserve admitted work across redelivery"
 ```
 
@@ -831,7 +1120,7 @@ git commit -m "fix(ingest): preserve admitted work across redelivery"
 
 **Interfaces:**
 - Consumes: `Runtime.handleMessage(msg: IncomingMessage): Promise<void>` and `DurabilityEngine.deferInbound(...)`.
-- Produces: `InboundReplayWorker.start(): void`, `stop(): void`, `tick(): Promise<number>`, and `DurabilityEngine.getHealthStats().deferredInbound`.
+- Produces: `InboundReplayWorker.start(): void`, `stop(): void`, `tick(): Promise<number>`, and `DurabilityEngine.getHealthStats().deferredInbound` / `.invalidDeferredInbound`.
 
 - [ ] **Step 1: Write the bounded replay and crash-recovery tests**
 
@@ -914,6 +1203,31 @@ describe('InboundReplayWorker', () => {
     });
   });
 
+  it('fails terminally after the bounded replay attempt budget is exhausted', async () => {
+    const now = 1_800_000_000;
+    const seq = admit('dispatch-exhausted', now);
+    durability.deferInbound(seq, 'chat_queue_full', 0, now);
+    db.raw.prepare('UPDATE inbound_events SET attempt_count = 4 WHERE seq = ?').run(seq);
+    const dispatch = vi.fn(async () => { throw new Error('synthetic terminal replay fault'); });
+    const worker = new InboundReplayWorker(db, durability, {
+      dispatch,
+      maxAttempts: 5,
+      now: () => now,
+    });
+
+    expect(await worker.tick()).toBe(0);
+    expect(db.raw.prepare(`
+      SELECT processing_status, terminal_reason, attempt_count
+      FROM inbound_events WHERE seq = ?
+    `).get(seq)).toEqual({
+      processing_status: 'failed',
+      terminal_reason: 'error',
+      attempt_count: 5,
+    });
+    expect(await worker.tick()).toBe(0);
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it('never claims a terminal row even when replay_after is due', async () => {
     const now = 1_800_000_000;
     const seq = admit('terminal-no-replay', now);
@@ -932,6 +1246,25 @@ describe('InboundReplayWorker', () => {
 
     expect(await worker.tick()).toBe(0);
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a deferred row with null replay_after as due work', async () => {
+    const now = 1_800_000_000;
+    const seq = admit('invalid-deferred-time', now);
+    db.raw.prepare(`
+      UPDATE inbound_events
+      SET processing_status = 'deferred', lease_until = NULL, replay_after = NULL
+      WHERE seq = ?
+    `).run(seq);
+    const dispatch = vi.fn(async () => undefined);
+    const worker = new InboundReplayWorker(db, durability, {
+      dispatch,
+      now: () => now,
+    });
+
+    expect(await worker.tick()).toBe(0);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(durability.getHealthStats().invalidDeferredInbound).toBe(1);
   });
 });
 ```
@@ -968,12 +1301,14 @@ Create `src/core/inbound-replay.ts`:
 import type { Database } from './database.ts';
 import type { DurabilityEngine } from './durability.ts';
 import type { ContentType, IncomingMessage } from './types.ts';
+import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('inbound-replay');
 
 interface ReplayRow {
   seq: number;
+  attempt_count: number;
   message_id: string;
   chat_jid: string;
   sender_jid: string;
@@ -990,6 +1325,7 @@ export interface InboundReplayOptions {
   dispatch: (msg: IncomingMessage) => Promise<void>;
   batchSize?: number;
   intervalMs?: number;
+  maxAttempts?: number;
   now?: () => number;
 }
 
@@ -997,6 +1333,7 @@ export class InboundReplayWorker {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly batchSize: number;
   private readonly intervalMs: number;
+  private readonly maxAttempts: number;
   private readonly now: () => number;
 
   constructor(
@@ -1006,6 +1343,7 @@ export class InboundReplayWorker {
   ) {
     this.batchSize = Math.max(1, Math.min(100, options.batchSize ?? 10));
     this.intervalMs = Math.max(1_000, options.intervalMs ?? 5_000);
+    this.maxAttempts = Math.max(1, Math.min(100, options.maxAttempts ?? 5));
     this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
   }
 
@@ -1025,13 +1363,14 @@ export class InboundReplayWorker {
   async tick(): Promise<number> {
     const now = this.now();
     const candidates = this.db.raw.prepare(`
-      SELECT e.seq, m.message_id, m.chat_jid, m.sender_jid, m.sender_name,
+      SELECT e.seq, e.attempt_count, m.message_id, m.chat_jid, m.sender_jid, m.sender_name,
              m.content, m.content_text, m.content_type, m.timestamp,
              m.quoted_message_id, m.raw_message
       FROM inbound_events e
       JOIN messages m ON m.message_id = e.message_id
       WHERE e.processing_status = 'deferred'
-        AND (e.replay_after IS NULL OR e.replay_after <= ?)
+        AND e.replay_after IS NOT NULL
+        AND e.replay_after <= ?
         AND m.deleted_at IS NULL
       ORDER BY e.seq ASC
       LIMIT ?
@@ -1039,13 +1378,21 @@ export class InboundReplayWorker {
 
     let dispatched = 0;
     for (const row of candidates) {
+      if (row.attempt_count >= this.maxAttempts) {
+        this.durability.markInboundFailed(row.seq, 'crash_recovery');
+        log.error(
+          { inboundSeq: row.seq, attemptCount: row.attempt_count },
+          'deferred inbound exhausted bounded replay attempts',
+        );
+        continue;
+      }
       const claimed = this.db.raw.prepare(`
         UPDATE inbound_events
         SET processing_status = 'processing', routed_to = 'replay',
             lease_until = ?, replay_after = NULL, deferred_reason = NULL,
             attempt_count = attempt_count + 1
         WHERE seq = ? AND processing_status = 'deferred'
-          AND (replay_after IS NULL OR replay_after <= ?)
+          AND replay_after IS NOT NULL AND replay_after <= ?
       `).run(now + 5 * 60, row.seq, now);
       if (Number(claimed.changes) !== 1) continue;
 
@@ -1077,8 +1424,20 @@ export class InboundReplayWorker {
         await this.options.dispatch(msg);
         dispatched += 1;
       } catch (err) {
-        this.durability.deferInbound(row.seq, 'crash_recovery', 30, now);
-        log.warn({ err, inboundSeq: row.seq }, 'deferred inbound dispatch failed');
+        const attemptCount = row.attempt_count + 1;
+        if (attemptCount >= this.maxAttempts) {
+          this.durability.markInboundFailed(row.seq, classifyErrorForInbound(err));
+          log.error(
+            { inboundSeq: row.seq, attemptCount },
+            'deferred inbound exhausted bounded replay attempts',
+          );
+        } else {
+          this.durability.deferInbound(row.seq, 'crash_recovery', 30, now);
+          log.warn(
+            { inboundSeq: row.seq, attemptCount },
+            'deferred inbound dispatch failed; retry scheduled',
+          );
+        }
       }
     }
     return dispatched;
@@ -1097,8 +1456,12 @@ Replace the no-terminal-op branch at `src/core/durability.ts:786-792` with:
             'crash_reclaim_no_terminal_outbound',
             'pre_connect_recovery',
           );
-          if (this.deferInbound(ev.seq, 'crash_recovery', 0)) {
-            stats.inboundReplayed += 1;
+          if (!this.deferInbound(ev.seq, 'crash_recovery', 0)) {
+            log.warn(
+              { inboundSeq: ev.seq },
+              'preConnectRecovery: inbound processing deferral lost its state race',
+            );
+            continue;
           }
           log.info(
             { inboundSeq: ev.seq },
@@ -1112,6 +1475,9 @@ Extend `getHealthStats` with this exact query and field:
 const deferred = this.db.raw.prepare(
   "SELECT COUNT(*) AS count FROM inbound_events WHERE processing_status = 'deferred'",
 ).get() as { count: number };
+const invalidDeferred = this.db.raw.prepare(
+  "SELECT COUNT(*) AS count FROM inbound_events WHERE processing_status = 'deferred' AND replay_after IS NULL",
+).get() as { count: number };
 ```
 
 ```ts
@@ -1119,12 +1485,14 @@ getHealthStats(): {
   pendingOutbound: number;
   quarantinedOutbound: number;
   deferredInbound: number;
+  invalidDeferredInbound: number;
   lastRecoveryAt: string | null;
 }
 ```
 
 ```ts
 deferredInbound: deferred.count,
+invalidDeferredInbound: invalidDeferred.count,
 ```
 
 - [ ] **Step 5: Run replay, recovery, and durability suites**
@@ -1998,7 +2366,7 @@ git commit -m "fix(durability): track reply guarantee interruptions"
 Run:
 
 ```bash
-bash scripts/run-with-pinned-npm.sh test -- tests/core/migration-37-inbound-replay.test.ts tests/core/inbound-admission.test.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts tests/core/ingest-control.test.ts tests/core/ingest-paused-chats.test.ts --pool=forks
+bash scripts/run-with-pinned-npm.sh test -- tests/core/db-tx.test.ts tests/core/migration-37-inbound-replay.test.ts tests/core/migration-safety.test.ts tests/core/inbound-admission.test.ts tests/core/durability.test.ts tests/core/ingest.test.ts tests/core/ingest-backpressure.test.ts tests/core/ingest-control.test.ts tests/core/ingest-paused-chats.test.ts --pool=forks
 bash scripts/run-with-pinned-npm.sh run typecheck:all
 bash scripts/run-with-pinned-npm.sh run guard:lint:src
 ```
@@ -2054,5 +2422,38 @@ Record these exact residual checks in the PR briefs; do not perform them against
 - **Spec coverage:** WS-A01 maps to Tasks 7-8, WS-A02 to Tasks 1-3, and WS-A03 to Tasks 4-6. Task 9 covers the required focused and full verification receipts. The plan explicitly covers atomic write boundaries, redelivery repair, bounded replay, queue admission, shutdown ordering, soft/hard deadlines, normal outbound journaling, and echo-gated terminal proof.
 - **Deferred-step scan:** Every code-changing step includes concrete TypeScript, SQL, Markdown, or exact replacement blocks; no unspecified implementation instruction remains.
 - **Type consistency:** `InboundDeferredReason` values used by ingest, replay, chat, agent, and recovery match the union defined in Task 3. `ReplyGuaranteeTerminalResult.proof` is consistently `'submitted' | 'awaiting_echo'`. `RuntimeConnection.shutdown` is consistently `Promise<void>`.
-- **Sequencing uncertainty:** WS-A01 is listed first in the audit PR train, but this plan executes WS-A02/WS-A03 foundations before the final WS-A01 wiring because the tracked hard notice depends on truthful admission and shutdown semantics. If maintainers require the published PR order to remain A01→A02→A03, implement the Reply Guarantee manager state machine first and rebase its runtime wiring after A02/A03; do not duplicate the durability interfaces.
+- **Sequencing decision:** Publish and merge WS-A02 → WS-A03 → WS-A01. The tracked hard notice depends on truthful admission, replay, and shutdown semantics; no alternate A01-first train is supported.
 - **Known proof gaps:** Reconstructed replay messages intentionally derive `isGroup` from `@g.us` and do not reconstruct mention metadata. Before implementation, verify runtime consumers do not need `mentionedJids` after ingest; if they do, extend migration 37 with metadata-only `mentioned_jids` rather than persisting a second content payload. Live WhatsApp echo timing, Twilio shutdown, and forced process crash behavior require staging drills.
+
+## Final Review Synthesis
+
+### Requirement traceability
+
+| Source invariant | Plan ownership | Production surfaces | Proving evidence | Disposition |
+|---|---|---|---|---|
+| I1 — durable, replayable inbound admission | Tasks 1–6 (WS-A02/WS-A03) | `database.ts`, `inbound-admission.ts`, `durability.ts`, `ingest.ts`, `inbound-replay.ts`, runtime queues, `main.ts` | Migration rollback/reopen, two-connection admission contention, policy-order characterization, bounded replay exhaustion, queue rejection, and shutdown lifecycle tests | Fully planned; implementation evidence pending. |
+| I2 — terminal only after durable visible outcome | Tasks 7–8 (WS-A01) | `reply-guarantee.ts`, agent runtime, `outbound_ops`/echo correlation | Fake-clock soft/hard boundary, journal-failure negative test, submitted/open then echo/complete real-DB test | Fully planned; implementation and live timing evidence pending. |
+| I3 — delivery truth separate from audit truth | Sibling plans WS-A04/WS-A05 | Send pipeline and retry identity | `2026-07-09-delivery-audit-and-idempotency.md` | Out of scope here; no claim of closure. |
+| I4 — unknown state remains unknown | Sibling plans WS-B01/WS-B02 and WS-C04–C06 | Health, recovery, self-update, metrics/realtime | Health/recovery and metrics-completeness plans | Out of scope here; no claim of closure. |
+| I5 — metadata-only routine telemetry | Cross-cutting constraint here; primary ownership WS-A06–A08/WS-C01–C03 | Pino events and counters touched by Tasks 1–8 | Redaction/low-cardinality assertions required by Logging and Error Traceability contracts | Constrained here; broader privacy/telemetry closure belongs to sibling plans. |
+| I6 — deletion at downstream boundaries | Sibling plans WS-A06–A08 | Enrichment, facts, telemetry, media | `2026-07-09-privacy-erasure-and-media-confinement.md` | Out of scope here; no claim of closure. |
+| I7 — truthful UI and recovery material | Sibling plans WS-B03–B06 | Console session/send/load/update UX | `2026-07-09-console-truthful-session-update-and-send-ux.md` | Out of scope here; no claim of closure. |
+
+### Scenario-to-proof classification
+
+| Scenario | Primary proof class | Load-bearing check | Residual evidence state |
+|---|---|---|---|
+| Atomic message plus admission, including write faults | File-backed SQLite integration and fault injection | Task 2 rollback, post-rollback usability, and two-connection single-winner tests | Planned; must show semantic RED then GREEN. |
+| Migration upgrade and failure recovery | File-backed migration/reopen integration | Task 1 legacy lifecycle, idempotent reopen, and injected rollback tests | Planned; migration number must be refreshed. |
+| Policy/capacity ordering and queue shedding | Runtime integration plus removal-sensitive characterization | Tasks 3 and 5 assert policy before deferral, processing CAS before dispatch, and durable rejection | Planned; no source-only assertion can substitute. |
+| Bounded deferred replay and exhaustion | File-backed integration with fake clock and mutation | Task 4 due-time, CAS race, max-attempt failure, invalid-deferred health, and removal mutation | Planned; broader load timing remains implementation evidence. |
+| Shutdown ordering | Runtime/transport integration plus a narrow source-order guard | Task 6 drains admitted work, awaits transport close, and checks top-level order | Forced process exit and service deadline remain staging-only. |
+| Reply Guarantee soft/hard delivery | Fake-clock unit plus real-DB outbound integration | Tasks 7–8 prove no completion at soft deadline or submission, and completion only after echo | Live transport echo timing remains staging-only. |
+| Full integrated train | Exact-head local release, remote Quality/CodeQL, independent review | Task 9 `verify:release`, unmasked CI, and reviewed branch SHA | Cannot pass before implementation branches exist. |
+
+### Closeout disposition
+
+- The corrected planning artifact is suitable to merge as documentation after B1 and B2 close. It does not assert that WS-A01–A03 are implemented, production-ready, or staging-proven.
+- The 320-question final bank produced 52 `PASS`, 23 `PARTIAL`, 12 `FAIL`, and 233 `INCONCLUSIVE` observations. Scope-mismatched guard-product questions remain explicitly inconclusive; relevant failures are closed by the bounded-replay correction, artifact map, blocker table, traceability/proof matrices, rollback preconditions, and reproducible pass-27 closeout.
+- B3 is resolved in the plan but must be re-proven through a semantic RED exhaustion test during WS-A03. B1 and B2 remain documentation-publication gates until rebase, exact-head release verification, and GitHub checks complete.
+- Planning capability is sufficient and the plan review is complete with constraints. Product implementation, real crash timing, live transport echo timing, and forced service-stop behavior remain `Inconclusive` until Tasks 1–9 and separately authorized staging drills produce evidence.
