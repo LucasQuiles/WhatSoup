@@ -5,47 +5,80 @@
 
 import { jidPattern } from './redaction-patterns.ts';
 
-const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\b/g;
-const EMAIL_LOCAL_ADJACENCY = /[A-Za-z0-9._%+-]/;
-const EMAIL_DOMAIN_CONTINUATION = /[A-Za-z0-9]/;
+const KEYED_SECRET_PREFIX = /\b(?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\s*[:=]\s*/gi;
+const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@:-]/;
+const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
+
+function redactKeyedSecretValues(text: string): string {
+  let cursor = 0;
+  let out = '';
+  for (const match of text.matchAll(KEYED_SECRET_PREFIX)) {
+    const index = match.index;
+    if (index < cursor) continue;
+    const valueStart = index + match[0].length;
+    out += text.slice(cursor, valueStart);
+    const quote = text[valueStart];
+    if (quote === '"' || quote === "'") {
+      let end = valueStart + 1;
+      let escaped = false;
+      while (end < text.length && text[end] !== '\n' && text[end] !== '\r') {
+        const char = text[end]!;
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === quote) {
+          break;
+        }
+        end += 1;
+      }
+      const closed = text[end] === quote;
+      out += `${quote}[REDACTED]${closed ? quote : ''}`;
+      cursor = closed ? end + 1 : end;
+      continue;
+    }
+
+    let end = valueStart;
+    while (end < text.length && !/\s/.test(text[end]!)) end += 1;
+    const value = text.slice(valueStart, end);
+    out += value.length >= 8 ? '[REDACTED]' : value;
+    cursor = end;
+  }
+  return out + text.slice(cursor);
+}
 
 function sanitizeProviderSecrets(text: string): string {
-  return text
+  return redactKeyedSecretValues(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(
-      // QR-079: a fixed key-name denylist leaked compound-snake (AWS_SESSION_TOKEN,
-      // aws_secret_access_key) and camelCase-glued (sessionToken, bearerToken) secret
-      // keys across every consumer of this SSOT sanitizer (handoff corpus → third-party
-      // summarizer, outbound-message-safety, provider logs, backups). Mirror the
-      // QR-052-hardened bot-errors KEYED_SECRET_RE coverage: an optional run of
-      // `<alnum>_` segments anchors compound keys, and the camelCase branch
-      // `<alnum>{1,40}(token|secret|password|passphrase|api_key)` catches glued keys —
-      // while benign tails (`retry_count=`, `event_count=`) stay untouched.
-      /\b((?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\s*[:=]\s*['"]?)[^'"\s]{8,}/gi,
-      '$1[REDACTED]',
-    )
     .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]');
 }
 
-function redactEmailsPreservingJids(text: string): string {
+function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): string {
   let cursor = 0;
   let out = '';
-  for (const match of text.matchAll(jidPattern())) {
-    const index = match.index;
-    const end = index + match[0].length;
-    const before = index > 0 ? text[index - 1] : undefined;
-    const after = text[end];
-    const afterNext = text[end + 1];
-    const embeddedInEmailLikeToken =
-      (before !== undefined && EMAIL_LOCAL_ADJACENCY.test(before))
-      || (after !== undefined && EMAIL_LOCAL_ADJACENCY.test(after)
-        && (after !== '.' && after !== '-' || (afterNext !== undefined && EMAIL_DOMAIN_CONTINUATION.test(afterNext))));
-    if (embeddedInEmailLikeToken) continue;
-    out += text.slice(cursor, index).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
-    out += match[0];
-    cursor = end;
+  let index = 0;
+  while (index < text.length) {
+    if (!EMAIL_TOKEN_CHAR.test(text[index]!)) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < text.length && EMAIL_TOKEN_CHAR.test(text[index]!)) index += 1;
+    const token = text.slice(start, index);
+    if (!token.includes('@')) continue;
+
+    let coreEnd = token.length;
+    while (coreEnd > 0 && TRAILING_EMAIL_PUNCTUATION.has(token[coreEnd - 1]!)) coreEnd -= 1;
+    const core = token.slice(0, coreEnd);
+    const suffix = token.slice(coreEnd);
+    const jidMatch = preserveWhatsAppJids ? jidPattern().exec(core) : null;
+    const preserve = jidMatch?.index === 0 && jidMatch[0].length === core.length;
+
+    out += text.slice(cursor, start);
+    out += preserve ? `${core}${suffix}` : `[REDACTED_EMAIL]${suffix}`;
+    cursor = index;
   }
-  return out + text.slice(cursor).replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
+  return out + text.slice(cursor);
 }
 
 export function sanitizeProviderPreviewText(
@@ -53,21 +86,7 @@ export function sanitizeProviderPreviewText(
   options: { preserveWhatsAppJids?: boolean } = {},
 ): string {
   const sanitized = sanitizeProviderSecrets(text);
-  if (options.preserveWhatsAppJids) return redactEmailsPreservingJids(sanitized);
-  return sanitized
-    // QR-128: the prior domain pattern `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` overlaps its own
-    // class (`.` is in `[A-Za-z0-9.-]`) with the required TLD dot, so a crafted
-    // local-part + a long `a.a.a…`/`a-a-a…` run drives quadratic backtracking (~5.5s at
-    // 80 KB). This sanitizer runs (via redactInternalArtifacts) on the FULL outbound
-    // reply with no length cap, so a single crafted message is a synchronous DoS.
-    // Rewrite the domain as delimiter-separated labels `[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*`
-    // — the label class excludes `.`, so the explicit `\.` delimiter is unambiguous and
-    // matching is linear (verified <1 ms at 80 KB). NOTE: the strict trailing-`.TLD`
-    // requirement is intentionally dropped; a `[A-Za-z]{2,}` TLD is a subset of the label
-    // class and re-introduces the same overlap (empirically still quadratic). This makes
-    // redaction slightly broader (bare `user@host`/`user@10.0.0.1` also redact), which is
-    // strictly safe for a redactor — it never under-redacts a real e-mail.
-    .replace(EMAIL_PATTERN, '[REDACTED_EMAIL]');
+  return redactEmailLikeTokens(sanitized, options.preserveWhatsAppJids === true);
 }
 
 export function providerPreview(text: string, maxLength: number): string {

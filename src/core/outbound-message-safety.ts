@@ -228,7 +228,7 @@ const INTERNAL_IDENTIFIERS: ReadonlyArray<{ re: RegExp; label: string }> = [
 // Tailnet / CGNAT shared address space (100.64.0.0/10).
 const TAILNET_IP =
   /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/g;
-const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9.-])(?:~|\/)[^\s"',;}\])>]+/g;
+const SENSITIVE_PATH_TOKEN = /(?<![A-Za-z0-9.-])(?:~\/|\/)[^\s"',;}\])>]+/g;
 const CREDENTIAL_FILE_NAMES = new Set([
   'bot-errors.env',
   'fleet-token',
@@ -238,6 +238,7 @@ const CREDENTIAL_FILE_NAMES = new Set([
   'secrets.env',
 ]);
 const TRAILING_PATH_PUNCTUATION: ReadonlySet<string> = new Set(['.', ':', '`', '!', '?', '*', '_', '~']);
+const TRAILING_PATH_UNICODE_PUNCTUATION = /[\p{P}\p{Cf}]/u;
 // PII shapes for ops-evidence sanitization (mirror BOT ERRORS outbox posture).
 // JID redaction uses the canonical SSOT `jidPattern()` so the device-suffix
 // (`:N`) dimension is never dropped — see `src/lib/redaction-patterns.ts`.
@@ -295,7 +296,15 @@ function redactSensitivePaths(text: string, redactions: Redaction[]): string {
   const out = text.replace(SENSITIVE_PATH_TOKEN, (match) => {
     const queryIndex = match.search(/[?#]/);
     let end = queryIndex === -1 ? match.length : queryIndex;
-    while (end > 1 && TRAILING_PATH_PUNCTUATION.has(match[end - 1]!)) end -= 1;
+    while (
+      end > 1
+      && (
+        TRAILING_PATH_PUNCTUATION.has(match[end - 1]!)
+        || TRAILING_PATH_UNICODE_PUNCTUATION.test(match[end - 1]!)
+      )
+    ) {
+      end -= 1;
+    }
     const candidate = match.slice(0, end);
     const suffix = match.slice(end);
     const label = sensitivePathLabel(candidate);

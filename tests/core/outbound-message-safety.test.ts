@@ -433,19 +433,18 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactions).toHaveLength(0);
   });
 
-  it('internal audience does not preserve a JID-shaped substring inside an email-like token', () => {
-    const jid = `${'12345'}@${'g.us'}`;
-    for (const input of [
-      `${jid}.evil.test`,
-      `${jid}-evil.test`,
-      `+${jid}`,
-      `x.${jid}`,
-    ]) {
+  it.each([
+    { label: 'nested domain', input: `${'12345'}@${'g.us'}.evil.test` },
+    { label: 'hyphenated domain', input: `${'12345'}@${'g.us'}-evil.test` },
+    { label: 'repeated hyphen domain', input: `${'12345'}@${'g.us'}--evil.test` },
+    { label: 'mixed punctuation domain', input: `${'12345'}@${'g.us'}.-evil.test` },
+    { label: 'leading plus', input: `+${'12345'}@${'g.us'}` },
+    { label: 'dotted local part', input: `x.${'12345'}@${'g.us'}` },
+  ])('internal audience redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
       const { text, redactions } = redactInternalArtifacts(input, 'internal');
       expect(text).not.toBe(input);
       expect(text).toContain('[REDACTED_EMAIL]');
       expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
-    }
   });
 
   it('internal audience does not reinterpret literal JID placeholder-shaped text', () => {
@@ -465,6 +464,26 @@ describe('redactInternalArtifacts — audience scoping', () => {
       expect(text).not.toContain(FAKE_GROUP_JID);
       expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
     }
+  });
+
+  it.each([
+    { input: `password="abc ${FAKE_GROUP_JID} def"`, expected: 'password="[REDACTED]"' },
+    { input: `client_secret='abcdefgh ${FAKE_GROUP_JID} suffix'`, expected: "client_secret='[REDACTED]'" },
+  ])('internal audience redacts the entire quoted keyed value in $input', ({ input, expected }) => {
+    const { text, redactions } = redactInternalArtifacts(input, 'internal');
+    expect(text).toBe(expected);
+    expect(text).not.toContain(FAKE_GROUP_JID);
+    expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+  });
+
+  it('scans dotted email-local adversarial input in linear time', () => {
+    const input = `${'a.'.repeat(32 * 1024)}tail`;
+    const startedAt = performance.now();
+    const { text } = redactInternalArtifacts(input, 'internal');
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(text).toBe(input);
+    expect(elapsedMs).toBeLessThan(500);
   });
 
   it('scans internal sensitive paths in linear time on slash-heavy input', () => {
@@ -504,6 +523,17 @@ describe('redactInternalArtifacts — audience scoping', () => {
       expect(text).toContain('[sensitive-path]');
       expect(redactions.map((redaction) => redaction.category)).toContain('sensitive_path');
     }
+  });
+
+  it.each([
+    { input: '/tmp/client.key…', expected: '[sensitive-path]…' },
+    { input: '“/tmp/client.key”', expected: '“[sensitive-path]”' },
+    { input: "‘/home/testuser/fleet-tokens.json’", expected: "‘[sensitive-path]’" },
+    { input: '~~~/home/testuser/fleet-tokens.json~~', expected: '~~[sensitive-path]~~' },
+  ])('preserves Unicode or Markdown wrappers while masking $input', ({ input, expected }) => {
+    const { text, redactions } = redactInternalArtifacts(input, 'internal');
+    expect(text).toBe(expected);
+    expect(redactions.map((redaction) => redaction.category)).toContain('sensitive_path');
   });
 
   it('ops audience is fully verbatim', () => {
