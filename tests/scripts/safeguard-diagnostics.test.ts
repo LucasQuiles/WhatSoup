@@ -147,6 +147,114 @@ const requiredConsolePackageScripts = {
   'lint:shadow:baseline': 'node scripts/check-shadow-baseline.mjs',
 };
 
+const qualityCiJobTimeoutBlock = [
+  'quality:',
+  '    runs-on: ubuntu-latest',
+  '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
+  '    # one (the quality job runs the full suite + coverage and can take ~40min).',
+  '    # Without this a hung run rides to the 6h GitHub default.',
+  '    timeout-minutes: 60',
+  '    strategy:',
+].join('\n');
+
+const qualityCiSystemDepsTimeoutBlock = [
+  '      - name: Install Playwright system deps',
+  '        timeout-minutes: 5',
+  '        run: npx playwright install-deps chromium',
+  '',
+  '      - name: Install Playwright chromium',
+].join('\n');
+
+const qualityCiBrowserInstallScript = [
+  'for attempt in 1 2 3; do',
+  '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
+  '  if timeout 300 npx playwright install chromium; then',
+  '    echo "::endgroup::"',
+  '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
+  '    exit 0',
+  '  fi',
+  '  echo "::endgroup::"',
+  '  echo "Playwright chromium download attempt ${attempt} failed or timed out; retrying after backoff"',
+  '  sleep $((attempt * 15))',
+  'done',
+  'echo "Playwright chromium download failed after 3 attempts"',
+  'exit 1',
+].join('\n');
+
+const requiredQualityWorkflow = [
+  'name: Quality',
+  'on:',
+  '  pull_request:',
+  'jobs:',
+  '  quality:',
+  '    runs-on: ubuntu-latest',
+  '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
+  '    # one (the quality job runs the full suite + coverage and can take ~40min).',
+  '    # Without this a hung run rides to the 6h GitHub default.',
+  '    timeout-minutes: 60',
+  '    strategy:',
+  '      fail-fast: false',
+  '      matrix:',
+  "        node: ['24.x', '25.x']",
+  '    steps:',
+  '      - name: Install console dependencies',
+  '        run: npm --prefix console ci',
+  '      - name: Design-system hygiene changed files',
+  '        run: npm run guard:design-system-hygiene -- --changed-since',
+  '      - name: Console build',
+  '        run: npm --prefix console run build',
+  '      - name: Console design verification',
+  '        run: npm run verify:console-design',
+  '      - name: Install Playwright system deps',
+  '        timeout-minutes: 5',
+  '        run: npx playwright install-deps chromium',
+  '',
+  '      - name: Install Playwright chromium',
+  '        run: |',
+  ...qualityCiBrowserInstallScript.split('\n').map((line) => `          ${line}`),
+  '      - name: Browser test suite',
+  '        run: npm run test:browser',
+  '      - name: Browser motion test suite',
+  '        run: npm run test:browser:motion',
+  '      - name: Upload browser artifacts',
+  '        uses: actions/upload-artifact@v4',
+  '        with:',
+  '          path: |',
+  '            tests/browser/__screenshots__',
+  '            tests/browser-motion/__screenshots__',
+].join('\n');
+
+const requiredTagReleaseWorkflow = [
+  'name: tag-release-gate',
+  'on:',
+  '  push:',
+  '    tags:',
+  "      - 'v*'",
+  'jobs:',
+  '  release-gate:',
+  '    runs-on: ubuntu-latest',
+  '    timeout-minutes: 60',
+  '    steps:',
+  '      - name: Install console dependencies',
+  '        run: npm --prefix console ci',
+  '      - name: Console build',
+  '        run: npm --prefix console run build',
+  '      - name: Console design verification',
+  '        run: npm run verify:console-design',
+  '      - name: Install Playwright chromium',
+  '        run: npx playwright install chromium --with-deps',
+  '      - name: Browser test suite',
+  '        run: npm run test:browser',
+  '      - name: Browser motion test suite',
+  '        run: npm run test:browser:motion',
+  '      - name: Upload browser artifacts',
+  '        uses: actions/upload-artifact@v4',
+  '        with:',
+  '          path: |',
+  '            tests/browser/__screenshots__',
+  '            tests/browser-motion/__screenshots__',
+].join('\n');
+
 const requiredFiles: Record<string, string> = {
   'scripts/repo-hygiene-guard.ts': [
     'model-attribution',
@@ -220,37 +328,8 @@ const requiredFiles: Record<string, string> = {
   ].join('\n'),
   'console/scripts/design-regression.sh': 'command -v rg',
   'console/src/components/primitives/Modal.tsx': 'useDismissable',
-  '.github/workflows/quality.yml': [
-    'name: Install console dependencies',
-    'name: Design-system hygiene changed files',
-    'npm run guard:design-system-hygiene -- --changed-since',
-    'name: Console build',
-    'name: Console design verification',
-    'run: npm run verify:console-design',
-    'run: npx playwright install-deps chromium',
-    'name: Install Playwright chromium',
-    'timeout 300 npx playwright install chromium',
-    'name: Browser test suite',
-    'run: npm run test:browser',
-    'name: Browser motion test suite',
-    'run: npm run test:browser:motion',
-    'tests/browser/__screenshots__',
-    'tests/browser-motion/__screenshots__',
-  ].join('\n'),
-  '.github/workflows/tag-release-gate.yml': [
-    'name: Install console dependencies',
-    'name: Console build',
-    'name: Console design verification',
-    'run: npm run verify:console-design',
-    'name: Install Playwright chromium',
-    'run: npx playwright install chromium --with-deps',
-    'name: Browser test suite',
-    'run: npm run test:browser',
-    'name: Browser motion test suite',
-    'run: npm run test:browser:motion',
-    'tests/browser/__screenshots__',
-    'tests/browser-motion/__screenshots__',
-  ].join('\n'),
+  '.github/workflows/quality.yml': requiredQualityWorkflow,
+  '.github/workflows/tag-release-gate.yml': requiredTagReleaseWorkflow,
   '.husky/pre-commit': [
     'npm run guard:repo:staged',
     'npm run guard:publication:staged',
@@ -657,6 +736,429 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
   });
 
+  it('fails when the quality job loses its bounded timeout', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(qualityCiJobTimeoutBlock, [
+      'quality:',
+      '    runs-on: ubuntu-latest',
+      '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
+      '    # one (the quality job runs the full suite + coverage and can take ~40min).',
+      '    # Without this a hung run rides to the 6h GitHub default.',
+      '    timeout-minutes: 360',
+      '    strategy:',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': mutated,
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['quality job timeout must be exactly 60 minutes']),
+      });
+  });
+
+  it('does not couple timeout enforcement to rationale comments', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('full suite + coverage and can take ~40min', 'full suite + coverage can take ~45min');
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({ status: 'pass' });
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts explicit false advisory settings on the quality job and bounded step', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const jobExplicit = workflow.replace(
+      "        node: ['24.x', '25.x']\n    steps:",
+      "        node: ['24.x', '25.x']\n    continue-on-error: false\n    steps:",
+    );
+    expect(jobExplicit).not.toBe(workflow);
+    const mutated = jobExplicit.replace(
+      '      - name: Install Playwright system deps',
+      '      - continue-on-error: false\n        name: Install Playwright system deps',
+    );
+    expect(mutated).not.toBe(jobExplicit);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({ status: 'pass' });
+    expect(result.ok).toBe(true);
+  });
+
+  it('fails when Playwright system dependency installation loses its step timeout', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(qualityCiSystemDepsTimeoutBlock, [
+      '      - name: Install Playwright system deps',
+      '        run: npx playwright install-deps chromium',
+      '',
+      '      - name: Install Playwright chromium',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': mutated,
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'Playwright system-dependency step timeout must be exactly 5 minutes',
+        ]),
+      });
+  });
+
+  it('fails when Playwright system dependency installation becomes advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(qualityCiSystemDepsTimeoutBlock, [
+      '      - name: Install Playwright system deps',
+      '        timeout-minutes: 5',
+      '        continue-on-error: true',
+      '        run: npx playwright install-deps chromium',
+      '',
+      '      - name: Install Playwright chromium',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': mutated,
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'Playwright system-dependency step continue-on-error must be absent or false',
+        ]),
+      });
+  });
+
+  it('fails when the Playwright system-dependency step starts with advisory mode', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Install Playwright system deps\n        timeout-minutes: 5',
+      '      - continue-on-error: true\n        name: Install Playwright system deps\n        timeout-minutes: 5',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'Playwright system-dependency step continue-on-error must be absent or false',
+        ]),
+      });
+  });
+
+  it('fails when the Playwright system-dependency step starts with a condition', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Install Playwright system deps\n        timeout-minutes: 5',
+      '      - if: false\n        name: Install Playwright system deps\n        timeout-minutes: 5',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['Playwright system-dependency step must not declare if']),
+      });
+  });
+
+  it('fails when quoted YAML makes the quality job advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      "        node: ['24.x', '25.x']\n    steps:",
+      "        node: ['24.x', '25.x']\n    \"continue-on-error\": true\n    steps:",
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['quality job continue-on-error must be absent or false']),
+      });
+  });
+
+  it('fails when quoted YAML makes the Playwright system-dependency step advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '        timeout-minutes: 5\n        run: npx playwright install-deps chromium',
+      '        timeout-minutes: 5\n        "continue-on-error": true\n        run: npx playwright install-deps chromium',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'Playwright system-dependency step continue-on-error must be absent or false',
+        ]),
+      });
+  });
+
+  it('fails when the browser retry reintroduces Playwright system-dependency installation', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      'timeout 300 npx playwright install chromium',
+      'timeout 300 npx playwright install chromium --with-deps',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'quality job must not run Playwright system-dependency installation outside the bounded step',
+        ]),
+      });
+  });
+
+  it('fails when the quality job depends on a skippable job', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('jobs:\n  quality:', [
+      'jobs:',
+      '  suppress-quality:',
+      '    runs-on: ubuntu-latest',
+      '    if: false',
+      '    steps:',
+      "      - run: 'true'",
+      '  quality:',
+      '    needs: suppress-quality',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['quality job must not declare needs']) });
+  });
+
+  it('fails when quality-job run defaults can suppress command execution', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('    timeout-minutes: 60\n    strategy:', [
+      '    timeout-minutes: 60',
+      '    defaults:',
+      '      run:',
+      '        shell: bash -n {0}',
+      '    strategy:',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['quality job must not declare defaults']) });
+  });
+
+  it('fails when the Playwright system-dependency step overrides its shell', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '        timeout-minutes: 5\n        run: npx playwright install-deps chromium',
+      '        timeout-minutes: 5\n        shell: bash -n {0}\n        run: npx playwright install-deps chromium',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['Playwright system-dependency step must not declare shell']),
+      });
+  });
+
+  it('fails when the Playwright system-dependency step runs in the background', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '        timeout-minutes: 5\n        run: npx playwright install-deps chromium',
+      '        timeout-minutes: 5\n        background: true\n        run: npx playwright install-deps chromium',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['Playwright system-dependency step must not declare background']),
+      });
+  });
+
+  it('fails when the Playwright chromium retry runs in the background', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Install Playwright chromium\n        run: |',
+      '      - name: Install Playwright chromium\n        background: true\n        run: |',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['Playwright chromium install step must not declare background']),
+      });
+  });
+
+  it('fails when the quality workflow uses an unsupported merge key', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('  quality:\n    runs-on:', '  quality:\n    <<: {}\n    runs-on:');
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['quality workflow must not use YAML merge keys']),
+      });
+  });
+
+  it('fails when the browser retry only echoes the required install command', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      'if timeout 300 npx playwright install chromium; then',
+      'if echo "timeout 300 npx playwright install chromium"; then',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'Playwright chromium install step must use the exact bounded retry script',
+        ]),
+      });
+  });
+
+  it('fails when the quality job becomes advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      "        node: ['24.x', '25.x']\n    steps:",
+      "        node: ['24.x', '25.x']\n    continue-on-error: true\n    steps:",
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': mutated,
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['quality job continue-on-error must be absent or false']),
+      });
+  });
+
+  it('fails when the quality job becomes conditional', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      "        node: ['24.x', '25.x']\n    steps:",
+      "        node: ['24.x', '25.x']\n    if: github.ref == 'refs/heads/main'\n    steps:",
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['quality job must not declare if']),
+      });
+  });
+
+  it('fails when a later quality-job timeout overrides the bounded timeout', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      "        node: ['24.x', '25.x']\n    steps:",
+      "        node: ['24.x', '25.x']\n    timeout-minutes: 360\n    steps:",
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          expect.stringContaining('quality workflow YAML must parse without errors: Map keys must be unique'),
+        ]),
+      });
+  });
+
+  it('fails when Playwright system dependency installation has an unbounded duplicate', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace('      - name: Browser test suite', [
+      '      - name: Install Playwright system deps again',
+      '        run: npx playwright install-deps chromium',
+      '',
+      '      - name: Browser test suite',
+    ].join('\n'));
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': mutated,
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'quality job must contain exactly one Playwright system-dependency install command (found 2)',
+        ]),
+      });
+  });
+
   it('fails when CI omits the no-reduce browser motion proof', () => {
     const fixture = makeRepo({
       files: {
@@ -688,6 +1190,110 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({
         status: 'fail',
         evidence: expect.arrayContaining(['conditional run: npm run test:browser (if: failure())']),
+      });
+  });
+
+  it('fails when CI makes a browser proof advisory', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        continue-on-error: true\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'advisory run: npm run test:browser (continue-on-error: true)',
+        ]),
+      });
+  });
+
+  it('fails when quoted YAML makes a browser proof conditional', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        "if": false\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['conditional run: npm run test:browser (if: false)']),
+      });
+  });
+
+  it('fails when a browser proof overrides its shell', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        shell: bash -n {0}\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['run: npm run test:browser must not declare shell']),
+      });
+  });
+
+  it('fails when a required browser proof runs in the background', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        background: true\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['run: npm run test:browser must not declare background']),
+      });
+  });
+
+  it('fails when a required browser proof moves outside the quality job', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const removed = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        run: echo misplaced',
+    );
+    expect(removed).not.toBe(workflow);
+    const mutated = removed.replace('jobs:\n  quality:', [
+      'jobs:',
+      '  unrelated:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: Misplaced browser proof',
+      '        run: npm run test:browser',
+      '  quality:',
+    ].join('\n'));
+    expect(mutated).not.toBe(removed);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'workflow must contain exactly one run: npm run test:browser step (found 0)',
+        ]),
       });
   });
 
@@ -750,6 +1356,72 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({
         status: 'fail',
         evidence: expect.arrayContaining(['conditional run: npm run test:browser:motion (if: failure())']),
+      });
+  });
+
+  it('fails when a tag-release browser proof overrides its shell', () => {
+    const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        shell: bash -n {0}\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['run: npm run test:browser must not declare shell']),
+      });
+  });
+
+  it('fails when a tag-release browser proof runs in the background', () => {
+    const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
+    const mutated = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        background: true\n        run: npm run test:browser',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['run: npm run test:browser must not declare background']),
+      });
+  });
+
+  it('fails when a required browser proof moves outside the tag-release job', () => {
+    const workflow = requiredFiles['.github/workflows/tag-release-gate.yml'];
+    const removed = workflow.replace(
+      '      - name: Browser test suite\n        run: npm run test:browser',
+      '      - name: Browser test suite\n        run: echo misplaced',
+    );
+    expect(removed).not.toBe(workflow);
+    const mutated = removed.replace('jobs:\n  release-gate:', [
+      'jobs:',
+      '  unrelated:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: Misplaced browser proof',
+      '        run: npm run test:browser',
+      '  release-gate:',
+    ].join('\n'));
+    expect(mutated).not.toBe(removed);
+    const fixture = makeRepo({ files: { '.github/workflows/tag-release-gate.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining([
+          'workflow must contain exactly one run: npm run test:browser step (found 0)',
+        ]),
       });
   });
 

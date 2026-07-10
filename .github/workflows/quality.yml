@@ -274,16 +274,18 @@ jobs:
       # System (apt) deps are installed ONCE, separately from the browser
       # download. Bundling them (`install --with-deps`) meant a timeout-kill of
       # the download left apt/dpkg mid-transaction, so retries fast-failed and
-      # never recovered. apt deps rarely hang; the browser download is the flaky
-      # part, so only that is wrapped in a bounded-timeout retry below.
+      # never recovered. This step normally finishes in seconds, but a hosted
+      # runner has stalled here for more than 10 minutes. Bound it and fail
+      # closed; do not retry apt on a runner whose package state may be partial.
       - name: Install Playwright system deps
+        timeout-minutes: 5
         run: npx playwright install-deps chromium
 
       - name: Install Playwright chromium
         # The chromium download intermittently hangs on the hosted ubuntu runners
         # (observed repeatedly on the 24.x lane). Bound each attempt with a timeout
         # so a hung attempt is killed and retried, rather than stalling the whole
-        # job until the 6h cap. Fails only after 3 genuine failures.
+        # job until the 60-minute cap. Fails only after 3 genuine failures.
         run: |
           for attempt in 1 2 3; do
             echo "::group::Playwright chromium download attempt ${attempt}/3"
