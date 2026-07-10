@@ -3,7 +3,7 @@
   "expectDispatcher": true,
   "expectQLoop": true,
   "expectFleetApi": true,
-  "fleetApiUrl": "http://100.91.13.7:9099",
+  "fleetApiUrl": "http://127.0.0.1:9099",
   "fleetApiTokenFile": "~/.config/whatsoup/fleet-tokens.json",
   "expectPersonalSocket": true,
   "expectPersonalTools": true,

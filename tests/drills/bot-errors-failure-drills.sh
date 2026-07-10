@@ -1030,7 +1030,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_in "BOT ERROR" "$CAPTURE" "D22c credential 0644 fails closed"
-assert_credential_failure "mode>600" "credential_path_basename=tokens.env" "D22c credential 0644 critical line"
+assert_credential_failure "non_private" "credential_path_basename=tokens.env" "D22c credential 0644 critical line"
 assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
 assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
 
