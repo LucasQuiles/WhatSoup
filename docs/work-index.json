@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-10T04:13:02Z",
+  "generated_at": "2026-07-10T14:25:17Z",
   "repo": "WhatSoup",
-  "git_head": "31b14b93cf9d43c09ff5c095137254278558e7a0",
+  "git_head": "1a19dbe549e3c222f33853772680e418002e200e",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 52,
   "schema_version": 5,
@@ -376,7 +376,7 @@
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-07-10",
-      "size_bytes": 77323
+      "size_bytes": 589936
     },
     {
       "path": "docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md",
