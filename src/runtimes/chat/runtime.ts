@@ -526,7 +526,7 @@ export class ChatRuntime implements Runtime {
           event: 'chat_runtime_post_send_settlement_failed',
           outboundOpId: mainOpId,
           hasWaMessageId: outboundReceipt.waMessageId !== null,
-          err: settlementErr,
+          settlementErrorKind: settlementErr instanceof Error ? 'error' : 'non_error',
         }, 'chat runtime: reply transport succeeded but durability settlement failed');
       }
     }

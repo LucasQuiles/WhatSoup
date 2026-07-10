@@ -1643,15 +1643,15 @@ describe('DurabilityEngine integration', () => {
     );
     expect(settlementErrors).toHaveLength(1);
     const settlementMeta = settlementErrors[0]![0] as Record<string, unknown>;
-    expect(settlementMeta).toMatchObject({
+    expect(settlementMeta).toEqual({
       event: 'chat_runtime_post_send_settlement_failed',
       outboundOpId: 42,
       hasWaMessageId: true,
-      err: expect.any(Error),
+      settlementErrorKind: 'error',
     });
-    expect((settlementMeta.err as Error).message).toBe('injected durability settlement failure');
     expect(settlementMeta).not.toHaveProperty('chatJid');
     expect(settlementMeta).not.toHaveProperty('responseText');
+    expect(settlementMeta).not.toHaveProperty('err');
   });
 
   it('settles only the resolving receipt after a genuine transport retry', async () => {
