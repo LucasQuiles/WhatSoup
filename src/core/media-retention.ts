@@ -47,12 +47,12 @@ export const DEFAULT_RETENTION: RetentionConfig = {
 // Core cleanup logic
 // ---------------------------------------------------------------------------
 
-async function runCleanupDir(
+function runCleanupDir(
   dir: string,
   maxAgeMs: number,
   db: Database,
   result: CleanupResult,
-): Promise<void> {
+): void {
   const now = Date.now();
   let entries;
   try {
@@ -75,12 +75,16 @@ async function runCleanupDir(
     const ageMs = now - stat.mtimeMs;
     if (ageMs > maxAgeMs) {
       try {
+        db.raw.prepare('UPDATE messages SET media_path = NULL WHERE media_path = ?').run(fullPath);
+      } catch {
+        result.skipped++;
+        continue;
+      }
+
+      try {
         unlinkSync(fullPath);
         result.bytesFreed += stat.size;
         result.deleted++;
-
-        // Nullify media_path in DB so queries don't return paths to deleted files
-        db.raw.prepare('UPDATE messages SET media_path = NULL WHERE media_path = ?').run(fullPath);
       } catch {
         result.skipped++;
       }
@@ -91,6 +95,7 @@ async function runCleanupDir(
 /**
  * Run a single cleanup pass over both media subdirectories.
  * Each subdirectory uses its own retention policy.
+ * Must run outside an explicit database transaction because file deletion cannot roll back.
  *
  * Exported for direct use by the `cleanup_media` MCP tool and tests.
  */
@@ -99,10 +104,14 @@ export async function runCleanup(
   db: Database,
   retention: RetentionConfig,
 ): Promise<CleanupResult> {
+  if (db.raw.isTransaction) {
+    throw new Error('media retention cleanup refused inside an active database transaction');
+  }
+
   const result: CleanupResult = { deleted: 0, skipped: 0, bytesFreed: 0 };
 
-  await runCleanupDir(join(baseMediaDir, 'tmp'),   retention.tempMaxAgeMs,  db, result);
-  await runCleanupDir(join(baseMediaDir, 'cache'), retention.cacheMaxAgeMs, db, result);
+  runCleanupDir(join(baseMediaDir, 'tmp'),   retention.tempMaxAgeMs,  db, result);
+  runCleanupDir(join(baseMediaDir, 'cache'), retention.cacheMaxAgeMs, db, result);
 
   // SP9: purge failed scheduled messages with stale BLOB data
   purgeFailedScheduledMessages(db);
