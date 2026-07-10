@@ -434,16 +434,16 @@ describe('redactInternalArtifacts — audience scoping', () => {
   });
 
   it.each([
-    { label: 'nested domain', input: `${'12345'}@${'g.us'}.evil.test` },
-    { label: 'hyphenated domain', input: `${'12345'}@${'g.us'}-evil.test` },
-    { label: 'repeated hyphen domain', input: `${'12345'}@${'g.us'}--evil.test` },
-    { label: 'mixed punctuation domain', input: `${'12345'}@${'g.us'}.-evil.test` },
-    { label: 'leading plus', input: `+${'12345'}@${'g.us'}` },
-    { label: 'dotted local part', input: `x.${'12345'}@${'g.us'}` },
+    { label: 'nested domain', input: `${FAKE_GROUP_JID}.evil.test` },
+    { label: 'hyphenated domain', input: `${FAKE_GROUP_JID}-evil.test` },
+    { label: 'repeated hyphen domain', input: `${FAKE_GROUP_JID}--evil.test` },
+    { label: 'mixed punctuation domain', input: `${FAKE_GROUP_JID}.-evil.test` },
+    { label: 'leading plus', input: `+${FAKE_GROUP_JID}` },
+    { label: 'dotted local part', input: `x.${FAKE_GROUP_JID}` },
   ])('internal audience redacts a JID-shaped substring inside an email-like token: $label', ({ input }) => {
       const { text, redactions } = redactInternalArtifacts(input, 'internal');
-      expect(text).not.toBe(input);
-      expect(text).toContain('[REDACTED_EMAIL]');
+      expect(text).toBe('[REDACTED_EMAIL]');
+      expect(text).not.toContain(FAKE_GROUP_JID);
       expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
   });
 
@@ -454,26 +454,35 @@ describe('redactInternalArtifacts — audience scoping', () => {
     expect(redactInternalArtifacts(input, 'internal').text).toBe(input);
   });
 
-  it('internal audience redacts keyed secret values that contain a WhatsApp JID', () => {
-    for (const input of [
-      `password=abc/${FAKE_GROUP_JID}/def`,
-      `client_secret=abc-${FAKE_GROUP_JID}-def`,
-    ]) {
-      const { text, redactions } = redactInternalArtifacts(input, 'internal');
-      expect(text).toContain('[REDACTED]');
-      expect(text).not.toContain(FAKE_GROUP_JID);
-      expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
-    }
+  it.each([
+    { input: `password=abc/${FAKE_GROUP_JID}/def`, expected: 'password=[REDACTED]' },
+    { input: `client_secret=abc-${FAKE_GROUP_JID}-def`, expected: 'client_secret=[REDACTED]' },
+  ])('internal audience redacts the complete unquoted keyed value in $input', ({ input, expected }) => {
+    const { text, redactions } = redactInternalArtifacts(input, 'internal');
+    expect(text).toBe(expected);
+    expect(text).not.toContain(FAKE_GROUP_JID);
+    expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
   });
 
   it.each([
     { input: `password="abc ${FAKE_GROUP_JID} def"`, expected: 'password="[REDACTED]"' },
     { input: `client_secret='abcdefgh ${FAKE_GROUP_JID} suffix'`, expected: "client_secret='[REDACTED]'" },
+    { input: `{"password":"abc ${FAKE_GROUP_JID} def"}`, expected: '{"password":"[REDACTED]"}' },
+    { input: `password="abc\n${FAKE_GROUP_JID} def"`, expected: 'password="[REDACTED]"' },
+    { input: `password="abc\n${FAKE_GROUP_JID} def`, expected: 'password="[REDACTED]' },
   ])('internal audience redacts the entire quoted keyed value in $input', ({ input, expected }) => {
     const { text, redactions } = redactInternalArtifacts(input, 'internal');
     expect(text).toBe(expected);
     expect(text).not.toContain(FAKE_GROUP_JID);
     expect(redactions.map((redaction) => redaction.category)).toContain('provider_secret');
+  });
+
+  it.each([
+    { label: 'quoted local part', input: `"${FAKE_GROUP_JID}"@evil.test`, expected: '[REDACTED_EMAIL]' },
+    { label: 'label delimiter', input: `target:${FAKE_GROUP_JID}`, expected: `target:${FAKE_GROUP_JID}` },
+    { label: 'device JID', input: '12345:6@g.us', expected: '12345:6@g.us' },
+  ])('classifies complete JIDs without preserving an enclosing email: $label', ({ input, expected }) => {
+    expect(redactInternalArtifacts(input, 'internal').text).toBe(expected);
   });
 
   it('scans dotted email-local adversarial input in linear time', () => {
@@ -530,6 +539,8 @@ describe('redactInternalArtifacts — audience scoping', () => {
     { input: '“/tmp/client.key”', expected: '“[sensitive-path]”' },
     { input: "‘/home/testuser/fleet-tokens.json’", expected: "‘[sensitive-path]’" },
     { input: '~~~/home/testuser/fleet-tokens.json~~', expected: '~~[sensitive-path]~~' },
+    { input: '/home/testuser/.config/secrets/', expected: '[sensitive-path]' },
+    { input: '/state/auth-bond-backups/', expected: '[sensitive-path]' },
   ])('preserves Unicode or Markdown wrappers while masking $input', ({ input, expected }) => {
     const { text, redactions } = redactInternalArtifacts(input, 'internal');
     expect(text).toBe(expected);

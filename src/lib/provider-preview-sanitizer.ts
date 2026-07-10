@@ -5,8 +5,8 @@
 
 import { jidPattern } from './redaction-patterns.ts';
 
-const KEYED_SECRET_PREFIX = /\b(?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\s*[:=]\s*/gi;
-const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@:-]/;
+const KEYED_SECRET_PREFIX = /(?<![A-Za-z0-9_.-])(["']?)(?:[A-Za-z0-9]+_)*(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20}|client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)\1(?![A-Za-z0-9_.-])\s*[:=]\s*/gi;
+const EMAIL_TOKEN_CHAR = /[A-Za-z0-9._%+@-]/;
 const TRAILING_EMAIL_PUNCTUATION = new Set(['.', ':']);
 
 function redactKeyedSecretValues(text: string): string {
@@ -21,7 +21,7 @@ function redactKeyedSecretValues(text: string): string {
     if (quote === '"' || quote === "'") {
       let end = valueStart + 1;
       let escaped = false;
-      while (end < text.length && text[end] !== '\n' && text[end] !== '\r') {
+      while (end < text.length) {
         const char = text[end]!;
         if (escaped) {
           escaped = false;
@@ -58,12 +58,53 @@ function redactEmailLikeTokens(text: string, preserveWhatsAppJids: boolean): str
   let out = '';
   let index = 0;
   while (index < text.length) {
+    const openingQuote = text[index];
+    if (openingQuote === '"' || openingQuote === "'") {
+      let quoteEnd = index + 1;
+      let escaped = false;
+      while (quoteEnd < text.length) {
+        const char = text[quoteEnd]!;
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === openingQuote) break;
+        quoteEnd += 1;
+      }
+      if (text[quoteEnd] === openingQuote && text[quoteEnd + 1] === '@') {
+        let emailEnd = quoteEnd + 2;
+        while (emailEnd < text.length && /[A-Za-z0-9.-]/.test(text[emailEnd]!)) emailEnd += 1;
+        if (emailEnd > quoteEnd + 2) {
+          out += text.slice(cursor, index);
+          out += '[REDACTED_EMAIL]';
+          cursor = emailEnd;
+          index = emailEnd;
+          continue;
+        }
+      }
+    }
     if (!EMAIL_TOKEN_CHAR.test(text[index]!)) {
       index += 1;
       continue;
     }
     const start = index;
-    while (index < text.length && EMAIL_TOKEN_CHAR.test(text[index]!)) index += 1;
+    let numericPrefix = true;
+    while (index < text.length) {
+      const char = text[index]!;
+      if (EMAIL_TOKEN_CHAR.test(char)) {
+        if (char < '0' || char > '9') numericPrefix = false;
+        index += 1;
+        continue;
+      }
+      if (char === ':' && numericPrefix) {
+        let deviceEnd = index + 1;
+        while (deviceEnd < text.length && /[0-9]/.test(text[deviceEnd]!)) deviceEnd += 1;
+        if (deviceEnd > index + 1 && text[deviceEnd] === '@') {
+          index = deviceEnd;
+          numericPrefix = false;
+          continue;
+        }
+      }
+      break;
+    }
     const token = text.slice(start, index);
     if (!token.includes('@')) continue;
 

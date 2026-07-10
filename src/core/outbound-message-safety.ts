@@ -300,7 +300,10 @@ function redactSensitivePaths(text: string, redactions: Redaction[]): string {
       end > 1
       && (
         TRAILING_PATH_PUNCTUATION.has(match[end - 1]!)
-        || TRAILING_PATH_UNICODE_PUNCTUATION.test(match[end - 1]!)
+        || (
+          match[end - 1] !== '/'
+          && TRAILING_PATH_UNICODE_PUNCTUATION.test(match[end - 1]!)
+        )
       )
     ) {
       end -= 1;
