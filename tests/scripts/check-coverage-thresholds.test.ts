@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -95,6 +95,12 @@ function makeFailingLibStatementsSummary(): string {
     [`${prefix}/console/src/components/shared/SearchInput.tsx`]: makeFileEntry(100, 99, 100, 95),
     // lib statements: 80/100 = 80% < 84% threshold
     [`${prefix}/console/src/lib/api.ts`]: makeFileEntry(100, 80, 100, 90),
+  });
+}
+
+function makeRootOnlySummary(): string {
+  return makeSummary({
+    '/fake/repo/src/main.ts': makeFileEntry(100, 100, 100, 100),
   });
 }
 
@@ -373,6 +379,29 @@ describe('check-coverage-thresholds.mjs', () => {
       expect(result.status).toBe(1);
       expect(() => JSON.parse(result.stdout)).not.toThrow();
     });
+
+    it('rejects a misspelled strict option instead of silently using report-only mode', () => {
+      const summary = makeRootOnlySummary();
+      const result = runScript(summary, ['--strcit']);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('ERROR(argument-error)');
+      expect(result.stdout).toBe('');
+    });
+
+    it('rejects duplicate strict options', () => {
+      const summary = makePassingSummary();
+      const result = runScript(summary, ['--strict', '--strict']);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('ERROR(argument-error)');
+    });
+
+    it('rejects more than one coverage summary path', () => {
+      const firstSummary = makePassingSummary();
+      const secondSummary = makeRootOnlySummary();
+      const result = runScript(firstSummary, [secondSummary]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('ERROR(argument-error)');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -391,6 +420,14 @@ describe('check-coverage-thresholds.mjs', () => {
       expect(result.status).toBe(2);
       // Must say coverage-not-run, not parse-error or schema-error
       expect(result.stderr).toMatch(/ERROR\(coverage-not-run\)/);
+    });
+
+    it('escapes newlines in a missing summary path diagnostic', () => {
+      const missingPath = join(tmpdir(), 'missing\n::error::injected.json');
+      const result = runScript(missingPath);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('\\n::error::injected.json');
+      expect(result.stderr).not.toContain('\n::error::injected.json');
     });
 
     it('exits 2 with ERROR(parse-error) when file is not valid JSON', () => {
@@ -437,6 +474,50 @@ describe('check-coverage-thresholds.mjs', () => {
       const result = runScript(path);
       expect(result.status).toBe(2);
       expect(result.stderr).toMatch(/ERROR\(schema-error\)/);
+    });
+
+    it('rejects covered counts greater than their totals', () => {
+      for (const metric of ['statements', 'branches'] as const) {
+        const entry = makeFileEntry(100, 98, 100, 95);
+        entry[metric].covered = entry[metric].total + 1;
+        const path = makeSummary({
+          '/fake/repo/console/src/hooks/use-foo.ts': entry,
+        });
+        const result = runScript(path, ['--strict']);
+        expect(result.status, metric).toBe(2);
+        expect(result.stderr, metric).toContain('ERROR(schema-error)');
+        expect(result.stderr, metric).toContain(`${metric}.covered`);
+      }
+    });
+
+    it('rejects negative and fractional coverage counters', () => {
+      const invalidCounters = [-1, 1.5];
+      for (const value of invalidCounters) {
+        const entry = makeFileEntry(100, 98, 100, 95);
+        entry.statements.total = value;
+        const path = makeSummary({
+          '/fake/repo/console/src/hooks/use-foo.ts': entry,
+        });
+        const result = runScript(path, ['--strict']);
+        expect(result.status, String(value)).toBe(2);
+        expect(result.stderr, String(value)).toContain('ERROR(schema-error)');
+        expect(result.stderr, String(value)).toContain('statements.total');
+      }
+    });
+
+    it('escapes newlines in malformed coverage entry keys', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cov-check-log-injection-'));
+      tmpDirs.push(dir);
+      const path = join(dir, 'coverage-summary.json');
+      const unsafeKey = '/fake/repo/console/src/hooks/use-foo.ts\n::error::injected';
+      writeFileSync(path, JSON.stringify({
+        total: makeFileEntry(100, 90, 50, 45),
+        [unsafeKey]: null,
+      }));
+      const result = runScript(path, ['--strict']);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('\\n::error::injected');
+      expect(result.stderr).not.toContain('\n::error::injected');
     });
   });
 
@@ -508,56 +589,73 @@ describe('check-coverage-thresholds.mjs', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Tests: empty area (no files matched)
+  // Tests: configured areas must be present in the coverage artifact
   // ---------------------------------------------------------------------------
 
-  describe('empty area', () => {
-    it('area with no matching files reports file_count 0 and pass true (vacuous 100%)', () => {
-      // Summary has no files in the hooks directory
+  describe('coverage artifact completeness', () => {
+    it('fails strict mode when configured areas have no matching files', () => {
+      const summary = makeRootOnlySummary();
+      const result = runScript(summary, ['--strict']);
+      expect(result.status).toBe(1);
+      const output = JSON.parse(result.stdout) as {
+        overall_pass: boolean;
+        summary: { areas_failing: number; areas_passing: number };
+        areas: Record<string, {
+          file_count: number;
+          pass: boolean;
+          pass_files: boolean;
+          actual_statements: number;
+        }>;
+      };
+      expect(output.overall_pass).toBe(false);
+      expect(output.summary.areas_failing).toBe(4);
+      expect(output.summary.areas_passing).toBe(0);
+      for (const area of ['primitives', 'hooks', 'shared', 'lib']) {
+        expect(output.areas[area].file_count).toBe(0);
+        expect(output.areas[area].pass_files).toBe(false);
+        expect(output.areas[area].pass).toBe(false);
+        expect(output.areas[area].actual_statements).toBe(100);
+        expect(result.stderr).toContain(area);
+      }
+      expect(result.stderr).toContain('ERROR(no-matching-files)');
+    });
+
+    it('keeps missing-file failures advisory in report-only mode', () => {
+      const result = runScript(makeRootOnlySummary());
+      expect(result.status).toBe(0);
+      const output = JSON.parse(result.stdout) as { overall_pass: boolean };
+      expect(output.overall_pass).toBe(false);
+      expect(result.stderr).toContain('WARN(no-matching-files)');
+      expect(result.stderr).not.toContain('ERROR(no-matching-files)');
+    });
+
+    it('accepts a matched type-only file with zero statements', () => {
       const prefix = '/fake/repo';
       const summary = makeSummary({
-        [`${prefix}/console/src/components/primitives/Button.tsx`]: makeFileEntry(100, 99, 100, 96),
-        // no hooks, no shared, no lib
+        [`${prefix}/console/src/components/primitives/types.ts`]: makeFileEntry(0, 0, 0, 0),
+        [`${prefix}/console/src/hooks/types.ts`]: makeFileEntry(0, 0, 0, 0),
+        [`${prefix}/console/src/components/shared/types.ts`]: makeFileEntry(0, 0, 0, 0),
+        [`${prefix}/console/src/lib/types.ts`]: makeFileEntry(0, 0, 0, 0),
       });
-      const result = runScript(summary);
-      expect(result.status).toBe(0);
-      const output = JSON.parse(result.stdout) as {
-        areas: Record<string, { file_count: number; pass: boolean; actual_statements: number }>;
-      };
-      // Hooks, shared, lib have no files -- vacuously pass at 100%
-      expect(output.areas.hooks.file_count).toBe(0);
-      expect(output.areas.hooks.pass).toBe(true);
-      expect(output.areas.hooks.actual_statements).toBe(100);
-    });
-  });
-
-  // ---------------------------------------------------------------------------
-  // Tests: real summary smoke (uses the /tmp/soup-coverage artifact if present)
-  // ---------------------------------------------------------------------------
-
-  describe('real summary smoke', () => {
-    const REAL_SUMMARY = '/tmp/soup-coverage/coverage-summary.json';
-
-    it('exits 0 against the real audit summary (all areas should pass current thresholds)', () => {
-      let exists = false;
-      try {
-        readFileSync(REAL_SUMMARY);
-        exists = true;
-      } catch {
-        // skip
-      }
-      if (!exists) return; // gracefully skip if artifact not present
-
-      const result = runScript(REAL_SUMMARY);
+      const result = runScript(summary, ['--strict']);
       expect(result.status).toBe(0);
       const output = JSON.parse(result.stdout) as {
         overall_pass: boolean;
-        areas: Record<string, { pass: boolean; actual_statements: number; actual_branches: number }>;
+        areas: Record<string, {
+          file_count: number;
+          pass: boolean;
+          pass_files: boolean;
+          actual_statements: number;
+          actual_branches: number;
+        }>;
       };
-      // All four contract surfaces were above thresholds at audit time
       expect(output.overall_pass).toBe(true);
       for (const area of ['primitives', 'hooks', 'shared', 'lib']) {
         expect(output.areas[area].pass).toBe(true);
+        expect(output.areas[area].pass_files).toBe(true);
+        expect(output.areas[area].file_count).toBe(1);
+        expect(output.areas[area].actual_statements).toBe(100);
+        expect(output.areas[area].actual_branches).toBe(100);
       }
     });
   });

@@ -139,6 +139,9 @@ function runWrapper(opts: {
       OPENAI_API_KEY: 'test-key',
       PINECONE_API_KEY: 'test-key',
       WHATSOUP_HEALTH_TOKEN: 'test-token',
+      // This suite isolates Node resolution/version enforcement. Restart preflight
+      // has its own behavioral suite and intentionally rejects dirty tracked trees.
+      WHATSOUP_SKIP_PREFLIGHT: '1',
       // Spread caller overrides last so they win
       ...env,
     },
