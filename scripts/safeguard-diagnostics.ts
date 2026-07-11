@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseDocument } from 'yaml';
 import { git as runGit, gitList as runGitList, readText } from './lib/guard-core.ts';
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail';
@@ -57,6 +58,8 @@ interface AnchorRequirement {
   file: string;
   anchors: string[];
   requiredUnconditionalRuns?: string[];
+  requiredWorkflowJob?: string;
+  validate?: (text: string) => string[];
   remediation: string;
 }
 
@@ -230,6 +233,23 @@ const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
   'design:capture:validate',
 ]);
 
+const QUALITY_CI_BROWSER_INSTALL_SCRIPT = [
+  'for attempt in 1 2 3; do',
+  '  echo "::group::Playwright chromium download attempt ${attempt}/3"',
+  '  if timeout 300 npx playwright install chromium; then',
+  '    echo "::endgroup::"',
+  '    echo "Playwright chromium download succeeded on attempt ${attempt}"',
+  '    exit 0',
+  '  fi',
+  '  echo "::endgroup::"',
+  '  echo "Playwright chromium download attempt ${attempt} failed or timed out; retrying after backoff"',
+  '  sleep $((attempt * 15))',
+  'done',
+  'echo "Playwright chromium download failed after 3 attempts"',
+  'exit 1',
+  '',
+].join('\n');
+
 const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   {
     id: 'design-regression-rg-preflight',
@@ -394,11 +414,20 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     ],
     requiredUnconditionalRuns: [
       'run: npx playwright install-deps chromium',
-      'timeout 300 npx playwright install chromium',
       'run: npm run test:browser',
       'run: npm run test:browser:motion',
     ],
+    requiredWorkflowJob: 'quality',
     remediation: 'Restore the shared console design verification chain in quality.yml CI.',
+  },
+  {
+    id: 'quality-ci-playwright-timeouts',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [],
+    validate: qualityCiPlaywrightTimeoutFailures,
+    remediation:
+      'Restore the 60-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
   },
   {
     id: 'tag-release-console-design-chain',
@@ -423,6 +452,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'run: npm run test:browser',
       'run: npm run test:browser:motion',
     ],
+    requiredWorkflowJob: 'release-gate',
     remediation: 'Restore the shared console design and browser verification chain in tag-release-gate.yml.',
   },
   {
@@ -674,23 +704,223 @@ function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, c
   };
 }
 
-function conditionalRunFailures(text: string, runs: string[]): string[] {
-  const lines = text.split(/\r?\n/);
-  const failures: string[] = [];
-  for (const run of runs) {
-    const runLineIndexes = lines
-      .map((line, index) => ({ line, index }))
-      .filter(({ line }) => line.trim() === run);
-    for (const { index } of runLineIndexes) {
-      let start = index;
-      while (start > 0 && !/^\s*-\s+name:/.test(lines[start])) start -= 1;
-      let end = index + 1;
-      while (end < lines.length && !/^\s*-\s+name:/.test(lines[end])) end += 1;
-      const conditional = lines.slice(start, end).find((line) => /^\s*if\s*:/.test(line));
-      if (conditional) failures.push(`conditional ${run} (${conditional.trim()})`);
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function containsMappingKey(value: unknown, key: string, seen = new WeakSet<object>()): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((entry) => containsMappingKey(entry, key, seen));
+  const record = value as Record<string, unknown>;
+  if (hasOwn(record, key)) return true;
+  return Object.values(record).some((entry) => containsMappingKey(entry, key, seen));
+}
+
+function collectStringValues(value: unknown, seen = new WeakSet<object>()): string[] {
+  if (typeof value === 'string') return [value];
+  if (value === null || typeof value !== 'object' || seen.has(value)) return [];
+  seen.add(value);
+  const entries = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  return entries.flatMap((entry) => collectStringValues(entry, seen));
+}
+
+function runControlFailures(step: Record<string, unknown>, label: string): string[] {
+  return ['shell', 'env', 'working-directory', 'background']
+    .filter((key) => hasOwn(step, key))
+    .map((key) => `${label} must not declare ${key}`);
+}
+
+function parseWorkflow(text: string, label: string): { root: Record<string, unknown> | null; failures: string[] } {
+  const document = parseDocument(text, { merge: false, stringKeys: true, uniqueKeys: true });
+  const parseProblems = [...document.errors, ...document.warnings];
+  if (parseProblems.length > 0) {
+    return {
+      root: null,
+      failures: parseProblems.map((problem) => `${label} YAML must parse without errors: ${problem.message}`),
+    };
+  }
+
+  try {
+    const root = asRecord(document.toJS({ maxAliasCount: 20 }));
+    if (root && containsMappingKey(root, '<<')) {
+      return { root: null, failures: [`${label} must not use YAML merge keys`] };
     }
+    return root
+      ? { root, failures: [] }
+      : { root: null, failures: [`${label} must contain a mapping at its root`] };
+  } catch (error) {
+    return {
+      root: null,
+      failures: [`${label} YAML conversion failed: ${error instanceof Error ? error.message : String(error)}`],
+    };
+  }
+}
+
+function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'quality workflow');
+  if (!root) return parseFailures;
+  const jobs = asRecord(root?.jobs);
+  const quality = asRecord(jobs?.quality);
+  if (!quality) return ['workflow must declare jobs.quality as a mapping'];
+
+  const failures: string[] = [];
+  if (hasOwn(root, 'defaults')) failures.push('quality workflow must not declare defaults');
+  if (hasOwn(root, 'env')) failures.push('quality workflow must not declare env');
+  if (quality['timeout-minutes'] !== 60) {
+    failures.push('quality job timeout must be exactly 60 minutes');
+  }
+  if (hasOwn(quality, 'continue-on-error') && quality['continue-on-error'] !== false) {
+    failures.push('quality job continue-on-error must be absent or false');
+  }
+  if (hasOwn(quality, 'if')) {
+    failures.push('quality job must not declare if');
+  }
+  if (hasOwn(quality, 'needs')) failures.push('quality job must not declare needs');
+  if (hasOwn(quality, 'defaults')) failures.push('quality job must not declare defaults');
+  if (hasOwn(quality, 'env')) failures.push('quality job must not declare env');
+
+  if (!Array.isArray(quality.steps)) {
+    failures.push('quality job must declare steps as an array');
+    return failures;
+  }
+  const steps = quality.steps.map(asRecord);
+  if (steps.some((step) => step === null)) {
+    failures.push('every quality-job step must be a mapping');
+    return failures;
+  }
+  const stepRecords = steps as Record<string, unknown>[];
+  const installCommand = 'npx playwright install-deps chromium';
+  const targetSteps = stepRecords.filter((step) => step.run === installCommand);
+  if (targetSteps.length !== 1) {
+    failures.push(
+      `quality job must contain exactly one Playwright system-dependency install command (found ${targetSteps.length})`,
+    );
+  }
+
+  const target = targetSteps[0];
+  if (!target) return failures;
+  if (target.name !== 'Install Playwright system deps') {
+    failures.push('Playwright system-dependency step must keep its canonical name');
+  }
+  if (target['timeout-minutes'] !== 5) {
+    failures.push('Playwright system-dependency step timeout must be exactly 5 minutes');
+  }
+  if (hasOwn(target, 'continue-on-error') && target['continue-on-error'] !== false) {
+    failures.push('Playwright system-dependency step continue-on-error must be absent or false');
+  }
+  if (hasOwn(target, 'if')) {
+    failures.push('Playwright system-dependency step must not declare if');
+  }
+  failures.push(...runControlFailures(target, 'Playwright system-dependency step'));
+
+  const browserInstallSteps = stepRecords.filter((step) => step.name === 'Install Playwright chromium');
+  if (browserInstallSteps.length !== 1) {
+    failures.push(`quality job must contain exactly one Playwright chromium install step (found ${browserInstallSteps.length})`);
+  }
+  const browserInstall = browserInstallSteps[0];
+  if (browserInstall) {
+    if (browserInstall.run !== QUALITY_CI_BROWSER_INSTALL_SCRIPT) {
+      failures.push('Playwright chromium install step must use the exact bounded retry script');
+    }
+    if (hasOwn(browserInstall, 'if')) {
+      failures.push('Playwright chromium install step must not declare if');
+    }
+    if (hasOwn(browserInstall, 'continue-on-error') && browserInstall['continue-on-error'] !== false) {
+      failures.push('Playwright chromium install step continue-on-error must be absent or false');
+    }
+    failures.push(...runControlFailures(browserInstall, 'Playwright chromium install step'));
+  }
+
+  const unexpectedInstallConfiguration = stepRecords.some((step) => {
+    if (step === target) return false;
+    return collectStringValues(step).some((value) => {
+      const compact = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+      if (step === browserInstall) {
+        return compact.includes('playwrightinstall-deps') || compact.includes('--with-deps');
+      }
+      return compact.includes('playwrightinstall') || compact.includes('--with-deps');
+    });
+  });
+  if (unexpectedInstallConfiguration) {
+    failures.push('quality job must not run Playwright system-dependency installation outside the bounded step');
   }
   return failures;
+}
+
+function conditionalRunFailures(text: string, runs: string[], requiredJobId?: string): string[] {
+  if (runs.length === 0) return [];
+  const { root, failures: parseFailures } = parseWorkflow(text, 'workflow');
+  if (!root) return parseFailures;
+  const jobs = asRecord(root.jobs);
+  if (!jobs) return ['workflow must declare jobs as a mapping'];
+
+  const failures = new Set<string>();
+  if (hasOwn(root, 'defaults')) failures.add('workflow must not declare defaults');
+  if (hasOwn(root, 'env')) failures.add('workflow must not declare env');
+  const jobEntries = requiredJobId
+    ? [[requiredJobId, jobs[requiredJobId]] as const]
+    : Object.entries(jobs);
+  if (requiredJobId && !asRecord(jobs[requiredJobId])) {
+    failures.add(`workflow must declare jobs.${requiredJobId} as a mapping`);
+  }
+
+  const candidates: Array<{
+    jobId: string;
+    job: Record<string, unknown>;
+    step: Record<string, unknown>;
+    run: string;
+  }> = [];
+  for (const [jobId, jobValue] of jobEntries) {
+    const job = asRecord(jobValue);
+    if (!job || !Array.isArray(job.steps)) continue;
+    if (hasOwn(job, 'needs')) failures.add(`workflow job ${jobId} must not declare needs`);
+    if (hasOwn(job, 'defaults')) failures.add(`workflow job ${jobId} must not declare defaults`);
+    if (hasOwn(job, 'env')) failures.add(`workflow job ${jobId} must not declare env`);
+    for (const stepValue of job.steps) {
+      const step = asRecord(stepValue);
+      if (step && typeof step.run === 'string') candidates.push({ jobId, job, step, run: step.run });
+    }
+  }
+
+  const renderValue = (value: unknown): string =>
+    typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  for (const requiredRun of runs) {
+    const exact = requiredRun.startsWith('run: ');
+    const command = exact ? requiredRun.slice('run: '.length) : requiredRun;
+    const matches = candidates.filter((candidate) =>
+      exact ? candidate.run === command : candidate.run.includes(command));
+    if (matches.length !== 1) {
+      failures.add(`workflow must contain exactly one ${requiredRun} step (found ${matches.length})`);
+    }
+    for (const { jobId, job, step } of matches) {
+      if (hasOwn(step, 'if')) {
+        failures.add(`conditional ${requiredRun} (if: ${renderValue(step.if)})`);
+      }
+      if (hasOwn(step, 'continue-on-error') && step['continue-on-error'] !== false) {
+        failures.add(
+          `advisory ${requiredRun} (continue-on-error: ${renderValue(step['continue-on-error'])})`,
+        );
+      }
+      for (const failure of runControlFailures(step, requiredRun)) failures.add(failure);
+      if (hasOwn(job, 'if')) {
+        failures.add(`conditional job ${jobId} for ${requiredRun} (if: ${renderValue(job.if)})`);
+      }
+      if (hasOwn(job, 'continue-on-error') && job['continue-on-error'] !== false) {
+        failures.add(
+          `advisory job ${jobId} for ${requiredRun} (continue-on-error: ${renderValue(job['continue-on-error'])})`,
+        );
+      }
+    }
+  }
+  return [...failures];
 }
 
 function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCheck {
@@ -707,18 +937,24 @@ function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCh
   }
 
   const missing = requirement.anchors.filter((anchor) => !text.includes(anchor));
-  const conditionalRuns = conditionalRunFailures(text, requirement.requiredUnconditionalRuns ?? []);
-  const failures = [
+  const conditionalRuns = conditionalRunFailures(
+    text,
+    requirement.requiredUnconditionalRuns ?? [],
+    requirement.requiredWorkflowJob,
+  );
+  const validationFailures = requirement.validate?.(text) ?? [];
+  const failures = [...new Set([
     ...missing,
     ...conditionalRuns,
-  ];
+    ...validationFailures,
+  ])];
   return {
     id: requirement.id,
     category: requirement.category,
     status: failures.length === 0 ? 'pass' : 'fail',
     message: failures.length === 0
-      ? `${requirement.file} contains required safeguard anchors.`
-      : `${requirement.file} has ${failures.length} safeguard anchor failure(s).`,
+      ? `${requirement.file} satisfies required safeguard checks.`
+      : `${requirement.file} has ${failures.length} safeguard failure(s).`,
     evidence: failures.length === 0 ? requirement.anchors : failures,
     remediation: requirement.remediation,
   };

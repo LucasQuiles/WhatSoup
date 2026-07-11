@@ -146,7 +146,8 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.58.0",
     "vitest": "4.1.8",
-    "vitest-browser-react": "2.2.0"
+    "vitest-browser-react": "2.2.0",
+    "yaml": "2.9.0"
   },
   "overrides": {
     "protobufjs": "^7.5.8",
