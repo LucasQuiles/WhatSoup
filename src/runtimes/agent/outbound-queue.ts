@@ -1458,7 +1458,9 @@ export class OutboundQueue implements IOutboundQueue {
     this.pruneTerminalTextDedupe(now);
     const key = this.terminalTextDedupeKey('text', chatJid, text);
     const entry = this.recentTerminalTextKeys.get(key);
-    if (!entry) return false;
+    if (!entry) {
+      return this.suppressDurableDuplicateTerminalText(text, chatJid);
+    }
 
     entry.lastSeenAt = now;
     entry.suppressedCount += 1;
@@ -1470,6 +1472,33 @@ export class OutboundQueue implements IOutboundQueue {
       suppressedCount: entry.suppressedCount,
       windowMs: TERMINAL_TEXT_DEDUPE_WINDOW_MS,
     }, 'suppressed duplicate outbound terminal text');
+    return true;
+  }
+
+  /**
+   * M1: durable counterpart of the in-memory window — the map dies with the
+   * process, so a restart could re-emit a terminal notice the user already
+   * received. Consult outbound_ops for a terminal op with the same
+   * (chat_jid, payload_hash) echoed within the same window. The hash keys on
+   * the {text} payload JSON, exactly what sendWithRetry writes to the op.
+   */
+  private suppressDurableDuplicateTerminalText(text: string, chatJid: string): boolean {
+    if (!this.durability?.hasRecentEchoedTerminalDuplicate) return false;
+    const payloadHash = createHash('sha256')
+      .update(JSON.stringify({ text }))
+      .digest('hex');
+    if (!this.durability.hasRecentEchoedTerminalDuplicate(
+      chatJid, payloadHash, TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+    )) {
+      return false;
+    }
+    log.info({
+      chatJid,
+      opType: 'text',
+      terminal: true,
+      payloadHash,
+      windowMs: TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+    }, 'suppressed duplicate outbound terminal text (durable echo evidence)');
     return true;
   }
 
