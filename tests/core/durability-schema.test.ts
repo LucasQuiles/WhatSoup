@@ -75,6 +75,35 @@ describe('Migration v2 — durability tables', () => {
     expect(names).toContain('session_status');
   });
 
+  it('migration 39 adds a nullable completed turn identity bundle', () => {
+    const cols = db.raw.prepare("PRAGMA table_info(session_checkpoints)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const byName = new Map(cols.map((column) => [column.name, column]));
+
+    for (const name of [
+      'completed_delivery_jid',
+      'completed_delivery_namespace',
+      'completed_scope',
+      'completed_logical_turn_id',
+      'completed_manager_id',
+    ]) {
+      expect(byName.get(name)).toMatchObject({
+        type: 'TEXT',
+        notnull: 0,
+        dflt_value: null,
+      });
+    }
+    expect(byName.get('completed_generation')).toMatchObject({
+      type: 'INTEGER',
+      notnull: 0,
+      dflt_value: null,
+    });
+  });
+
   it('creates recovery_runs table', () => {
     const cols = db.raw.prepare("PRAGMA table_info(recovery_runs)").all() as Array<{ name: string }>;
     expect(cols.map(c => c.name)).toContain('tool_calls_quarantined');

@@ -955,12 +955,15 @@ describe('usage-limit user notice', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Primary model hit a usage/quota limit'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Switching to OpenCode / minimax/minimax-m2'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining("I'll continue here."),
+      'lifecycle',
     );
   });
 

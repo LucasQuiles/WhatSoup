@@ -27,6 +27,8 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
+    bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
+    getDbRowId: vi.fn(() => null),
   };
 
   const mockQueue = {
@@ -221,6 +223,22 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
+function setOwnedTestSession(runtime: AgentRuntime, mapKey: string, session: unknown): void {
+  (runtime as unknown as {
+    setOwnedPerChatSession: (key: string, value: unknown) => void;
+  }).setOwnedPerChatSession(mapKey, session);
+}
+
+function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
+  generationIdentity: { managerId: string; generation: number };
+} {
+  const owner = (runtime as unknown as {
+    sessionOwnership: { get: (key: string) => { managerId: string; generation: number } | undefined };
+  }).sessionOwnership.get(mapKey);
+  if (!owner) throw new Error(`missing test owner for ${mapKey}`);
+  return { generationIdentity: { managerId: owner.managerId, generation: owner.generation } };
+}
+
 
 // ── F-STICKY-ACTOR tests ─────────────────────────────────────────────────────
 
@@ -313,13 +331,13 @@ describe('F-STICKY-ACTOR: crash clears the WHOLE executing-actor queue (S-CRASH,
     runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
     mapKey = priv().resolvePerChatMapKey(CHAT);
     // A live session with two in-flight turns: ADMIN executing (HEAD) + GUEST queued behind.
-    priv().chatSessions.set(mapKey, { getStatus: () => ({ active: true }), getDbRowId: () => null });
+    setOwnedTestSession(runtime, mapKey, mockSession);
     priv().perChatExecActorQueue.set(mapKey, [ADMIN, GUEST]);
   });
 
   it('handlePerChatCrash clears ALL in-flight entries (not shift-one) -> post-respawn turn is fail-closed', () => {
     // A crash discards the whole subprocess; both in-flight turns are gone.
-    priv().handlePerChatCrash(mapKey, CHAT, {}); // info={} -> no auto-respawn timer scheduled
+    priv().handlePerChatCrash(mapKey, CHAT, currentCrashIdentity(runtime, mapKey));
     expect(priv().perChatExecActorQueue.get(mapKey) ?? []).toEqual([]);
     // The crashed turn's actor (ADMIN) must NOT survive as HEAD; the continuation /
     // next turn resolves to undefined -> denied, never stale-authorized as ADMIN.
@@ -385,7 +403,7 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
       shutdown: vi.fn(async () => {}),
       sendTurn: vi.fn(async () => {}),
     };
-    priv().chatSessions.set(mapKey, inactive);
+    setOwnedTestSession(runtime, mapKey, inactive);
     priv().chatQueues.set(mapKey, mockQueue);
     priv().perChatExecActorQueue.set(mapKey, [GUEST]); // stale from a dead subprocess (e.g. resume-fail)
     await priv().sendTurnToSession(inactive, CHAT, 'admin turn', mapKey, ADMIN);
@@ -417,7 +435,7 @@ describe('F-STICKY-ACTOR F6: LID-rekey migrates the exec-queue + socket to canon
     const newJid = `${convKey}@s.whatsapp.net`;
     const canonical = priv().resolvePerChatMapKey(newJid);
     // Preconditions for the per_chat rekey branch: a session + in-flight state under lidKey.
-    priv().chatSessions.set(lidKey, { getStatus: () => ({ active: true }), getDbRowId: () => null });
+    setOwnedTestSession(runtime, lidKey, mockSession);
     priv().perChatExecActorQueue.set(lidKey, [ADMIN, GUEST]);
     const sockRes = { socketServer: { stop: vi.fn(), updateDeliveryJid: vi.fn() }, socketPath: '/tmp/x.sock', cfgPath: '/tmp/x.mcp.json' };
     priv().perChatSocketResources.set(lidKey, sockRes);

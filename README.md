@@ -316,7 +316,7 @@ Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm`
 
 **ToolRegistry** — In-process MCP tool declarations with scope enforcement (`chat`-scoped vs `global`) and replay policy (`read_only`, `safe`, `unsafe`). Chat-scoped tools only see messages from the current conversation. Global tools see everything. The distinction matters when one instance serves multiple contacts.
 
-**Durability engine** — Two-phase commit for message delivery. Inbound journal captures what arrived. Outbound ops track what was sent. Echo correlation confirms delivery. If the process crashes between receiving a message and sending the reply, the journal replays on restart.
+**Durability engine** — Two-phase commit for message delivery. The inbound journal captures what arrived, outbound ops track what was sent, and echo correlation confirms delivery. Restart recovery classifies persisted evidence instead of blindly replaying the interrupted prompt: reconstructable `safe`/`read_only` outbound ops may be re-sent, unsafe or uncertain user-visible sends are quarantined or transferred to an exact proof-linked recovery owner, and an inbound with no provable recovery owner fails closed for operator visibility.
 
 **Media bridge** — Unix socket per workspace that lets Claude Code subprocesses send WhatsApp media (images, documents, audio) without direct Baileys access. The agent runtime owns the bridge; the subprocess just writes to a socket.
 
@@ -326,7 +326,7 @@ Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm`
 
 **linkedStatus** — Each instance in the fleet API includes `linkedStatus: 'linked' | 'unlinked'` based on whether Baileys auth credentials exist. Unlinked instances show a "Re-link" button instead of "Restart" since they need QR authentication before they can run.
 
-**Reply Guarantee Protocol (RGP)** — Reliability layer ensuring every inbound user message eventually produces either a terminal echoed outbound response or an explicit fallback notice. Layered above the durability journal: a transcript-visibility parser, hook-tier queue + MCP client, a Stop hook, a drain daemon (timer/launchd), and the runtime watchdog (`ReplyGuaranteeManager`) that arms per inbound event and disarms when delivery is confirmed. See [docs/reply-guarantee.md](docs/reply-guarantee.md).
+**Reply Guarantee Protocol (RGP)** — Reliability coverage for reply-required turns that reach an agent/session boundary without visible output. Its six shipped layers are the transcript-visibility parser, hook-tier queue + MCP client, Stop hook, drain daemon (timer/launchd), runtime watchdog, and assistant-text egress gate. `ReplyGuaranteeManager` provides rate-bounded typing-only liveness while an inbound remains open; it never proves delivery or completes the turn. Immutable turn finalization records the actual outcome — replied, intentional no-reply policy, failed, or exact proof-linked recovery — while the hook/drain tier retries interruption notices at session boundaries. See [docs/reply-guarantee.md](docs/reply-guarantee.md).
 
 ## Health & Monitoring
 
@@ -354,7 +354,7 @@ Baileys v7 (one WhatsApp connection per line) is the default transport. An insta
 
 ## Reliability & Alerting
 
-- **Reply Guarantee Protocol** — every inbound message yields a reply or an explicit fallback (see [Key Concepts](#key-concepts) and [docs/reply-guarantee.md](docs/reply-guarantee.md)).
+- **Reply Guarantee Protocol** — reply-required turns receive layered liveness and session-boundary fallback coverage; intentional no-reply policy and failed/recovery-owned terminals remain explicit rather than being counted as replies (see [Key Concepts](#key-concepts) and [docs/reply-guarantee.md](docs/reply-guarantee.md)).
 - **BOT ERRORS pipeline** — `deploy/scripts/` collector/dispatcher/sentinel daemons capture, redact, and route runtime errors; alert throttling and runtime manifests pin the hardened surface. See [deploy/scripts/README-bot-errors.md](deploy/scripts/README-bot-errors.md).
 - **Fleet silences** — `GET/POST/DELETE /api/fleet/silence(s)` suppress alerts for known-noisy instances during maintenance.
 
@@ -398,7 +398,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
-| [Reply Guarantee Protocol](docs/reply-guarantee.md) | RGP architecture and its shipped layers (parser, hooks, drain daemon, runtime watchdog) |
+| [Reply Guarantee Protocol](docs/reply-guarantee.md) | Six-layer RGP architecture, typing-only runtime liveness, terminal ownership, and hook/drain fallback recovery |
 | [Public Surface](docs/public-surface.md) | Generated SSOT for the HTTP API and generated artifacts (guard-checked) |
 | [Twilio Transport](docs/runbooks/twilio-transport.md) | Optional Twilio SMS transport — setup, webhook, voicemail, limitations |
 | [BOT ERRORS Pipeline](deploy/scripts/README-bot-errors.md) | Error collector/dispatcher/sentinel daemons, redaction, runtime manifests |

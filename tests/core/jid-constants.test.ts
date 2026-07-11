@@ -31,6 +31,7 @@ import {
   smsJidToPhone,
   isSmsJid,
   isWhatsAppAuthenticatedJid,
+  parseWhatsAppDeliveryNamespace,
 } from '../../src/core/jid-constants.ts';
 
 describe('domain constants', () => {
@@ -47,6 +48,26 @@ describe('domain constants', () => {
     expect(JID_PERSONAL).toBe('@s.whatsapp.net');
     expect(JID_LID).toBe('@lid');
     expect(JID_GROUP).toBe('@g.us');
+  });
+});
+
+describe('parseWhatsAppDeliveryNamespace', () => {
+  it.each([
+    ['15551234567@s.whatsapp.net', DOMAIN_PERSONAL],
+    ['81536414179557@lid', DOMAIN_LID],
+    ['synthetic-group@g.us', DOMAIN_GROUP],
+  ])('accepts canonical delivery JID %s', (jid, namespace) => {
+    expect(parseWhatsAppDeliveryNamespace(jid)).toBe(namespace);
+  });
+
+  it.each([
+    'status@broadcast',
+    'a@b@lid',
+    '@lid',
+    '15551234567@LID',
+    ' 15551234567@lid',
+  ])('rejects non-canonical or unsupported JID %s', (jid) => {
+    expect(parseWhatsAppDeliveryNamespace(jid)).toBeNull();
   });
 });
 

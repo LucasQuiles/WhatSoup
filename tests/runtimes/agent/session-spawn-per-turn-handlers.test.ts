@@ -41,6 +41,12 @@ vi.mock('node:os', () => ({
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
+vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+  killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+    target.kill(signal);
+  }),
+}));
+
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -264,5 +270,54 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(onCrash).not.toHaveBeenCalled();
+    expect((sm as unknown as { child: HandlerChild | null }).child).toBe(secondChild);
+  });
+
+  it('clears an inactive exact child even after its ownership generation advances', async () => {
+    let generationIdentity = { managerId: 'spawn-turn-inactive-exit', generation: 1 };
+    const { sm } = await makeOpencodeSession();
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.sendTurn('generation one');
+    const state = sm as unknown as { active: boolean; child: HandlerChild | null };
+    generationIdentity = { managerId: 'spawn-turn-inactive-exit', generation: 2 };
+    state.active = false;
+
+    child._exitCb!(0, null);
+
+    expect(state).toMatchObject({ active: false, child: null });
+  });
+
+  it('ignores stdout and stderr from a stale generation child', async () => {
+    const events: AgentEvent[] = [];
+    let generationIdentity = { managerId: 'spawn-turn-streams', generation: 1 };
+    const { sm } = await makeOpencodeSession({ onEvent: (event: AgentEvent) => events.push(event) });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.sendTurn('generation one');
+    events.length = 0;
+    generationIdentity = { managerId: 'spawn-turn-streams', generation: 2 };
+
+    child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop', tokens: { input: 1, output: 2 }, cost: 0 },
+    })}\n`));
+    child.stderr.emit('data', Buffer.from('stale generation failure\n'));
+
+    expect(events).toEqual([]);
+    expect((sm as unknown as { crashStderrPreview: string }).crashStderrPreview).toBe('');
+  });
+
+  it('does not clear the current stalled-operation timer from a stale exit', async () => {
+    let generationIdentity = { managerId: 'spawn-turn-stalled-timer', generation: 1 };
+    const { sm } = await makeOpencodeSession();
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.sendTurn('generation one');
+    const currentTimer = { id: 'current-stalled-operation' } as unknown as ReturnType<typeof setTimeout>;
+    const state = sm as unknown as { stalledOpKill: ReturnType<typeof setTimeout> | null };
+    state.stalledOpKill = currentTimer;
+    generationIdentity = { managerId: 'spawn-turn-stalled-timer', generation: 2 };
+
+    child._exitCb!(9, null);
+
+    expect(state.stalledOpKill).toBe(currentTimer);
   });
 });

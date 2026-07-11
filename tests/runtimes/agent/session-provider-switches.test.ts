@@ -5,7 +5,7 @@
  * `getProviderArgs`, `getParser`) used a `default:` branch that silently
  * aliased any unknown provider ID to Claude semantics. Combined with a
  * validator that accepted any non-empty string, a typo'd `provider: "claud"`
- * config would launch the `claude` binary, parse output with `parseEvent`,
+ * config would launch the `claude` binary, parse output with `parseEvents`,
  * and the operator would never see an error.
  *
  * The fix tightens validation upstream (now an enum check) AND tightens the
@@ -67,6 +67,49 @@ describe('SessionManager provider switches — fail-fast (#447)', () => {
 
   it('getParser throws on an unknown provider ID', () => {
     expect(() => __provider_switch_for_test.getParser('claud-cli')).toThrow(/unknown provider/i);
+  });
+
+  it('normalizes every CLI provider parser result into an event envelope', () => {
+    const cases = [
+      {
+        provider: 'claude-cli',
+        line: JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: 'hello' }] },
+        }),
+        expectedType: 'assistant_text',
+      },
+      {
+        provider: 'codex-cli',
+        line: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'thread/started',
+          params: { thread: { id: 'codex-session' } },
+        }),
+        expectedType: 'init',
+      },
+      {
+        provider: 'gemini-cli',
+        line: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { protocolVersion: '0.1', agentCapabilities: {} },
+        }),
+        expectedType: 'init',
+      },
+      {
+        provider: 'opencode-cli',
+        line: JSON.stringify({ type: 'step_start', sessionID: 'opencode-session' }),
+        expectedType: 'init',
+      },
+    ] as const;
+
+    for (const { provider, line, expectedType } of cases) {
+      expect(__provider_switch_for_test.getParser(provider)(line)).toEqual([
+        expect.objectContaining({ type: expectedType }),
+      ]);
+      expect(__provider_switch_for_test.getParser(provider)('')).toEqual([]);
+    }
   });
 
   it('buildChildEnv throws on an unknown provider ID', () => {

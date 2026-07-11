@@ -57,6 +57,7 @@ const {
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
+    bindGenerationOwnership: vi.fn((_resolve: () => unknown) => {}),
   };
 
   const mockQueue = {
@@ -74,6 +75,10 @@ const {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
+    beginTurnEvidence: vi.fn(),
+    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+      turnId, answerOpIds: [], lifecycleOpIds: [], statusOpIds: [],
+    })),
     setToolUpdateMode: vi.fn(),
     setToolUpdateRedirectJid: vi.fn(),
     setTextAggregateDelayMs: vi.fn(),
@@ -237,6 +242,7 @@ type CrashInfo = {
   provider?: string;
   crashClass?: string;
   stderrPreview?: string;
+  generationIdentity?: { managerId: string; generation: number };
 };
 
 type PollRuntimeState = {
@@ -280,6 +286,22 @@ function seedPending(overrides: Partial<PendingPollQuestion>): PendingPollQuesti
 
 function vote(voterJid: string, option: string, isAdmin: boolean, ts: number): PollVote {
   return { voterJid, selectedOptions: [option], isAdmin, timestamp: ts };
+}
+
+function setOwnedTestSession(runtime: AgentRuntime, mapKey: string): void {
+  (runtime as unknown as {
+    setOwnedPerChatSession: (key: string, value: typeof mockSession) => void;
+  }).setOwnedPerChatSession(mapKey, mockSession);
+}
+
+function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
+  generationIdentity: { managerId: string; generation: number };
+} {
+  const owner = (runtime as unknown as {
+    sessionOwnership: { get: (key: string) => { managerId: string; generation: number } | undefined };
+  }).sessionOwnership.get(mapKey);
+  if (!owner) throw new Error(`missing test owner for ${mapKey}`);
+  return { generationIdentity: { managerId: owner.managerId, generation: owner.generation } };
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -411,7 +433,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PollRuntimeState;
 
-      state.chatSessions.set(groupJid, mockSession);
+      setOwnedTestSession(runtime, groupJid);
       state.chatQueues.set(groupJid, mockQueue);
 
       const votes = new Map<string, PollVote>([
@@ -552,7 +574,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
   describe('handlePerChatCrash auto-respawn continuation', () => {
     function seedPerChatSession(state: PollRuntimeState, mapKey: string): void {
-      state.chatSessions.set(mapKey, mockSession);
+      setOwnedTestSession(state as unknown as AgentRuntime, mapKey);
       state.chatQueues.set(mapKey, mockQueue);
     }
 
@@ -570,6 +592,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-1', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }); // post-resume
 
       state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
         exitCode: 1,
         signal: null,
         sessionId: 'sess-1',
@@ -611,6 +634,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         .mockReturnValue({ active: true, pid: 321, sessionId: 'sess-2', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
 
       state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
         exitCode: 1, signal: null, sessionId: 'sess-2', dbRowId: 9,
       });
 
@@ -639,6 +663,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
 
       state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
         exitCode: 1, signal: null, sessionId: 'sess-3', dbRowId: 11,
       });
 
@@ -659,14 +684,16 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
 
-      // Drive crash count past AUTO_RESPAWN_MAX_CRASHES; the final crash takes
-      // the exhaustion branch and emits the alert.
-      for (let i = 0; i < 6; i++) {
-        state.handlePerChatCrash(mapKey, dmJid, {
-          exitCode: 1, signal: 'SIGKILL', sessionId: 'sess-x', dbRowId: 1,
-          provider: 'p', crashClass: 'oom', stderrPreview: 'kaboom',
-        });
-      }
+      // Seed the prior crash history, then deliver one current-generation crash.
+      // Replaying the same callback would now be (correctly) deduplicated while
+      // the generation is recoverable_dead, so it cannot model distinct crashes.
+      const crashState = state as unknown as { recordCrash: (key: string) => number };
+      for (let i = 0; i < 3; i++) crashState.recordCrash(mapKey);
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1, signal: 'SIGKILL', sessionId: 'sess-x', dbRowId: 1,
+        provider: 'p', crashClass: 'oom', stderrPreview: 'kaboom',
+      });
 
       expect(mockEmitAlert).toHaveBeenCalledWith(
         'test',

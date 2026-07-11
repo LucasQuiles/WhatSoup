@@ -84,6 +84,16 @@ describe('repo hygiene guard', () => {
     ]);
   });
 
+  it('blocks todo tests in staged added lines', () => {
+    const issues = scanAddedLines([
+      { filePath: 'tests/example.test.ts', line: 10, text: 'it.todo("implement this test")' },
+      { filePath: 'tests/example.test.ts', line: 11, text: 'test.todo("implement that test")' },
+      { filePath: 'tests/example.test.ts', line: 12, text: 'describe.todo("implement this suite")' },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual(['todo-test', 'todo-test', 'todo-test']);
+  });
+
   it('flags private host labels in deploy script Python tests', () => {
     const issues = scanAddedLines([
       { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: `HOST = "${privateHostLabelFixture}"` },

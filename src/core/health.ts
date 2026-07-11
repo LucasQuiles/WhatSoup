@@ -1184,6 +1184,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       const body = JSON.stringify({
         status,
+        generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(process.env.WHATSOUP_REPO_ROOT ?? process.cwd()),
         instance: {

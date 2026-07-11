@@ -81,11 +81,37 @@ describe('HTTP provider lifecycle and error coverage', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalOpenAiKey;
     if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+  });
+
+  it.each([
+    ['openai-api', () => new OpenAIApiProvider()],
+    ['anthropic-api', () => new AnthropicApiProvider()],
+  ] as const)('%s emits collision-safe session IDs when the wall clock is pinned', async (
+    providerId,
+    makeProvider,
+  ) => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const firstEvents: AgentEvent[] = [];
+    const secondEvents: AgentEvent[] = [];
+
+    await initializeProvider(makeProvider(), firstEvents);
+    await initializeProvider(makeProvider(), secondEvents);
+
+    const firstInit = firstEvents.find(
+      (event): event is Extract<AgentEvent, { type: 'init' }> => event.type === 'init',
+    );
+    const secondInit = secondEvents.find(
+      (event): event is Extract<AgentEvent, { type: 'init' }> => event.type === 'init',
+    );
+    expect(firstInit?.sessionId).toMatch(new RegExp(`^${providerId}-`));
+    expect(secondInit?.sessionId).toMatch(new RegExp(`^${providerId}-`));
+    expect(secondInit?.sessionId).not.toBe(firstInit?.sessionId);
   });
 
   it('rejects turns before initialization', async () => {

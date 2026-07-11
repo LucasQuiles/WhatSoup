@@ -1,0 +1,1 @@
+export const TURN_RECOVERY_MAX_TEXT_BYTES = 256 * 1024;

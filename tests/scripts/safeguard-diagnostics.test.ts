@@ -27,6 +27,7 @@ const requiredPackageScripts = {
   'guard:repo:commit-authors': 'npm run guard:repo -- --commit-authors',
   'guard:repo:release-hygiene': 'npm run guard:repo -- --release-hygiene',
   'guard:test-integrity': 'bash scripts/test-integrity-ci.sh',
+  'guard:test-integrity:required': 'WHATSOUP_REQUIRE_TEST_INTEGRITY=1 npm run guard:test-integrity',
   'guard:lint:src': 'node scripts/eslint-fitness-check.ts',
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
@@ -98,7 +99,7 @@ const requiredPackageScripts = {
     'npm run guard:claude-settings',
     'npm run guard:agent-decision-polls',
     'npm run guard:safeguard-diagnostics',
-    'npm run guard:test-integrity',
+    'npm run guard:test-integrity:required',
     'npm run guard:boundaries',
     'npm run guard:fail-closed-gate',
     'npm run guard:service-units',
@@ -463,6 +464,62 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
       .toContain('missing npm run guard:safeguard-diagnostics');
+  });
+
+  it('fails when the required test-integrity guard script is missing', () => {
+    const fixture = makeRepo({ scripts: { 'guard:test-integrity:required': undefined } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'required-package-scripts')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['guard:test-integrity:required']),
+    });
+  });
+
+  it('fails when release verification uses the optional test-integrity guard', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace('npm run guard:test-integrity:required', 'npm run guard:test-integrity'),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing npm run guard:test-integrity:required');
+  });
+
+  it('fails when release verification omits the required test-integrity guard', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run guard:test-integrity:required', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing npm run guard:test-integrity:required');
+  });
+
+  it('fails when release verification runs the required test-integrity guard out of order', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(
+            'npm run guard:safeguard-diagnostics && npm run guard:test-integrity:required',
+            'npm run guard:test-integrity:required && npm run guard:safeguard-diagnostics',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('out-of-order npm run guard:test-integrity:required');
   });
 
   it('fails when release verification mixes pinned npm with bare nested npm commands', () => {

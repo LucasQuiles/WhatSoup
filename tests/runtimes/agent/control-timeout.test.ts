@@ -47,6 +47,10 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
+    beginTurnEvidence: vi.fn(),
+    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+      turnId, answerOpIds: [], lifecycleOpIds: [], statusOpIds: [],
+    })),
     setToolUpdateMode: vi.fn(),
     setToolUpdateRedirectJid: vi.fn(),
     setTextAggregateDelayMs: vi.fn(),

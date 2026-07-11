@@ -1,19 +1,24 @@
 # Reply Guarantee Protocol
 
-The Reply Guarantee Protocol (RGP) is the reliability layer for the gap between
-two different promises:
+The Reply Guarantee Protocol (RGP) is reliability coverage for the gap between
+two different concerns:
 
 - WhatSoup already guarantees durable delivery for messages it decides to send.
-- WhatSoup also needs to guarantee that every inbound user message produces a
-  visible reply or an explicit interruption notice.
+- Reply-required agent turns need liveness and session-boundary recovery when no
+  visible output appears.
 
-The invariant is:
+The scoped invariant is:
 
-> For every inbound user message, WhatSoup eventually records either a terminal
-> echoed outbound response for that turn or a fallback notification delivered to
-> the originating chat.
+> A reply-required turn that reaches an agent/session boundary without visible
+> output leaves a durable fallback intent for the originating chat; live runtime
+> completion is decided separately from exact persisted turn and delivery evidence.
 
-This document records the architecture and its shipped state. All five layers
+This is not a universal claim that every inbound must echo a reply. Immutable turn
+finalization can record `finalized_replied`, `finalized_no_reply_policy`,
+`failed_terminal`, or `transferred_to_recovery_owner`. Only the first is a proved
+reply; intentional suppression, failure, and recovery ownership stay explicit.
+
+This document records the architecture and its shipped state. All six layers
 below are now implemented: the pure transcript parser
 (`deploy/hooks/lib/transcript-walk.mjs`), the hook-tier state and MCP client
 helpers (`deploy/hooks/lib/rgp-state.mjs`, `deploy/hooks/lib/whatsoup-mcp-call.mjs`),
@@ -23,10 +28,11 @@ the Stop hook (`deploy/hooks/stop-ensure-reply.mjs`), the drain daemon
 `whatsoup-reply-guarantee.timer`/`.service` systemd units and the
 `com.whatsoup.reply-guarantee.plist` launchd agent), and the runtime watchdog
 (`ReplyGuaranteeManager` in `src/core/reply-guarantee.ts`, armed from the agent
-runtime). Layer-level status is noted inline below.
+runtime), plus the runtime assistant-text egress gate. Layer-level status is
+noted inline below.
 
 
-> **Rate-limit layering note:** two independent throttles guard the fallback message, both keyed per chat — the in-process watchdog (1 per 15 min, in-memory, resets on restart) and the hook-tier drain (3 per hour, persisted per instance in `fallback-rate-limit.json`). They differ in window, threshold, and persistence; a fallback is sent only when the layer handling that path admits it. Tune them together.
+> **Rate-limit layering note:** two independent throttles are keyed per chat — the in-process watchdog limits its typing-only liveness nudge to 1 per 15 min (in-memory, reset on restart), while the hook-tier drain limits actual fallback messages to 3 per hour (persisted per instance in `fallback-rate-limit.json`). Tune them together without treating the runtime nudge as delivery or terminal proof.
 
 ## Current Surface
 
@@ -70,20 +76,27 @@ RGP is decomposed into independently reviewable layers, all now shipped:
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in
    `src/core/reply-guarantee.ts`, armed from the agent runtime) arms per inbound
-   event and disarms when the existing durability journal observes a terminal
-   echoed outbound response.
+   event and emits a rate-bounded typing-only liveness nudge after sustained
+   silence. It never completes the inbound row: immutable turn finalization owns
+   terminal CAS, delivery proof, recovery transfer, and disarm.
 
 6. Assistant-text egress gate (shipped).
    The agent runtime classifies provider `assistant_text` before it reaches the
    WhatsApp outbound queue. High-confidence process narration is suppressed but
    leaves the watchdog armed; high-confidence no-op or send-verification chatter
-   is suppressed and disarms the watchdog for the active inbound turn, preventing
-   a hidden acknowledgement from being followed by the generic runtime fallback.
+   is recorded as intentional suppression, and the terminal finalizer then
+   disarms the watchdog only after the no-reply policy terminal commits.
    Explicit MCP sends (`send_message`, `reply_message`, media captions) bypass
    this gate because they already carry user-visible send intent.
 
-The runtime watchdog is the root guarantee. Hooks and daemons are recovery
-coverage for agent/session boundaries.
+Immutable turn finalization is the terminal authority for live runtime turns.
+The runtime watchdog is only a rate-bounded liveness monitor: a successful
+typing nudge is neither user-visible delivery nor terminal proof, and an open
+inbound remains monitored until durable terminal state disarms it. The Stop
+hook and drain daemon provide actual fallback-notice recovery at agent/session
+boundaries where live finalization cannot finish. A fallback intent or attempted
+send is not relabeled as an echoed reply; outbound delivery evidence retains its
+own status until transport reconciliation proves what happened.
 
 ## Transcript Visibility
 
@@ -130,6 +143,7 @@ For the transcript parser:
 - Tool-result-only user messages are ignored.
 - Malformed transcript lines are tolerated.
 
-The queue, daemon, runtime watchdog, and their tests have since shipped as
-separate layers (see the Layered Design section); runtime watchdog behavior is
-covered by `tests/core/reply-guarantee.test.ts`.
+The full six-layer implementation and its tests have since shipped (see the
+Layered Design section). Runtime watchdog behavior, including fail-closed typing
+adapter failures and continued monitoring of open inbound rows, is covered by
+`tests/core/reply-guarantee.test.ts`.

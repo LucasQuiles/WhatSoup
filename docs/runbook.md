@@ -72,6 +72,17 @@ systemctl --user status whatsoup@sandbox-agent
 # Reload without full restart (not supported — always use restart)
 ```
 
+Agent shutdown is fail-visible. The runtime continues closing other sessions and auxiliary
+resources if one provider termination fails, but retains the failed session manager and its
+ownership for a later retry and returns a failure to the service manager (multiple failures are
+aggregated). Do not delete its checkpoint or kill a PID from that checkpoint to make the stop
+look successful; inspect the termination error and retry the managed stop after correcting it.
+Turn admission closes before the shutdown snapshot. A turn still waiting behind system output is
+terminalized without being dispatched, and a late queue admission is rejected into the same
+durable terminal path. If logs report that exact terminal or recovery-handoff proof is missing,
+the runtime deliberately retains the affected session, queue, FIFO context, and reply-guarantee
+owner and returns a failed stop; preserve that state and fix the durability failure before retrying.
+
 ### Enable / Disable on Login
 
 ```bash
@@ -343,7 +354,7 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
 | `unhealthy` | 503 | WhatsApp disconnected. Messages cannot be received or sent. |
 
-**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code.
+**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
 ### Quick Health Check
 
@@ -390,6 +401,16 @@ sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
 - Access list blocks the sender — check `access_list` table (see §7.1)
 - Rate limit hit — check `rate_limits` table
 
+If `/new` replies `_A response is still in progress. Send /new again after it finishes._`, the
+reset was intentionally deferred. The current user or synthetic turn still owns the queue and
+terminal evidence; `/new` does not cancel it or remove its manager. Wait for the result/failure
+to finalize, then send `/new` again.
+
+If logs report that the configured provider does not support persisted resume, the exact stale
+lifecycle has already been retired to `ended`; cleanup will not turn it back into `suspended`.
+Do not edit the checkpoint status to make it resumable. Let the next inbound create a fresh
+lifecycle (supported resume providers are Claude CLI, Codex CLI, and OpenCode CLI).
+
 ---
 
 ### 5.2 Health Endpoint Returns Degraded
@@ -421,6 +442,12 @@ journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 
 **Common causes for agent instances:**
 - Recent session crashes — check `durability.quarantinedOutbound` and `recentCrashCount` in the health JSON
+
+On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, queue, or
+checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
+cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
+no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
+degraded so the exhausted episode is not hidden.
 
 ---
 
@@ -458,27 +485,24 @@ This occurs when a previous process died without releasing the health port, or (
 
 ```bash
 # 1. Check what holds the port (e.g. 9091 for sandbox-agent)
-lsof -i :9091
+lsof -nP -iTCP:9091 -sTCP:LISTEN
 
-# 2. If it's a zombie whatsoup process, kill it
-kill -9 <PID>
+# 2. Inspect and stop the owning managed unit; a PID from lsof alone is not
+# lifecycle proof and must never be fed directly to kill.
+systemctl --user status whatsoup@sandbox-agent
+systemctl --user stop whatsoup@sandbox-agent
 
 # 3. Check for orphaned lock file
 ls -la ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
-# 4. The lock self-heals across reboots only: on startup WhatSoup reclaims a
-# lock whose recorded bootId differs from the current boot AND whose holder PID
-# is dead (the holder is provably gone); the reclaim is logged as "reclaimed a
-# stale lock left by a previous boot". A dead-pid lock from the SAME boot stays
-# fail-closed (to avoid stealing a lock from a transiently-unsignalable holder),
-# and the rare case where a reboot recycled the holder's PID onto an unrelated
-# live process also stays fail-closed (reported "active") — both still need a
-# manual removal once you're sure no real bot is running:
-rm ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
+# 4. Follow §5.6 to prove a stale lock before removing it.
 
-# 5. Restart
+# 5. Start only after the port and lock each have one proved owner.
 systemctl --user start whatsoup@sandbox-agent
 ```
+
+If `lsof` identifies an unrelated process, resolve that process through its own service manager
+or move the WhatSoup port. Do not force-kill an arbitrary listener to recover a line.
 
 ---
 
@@ -489,20 +513,33 @@ systemctl --user start whatsoup@sandbox-agent
 This happens when the WhatSoup process crashed before it could SIGTERM its Claude Code children.
 
 ```bash
-# 1. Find all claude processes
-ps aux | grep 'claude ' | grep -v grep
+# Replace this synthetic label with the deployed instance name.
+INSTANCE='your-instance'
+DB="$HOME/.local/share/whatsoup/instances/$INSTANCE/bot.db"
 
-# 2. Check which are legitimate (owned by running whatsoup instances)
-sqlite3 ~/.local/share/whatsoup/instances/q/bot.db \
+# 1. Find all claude processes
+pgrep -af 'claude '
+
+# 2. Read the checkpoint inventory; this is evidence, not kill authorization.
+sqlite3 "$DB" \
   "SELECT conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active';"
 
-# 3. Kill orphaned processes (PIDs not in the session_checkpoints table)
-kill <PID>
+# 3. Stop the owning WhatSoup unit and compare the candidate's executable,
+# parent, and start time with the service logs/checkpoint before acting.
+systemctl --user stop "whatsoup@$INSTANCE"
+PID=12345 # replace with the candidate after the ownership checks above
+ps -p "$PID" -o pid=,ppid=,lstart=,command=
 
-# 4. After cleanup, the database will self-heal on next startup:
-# preConnectRecovery() runs kill -0 on each checkpoint's claude_pid and marks
-# dead sessions as 'orphaned' before any new connections are established.
+# 4. Start through the service manager. preConnectRecovery() probes each
+# checkpoint PID and marks a proved-dead lifecycle orphaned before reconnect.
+systemctl --user start "whatsoup@$INSTANCE"
 ```
+
+PID absence from one checkpoint query is not proof of orphanhood: PIDs can be reused, a shared
+session can own multiple checkpoints, and a shutdown failure deliberately retains its manager.
+Never terminate a candidate from `pgrep`/SQLite output alone. If exact process ownership cannot
+be proved after the unit is stopped, preserve the process and escalate with the health, logs,
+checkpoint row, and `ps` metadata rather than bypassing lifecycle closure.
 
 ---
 
@@ -687,18 +724,17 @@ After an unclean shutdown (OOM kill, power loss, etc.), run this before restarti
 
 ```bash
 INSTANCE=sandbox-agent
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 # 1. Stop the service (in case systemd is still trying to restart it)
 systemctl --user stop whatsoup@$INSTANCE
 
-# 2. Remove stale lock file (if present)
-rm -f ~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.lock
+# 2. Inspect any lock; do not remove it until the §5.6 holder/boot proof passes.
+test ! -e ~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.lock || \
+  cat ~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.lock
 
-# 3. Kill any orphaned Claude processes
-# Get PIDs from session_checkpoints
-sqlite3 ~/.local/share/whatsoup/instances/$INSTANCE/bot.db \
-  "SELECT claude_pid FROM session_checkpoints WHERE claude_pid IS NOT NULL AND session_status = 'active';" \
-  | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && kill {} || true'
+# 3. Preserve a point-in-time database copy before recovery changes state.
+sqlite3 $DB ".backup '${DB}.pre-recovery'"
 
 # 4. The next startup will run preConnectRecovery() automatically:
 #    - Marks orphaned sessions (dead claude_pid)
@@ -715,6 +751,9 @@ sqlite3 ~/.local/share/whatsoup/instances/$INSTANCE/bot.db \
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
 #    - Reconstructable text ops ({text}) → re-sent via messenger
 #    - Non-reconstructable ops → quarantined + alerted (never left pending)
+# Turn recovery is narrower: it reconciles only an exact source inbound,
+# terminal owner, and selected unresolved delivery-op chain. It never blindly
+# replays an arbitrary prompt that happened to be open at the crash.
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE
@@ -723,19 +762,25 @@ systemctl --user start whatsoup@$INSTANCE
 journalctl --user -u whatsoup@$INSTANCE -n 50 | grep -E 'preConnect|postConnect|recovery'
 ```
 
+Do not kill checkpoint PIDs or edit lifecycle/recovery rows as a preparatory step. PID reuse and
+shared-session ownership make those shortcuts unsafe, and Migration 40 deliberately requires
+terminal source plus selected-delivery proof before a recovery job can complete or be retained
+as completed evidence.
+
 ---
 
 ### 6.3 Handling Quarantined Messages
 
-Quarantined outbound operations are messages the durability engine could not safely replay after a crash. They are preserved in the database for manual inspection.
+Quarantined outbound operations are messages the durability engine could not safely replay after a crash. They are preserved in the database for read-only inspection and evidence-backed remediation.
 
 ```bash
 INSTANCE=sandbox-agent
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+OP_ID=123 # replace with the quarantined op under review
 
-# 1. Inspect quarantined messages
+# 1. Inspect quarantined operation metadata without printing message bodies.
 sqlite3 $DB \
-  "SELECT id, conversation_key, payload, error, submitted_at
+  "SELECT id, conversation_key, payload_hash, source_inbound_seq, error, submitted_at
    FROM outbound_ops WHERE status = 'quarantined'
    ORDER BY id DESC;"
 
@@ -746,16 +791,22 @@ sqlite3 $DB \
    JOIN inbound_events ie ON op.source_inbound_seq = ie.seq
    WHERE op.status = 'quarantined';"
 
-# 3. Decision options:
-#    a) The message was actually sent (user received it): mark it echoed
-sqlite3 $DB "UPDATE outbound_ops SET status = 'echoed' WHERE id = <ID>;"
-
-#    b) The message was not sent and you want to discard it: mark failed_permanent
-sqlite3 $DB "UPDATE outbound_ops SET status = 'failed_permanent', error = 'manually_discarded' WHERE id = <ID>;"
-
-#    c) You want to re-attempt delivery: reset to pending (use with caution — may duplicate)
-sqlite3 $DB "UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = <ID>;"
+# 3. Check whether the op is selected by an immutable terminal/recovery chain.
+sqlite3 $DB \
+  "SELECT t.id AS terminal_id, t.inbound_disposition, j.id AS recovery_job_id,
+          j.state, j.completion_kind, j.echo_conflict_at
+   FROM turn_terminal_records t
+   LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
+   WHERE t.delivery_op_id = $OP_ID;"
 ```
+
+Do **not** repair these rows with direct `UPDATE outbound_ops`,
+`UPDATE turn_recovery_jobs`, or `DELETE` statements. Changing `quarantined` to `pending`,
+fabricating `echoed`, or deleting a job bypasses terminal CAS, source-inbound settlement,
+completion proof, reply-guarantee disarm, and late-echo conflict handling. Preserve a database
+backup and the read-only evidence above, then use an audited application recovery path. If the
+deployed build exposes no supported resolver for the required operator decision, leave the chain
+intact and escalate for a reviewed repair rather than manufacturing delivery truth in SQLite.
 
 ---
 
@@ -779,7 +830,8 @@ mv ${DB}.recovered $DB
 
 # 4. If unrecoverable, start fresh (auth state is separate — preserved)
 mv $DB ${DB}.corrupted.$(date +%Y%m%d%H%M%S)
-# The next startup will create a fresh database and run all 8 migrations.
+# The next startup will create a fresh database and run the current migration
+# set through version 40.
 # If another instance has the same phone's message history, a warm-start import
 # will be attempted automatically from legacy paths.
 
@@ -826,6 +878,12 @@ FALLBACK STATUS      # report effective provider, window expiry, turn counters
 **Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then let the window lapse or send `FALLBACK OFF`.
 
 Notes: on instances whose runtime has no fallback support (e.g. chat-mode), the bot replies "Fallback control not supported on this instance." A malformed duration (`FALLBACK ON 0m`, `FALLBACK ON tomorrow`) is not recognized as an admin command at all — the text falls through to normal message handling.
+
+When an agent hits a provider rate limit or model-unavailable terminal and no fallback activates,
+the user receives a deterministic notice such as “Primary model is rate limited” or “Primary
+model is unavailable on this host.” The provider's raw result is suppressed; account, credential,
+model-detail, and stderr text are not copied into chat. Seeing the sanitized notice followed by
+session shutdown is the intended fail-visible behavior, not proof that a fallback ran.
 
 ### 7.3 Provider/Fallback Parity Report
 
@@ -1246,6 +1304,13 @@ After a successful auto-compact, the runtime applies a 5-minute success cooldown
 
 The next real user turn after a successful compact is measured separately. If that turn's own input exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
+An auto-compact that has not completed after 4 minutes is logged as `auto compact timed out`,
+enters a 5-minute retry backoff, and stops blocking the next user dispatch. The runtime keeps the
+timed-out compact's FIFO classification slot: if its result arrives late, that result is still
+consumed as a system result and cannot consume or finalize the following user's inbound turn. A
+later system turn remains independently blocking; rejection of the older timed-out send removes
+only the older released slot.
+
 ### Diagnosis
 
 ```bash
@@ -1253,7 +1318,7 @@ The next real user turn after a successful compact is measured separately. If th
 grep "prompt too long" /var/log/whatsoup/<instance>.log
 
 # Check auto-compact activity
-grep "auto compact triggered" /var/log/whatsoup/<instance>.log
+grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<instance>.log
 
 # Check bounded-spiral detections
 grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log

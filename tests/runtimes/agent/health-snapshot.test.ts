@@ -261,6 +261,21 @@ function expectedFallbackDetails(): Record<string, unknown> {
   };
 }
 
+function expectedTurnRecoveryDetails(): Record<string, number> {
+  return {
+    turnRecoveryOutstanding: 0,
+    turnRecoveryPending: 0,
+    turnRecoveryLiveClaimed: 0,
+    turnRecoveryExpiredClaimed: 0,
+    turnRecoveryBlockedUnsafe: 0,
+    turnRecoveryExhausted: 0,
+    turnRecoveryQuarantinedDelivery: 0,
+    turnRecoveryCorruptLinks: 0,
+    turnRecoveryOrphanTransfers: 0,
+    turnRecoveryEchoConflicts: 0,
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
@@ -313,6 +328,13 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        proactiveResumeIdentityRejects: 0,
+        turnFinalizationRetainedRetries: 0,
+        turnFinalizationDegradedScopes: 0,
+        turnFinalizationRetryAttempts: 0,
+        turnFinalizationRetryRecoveries: 0,
+        turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },
     });
@@ -333,6 +355,13 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        proactiveResumeIdentityRejects: 0,
+        turnFinalizationRetainedRetries: 0,
+        turnFinalizationDegradedScopes: 0,
+        turnFinalizationRetryAttempts: 0,
+        turnFinalizationRetryRecoveries: 0,
+        turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },
     });
@@ -386,6 +415,13 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        proactiveResumeIdentityRejects: 0,
+        turnFinalizationRetainedRetries: 0,
+        turnFinalizationDegradedScopes: 0,
+        turnFinalizationRetryAttempts: 0,
+        turnFinalizationRetryRecoveries: 0,
+        turnFinalizationRetryExhaustions: 0,
+        ...expectedTurnRecoveryDetails(),
         ...expectedFallbackDetails(),
       },
     });

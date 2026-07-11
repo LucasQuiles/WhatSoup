@@ -20,9 +20,14 @@ import {
   type InstanceHealth,
   type LoggedOutConfirmation,
 } from '../../src/fleet/health-poller.ts';
+import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 
 const alertFns = vi.hoisted(() => ({
-  emitAlert: vi.fn(() => true),
+  emitAlert: vi.fn((): AlertEmissionResult => ({
+    ok: true,
+    channel: 'outbox',
+    status: 'durably_queued',
+  })),
   clearAlertSource: vi.fn(() => true),
 }));
 const logger = vi.hoisted(() => ({
@@ -61,6 +66,10 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 type AlertMockCall = [string, string, ...unknown[]];
+
+function durableAlertResult(): AlertEmissionResult {
+  return { ok: true, channel: 'outbox', status: 'durably_queued' };
+}
 type AlertCriticalAsset = {
   failure?: {
     code?: string;
@@ -94,6 +103,33 @@ function makeInstances(...items: [string, InstanceHealth][]): Map<string, Instan
   return new Map(items);
 }
 
+function onlineHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const whatsappOverrides = typeof overrides.whatsapp === 'object' && overrides.whatsapp !== null
+    ? overrides.whatsapp as Record<string, unknown>
+    : {};
+  const connectionOverrides = typeof whatsappOverrides.connection === 'object' && whatsappOverrides.connection !== null
+    ? whatsappOverrides.connection as Record<string, unknown>
+    : {};
+  return {
+    status: 'healthy',
+    generated_at: new Date().toISOString(),
+    runtime: {},
+    ...overrides,
+    whatsapp: {
+      connected: true,
+      account_jid: 'redacted-account@s.whatsapp.net',
+      ...whatsappOverrides,
+      connection: {
+        state: 'connected',
+        reconnect_phase: null,
+        reconnect_attempts: 0,
+        auth_failure_class: 'none',
+        ...connectionOverrides,
+      },
+    },
+  };
+}
+
 type PollerPrivate = { poll(): Promise<void> };
 function privatePoll(p: HealthPoller): Promise<void> {
   return (p as unknown as PollerPrivate).poll();
@@ -123,7 +159,7 @@ describe('HealthPoller — branch coverage supplement #2', () => {
     logger.error.mockClear();
     logger.debug.mockClear();
     alertFns.emitAlert.mockReset();
-    alertFns.emitAlert.mockReturnValue(true);
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
     alertFns.clearAlertSource.mockReset();
     alertFns.clearAlertSource.mockReturnValue(true);
     alertThrottleStore.loadAlertThrottle.mockReset();
@@ -425,8 +461,7 @@ describe('HealthPoller — branch coverage supplement #2', () => {
             },
           },
         }) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -444,7 +479,7 @@ describe('HealthPoller — branch coverage supplement #2', () => {
             },
           },
           outbound_sends: { latest_successful_send_at: '2026-05-20T12:00:10.000Z' },
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);

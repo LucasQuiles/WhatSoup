@@ -211,4 +211,103 @@ describe('PendingSystemResultTracker', () => {
     // No further decrement.
     expect(tracker.count('a')).toBe(0);
   });
+
+  it('waits for every marked system result before releasing a following user turn', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-a');
+    tracker.mark('chat-a');
+
+    let released = false;
+    const waiting = tracker.waitForDrain('chat-a').then(() => { released = true; });
+    tracker.consumeIfPending('chat-a');
+    await Promise.resolve();
+    expect(released).toBe(false);
+
+    tracker.consumeIfPending('chat-a');
+    await waiting;
+    expect(released).toBe(true);
+    expect(tracker.count('chat-a')).toBe(0);
+  });
+
+  it('releases a system-result waiter when the send fails and its mark is reversed', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-b');
+
+    const waiting = tracker.waitForDrain('chat-b');
+    tracker.unmark('chat-b');
+
+    await expect(waiting).resolves.toBeUndefined();
+    expect(tracker.count('chat-b')).toBe(0);
+  });
+
+  it('lets a marked system sender wait only for earlier system results', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-c');
+    tracker.mark('chat-c');
+
+    let released = false;
+    const waiting = tracker.waitForCountAtMost('chat-c', 1).then(() => { released = true; });
+    await Promise.resolve();
+    expect(released).toBe(false);
+
+    tracker.consumeIfPending('chat-c');
+    await waiting;
+    expect(released).toBe(true);
+    expect(tracker.count('chat-c')).toBe(1);
+  });
+
+  it('releases dispatch blocking while retaining a timed-out result for classification', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-timeout');
+
+    let released = false;
+    const waiting = tracker.waitForDrain('chat-timeout').then(() => { released = true; });
+    tracker.releaseBlockingMark('chat-timeout');
+    await waiting;
+
+    expect(released).toBe(true);
+    expect(tracker.blockingCount('chat-timeout')).toBe(0);
+    expect(tracker.count('chat-timeout')).toBe(1);
+    expect(tracker.consumeIfPending('chat-timeout')).toBe(true);
+    expect(tracker.count('chat-timeout')).toBe(0);
+  });
+
+  it('consumes a released FIFO result without releasing a later blocking system turn', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-fifo');
+    tracker.releaseBlockingMark('chat-fifo');
+    tracker.mark('chat-fifo');
+
+    let released = false;
+    const waiting = tracker.waitForDrain('chat-fifo').then(() => { released = true; });
+    expect(tracker.consumeIfPending('chat-fifo')).toBe(true);
+    await Promise.resolve();
+
+    expect(released).toBe(false);
+    expect(tracker.blockingCount('chat-fifo')).toBe(1);
+    expect(tracker.count('chat-fifo')).toBe(1);
+
+    expect(tracker.consumeIfPending('chat-fifo')).toBe(true);
+    await waiting;
+    expect(released).toBe(true);
+  });
+
+  it('cancels a released send without unblocking a newer system turn', async () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('chat-timeout-reject');
+    tracker.releaseBlockingMark('chat-timeout-reject');
+    tracker.mark('chat-timeout-reject');
+
+    expect(tracker.unmarkReleased('chat-timeout-reject')).toBe(true);
+    expect(tracker.count('chat-timeout-reject')).toBe(1);
+    expect(tracker.blockingCount('chat-timeout-reject')).toBe(1);
+
+    let released = false;
+    const waiting = tracker.waitForDrain('chat-timeout-reject').then(() => { released = true; });
+    await Promise.resolve();
+    expect(released).toBe(false);
+    tracker.consumeIfPending('chat-timeout-reject');
+    await waiting;
+    expect(released).toBe(true);
+  });
 });
