@@ -13,9 +13,11 @@
 // exit codes on threshold regressions; the root coverage gate uses --strict.
 //
 // Fail-closed parsing:
+//   - unsupported arguments -> exit 2, named error "argument-error"
 //   - missing summary file  -> exit 2, named error "coverage-not-run"
 //   - malformed JSON        -> exit 2, named error "parse-error"
-//   - wrong schema shape    -> exit 2, named error "schema-error"
+//   - invalid schema/counts -> exit 2, named error "schema-error"
+//   - configured area empty -> exit 0 in report-only, stderr WARN; exit 1 under --strict
 //   - below threshold       -> exit 0 in report-only, stderr WARN; exit 1 under --strict
 //
 // Usage:
@@ -94,8 +96,23 @@ const DEFAULT_SUMMARY_PATH = process.env.COVERAGE_SUMMARY_PATH
 // Argument parsing
 // ---------------------------------------------------------------------------
 const rawArgs = process.argv.slice(2);
+const unknownOption = rawArgs.find(arg => arg.startsWith('-') && arg !== '--strict');
+if (unknownOption !== undefined) {
+  process.stderr.write(
+    `ERROR(argument-error): unsupported option ${JSON.stringify(unknownOption)}; supported option: --strict\n`
+  );
+  process.exit(2);
+}
+if (rawArgs.filter(arg => arg === '--strict').length > 1) {
+  process.stderr.write('ERROR(argument-error): --strict may be specified at most once\n');
+  process.exit(2);
+}
 const strictMode = rawArgs.includes('--strict');
-const positionalArgs = rawArgs.filter(a => !a.startsWith('--'));
+const positionalArgs = rawArgs.filter(arg => !arg.startsWith('-'));
+if (positionalArgs.length > 1) {
+  process.stderr.write('ERROR(argument-error): expected at most one coverage summary path\n');
+  process.exit(2);
+}
 const summaryPath = positionalArgs[0] ?? DEFAULT_SUMMARY_PATH;
 
 // ---------------------------------------------------------------------------
@@ -137,10 +154,11 @@ let raw;
 try {
   raw = readFileSync(summaryPath, 'utf8');
 } catch (e) {
+  const readError = e instanceof Error ? e.message : String(e);
   process.stderr.write(
-    `ERROR(coverage-not-run): coverage summary not found at ${summaryPath}\n` +
+    `ERROR(coverage-not-run): coverage summary not found at ${JSON.stringify(summaryPath)}\n` +
     `  Run vitest with --coverage.enabled --coverage.reportOnFailure first.\n` +
-    `  Underlying error: ${e.message}\n`
+    `  Underlying error: ${JSON.stringify(readError)}\n`
   );
   process.exit(2);
 }
@@ -149,7 +167,10 @@ let summary;
 try {
   summary = JSON.parse(raw);
 } catch (e) {
-  process.stderr.write(`ERROR(parse-error): coverage summary JSON is malformed: ${e.message}\n`);
+  const parseError = e instanceof Error ? e.message : String(e);
+  process.stderr.write(
+    `ERROR(parse-error): coverage summary JSON is malformed: ${JSON.stringify(parseError)}\n`
+  );
   process.exit(2);
 }
 
@@ -185,21 +206,29 @@ for (const [filePath, metrics] of Object.entries(summary)) {
   // Validate the shape of each file entry
   if (typeof metrics !== 'object' || metrics === null) {
     process.stderr.write(
-      `ERROR(schema-error): coverage entry for "${filePath}" is not an object\n`
+      `ERROR(schema-error): coverage entry for ${JSON.stringify(filePath)} is not an object\n`
     );
     process.exit(2);
   }
-  if (
-    typeof metrics.statements?.total !== 'number' ||
-    typeof metrics.statements?.covered !== 'number' ||
-    typeof metrics.branches?.total !== 'number' ||
-    typeof metrics.branches?.covered !== 'number'
-  ) {
-    process.stderr.write(
-      `ERROR(schema-error): coverage entry for "${filePath}" is missing expected numeric fields ` +
-      `(statements.total, statements.covered, branches.total, branches.covered)\n`
-    );
-    process.exit(2);
+  for (const metricName of ['statements', 'branches']) {
+    const metric = metrics[metricName];
+    for (const counterName of ['total', 'covered']) {
+      const value = metric?.[counterName];
+      if (!Number.isSafeInteger(value) || value < 0) {
+        process.stderr.write(
+          `ERROR(schema-error): coverage entry for ${JSON.stringify(filePath)} has invalid ` +
+          `${metricName}.${counterName}; expected a non-negative safe integer\n`
+        );
+        process.exit(2);
+      }
+    }
+    if (metric.covered > metric.total) {
+      process.stderr.write(
+        `ERROR(schema-error): coverage entry for ${JSON.stringify(filePath)} has invalid ` +
+        `${metricName}.covered (${metric.covered}) greater than ${metricName}.total (${metric.total})\n`
+      );
+      process.exit(2);
+    }
   }
 
   for (const acc of accumulators) {
@@ -226,7 +255,8 @@ const areaResults = accumulators.map(acc => {
 
   const passStatements = actualStatements >= acc.threshold_statements;
   const passBranches = actualBranches >= acc.threshold_branches;
-  const pass = passStatements && passBranches;
+  const passFiles = acc._fileCount > 0;
+  const pass = passFiles && passStatements && passBranches;
 
   return {
     area: acc.area,
@@ -241,6 +271,7 @@ const areaResults = accumulators.map(acc => {
       statements: acc.threshold_statements,
     },
     pass,
+    pass_files: passFiles,
     pass_statements: passStatements,
     pass_branches: passBranches,
   };
@@ -273,6 +304,7 @@ const outputObj = sortedKeys({
       glob: r.glob,
       pass: r.pass,
       pass_branches: r.pass_branches,
+      pass_files: r.pass_files,
       pass_statements: r.pass_statements,
       threshold_branches: r.threshold.branches,
       threshold_statements: r.threshold.statements,
@@ -286,16 +318,33 @@ process.stdout.write(outputJson);
 
 // ---------------------------------------------------------------------------
 // Emit advisory WARN to stderr for any failing areas (report-only) or
-// ERROR for --strict mode.
+// ERROR for --strict mode. Missing files are reported separately from metric
+// regressions so a stale or miswired coverage artifact is unambiguous.
 // ---------------------------------------------------------------------------
-if (failingAreas.length > 0) {
-  const tag = strictMode ? 'ERROR(below-threshold)' : 'WARN(below-threshold)';
+const emptyAreas = failingAreas.filter(r => !r.pass_files);
+if (emptyAreas.length > 0) {
+  const tag = strictMode ? 'ERROR(no-matching-files)' : 'WARN(no-matching-files)';
   process.stderr.write(
-    `${tag}: ${failingAreas.length} area(s) below coverage threshold` +
+    `${tag}: ${emptyAreas.length} configured area(s) matched no coverage files` +
     (strictMode ? '' : ' [report-only mode -- exits 0]') +
     '\n'
   );
-  for (const r of failingAreas.sort((a, b) => a.area.localeCompare(b.area))) {
+  for (const r of emptyAreas.sort((a, b) => a.area.localeCompare(b.area))) {
+    process.stderr.write(`  ${r.area}: 0 files matched ${r.glob}\n`);
+  }
+}
+
+const thresholdFailingAreas = failingAreas.filter(
+  r => r.pass_files && (!r.pass_statements || !r.pass_branches)
+);
+if (thresholdFailingAreas.length > 0) {
+  const tag = strictMode ? 'ERROR(below-threshold)' : 'WARN(below-threshold)';
+  process.stderr.write(
+    `${tag}: ${thresholdFailingAreas.length} area(s) below coverage threshold` +
+    (strictMode ? '' : ' [report-only mode -- exits 0]') +
+    '\n'
+  );
+  for (const r of thresholdFailingAreas.sort((a, b) => a.area.localeCompare(b.area))) {
     if (!r.pass_statements) {
       process.stderr.write(
         `  ${r.area} statements: ${r.actual.statements}% < ${r.threshold.statements}% threshold\n`
