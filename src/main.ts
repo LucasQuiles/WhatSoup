@@ -61,6 +61,7 @@ import { MediaRetentionTimer } from './core/media-retention.ts';
 import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/process-tmp-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
+import { consumeStartupPingMarker, persistStartupPingMarker, clearStartupPingMarker } from './core/startup-ping-marker.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
 import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
@@ -1042,16 +1043,35 @@ async function start(): Promise<void> {
       config.startupNotifications &&
       config.toolUpdateMode !== 'minimal'
     ) {
-      // Agent restart notification (existing behavior)
+      // Agent restart notification. M1: 'ephemeral' replay policy — a startup
+      // notice must never replay across a later restart — plus an
+      // introSent-pattern idempotency guard: persist-before-send, clear after a
+      // confirmed send. A fresh marker here means the PREVIOUS boot crashed
+      // around its ping send; skip this boot's ping (at-most-once) instead of
+      // stacking back-online duplicates during a crash loop.
       const pending = runtime.popStartupMessage();
       const notifyTarget = pending
         ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
         : { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
-      setTimeout(() => {
-        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
-          .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
-          .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
-      }, 3_000);
+      let skipStartupPing = false;
+      try {
+        skipStartupPing = consumeStartupPingMarker(config.dataRoot) !== null;
+        if (!skipStartupPing) persistStartupPingMarker(config.dataRoot);
+      } catch (err) {
+        log.warn({ err }, 'startup-ping guard failed; sending unguarded');
+      }
+      if (skipStartupPing) {
+        log.info({ chatJid: notifyTarget.chatJid }, 'skipped startup notification (fresh startup-ping marker from previous boot)');
+      } else {
+        setTimeout(() => {
+          sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'ephemeral' })
+            .then(() => {
+              try { clearStartupPingMarker(config.dataRoot); } catch { /* best effort */ }
+              log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification');
+            })
+            .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
+        }, 3_000);
+      }
     }
   } else if (!adminPhone) {
     log.warn('no admin phones configured — skipping startup notification');
@@ -1064,7 +1084,9 @@ async function start(): Promise<void> {
   if (selfRestartBackOnline) {
     const resume = selfRestartBackOnline;
     setTimeout(() => {
-      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'safe' })
+      // M1: ephemeral — the marker consume above is already once-only, and the
+      // durable op must not ride the safe-replay loop on a later restart.
+      sendTracked(connectionManager, resume.chatJid, resume.text, durability, { replayPolicy: 'ephemeral' })
         .then(() => log.info({ chatJid: resume.chatJid }, 'sent self-restart back-online ping'))
         .catch((err) => log.warn({ err, chatJid: resume.chatJid }, 'failed to send self-restart back-online ping'));
     }, 3_000);

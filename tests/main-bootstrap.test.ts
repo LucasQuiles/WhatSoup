@@ -262,6 +262,9 @@ async function importMainWithMocks(options: {
     rememberReplayedId: vi.fn(),
     sendTracked: vi.fn(async () => ({ waMessageId: 'sent-1' })),
     drainPendingOutbound: vi.fn(async () => 0),
+    consumeStartupPingMarker: vi.fn(() => null),
+    persistStartupPingMarker: vi.fn(() => '/tmp/whatsoup-main-data/startup-ping.marker'),
+    clearStartupPingMarker: vi.fn(),
     waitForHistorySyncThenRecover: vi.fn(async ({ recover }: { recover: () => unknown }) => {
       await recover();
     }),
@@ -442,6 +445,11 @@ async function importMainWithMocks(options: {
     DEFAULT_DATABASE_RETENTION: { intervalMs: 60_000 },
   }));
   vi.doMock('../src/core/intro-sent-config.ts', () => ({ persistIntroSentFlag: mocks.persistIntroSentFlag }));
+  vi.doMock('../src/core/startup-ping-marker.ts', () => ({
+    consumeStartupPingMarker: mocks.consumeStartupPingMarker,
+    persistStartupPingMarker: mocks.persistStartupPingMarker,
+    clearStartupPingMarker: mocks.clearStartupPingMarker,
+  }));
   vi.doMock('../src/core/scheduler.ts', () => ({ MessageScheduler: mocks.MessageScheduler }));
   vi.doMock('../src/core/substrate/poller.ts', () => ({ TriggerPoller: mocks.TriggerPoller }));
   vi.doMock('../src/core/metrics-collector.ts', () => ({
@@ -836,12 +844,13 @@ describe('main bootstrap', () => {
     expect(h.agentInstances[0].start).toHaveBeenCalledOnce();
 
     await vi.advanceTimersByTimeAsync(3_000);
+    // M1: startup notices are 'ephemeral' \u2014 they must never replay across restarts.
     expect(h.sendTracked).toHaveBeenCalledWith(
       h.connection,
       '15551230000@s.whatsapp.net',
       '*Agent back online* \u2713',
       h.durability,
-      { replayPolicy: 'safe' },
+      { replayPolicy: 'ephemeral' },
     );
   });
 });
