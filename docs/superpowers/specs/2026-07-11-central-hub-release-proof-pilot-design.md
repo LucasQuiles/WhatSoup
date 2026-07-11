@@ -46,7 +46,7 @@ Read-only inspection on 2026-07-11 established:
 - the checkout is on a host-local feature branch whose exact name and SHA are retained only in the private execution ledger;
 - it is 28 commits behind and 3 commits ahead of the last-fetched `origin/main`, and neither side is an ancestor of the other;
 - the tree has one pre-existing untracked entry;
-- both running application processes predate C1 and currently report nullable health `commit` and `branch` as `null`;
+- both running application processes predate C1 — the health-provenance change (WhatSoup commit `b46b2f9c`, PR #1691) that added the nullable `commit` and `branch` fields to the `/health` payload's `instance` object — and currently report both fields as `null`;
 - both private WhatSoup instance services and `bot-errors-dispatcher.service` were active with zero restart count;
 - both WhatSoup health endpoints returned HTTP 200, healthy status, connected WhatsApp state, and ready SQLite schema;
 - the two application services used approximately 4.05 GB and 3.27 GB respectively at the observation point.
@@ -76,7 +76,8 @@ These values are a baseline, not a permanent expectation. Operational proof must
 
 Required correction:
 
-- instance discovery failure is a probe error, not an empty healthy fleet;
+- instance discovery failure is a probe error, not an empty healthy fleet; a successful discovery that finds zero instances on a monitored host is likewise a probe error, not a healthy result;
+- an instance affirmatively observed as not running (the PID probe command succeeds and reports MainPID 0) is skipped with no alert, no clear, and no run failure; probe-command failure and malformed probe output are errors, never a not-running observation;
 - failed PID, elapsed-time, repo-root, or source-mtime probes never emit alert or clear state;
 - a probe error exits `2` and leaves an existing incident untouched;
 - a failed event emission exits `1`;
