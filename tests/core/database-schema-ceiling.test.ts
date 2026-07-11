@@ -984,16 +984,16 @@ describe('database schema ceiling', () => {
     const originalExec = db.raw.exec.bind(db.raw);
 
     vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
-      if (sql.includes('ADD COLUMN total_cache_read_tokens')) {
+      if (sql.includes('CREATE TABLE IF NOT EXISTS outbound_op_message_ids')) {
         throw new Error('injected final migration failure');
       }
       originalExec(sql);
     });
 
-    expect(() => db.open()).toThrow(/migration 44 failed/i);
+    expect(() => db.open()).toThrow(/migration 45 failed/i);
     expect(db.raw.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
-      WHERE type='table' AND name IN ('schema_migrations', 'messages', 'agent_sessions')
+      WHERE type='table' AND name IN ('schema_migrations', 'messages', 'agent_sessions', 'outbound_op_message_ids')
     `).get()).toEqual({ count: 0 });
     db.close();
   });
