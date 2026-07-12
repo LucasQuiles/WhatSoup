@@ -40,6 +40,7 @@ interface MockLogger {
 
 const originalLogDir = process.env.LOG_DIR;
 const originalLogLevel = process.env.LOG_LEVEL;
+const originalVitest = process.env.VITEST;
 
 async function importLoggerWithoutFileTransport(): Promise<LoggerModule> {
   vi.resetModules();
@@ -81,6 +82,7 @@ async function importLoggerWithMockedPino(options: {
   else process.env.LOG_DIR = options.logDir;
   if (options.logLevel === undefined) delete process.env.LOG_LEVEL;
   else process.env.LOG_LEVEL = options.logLevel;
+  delete process.env.VITEST;
 
   const logger = createMockLogger(options.logLevel ?? 'info');
   const transportFactory = vi.fn(() => {
@@ -103,6 +105,8 @@ afterEach(() => {
   vi.doUnmock('pino');
   vi.resetModules();
   vi.useRealTimers();
+  if (originalVitest === undefined) delete process.env.VITEST;
+  else process.env.VITEST = originalVitest;
 });
 
 afterAll(() => {
@@ -215,6 +219,42 @@ describe('flushLogger', () => {
 });
 
 describe('file transport configuration', () => {
+  it.each(['true', 'false'])(
+    'does not start an async file transport when VITEST is present (%s)',
+    async (vitestValue) => {
+      vi.resetModules();
+      process.env.VITEST = vitestValue;
+      process.env.LOG_DIR = '/tmp/whatsoup-logs';
+      const logger = createMockLogger();
+      const transportFactory = vi.fn();
+      const pinoFactory = vi.fn(() => logger);
+      Object.assign(pinoFactory, { transport: transportFactory });
+      vi.doMock('pino', () => ({ default: pinoFactory }));
+
+      await import('../src/logger');
+
+      expect(transportFactory).not.toHaveBeenCalled();
+      expect(pinoFactory).toHaveBeenCalledWith({ level: 'info' });
+    },
+  );
+
+  it('keeps file transport enabled when VITEST is absent', async () => {
+    vi.resetModules();
+    delete process.env.VITEST;
+    process.env.LOG_DIR = '/tmp/whatsoup-logs';
+    const logger = createMockLogger();
+    const transport = { end: vi.fn(), on: vi.fn() };
+    const transportFactory = vi.fn(() => transport);
+    const pinoFactory = vi.fn(() => logger);
+    Object.assign(pinoFactory, { transport: transportFactory });
+    vi.doMock('pino', () => ({ default: pinoFactory }));
+
+    await import('../src/logger');
+
+    expect(transportFactory).toHaveBeenCalledOnce();
+    expect(pinoFactory).toHaveBeenCalledWith({ level: 'info' }, transport);
+  });
+
   it('creates stdout and rolling-file targets when LOG_DIR is set', async () => {
     const logDir = '/tmp/whatsoup-logs';
     const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
