@@ -183,7 +183,6 @@ const MUTATION_EXACT = new Set([
   'upsert-dataverse-record',
   'associate-dataverse-records',
   'execute-dataverse-action',
-  'execute-dataverse-function',
   'execute-tool',
   'batch-dataverse',
   'graph-batch',
@@ -191,6 +190,7 @@ const MUTATION_EXACT = new Set([
   'hub-manage-subscription',
   'hub-recover-delta',
   'hub-refresh-account',
+  'hub-trigger-enrich',
 ]);
 
 function m365ToolName(permission: string): string | null {
@@ -202,6 +202,15 @@ function m365ToolName(permission: string): string | null {
 // REQUIRED_DENY is populated from the approved connector mutation inventory.
 
 describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
+  it('denies the live Agent365 enrichment writer but not the read-only Dataverse function', () => {
+    expect(REQUIRED_DENY).toContain(
+      'mcp__plugin_microsoft_365_microsoft_365__hub-trigger-enrich',
+    );
+    expect(REQUIRED_DENY).not.toContain(
+      'mcp__plugin_microsoft_365_microsoft_365__execute-dataverse-function',
+    );
+  });
+
   it('matches the approved G-D0 connector mutation fixture', () => {
     const fixtureHash = createHash('sha256')
       .update(`${CONNECTOR_MUTATION_DENY_FIXTURE.join('\n')}\n`)
