@@ -115,6 +115,7 @@ export interface RuntimeResultHandlerPort {
   readonly postTurnGate: Set<string>;
   readonly turnHadToolActivity: Set<string>;
   readonly perChatRouteMarkerHold: Map<string, string>;
+  readonly pendingTurnText: Map<string, string>;
   readonly pendingTurnActorJid: Map<string, string | undefined>;
   readonly perChatTurnText: Map<string, string>;
   readonly perChatAssistantItemText: Map<string, Map<string, string>>;
@@ -614,6 +615,10 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
       log.error({ err, mapKey, scopeKey }, 'per-chat runtime turn finalization escaped');
     });
   } else if (isSystemResult || inboundSeq === undefined || host.durability === null) {
+    if (!isSystemResult && mapKey !== undefined && clearReplayOnSuccess) {
+      host.pendingTurnText.delete(mapKey);
+      host.pendingTurnActorJid.delete(mapKey);
+    }
     host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
   } else if (!isSystemResult && inboundSeq !== undefined && host.durability) {
     log.error({ mapKey, inboundSeq }, 'journaled per-chat result has no immutable runtime turn context');
