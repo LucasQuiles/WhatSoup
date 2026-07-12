@@ -61,7 +61,7 @@ function makeFixture(): Fixture {
   tmpDirs.push(root);
   const home = join(root, 'home');
   const source = join(root, 'source');
-  const systemd = join(root, 'systemd');
+  const systemd = join(home, '.config/systemd/user');
   const bin = join(root, 'bin');
   const ledger = join(root, 'ledger.txt');
   mkdirSync(join(source, 'deploy/scripts/lib'), { recursive: true });
@@ -187,6 +187,10 @@ function snapshotDir(dir: string): string[] {
 
 function ledgerLines(fx: Fixture): string[] {
   return existsSync(fx.ledger) ? readFileSync(fx.ledger, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
+function receiptRoot(fx: Fixture): string {
+  return join(fx.home, '.local/state/whatsoup/release-proof-installer/receipts');
 }
 
 function installOk(fx: Fixture) {
@@ -419,10 +423,29 @@ describe('installer mutation, set-mode, verify, rollback', () => {
     expect(res.status).not.toBe(0);
     expect(res.stderr).toContain('rolling back');
     expect(snapshotDir(fx.systemd)).toEqual(before);
+    expect(existsSync(join(fx.home, '.local/lib/whatsoup/release-proof', fx.sha))).toBe(true);
+    expect(existsSync(join(fx.home, '.local/lib/whatsoup/release-proof/current'))).toBe(false);
   });
 });
 
 describe('installer symlink and verify-bypass fixes (review findings)', () => {
+  it('symlinked managed bundle root is rejected before external writes', () => {
+    const fx = makeFixture();
+    const bundleParent = join(fx.home, '.local/lib/whatsoup/release-proof');
+    const external = join(fx.home, 'outside-bundle-root');
+    mkdirSync(join(fx.home, '.local/lib/whatsoup'), { recursive: true });
+    mkdirSync(external);
+    symlinkSync(external, bundleParent);
+
+    const res = runInstaller(fx, [
+      'install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', fx.sha,
+    ]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('managed path roots must stay under a real home directory');
+    expect(readdirSync(external)).toEqual([]);
+    expect(ledgerLines(fx)).toHaveLength(0);
+  });
+
   it('dangling destination unit symlink is rejected, not silently replaced', () => {
     const fx = makeFixture();
     const target = join(fx.systemd, 'bot-errors-tree-provenance.service');
@@ -487,6 +510,26 @@ describe('installer symlink and verify-bypass fixes (review findings)', () => {
     expect(readFileSync(externalMode, 'utf8')).toBe('mode sentinel\n');
     expect(lstatSync(join(fx.systemd, 'bot-errors-tree-provenance.service')).isSymbolicLink()).toBe(false);
     expect(lstatSync(join(fx.home, '.config/whatsoup/bot-errors-release-proof.env')).isSymbolicLink()).toBe(false);
+  });
+
+  it('verify rejects byte-identical unit and mode-file symlinks', () => {
+    const fx = makeFixture();
+    installOk(fx);
+    const unit = join(fx.systemd, 'bot-errors-tree-provenance.service');
+    const mode = join(fx.home, '.config/whatsoup/bot-errors-release-proof.env');
+    const externalUnit = join(fx.home, 'external-verify-unit');
+    const externalMode = join(fx.home, 'external-verify-mode');
+    writeFileSync(externalUnit, readFileSync(unit));
+    writeFileSync(externalMode, readFileSync(mode));
+    rmSync(unit);
+    rmSync(mode);
+    symlinkSync(externalUnit, unit);
+    symlinkSync(externalMode, mode);
+
+    const result = runInstaller(fx, ['verify', '--host', SYNTH_HOST, '--bundle-sha', fx.sha]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('installed unit is a symlink');
+    expect(result.stderr).toContain('mode file is a symlink');
   });
 });
 
@@ -569,6 +612,42 @@ describe('rollback hardening and install ordering (final review findings)', () =
     const beforeLedger = ledgerLines(fx);
 
     const roll = runInstaller(fx, ['rollback', '--host', SYNTH_HOST, '--receipt', outside]);
+    expect(roll.status).toBe(2);
+    expect(roll.stderr).toContain('receipt is not a confined installer receipt');
+    expect(ledgerLines(fx)).toEqual(beforeLedger);
+  });
+
+  it('rollback rejects a metadata-only receipt before disabling timers', () => {
+    const fx = makeFixture();
+    const root = receiptRoot(fx);
+    const receipt = join(root, '20260712T000000Z-1');
+    mkdirSync(receipt, { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o700);
+    chmodSync(receipt, 0o700);
+    writeFileSync(
+      join(receipt, 'receipt.meta'),
+      `schemaVersion=1\nhostFingerprint=${sha256(SYNTH_HOST).slice(0, 12)}\n`,
+      { mode: 0o600 },
+    );
+
+    const roll = runInstaller(fx, ['rollback', '--host', SYNTH_HOST, '--receipt', receipt]);
+    expect(roll.status).toBe(2);
+    expect(roll.stderr).toContain('receipt is not a confined installer receipt');
+    expect(ledgerLines(fx)).toHaveLength(0);
+  });
+
+  it('rollback rejects a receipt whose host fingerprint does not match the host gate', () => {
+    const fx = makeFixture();
+    const res = installOk(fx);
+    const receipt = res.stdout.match(/RECEIPT=(\S+)/)?.[1]!;
+    writeFileSync(
+      join(receipt, 'receipt.meta'),
+      'schemaVersion=1\nhostFingerprint=000000000000\n',
+      { mode: 0o600 },
+    );
+    const beforeLedger = ledgerLines(fx);
+
+    const roll = runInstaller(fx, ['rollback', '--host', SYNTH_HOST, '--receipt', receipt]);
     expect(roll.status).toBe(2);
     expect(roll.stderr).toContain('receipt is not a confined installer receipt');
     expect(ledgerLines(fx)).toEqual(beforeLedger);

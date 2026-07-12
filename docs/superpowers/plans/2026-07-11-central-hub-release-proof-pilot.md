@@ -14,8 +14,9 @@
 > supersedes the illustrative Task 7/8 installer listings below. In particular,
 > the final installer binds `--bundle-sha` to a clean source `HEAD`, validates
 > staged unit copies before changing `current`, treats versioned bundles as
-> immutable, uses exclusive random replacement files, stores path-confined
-> receipts outside the monitor-writable BOT ERRORS state tree, fails closed on
+> immutable, uses exclusive random replacement files, rejects symlinked managed
+> roots, stores complete host-bound receipts outside the monitor-writable BOT
+> ERRORS state tree, retains failed bundles for forensics, fails closed on
 > unknown timer-state probes, and verifies timers are both enabled and active.
 > The executable script and its black-box tests are authoritative where an
 > older inline listing differs.

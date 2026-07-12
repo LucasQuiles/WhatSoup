@@ -488,9 +488,11 @@ the in-place-git central pilot host. Design:
   `~/.local/state/whatsoup/release-proof-installer/receipts/`, the four
   monitor units, and the two monitor timer enablements. The supplied SHA must
   equal the source checkout's clean `HEAD`; existing same-SHA bundles are
-  immutable and reused only after exact verification. `install` accepts only
-  observe mode; emit is a separate `set-mode` after the observe soak. Dry-run
-  performs zero writes.
+  immutable and reused only after exact verification. Managed destination
+  roots reject symlink components; rollback accepts only complete receipts
+  bound to the expected host; failed new bundles remain as forensic evidence.
+  `install` accepts only observe mode; emit is a separate `set-mode` after the
+  observe soak. Dry-run performs zero writes.
 - Units: `bot-errors-tree-provenance.{service,timer}`,
   `bot-errors-runtime-staleness.{service,timer}` — oneshot, 30-minute
   `OnUnitInactiveSec` cadence with distinct bootstrap offsets, resource-capped

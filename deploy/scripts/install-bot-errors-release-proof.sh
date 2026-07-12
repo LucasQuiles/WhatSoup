@@ -146,7 +146,41 @@ verify_sources() {
   echo "sources verified against manifest ($(basename "$MANIFEST"))"
 }
 
+require_managed_roots() {
+  python3 - "$HOME_DIR" "$BUNDLE_PARENT" "$(dirname "$MODE_FILE")" "$SYSTEMD_DIR" "$INSTALL_STATE_DIR" <<'PY' \
+    || fail "managed path roots must stay under a real home directory without symlink components"
+import os
+from pathlib import Path
+import stat
+import sys
+
+home = Path(os.path.abspath(sys.argv[1]))
+try:
+    home_stat = home.lstat()
+except OSError:
+    raise SystemExit(1)
+if stat.S_ISLNK(home_stat.st_mode) or not stat.S_ISDIR(home_stat.st_mode):
+    raise SystemExit(1)
+for raw_target in sys.argv[2:]:
+    target = Path(os.path.abspath(raw_target))
+    try:
+        relative = target.relative_to(home)
+    except ValueError:
+        raise SystemExit(1)
+    current = home
+    for part in relative.parts:
+        current /= part
+        try:
+            item = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+            raise SystemExit(1)
+PY
+}
+
 require_lock() {
+  require_managed_roots
   mkdir -p "$INSTALL_STATE_DIR"
   chmod 0700 "$INSTALL_STATE_DIR"
   exec 8>"$INSTALL_LOCK"
@@ -339,14 +373,16 @@ probe_unit_state() {
 }
 
 validate_receipt_path() {
-  python3 - "$RECEIPT_PARENT" "$1" <<'PY'
+  local expected_host_fingerprint
+  expected_host_fingerprint="$(fingerprint "$(canon_host "$EXPECT_HOST")")"
+  python3 - "$RECEIPT_PARENT" "$1" "$expected_host_fingerprint" <<'PY'
 import os
 from pathlib import Path
 import re
 import stat
 import sys
 
-parent_arg, receipt_arg = sys.argv[1:]
+parent_arg, receipt_arg, expected_host_fingerprint = sys.argv[1:]
 try:
     parent = Path(parent_arg).resolve(strict=True)
     receipt = Path(receipt_arg)
@@ -370,7 +406,7 @@ except (FileNotFoundError, OSError, UnicodeError):
     raise SystemExit(1)
 if not stat.S_ISREG(meta_stat.st_mode) or meta_stat.st_uid != os.getuid():
     raise SystemExit(1)
-if not re.fullmatch(r"schemaVersion=1\nhostFingerprint=[0-9a-f]{12}\n", meta_text):
+if meta_text != f"schemaVersion=1\nhostFingerprint={expected_host_fingerprint}\n":
     raise SystemExit(1)
 for path in resolved.rglob("*"):
     item = path.lstat()
@@ -378,6 +414,44 @@ for path in resolved.rglob("*"):
         raise SystemExit(1)
     if item.st_uid != os.getuid() or stat.S_IMODE(item.st_mode) & 0o077:
         raise SystemExit(1)
+
+def exactly_one(first: Path, second: Path) -> bool:
+    return first.is_file() != second.is_file()
+
+units_prior = resolved / "units-prior"
+if not units_prior.is_dir():
+    raise SystemExit(1)
+unit_names = (
+    "bot-errors-tree-provenance.service",
+    "bot-errors-tree-provenance.timer",
+    "bot-errors-runtime-staleness.service",
+    "bot-errors-runtime-staleness.timer",
+)
+for unit in unit_names:
+    if not exactly_one(units_prior / unit, units_prior / f"{unit}.was-absent"):
+        raise SystemExit(1)
+if not exactly_one(resolved / "current-prior.txt", resolved / "current-prior.was-absent"):
+    raise SystemExit(1)
+if not exactly_one(resolved / "mode-prior.env", resolved / "mode-prior.was-absent"):
+    raise SystemExit(1)
+timer_state = resolved / "timer-state-prior.txt"
+try:
+    timer_lines = timer_state.read_text(encoding="utf-8").splitlines()
+except (FileNotFoundError, OSError, UnicodeError):
+    raise SystemExit(1)
+timer_pattern = re.compile(
+    r"^(bot-errors-(?:tree-provenance|runtime-staleness)\.timer) "
+    r"enabled=(enabled|enabled-runtime|linked|linked-runtime|alias|static|indirect|generated|transient|disabled|masked|not-found) "
+    r"active=(active|reloading|inactive|failed|activating|deactivating|maintenance|unknown)$"
+)
+parsed_timers = [timer_pattern.fullmatch(line) for line in timer_lines]
+if any(match is None for match in parsed_timers):
+    raise SystemExit(1)
+if {match.group(1) for match in parsed_timers if match} != {
+    "bot-errors-tree-provenance.timer",
+    "bot-errors-runtime-staleness.timer",
+} or len(timer_lines) != 2:
+    raise SystemExit(1)
 PY
 }
 
@@ -539,9 +613,13 @@ do_rollback_from() {
 }
 
 do_verify() {
+  require_managed_roots
   local unit failures=0
   for unit in "${UNIT_FILES[@]}"; do
-    if ! cmp -s "$SOURCE_ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"; then
+    if [ -L "$SYSTEMD_DIR/$unit" ]; then
+      echo "verify: installed unit is a symlink: $unit" >&2
+      failures=$((failures + 1))
+    elif ! cmp -s "$SOURCE_ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"; then
       echo "verify: unit drift or missing: $unit" >&2
       failures=$((failures + 1))
     fi
@@ -555,7 +633,10 @@ do_verify() {
     failures=$((failures + 1))
   fi
   local mode_value
-  if [ ! -f "$MODE_FILE" ]; then
+  if [ -L "$MODE_FILE" ]; then
+    echo "verify: mode file is a symlink" >&2
+    failures=$((failures + 1))
+  elif [ ! -f "$MODE_FILE" ]; then
     echo "verify: mode file missing" >&2
     failures=$((failures + 1))
   else
@@ -615,7 +696,7 @@ do_install() {
     require_no_symlink "$SYSTEMD_DIR/$unit"
   done
   require_no_symlink "$MODE_FILE"
-  local bundle_dir="$BUNDLE_PARENT/$BUNDLE_SHA" bundle_preexisting=0 bundle_created=0
+  local bundle_dir="$BUNDLE_PARENT/$BUNDLE_SHA" bundle_preexisting=0
   if [ -L "$bundle_dir" ]; then
     fail "refusing symlink in managed bundle path: $bundle_dir"
   elif [ -e "$bundle_dir" ]; then
@@ -640,7 +721,6 @@ do_install() {
   # the trap: an explicit banner is printed and the install still exits 1.
   trap 'echo "release-proof-install: failure after backup — rolling back" >&2
     rm -rf "$stage" || true
-    if [ "${bundle_created:-0}" -eq 1 ]; then rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA" || true; fi
     do_rollback_from "$RECEIPT" || echo "release-proof-install: ROLLBACK_FAILED during install recovery — partial state; inspect receipt $RECEIPT" >&2
     exit 1' ERR
 
@@ -648,7 +728,6 @@ do_install() {
     echo "release-proof-install: reusing verified immutable bundle $BUNDLE_SHA"
   else
     mv "$stage/bundle" "$bundle_dir"
-    bundle_created=1
   fi
   atomic_symlink "$bundle_dir" "$BUNDLE_PARENT/current"
   for unit in "${UNIT_FILES[@]}"; do
@@ -689,6 +768,7 @@ do_set_mode() {
 }
 
 do_dry_run() {
+  require_managed_roots
   verify_sources
   echo "--- would materialize bundle $BUNDLE_SHA under $BUNDLE_PARENT/$BUNDLE_SHA/ ---"
   printf '  %s\n' "${BUNDLE_FILES[@]}"
@@ -748,6 +828,7 @@ case "$OP" in
   rollback)
     require_host
     [ -n "$RECEIPT_ARG" ] || fail "rollback requires --receipt <dir>"
+    require_managed_roots
     validate_receipt_path "$RECEIPT_ARG" \
       || fail "receipt is not a confined installer receipt"
     require_lock
