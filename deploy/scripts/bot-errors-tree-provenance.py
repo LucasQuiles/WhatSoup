@@ -32,6 +32,16 @@ Design constraints:
     is invoked from the daily health-check via :func:`tree_provenance_inventory`,
     which returns daily-health-style FAIL/WARN lines that the health-check's
     existing failure classifier + per-instance salient emitter pick up for free.
+    ``--reporter`` selects a third, scheduler-oriented mode (combinable with
+    ``--once``/``--print``, rejects ``--fetch``): exit 0 for any successfully
+    observed finding state (clean/warning/critical), 2 for an inspection
+    failure, 1 for an event-write failure -- so a systemd/launchd oneshot never
+    reads a successfully-detected drift finding as a process failure. Without
+    ``--reporter`` the interactive exit contract is unchanged:
+    ``{"info": 0, "warning": 1, "critical": 2}``, GitError -> 1.
+  * Every git invocation runs with ``--no-optional-locks`` (see ``_git``), so
+    offline inspection never takes the ``.git/index`` lock and can't race a
+    concurrent commit/checkout on the same bot tree.
   * Thresholds are configurable via environment (see the ``BOT_ERRORS_TREE_*``
     constants below).
   * All emitted text is redacted: branch names and paths are basename/fingerprint
@@ -160,7 +170,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            ["git", "--no-optional-locks", "-C", str(repo), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -546,13 +556,22 @@ def emit_outbox_event(event: dict[str, Any]) -> Path:
     return path
 
 
-def run_once(*, do_fetch: bool, dry: bool) -> int:
+def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     """Inspect the tree and (unless dry) emit one outbox event summarising
-    provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical."""
+    provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical.
+
+    ``reporter=True`` selects scheduler mode instead: 0 for any successfully
+    observed state (clean/warning/critical), 2 for an inspection failure, 1
+    for an event-write failure. The default exit contract above is unchanged
+    when ``reporter`` is False.
+    """
     try:
         snap = gather_tree_provenance(REPO_ROOT, do_fetch=do_fetch)
     except GitError as exc:
         evidence = f"tree_provenance inspection_error {str(exc)[:200]}"
+        if reporter:
+            print(evidence, file=sys.stderr)
+            return 2
         if not dry:
             emit_outbox_event(build_outbox_event(
                 "BOT ERRORS tree-provenance inspection error",
@@ -583,12 +602,18 @@ def run_once(*, do_fetch: bool, dry: bool) -> int:
         # Critical findings are salient: key the alert on the branch and request
         # notify so a direct-to-protected/diverged tree is never buried.
         alert_source = f"tree_provenance:{branch}" if sev == "critical" else None
-        emit_outbox_event(build_outbox_event(
-            summary, evidence, sev,
-            event_type=event_type, alert_source=alert_source, snapshot=snap,
-        ))
+        try:
+            emit_outbox_event(build_outbox_event(
+                summary, evidence, sev,
+                event_type=event_type, alert_source=alert_source, snapshot=snap,
+            ))
+        except OSError as exc:
+            print(f"tree_provenance event_write_error {str(exc)[:200]}", file=sys.stderr)
+            return 1
     print(summary)
     print(evidence)
+    if reporter:
+        return 0
     return {"info": 0, "warning": 1, "critical": 2}[sev]
 
 
@@ -601,6 +626,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--fetch", action="store_true",
         help="refresh origin ref before comparing (NETWORK; default offline)",
+    )
+    parser.add_argument(
+        "--reporter", action="store_true",
+        help="scheduler mode: exit 0 for any successfully observed finding state "
+             "(clean/warning/critical), 2 for inspection failure, 1 for event-write "
+             "failure; rejects --fetch",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -615,7 +646,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--json", action="store_true",
         help="print the raw provenance snapshot as JSON and exit",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.reporter and args.fetch:
+        parser.error("--reporter rejects --fetch: scheduled runs must stay offline")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -634,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         safe["head_short"] = snap["head"][:12]
         print(json.dumps(safe, indent=2, sort_keys=True))
         return 0
-    return run_once(do_fetch=args.fetch, dry=bool(args.dry))
+    return run_once(do_fetch=args.fetch, dry=bool(args.dry), reporter=bool(args.reporter))
 
 
 if __name__ == "__main__":
