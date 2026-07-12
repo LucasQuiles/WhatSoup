@@ -22,7 +22,8 @@
 #   rollback --host <name> --receipt <dir>
 #
 # Exit codes: 0 ok; 1 verification failure; 2 usage/preflight error or
-# inconclusive (a check that could not run).
+# inconclusive (a check that could not run); 4 rollback completed with one
+# or more failed steps (partial state — inspect the receipt and stderr).
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,7 +60,7 @@ TIMER_UNITS=(
 fail() { echo "release-proof-install: $*" >&2; exit 2; }
 
 usage() {
-  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 sha256_of() {
@@ -136,13 +137,45 @@ require_lock() {
 
 sctl() { systemctl --user "$@"; }
 
+# Called inside do_install's trap-armed region: failures here must flow
+# through the ERR trap (which rolls back the bundle and `current` symlink),
+# so this reports and raises via `false` instead of fail()'s exit 2.
+# systemd-analyze presence is preflighted in do_install before any mutation.
+# The runner is checked in the MATERIALIZED bundle (the bytes that will
+# actually execute); units are still the staged copies, pre-install.
 validate_units_staged() {
-  local stage="$1" unit
-  command -v systemd-analyze >/dev/null 2>&1 || fail "missing dependency: systemd-analyze (unit validation is mandatory)"
-  bash -n "$stage/bundle/deploy/scripts/bot-errors-release-proof-run.sh" || fail "runner failed bash -n"
+  local stage="$1" bundle_dir="$2" unit
+  if ! bash -n "$bundle_dir/deploy/scripts/bot-errors-release-proof-run.sh"; then
+    echo "release-proof-install: runner failed bash -n" >&2
+    false
+  fi
   for unit in "${UNIT_FILES[@]}"; do
-    systemd-analyze --user verify "$stage/units/$unit" || fail "systemd verify rejected $unit"
+    if ! systemd-analyze --user verify "$stage/units/$unit"; then
+      echo "release-proof-install: systemd verify rejected $unit" >&2
+      false
+    fi
   done
+}
+
+# Under the install lock, any pre-existing .stage-* dir is a leftover from an
+# earlier aborted run: sweep before creating this run's staging dir so
+# failures never accumulate residue.
+sweep_stale_stages() {
+  local dir
+  for dir in "$BUNDLE_PARENT"/.stage-*; do
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      rm -rf "$dir"
+      echo "release-proof-install: swept stale staging dir: $(basename "$dir")" >&2
+    fi
+  done
+}
+
+# The monitor services EnvironmentFile= this file; a missing file means every
+# timer fire fails at unit start. Gate before the lock: the lock file itself
+# is a filesystem write, and preflight failures must leave zero delta.
+require_env_file() {
+  [ -f "$HOME_DIR/.config/whatsoup/bot-errors.env" ] \
+    || fail "missing $HOME_DIR/.config/whatsoup/bot-errors.env (monitor units EnvironmentFile= it; create it before install)"
 }
 
 render_stage() {
@@ -211,50 +244,101 @@ take_backup() {
   echo "backup receipt: $RECEIPT"
 }
 
+# Rollback handler. Runs both standalone (rollback op) and as do_install's
+# ERR-trap recovery, so it must NEVER abort partway: every step is guarded,
+# failures accumulate in a counter with a per-step stderr line, and the
+# byte-verification loop plus the timer-state restore are always reached.
+# Returns 0 with ROLLBACK_OK on a clean pass, or 4 with ROLLBACK_FAILED on
+# stderr otherwise (the standalone rollback op surfaces that as exit 4).
 do_rollback_from() {
-  local receipt="$1" unit prior
-  [ -d "$receipt" ] || fail "receipt not found: $receipt"
+  local receipt="$1" unit prior frag failures=0
+  if [ ! -d "$receipt" ]; then
+    echo "release-proof-install: receipt not found: $receipt" >&2
+    return 2
+  fi
   for unit in "${TIMER_UNITS[@]}"; do
     sctl disable --now "$unit" || true
   done
   for unit in "${UNIT_FILES[@]}"; do
     prior="$receipt/units-prior/$unit"
     if [ -f "$prior" ]; then
-      cp "$prior" "$SYSTEMD_DIR/.$unit.tmp"
-      mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"
+      if ! cp "$prior" "$SYSTEMD_DIR/.$unit.tmp" || ! mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"; then
+        echo "release-proof-install: rollback: failed to restore unit $unit" >&2
+        failures=$((failures + 1))
+      fi
     elif [ -f "$receipt/units-prior/$unit.was-absent" ]; then
-      rm -f "$SYSTEMD_DIR/$unit"
+      if ! rm -f "$SYSTEMD_DIR/$unit"; then
+        echo "release-proof-install: rollback: failed to remove installed unit $unit" >&2
+        failures=$((failures + 1))
+      fi
     fi
   done
   if [ -f "$receipt/current-prior.txt" ]; then
-    atomic_symlink "$(cat "$receipt/current-prior.txt")" "$BUNDLE_PARENT/current"
+    if ! atomic_symlink "$(cat "$receipt/current-prior.txt")" "$BUNDLE_PARENT/current"; then
+      echo "release-proof-install: rollback: failed to restore current symlink" >&2
+      failures=$((failures + 1))
+    fi
   elif [ -f "$receipt/current-prior.was-absent" ]; then
-    rm -f "$BUNDLE_PARENT/current"
+    if ! rm -f "$BUNDLE_PARENT/current"; then
+      echo "release-proof-install: rollback: failed to remove current symlink" >&2
+      failures=$((failures + 1))
+    fi
   fi
   if [ -f "$receipt/mode-prior.env" ]; then
-    cp "$receipt/mode-prior.env" "$MODE_FILE.tmp"
-    mv -f "$MODE_FILE.tmp" "$MODE_FILE"
+    if ! cp "$receipt/mode-prior.env" "$MODE_FILE.tmp" || ! mv -f "$MODE_FILE.tmp" "$MODE_FILE"; then
+      echo "release-proof-install: rollback: failed to restore mode file" >&2
+      failures=$((failures + 1))
+    fi
   elif [ -f "$receipt/mode-prior.was-absent" ]; then
-    rm -f "$MODE_FILE"
+    if ! rm -f "$MODE_FILE"; then
+      echo "release-proof-install: rollback: failed to remove mode file" >&2
+      failures=$((failures + 1))
+    fi
   fi
-  sctl daemon-reload
+  if ! sctl daemon-reload; then
+    echo "release-proof-install: rollback: daemon-reload failed" >&2
+    failures=$((failures + 1))
+  fi
   if [ -f "$receipt/timer-state-prior.txt" ]; then
     while read -r unit rest; do
       case "$rest" in
-        *enabled=enabled*) sctl enable "$unit" || true ;;
+        *enabled=enabled*)
+          if ! sctl enable "$unit"; then
+            echo "release-proof-install: rollback: failed to re-enable $unit" >&2
+            failures=$((failures + 1))
+          fi
+          ;;
       esac
       case "$rest" in
-        *active=active*) sctl start "$unit" || true ;;
+        *active=active*)
+          if ! sctl start "$unit"; then
+            echo "release-proof-install: rollback: failed to restart $unit" >&2
+            failures=$((failures + 1))
+          fi
+          ;;
       esac
     done < "$receipt/timer-state-prior.txt"
   fi
   for unit in "${UNIT_FILES[@]}"; do
     prior="$receipt/units-prior/$unit"
-    if [ -f "$prior" ] && ! cmp -s "$prior" "$SYSTEMD_DIR/$unit"; then
-      echo "release-proof-install: rollback byte verification failed for $unit" >&2
-      exit 1
+    if [ -f "$prior" ]; then
+      if cmp -s "$prior" "$SYSTEMD_DIR/$unit"; then
+        echo "rollback byte verification ok: $unit"
+      else
+        echo "release-proof-install: rollback byte verification failed for $unit" >&2
+        failures=$((failures + 1))
+      fi
+      frag="$(sctl show -p FragmentPath --value "$unit" 2>/dev/null || true)"
+      if [ "$frag" != "$SYSTEMD_DIR/$unit" ]; then
+        echo "release-proof-install: rollback: loaded fragment for restored $unit is '$frag', expected $SYSTEMD_DIR/$unit" >&2
+        failures=$((failures + 1))
+      fi
     fi
   done
+  if [ "$failures" -ne 0 ]; then
+    echo "ROLLBACK_FAILED steps=$failures receipt=$receipt" >&2
+    return 4
+  fi
   echo "ROLLBACK_OK receipt=$receipt"
 }
 
@@ -278,10 +362,29 @@ do_verify() {
       failures=$((failures + 1))
     fi
   done
+  local mode_value
   if [ ! -f "$MODE_FILE" ]; then
     echo "verify: mode file missing" >&2
     failures=$((failures + 1))
+  else
+    # Same extraction the scheduler runner uses (read as data, never sourced).
+    mode_value="$(sed -n 's/^BOT_ERRORS_RELEASE_PROOF_MODE=//p' "$MODE_FILE" | tail -n 1 | tr -d '[:space:]')"
+    case "$mode_value" in
+      observe|emit) ;;
+      *)
+        echo "verify: mode file value '$mode_value' does not parse to observe|emit" >&2
+        failures=$((failures + 1))
+        ;;
+    esac
   fi
+  local enabled_state
+  for unit in "${TIMER_UNITS[@]}"; do
+    enabled_state="$(sctl is-enabled "$unit" 2>/dev/null || true)"
+    if [ "$enabled_state" != "enabled" ]; then
+      echo "verify: timer $unit is-enabled reports '$enabled_state', expected enabled" >&2
+      failures=$((failures + 1))
+    fi
+  done
   local frag dropins
   for unit in "${UNIT_FILES[@]}"; do
     frag="$(sctl show -p FragmentPath --value "$unit" 2>/dev/null || true)"
@@ -300,26 +403,52 @@ do_verify() {
 }
 
 do_install() {
-  # Verification precedes the lock (spec 6.5 items 2 vs 5): a failed source
-  # check must leave zero filesystem delta, and the lock file is a write.
+  # Preflight precedes the lock (spec 6.5 items 2 vs 5): a failed source,
+  # dependency, or environment check must leave zero filesystem delta, and
+  # the lock file itself is a write.
+  require_env_file
+  command -v systemd-analyze >/dev/null 2>&1 || fail "missing dependency: systemd-analyze (unit validation is mandatory)"
   verify_sources
   require_lock
   mkdir -p "$BUNDLE_PARENT"
+  sweep_stale_stages
   local stage
   stage="$(mktemp -d "$BUNDLE_PARENT/.stage-XXXXXX")"
   render_stage "$stage"
-  validate_units_staged "$stage"
   take_backup
-  trap 'echo "release-proof-install: failure after backup — rolling back" >&2; do_rollback_from "$RECEIPT"; exit 1' ERR
+  # The rollback call is guarded (|| …) so a partial rollback cannot abort
+  # the trap: an explicit banner is printed and the install still exits 1.
+  trap 'echo "release-proof-install: failure after backup — rolling back" >&2
+    rm -rf "$stage" || true
+    rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA" || true
+    do_rollback_from "$RECEIPT" || echo "release-proof-install: ROLLBACK_FAILED during install recovery — partial state; inspect receipt $RECEIPT" >&2
+    exit 1' ERR
 
+  # Reinstalling an already-current bundle sha destroys the dir a
+  # rollback-restored `current` symlink points at; record the hazard.
+  if [ -f "$RECEIPT/current-prior.txt" ] && [ "$(cat "$RECEIPT/current-prior.txt")" = "$BUNDLE_PARENT/$BUNDLE_SHA" ]; then
+    printf 'reinstall of bundle %s: prior current pointed at this bundle dir, which this install replaces; a rollback restores the symlink but it may dangle until the next successful install\n' \
+      "$BUNDLE_SHA" > "$RECEIPT/reinstall-dangling-current.note"
+  fi
   rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA"
   mv "$stage/bundle" "$BUNDLE_PARENT/$BUNDLE_SHA"
   atomic_symlink "$BUNDLE_PARENT/$BUNDLE_SHA" "$BUNDLE_PARENT/current"
 
+  # Staged-unit validation runs AFTER the bundle dir and `current` symlink
+  # exist (the units' ExecStart targets …/release-proof/current/…, so on a
+  # virgin host earlier validation always fails) and BEFORE any unit copy,
+  # daemon-reload, or timer enablement (spec 6.5 "before activation"). A
+  # rejection rolls the bundle and symlink back via the ERR trap.
+  validate_units_staged "$stage" "$BUNDLE_PARENT/$BUNDLE_SHA"
+
   mkdir -p "$SYSTEMD_DIR"
   local unit
   for unit in "${UNIT_FILES[@]}"; do
-    require_no_symlink "$SYSTEMD_DIR/$unit"
+    # ERR-flow guard: fail() here would exit 2 and bypass the armed trap.
+    if [ -L "$SYSTEMD_DIR/$unit" ]; then
+      echo "release-proof-install: refusing symlink in managed path: $SYSTEMD_DIR/$unit" >&2
+      false
+    fi
     cp "$stage/units/$unit" "$SYSTEMD_DIR/.$unit.tmp"
     mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"
   done
@@ -410,7 +539,8 @@ case "$OP" in
     require_host
     [ -n "$RECEIPT_ARG" ] || fail "rollback requires --receipt <dir>"
     require_lock
-    do_rollback_from "$RECEIPT_ARG"
+    # Explicit propagation: 4 = rollback ran to completion with failed steps.
+    do_rollback_from "$RECEIPT_ARG" || exit "$?"
     ;;
   *)
     usage >&2

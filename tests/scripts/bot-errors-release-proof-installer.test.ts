@@ -70,13 +70,27 @@ function makeFixture(): Fixture {
     files: entries,
   }, null, 2));
 
+  // The monitor units EnvironmentFile= this file; the installer preflights
+  // its existence before taking the lock.
+  mkdirSync(join(home, '.config/whatsoup'), { recursive: true });
+  writeFileSync(join(home, '.config/whatsoup/bot-errors.env'), 'BOT_ERRORS_SYNTHETIC_FIXTURE=1\n');
+
   // fake systemctl / systemd-analyze / hostname write a command ledger;
   // `show -p FragmentPath --value <unit>` answers with the fixture systemd
   // path so the installer's loaded-fragment verification can pass.
+  // `is-enabled` is stateful via the ledger: once an `enable --now <unit>`
+  // line has been ledgered (and not later `disable --now`d) it answers
+  // enabled for that unit — mirroring real systemd enablement state.
   const fakeSystemctl = [
     '#!/usr/bin/env bash',
     `echo "systemctl $*" >> "${ledger}"`,
-    'if [ "$2" = "is-enabled" ]; then echo disabled; fi',
+    'if [ "$2" = "is-enabled" ]; then',
+    `  last="$(grep -E " (enable|disable) --now $3\\$" "${ledger}" | tail -n 1)"`,
+    '  case "$last" in',
+    '    *" enable --now $3") echo enabled ;;',
+    '    *) echo disabled ;;',
+    '  esac',
+    'fi',
     'if [ "$2" = "is-active" ]; then echo inactive; fi',
     'if [ "$2" = "show" ]; then',
     '  for a in "$@"; do :; done   # a = last arg = unit name',
@@ -135,6 +149,13 @@ function snapshotDir(dir: string): string[] {
 
 function ledgerLines(fx: Fixture): string[] {
   return existsSync(fx.ledger) ? readFileSync(fx.ledger, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
+function installOk(fx: Fixture) {
+  const res = runInstaller(fx, ['install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', SHA]);
+  expect(res.status, res.stderr).toBe(0);
+  expect(res.stdout).toContain('INSTALL_OK');
+  return res;
 }
 
 afterEach(() => {
@@ -212,13 +233,6 @@ describe('installer preflight and dry-run', () => {
 });
 
 describe('installer mutation, set-mode, verify, rollback', () => {
-  function installOk(fx: Fixture) {
-    const res = runInstaller(fx, ['install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', SHA]);
-    expect(res.status, res.stderr).toBe(0);
-    expect(res.stdout).toContain('INSTALL_OK');
-    return res;
-  }
-
   it('install materializes bundle, units, mode file, and enables only the two monitor timers', () => {
     const fx = makeFixture();
     installOk(fx);
@@ -363,5 +377,99 @@ describe('installer symlink and verify-bypass fixes (review findings)', () => {
     expect(res.status).not.toBe(0);
     expect(res.stderr).toContain('rolling back');
     expect(snapshotDir(fx.systemd)).toEqual(before);
+  });
+});
+
+describe('rollback hardening and install ordering (final review findings)', () => {
+  it('standalone rollback with failing daemon-reload exits 4 with ROLLBACK_FAILED and still byte-verifies and restores', () => {
+    const fx = makeFixture();
+    writeFileSync(join(fx.systemd, 'bot-errors-runtime-staleness.service'), '[Unit]\nDescription=old generation\n');
+    const res = installOk(fx);
+    const receipt = res.stdout.match(/RECEIPT=(\S+)/)?.[1]!;
+    // Tamper the installed unit so the rollback's restore + byte-verification
+    // have observable work to do after the failed daemon-reload step.
+    writeFileSync(join(fx.systemd, 'bot-errors-runtime-staleness.service'), '[Unit]\nDescription=tampered\n');
+    // From here on daemon-reload fails: a broken user manager at rollback time.
+    const failingSystemctl = [
+      '#!/usr/bin/env bash',
+      `echo "systemctl $*" >> "${fx.ledger}"`,
+      'if [ "$2" = "daemon-reload" ]; then exit 1; fi',
+      'if [ "$2" = "is-enabled" ]; then echo disabled; fi',
+      'if [ "$2" = "is-active" ]; then echo inactive; fi',
+      'if [ "$2" = "show" ]; then',
+      '  for a in "$@"; do :; done',
+      '  case "$*" in',
+      `    *FragmentPath*) echo "${fx.systemd}/$a" ;;`,
+      '    *) echo "" ;;',
+      '  esac',
+      'fi',
+      'exit 0',
+    ].join('\n') + '\n';
+    writeFileSync(join(fx.bin, 'systemctl'), failingSystemctl);
+    chmodSync(join(fx.bin, 'systemctl'), 0o755);
+    const roll = runInstaller(fx, ['rollback', '--host', SYNTH_HOST, '--receipt', receipt]);
+    expect(roll.status).toBe(4);
+    expect(roll.stderr).toContain('daemon-reload');
+    expect(roll.stderr).toContain(`ROLLBACK_FAILED steps=1 receipt=${receipt}`);
+    expect(roll.stdout).not.toContain('ROLLBACK_OK');
+    // The failed step must not abort the handler: the restore already
+    // happened and the byte-verification loop still ran and reported.
+    expect(readFileSync(join(fx.systemd, 'bot-errors-runtime-staleness.service'), 'utf8'))
+      .toContain('old generation');
+    expect(roll.stdout).toContain('rollback byte verification ok: bot-errors-runtime-staleness.service');
+  });
+
+  it('systemd-analyze rejection rolls back bundle, symlink, and units with no staging residue', () => {
+    const fx = makeFixture();
+    writeFileSync(join(fx.bin, 'systemd-analyze'),
+      `#!/usr/bin/env bash\necho "systemd-analyze $*" >> "${fx.ledger}"\nexit 1\n`);
+    chmodSync(join(fx.bin, 'systemd-analyze'), 0o755);
+    const res = runInstaller(fx, ['install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', SHA]);
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain('systemd verify rejected');
+    expect(res.stderr).toContain('rolling back');
+    for (const unit of UNIT_FILES) {
+      expect(existsSync(join(fx.systemd, unit))).toBe(false);
+    }
+    const parent = join(fx.home, '.local/lib/whatsoup/release-proof');
+    const leftovers = existsSync(parent) ? readdirSync(parent) : [];
+    expect(leftovers.filter((name) => name.startsWith('.stage-'))).toEqual([]);
+    expect(leftovers).not.toContain('current');
+    expect(leftovers).not.toContain(SHA);
+  });
+
+  it('virgin host: bundle dir and current symlink exist before systemd-analyze runs (install ordering)', () => {
+    const fx = makeFixture();
+    // Encodes the first-install finding: the units' ExecStart targets
+    // .../release-proof/current/..., so on a virgin host validation can only
+    // succeed if the bundle and `current` symlink are materialized first.
+    const currentLink = join(fx.home, '.local/lib/whatsoup/release-proof/current');
+    const orderingAnalyze = [
+      '#!/usr/bin/env bash',
+      `echo "systemd-analyze $*" >> "${fx.ledger}"`,
+      `if [ ! -L "${currentLink}" ]; then`,
+      '  echo "current symlink absent at analyze time" >&2',
+      '  exit 1',
+      'fi',
+      'exit 0',
+    ].join('\n') + '\n';
+    writeFileSync(join(fx.bin, 'systemd-analyze'), orderingAnalyze);
+    chmodSync(join(fx.bin, 'systemd-analyze'), 0o755);
+    const res = runInstaller(fx, ['install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', SHA]);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain('INSTALL_OK');
+    expect(ledgerLines(fx).filter((line) => line.startsWith('systemd-analyze'))).toHaveLength(UNIT_FILES.length);
+  });
+
+  it('missing bot-errors.env fails preflight with exit 2 before any mutation', () => {
+    const fx = makeFixture();
+    rmSync(join(fx.home, '.config/whatsoup/bot-errors.env'));
+    const before = { home: snapshotDir(fx.home), systemd: snapshotDir(fx.systemd) };
+    const res = runInstaller(fx, ['install', '--host', SYNTH_HOST, '--mode', 'observe', '--bundle-sha', SHA]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('bot-errors.env');
+    expect(snapshotDir(fx.home)).toEqual(before.home);
+    expect(snapshotDir(fx.systemd)).toEqual(before.systemd);
+    expect(ledgerLines(fx)).toHaveLength(0);
   });
 });
