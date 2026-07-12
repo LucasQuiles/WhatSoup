@@ -23,7 +23,7 @@
 #
 # Exit codes: 0 ok; 1 verification failure; 2 usage/preflight error or
 # inconclusive (a check that could not run).
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${RELEASE_PROOF_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -186,8 +186,8 @@ take_backup() {
   local unit installed
   for unit in "${UNIT_FILES[@]}"; do
     installed="$SYSTEMD_DIR/$unit"
+    require_no_symlink "$installed"
     if [ -f "$installed" ]; then
-      require_no_symlink "$installed"
       cp "$installed" "$RECEIPT/units-prior/$unit"
     else
       : > "$RECEIPT/units-prior/$unit.was-absent"
@@ -295,7 +295,7 @@ do_verify() {
       failures=$((failures + 1))
     fi
   done
-  [ "$failures" -eq 0 ] || exit 1
+  [ "$failures" -eq 0 ] || return 1
   echo "VERIFY_OK"
 }
 
@@ -319,7 +319,7 @@ do_install() {
   mkdir -p "$SYSTEMD_DIR"
   local unit
   for unit in "${UNIT_FILES[@]}"; do
-    [ -e "$SYSTEMD_DIR/$unit" ] && require_no_symlink "$SYSTEMD_DIR/$unit"
+    require_no_symlink "$SYSTEMD_DIR/$unit"
     cp "$stage/units/$unit" "$SYSTEMD_DIR/.$unit.tmp"
     mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"
   done
