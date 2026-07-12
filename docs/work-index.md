@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 54
+**Total entries:** 55
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=31, review=3, spec=15, state=1 |
-| Status | active=3, closed=4, completed=31, deferred=7, pending=9 |
-| Status source | body-marker=53, state-md-status=1 |
+| Kind | handoff=4, plan=31, review=3, spec=16, state=1 |
+| Status | active=3, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
+| Status source | body-marker=54, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -41,6 +41,12 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
+
+### Unknown-status — triage needed (1)
+
+| Path | Kind | Topic | Last Mod |
+|------|------|-------|----------|
+| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-12 |
 
 ### Cross-tree topic clusters (1)
 
@@ -114,7 +120,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(15 entries)_
+### docs/superpowers/specs  _(16 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -133,8 +139,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | active | body-marker | wall-to-wall-audit-remediation-design | 2026-07-10 |  |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
+| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-12 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-12T07:44:17Z from commit `07ccdced563b32095f22b7b256b680ed04f85232`
+- Generated at 2026-07-12T07:46:02Z from commit `384db60ddb82c6e7fb46d07fa6e617694699edf0`

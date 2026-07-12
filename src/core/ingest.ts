@@ -19,6 +19,7 @@ import { isLidJid } from './jid-constants.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
+import { emitAlert } from '../lib/emit-alert.ts';
 
 const log = createChildLogger('ingest');
 
@@ -30,6 +31,10 @@ const log = createChildLogger('ingest');
 let ingestActive = 0;
 let ingestQueued = 0;
 let ingestDropped = 0;
+
+const DISPLACEMENT_INCIDENT_WINDOW_MS = 15 * 60 * 1000;
+const DISPLACEMENT_INCIDENT_LIMITER_MAX_ENTRIES = 256;
+const displacementIncidentNextAttemptAt = new Map<string, number>();
 
 /** Returns a snapshot of ingest backpressure counters. */
 export function getIngestStats(): { active: number; queued: number; dropped: number } {
@@ -47,18 +52,104 @@ let _activeSlots = 0;
 
 interface QueuedItem {
   msg: IncomingMessage;
-  resolve: () => void;
-  dropped: boolean;
+  resolve: (result: AdmissionResult) => void;
 }
 
 const waitQueue: QueuedItem[] = [];
 
+type AdmissionResult =
+  | { status: 'acquired' }
+  | { status: 'displaced' };
+
+interface DisplacementIncidentResult {
+  accepted: boolean;
+  status: 'durably_queued' | 'legacy_accepted_unconfirmed' | 'failed' | 'rate_limited' | 'threw';
+}
+
+interface StoredIncomingMessage {
+  conversationKey: string;
+  isNew: boolean;
+}
+
+function persistIncomingMessage(db: Database, msg: IncomingMessage): StoredIncomingMessage | null {
+  try {
+    const conversationKey = !msg.isGroup && isLidJid(msg.chatJid)
+      ? resolvePhoneFromJid(msg.chatJid, db)
+      : toConversationKey(msg.chatJid);
+    const isNew = storeMessageIfNew(db, {
+      chatJid: msg.chatJid,
+      conversationKey,
+      senderJid: msg.senderJid,
+      senderName: msg.senderName,
+      messageId: msg.messageId,
+      content: msg.content,
+      contentText: msg.contentText ?? null,
+      contentType: msg.contentType,
+      isFromMe: msg.isFromMe,
+      timestamp: msg.timestamp,
+      quotedMessageId: msg.quotedMessageId,
+      rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
+    });
+    return { conversationKey, isNew };
+  } catch (err) {
+    log.error({ err, messageId: msg.messageId }, 'failed to store message');
+    return null;
+  }
+}
+
+function reserveDisplacementIncidentWindow(conversationKey: string, now: number): boolean {
+  const nextAttemptAt = displacementIncidentNextAttemptAt.get(conversationKey);
+  if (nextAttemptAt !== undefined) {
+    displacementIncidentNextAttemptAt.delete(conversationKey);
+    if (now < nextAttemptAt) {
+      displacementIncidentNextAttemptAt.set(conversationKey, nextAttemptAt);
+      return false;
+    }
+  }
+
+  if (displacementIncidentNextAttemptAt.size >= DISPLACEMENT_INCIDENT_LIMITER_MAX_ENTRIES) {
+    const leastRecentlyUsed = displacementIncidentNextAttemptAt.keys().next().value;
+    if (leastRecentlyUsed !== undefined) displacementIncidentNextAttemptAt.delete(leastRecentlyUsed);
+  }
+  displacementIncidentNextAttemptAt.set(conversationKey, now + DISPLACEMENT_INCIDENT_WINDOW_MS);
+  return true;
+}
+
+function emitDisplacementIncident(msg: IncomingMessage, queueDepth: number): DisplacementIncidentResult {
+  const now = Date.now();
+  const conversationKey = toConversationKey(msg.chatJid);
+  if (!reserveDisplacementIncidentWindow(conversationKey, now)) {
+    return { accepted: false, status: 'rate_limited' };
+  }
+
+  try {
+    const result = emitAlert(
+      config.botName,
+      'ingest_queue_displacement',
+      'ingest queue displaced a pre-journal message',
+      JSON.stringify({
+        chatJid: msg.chatJid,
+        messageId: msg.messageId,
+        evictionReason: 'wait_queue_capacity',
+        queueDepth,
+      }),
+      'warning',
+    );
+    return {
+      accepted: result.status === 'durably_queued',
+      status: result.status,
+    };
+  } catch (err) {
+    log.error({ err, chatJid: msg.chatJid, messageId: msg.messageId }, 'ingest displacement incident emission threw');
+    return { accepted: false, status: 'threw' };
+  }
+}
+
 /**
- * Try to acquire a concurrency slot. Returns a promise that resolves to `true`
- * when the slot is acquired and the caller should proceed, or `false` if the
- * message was dropped from the overflow queue while waiting.
+ * Try to acquire a concurrency slot. The result distinguishes an acquired
+ * slot from a message displaced out of the overflow queue while waiting.
  */
-function acquireSlot(msg: IncomingMessage): Promise<boolean> {
+function acquireSlot(msg: IncomingMessage): Promise<AdmissionResult> {
   const maxConcurrent = config.ingest?.maxConcurrent ?? 20;
   const maxQueueDepth = config.ingest?.maxQueueDepth ?? 500;
 
@@ -66,33 +157,40 @@ function acquireSlot(msg: IncomingMessage): Promise<boolean> {
   if (_activeSlots < maxConcurrent) {
     _activeSlots++;
     ingestActive++;
-    return Promise.resolve(true);
+    return Promise.resolve({ status: 'acquired' });
   }
 
   // Slow path: queue is full — need to drop something
   if (waitQueue.length >= maxQueueDepth) {
     // Prefer dropping group messages (lower priority) over DMs
+    const queueDepth = waitQueue.length;
     const groupIdx = waitQueue.findIndex((q) => q.msg.isGroup === true);
     const dropIdx = groupIdx !== -1 ? groupIdx : 0;
     const dropped = waitQueue.splice(dropIdx, 1)[0];
 
-    dropped.dropped = true;
-    dropped.resolve(); // unblock the dropped task so it can exit
+    dropped.resolve({ status: 'displaced' }); // unblock the dropped task so it can exit
     ingestDropped++;
     ingestQueued--;
+    const displacementIncident = emitDisplacementIncident(dropped.msg, queueDepth);
 
     log.warn(
-      { droppedMessageId: dropped.msg.messageId, isGroup: dropped.msg.isGroup, queueDepth: waitQueue.length },
+      {
+        droppedMessageId: dropped.msg.messageId,
+        chatJid: dropped.msg.chatJid,
+        isGroup: dropped.msg.isGroup,
+        queueDepth,
+        displacementIncidentAccepted: displacementIncident.accepted,
+        displacementIncidentStatus: displacementIncident.status,
+      },
       'ingest queue full, dropped message',
     );
   }
 
   // Enqueue this message
-  return new Promise<boolean>((resolve) => {
+  return new Promise<AdmissionResult>((resolve) => {
     const item: QueuedItem = {
       msg,
-      resolve: () => resolve(item.dropped ? false : true),
-      dropped: false,
+      resolve,
     };
     waitQueue.push(item);
     ingestQueued++;
@@ -106,7 +204,7 @@ function releaseSlot(): void {
     ingestQueued--;
     ingestActive++;
     // Slot transfers directly — _activeSlots stays the same
-    next.resolve();
+    next.resolve({ status: 'acquired' });
   } else {
     _activeSlots--;
   }
@@ -118,10 +216,11 @@ function releaseSlot(): void {
  * given runtime.
  *
  * Steps (in order):
+ *   pre-admission. Sanitize every message; correlate and store self echoes before displacement
  *   0. Control plane intercept — if extractProtocol matches and sender is a controlPeer, store in
  *      control_messages (NOT messages), journal as skipped, and return
  *   1. Store the message (always, even if later rejected)
- *   1b. Echo correlation — if isFromMe, call durabilityEngine.matchEcho and return
+ *   1b. Echo short-circuit — if isFromMe, return after its pre-admission storage
  *   1c. Passive short-circuit — journal as complete, return (no runtime dispatch)
  *   2. Check admin commands — consumed here, not forwarded to runtime
  *   3. Apply access policy (shouldRespond)
@@ -155,9 +254,28 @@ export function createIngestHandler(
         if (msg.senderName !== null) msg.senderName = stripLoneSurrogates(msg.senderName);
         if (msg.contentText !== null) msg.contentText = stripLoneSurrogates(msg.contentText);
 
+        // Correlate and idempotently store outbound echoes without consuming
+        // bounded admission capacity. The shared helper below keeps the normal
+        // downstream storage path behavior-identical without double writes.
+        if (msg.isFromMe && durability) {
+          try {
+            durability.matchEcho(msg.messageId);
+          } catch (err) {
+            log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
+          }
+        }
+        if (msg.isFromMe) {
+          const storedEcho = persistIncomingMessage(db, msg);
+          if (!storedEcho) return;
+          if (!storedEcho.isNew) {
+            log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
+          }
+          return;
+        }
+
         // --- Backpressure gate (SP1) ---
-        const proceed = await acquireSlot(msg);
-        if (!proceed) return;
+        const admission = await acquireSlot(msg);
+        if (admission.status === 'displaced') return;
         slotAcquired = true;
 
         // 0. Control plane intercept — before any normal storage
@@ -207,43 +325,11 @@ export function createIngestHandler(
         //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
         //    For LID DMs, resolve to the phone-based conversation key so messages from
         //    the same person (via LID or JID) share one conversation thread.
-        let conversationKey: string;
-        try {
-          if (!msg.isGroup && isLidJid(msg.chatJid)) {
-            conversationKey = resolvePhoneFromJid(msg.chatJid, db);
-          } else {
-            conversationKey = toConversationKey(msg.chatJid);
-          }
-          const isNew = storeMessageIfNew(db, {
-            chatJid: msg.chatJid,
-            conversationKey,
-            senderJid: msg.senderJid,
-            senderName: msg.senderName,
-            messageId: msg.messageId,
-            content: msg.content,
-            contentText: msg.contentText ?? null,
-            contentType: msg.contentType,
-            isFromMe: msg.isFromMe,
-            timestamp: msg.timestamp,
-            quotedMessageId: msg.quotedMessageId,
-            rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
-          });
-          if (!isNew) {
-            log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
-            return;
-          }
-        } catch (err) {
-          log.error({ err, messageId: msg.messageId }, 'failed to store message');
-          return;
-        }
-
-        // 1b. Echo correlation — Baileys echoes our own sent messages back through
-        //     messages.upsert with isFromMe=true. Match against submitted outbound_ops
-        //     so they transition submitted → echoed. Never route to runtime.
-        if (msg.isFromMe) {
-          if (durability) {
-            durability.matchEcho(msg.messageId);
-          }
+        const storedMessage = persistIncomingMessage(db, msg);
+        if (!storedMessage) return;
+        const { conversationKey } = storedMessage;
+        if (!storedMessage.isNew) {
+          log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
           return;
         }
 

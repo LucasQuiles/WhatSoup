@@ -222,16 +222,19 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
     rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
 
     // Drive THRESHOLD - 1 empty turns: below threshold, no arm yet.
-    // With the fix, empty turns do not delete pendingTurnText, so the entry
-    // persists across consecutive empty turns without needing re-population.
     for (let i = 0; i < THRESHOLD - 1; i++) {
       rv.handleEventPerChat(mapKey, { type: 'result', text: null }, mapKey);
     }
     expect(rv.replayTurnOnFallback).not.toHaveBeenCalled();
-    // Entry must still be present after the below-threshold empty turn.
-    expect(rv.pendingTurnText.get(mapKey)).toBe(turnText);
+    // The completed unowned turn must release its replay/eviction latch after
+    // the handler has had a chance to inspect it for fallback activation.
+    expect(rv.pendingTurnText.has(mapKey)).toBe(false);
+    expect(rv.pendingTurnActorJid.has(mapKey)).toBe(false);
 
+    // Simulate sendTurnPerChat arming the next real user turn.
     rv.perChatInboundSeqQueue.set(mapKey, [2]);
+    rv.pendingTurnText.set(mapKey, turnText);
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
 
     // Drive the THRESHOLD-th empty turn: this must arm the fallback AND replay.
     rv.handleEventPerChat(mapKey, { type: 'result', text: null }, mapKey);
@@ -274,6 +277,23 @@ describe('per_chat empty-output fallback — replay sees pendingTurnText', () =>
 
     expect(rv.pendingTurnText.has(mapKey)).toBe(false);
     expect(rv.pendingTurnActorJid.has(mapKey)).toBe(false);
+  });
+
+  it('per_chat: a system result preserves the pending user replay state', () => {
+    const runtime = makeRuntime(FALLBACK_CFG);
+    const rv = v(runtime);
+
+    const mapKey = 'chat@s.whatsapp.net';
+    rv.chatQueues.set(mapKey, makeFakeQueue(mapKey));
+    rv.perChatInboundSeqQueue.set(mapKey, [1]);
+    rv.pendingTurnText.set(mapKey, 'Pending user turn');
+    rv.pendingTurnActorJid.set(mapKey, 'user@s.whatsapp.net');
+    rv.pendingSystemResults.counts.set(mapKey, 1);
+
+    rv.handleEventPerChat(mapKey, { type: 'result', text: 'Context restored' }, mapKey);
+
+    expect(rv.pendingTurnText.get(mapKey)).toBe('Pending user turn');
+    expect(rv.pendingTurnActorJid.get(mapKey)).toBe('user@s.whatsapp.net');
   });
 
   it('singleton path: replay still fires when primary hits threshold (regression guard)', async () => {

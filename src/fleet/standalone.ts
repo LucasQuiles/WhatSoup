@@ -25,7 +25,11 @@ const server = createFleetServer({
   fleetToken: tokens.active,
   acceptTokens: tokens.accept,
   getFleetTokens: loadOrCreateFleetTokens,
-  getSelfHealth: () => ({ status: 'healthy', standalone: true }),
+  getSelfHealth: () => ({
+    status: 'healthy',
+    generated_at: new Date().toISOString(),
+    standalone: true,
+  }),
 });
 
 server.start(port);

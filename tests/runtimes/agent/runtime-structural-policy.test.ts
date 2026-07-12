@@ -18,19 +18,39 @@ async function readFailureTaxonomySource(): Promise<string> {
   return readFile(new URL('../../../src/runtimes/agent/failure-taxonomy.ts', import.meta.url), 'utf8');
 }
 
+function methodSource(source: string, methodName: string): string {
+  const match = source.match(
+    new RegExp(`\\n  (?:private )?(?:async )?${methodName}\\([\\s\\S]*?\\n  \\}`),
+  );
+  expect(match).toBeTruthy();
+  return match?.[0] ?? '';
+}
+
 describe('AgentRuntime structural policy', () => {
   it('LEAK-02 wires cleanup into crash/deletion sites without dropping replay text', async () => {
     const source = await readRuntimeSource();
-    const mapKeyCleanupMatches = source.match(/this\.cleanupPerChatState\(mapKey\);/g) ?? [];
-    const workspaceCleanupMatches = source.match(/this\.cleanupPerChatState\(workspaceKey\);/g) ?? [];
-    const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
+    const generationCleanup = methodSource(source, 'cleanupPerChatGenerationState');
+    const terminalCleanup = methodSource(source, 'cleanupPerChatState');
+    const resetOwnedSession = methodSource(source, 'resetOwnedPerChatSession');
+    const idleEviction = methodSource(source, 'evictIdleSession');
+    const failedWorkspaceCreation = methodSource(source, 'cleanupFailedSandboxWorkspace');
+    const exhaustedSession = methodSource(source, 'terminalizeExhaustedPerChatSession');
+    const lidRetirement = methodSource(source, 'handleJidAliasChanged');
+    const crashBody = methodSource(source, 'cleanupPerChatCrashTurnState');
 
-    expect(mapKeyCleanupMatches.length).toBeGreaterThanOrEqual(2);
-    expect(workspaceCleanupMatches.length).toBeGreaterThanOrEqual(3);
-    expect(source).toContain('this.cleanupPerChatState(lidKey);');
-    expect(crashMatch).toBeTruthy();
+    expect(terminalCleanup).toContain('this.cleanupPerChatGenerationState(mapKey, options);');
+    expect(terminalCleanup).toContain('this.teardownPerChatActorSocket(mapKey);');
+    expect(resetOwnedSession).toContain('this.cleanupPerChatGenerationState(mapKey);');
+    expect(resetOwnedSession).not.toContain('this.cleanupPerChatState(mapKey);');
+    expect(resetOwnedSession).not.toContain('this.teardownPerChatActorSocket(mapKey);');
+    expect(idleEviction).toContain('this.cleanupPerChatState(mapKey);');
+    expect(failedWorkspaceCreation).toContain('this.cleanupPerChatState(workspaceKey);');
+    expect(exhaustedSession).toContain(
+      'this.cleanupPerChatState(releaseKey, { preserveCrashHistory: true });',
+    );
+    expect(lidRetirement).toContain('this.cleanupPerChatState(lidKey);');
 
-    const crashBody = crashMatch?.[1] ?? '';
+    expect(generationCleanup).toContain('this.pendingTurnText.delete(mapKey);');
     expect(crashBody).toContain('this.perChatTurnContentType.delete(mapKey);');
     expect(crashBody).toContain('this.perChatTurnText.delete(mapKey);');
     expect(crashBody).toContain('this.perChatAssistantItemText.delete(mapKey);');
@@ -39,15 +59,12 @@ describe('AgentRuntime structural policy', () => {
 
   it('cleanupPerChatState covers all auxiliary per-chat maps', async () => {
     const source = await readRuntimeSource();
-    const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
-
-    expect(match).toBeTruthy();
-
-    const methodBody = match?.[1] ?? '';
-    const expectedDeletes = [
+    const terminalCleanup = methodSource(source, 'cleanupPerChatState');
+    const generationCleanup = methodSource(source, 'cleanupPerChatGenerationState');
+    const expectedGenerationCleanup = [
       'this.crashes.forget(mapKey);',
       'this.perChatInboundSeqQueue.delete(mapKey);',
-      'this.pendingSystemResults.counts.delete(mapKey);',
+      'this.pendingSystemResults.clearScope(mapKey);',
       'this.perChatTurnContentType.delete(mapKey);',
       'this.perChatTurnText.delete(mapKey);',
       'this.perChatAssistantItemText.delete(mapKey);',
@@ -55,48 +72,30 @@ describe('AgentRuntime structural policy', () => {
       'this.perChatRouteMarkerHold.delete(mapKey);',
       'this.pendingTurnText.delete(mapKey);',
       'this.pendingTurnActorJid.delete(mapKey);',
-      // F-STICKY-ACTOR (QR-247 hardening): the exec-queue + per-chat socket clears
-      // are delegated to teardownPerChatActorSocket (reused by the non-claude
-      // fallback path in wirePerChatActorSocket). The delegation target is verified
-      // to clear BOTH maps below, so the leak-guard invariant is preserved.
-      'this.teardownPerChatActorSocket(mapKey);',
+      'this.perChatExecActorQueue.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
       'this.postTurnGate.delete(mapKey);',
-      'this.lastSpawnRouteProvider.delete(conversationKey);',
-      'this.lastPinBlockNotice.delete(conversationKey);',
       'this.autoCompact.cleanupScope(mapKey);',
-      'this.operationTrackers.delete(mapKey);',
       'this.deletePendingPollQuestions(mapKey);',
+      "this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');",
+      'tracker.shutdown();',
+      'this.operationTrackers.delete(mapKey);',
     ];
 
-    for (const expectedDelete of expectedDeletes) {
-      expect(methodBody).toContain(expectedDelete);
+    for (const expectedCleanup of expectedGenerationCleanup) {
+      expect(generationCleanup).toContain(expectedCleanup);
     }
 
-    // Six listed entries are not raw `.delete(mapKey)` calls: the crash count
-    // routes through this.crashes.forget(mapKey) (extracted CrashTracker), the
-    // auto-compact bookkeeping (cooldown/last-success/rapid-rearm/measure/boundary
-    // + waiter + silent timer) routes through this.autoCompact.cleanupScope(mapKey)
-    // (extracted AutoCompactController), the pending-poll cleanup goes through
-    // this.deletePendingPollQuestions(mapKey), the exec-queue + per-chat socket
-    // clears route through this.teardownPerChatActorSocket(mapKey), and the two
-    // slice-4 route maps are keyed by conversationKey (not mapKey), deleting under
-    // the reconciled conversationKey derived from mapKey.
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 6);
+    expect(terminalCleanup).toContain('this.cleanupPerChatGenerationState(mapKey, options);');
+    expect(terminalCleanup).toContain('this.teardownPerChatActorSocket(mapKey);');
+    expect(terminalCleanup).toContain('this.lastSpawnRouteProvider.delete(conversationKey);');
+    expect(terminalCleanup).toContain('this.lastPinBlockNotice.delete(conversationKey);');
 
-    const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
-    expect(pendingHelper).toBeTruthy();
-    const helperBody = pendingHelper?.[1] ?? '';
+    const helperBody = methodSource(source, 'deletePendingPollQuestions');
     expect(helperBody).toContain('clearPendingPollTimers(pending);');
     expect(helperBody).toContain('this.pendingPolls.questions.delete(mapKey);');
-    expect(methodBody).toContain("this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');");
 
-    // F-STICKY-ACTOR (QR-247 hardening): the delegated teardown MUST clear both the
-    // executing-actor queue AND the per-chat socket (stop + map delete), else moving
-    // them out of cleanupPerChatState above would silently reopen a leak.
-    const teardownHelper = source.match(/private teardownPerChatActorSocket\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
-    expect(teardownHelper).toBeTruthy();
-    const teardownBody = teardownHelper?.[1] ?? '';
+    const teardownBody = methodSource(source, 'teardownPerChatActorSocket');
     expect(teardownBody).toContain('this.perChatExecActorQueue.delete(mapKey);');
     expect(teardownBody).toContain('this.perChatSocketResources.delete(mapKey);');
     expect(teardownBody).toContain('sockRes.socketServer.stop();');

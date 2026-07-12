@@ -22,6 +22,58 @@ export interface ToolUpdate {
   detail: string;
 }
 
+export type OutboundMessageRole = 'answer' | 'lifecycle' | 'status';
+
+export interface TurnDeliveryEvidence {
+  readonly turnId: string;
+  readonly answerOpIds: readonly number[];
+  readonly lifecycleOpIds: readonly number[];
+  readonly statusOpIds: readonly number[];
+}
+
+interface MutableTurnDeliveryEvidence {
+  readonly turnId: string;
+  readonly epoch: number;
+  readonly opIds: Record<OutboundMessageRole, number[]>;
+}
+
+interface TurnEvidenceFlush {
+  readonly evidence: MutableTurnDeliveryEvidence;
+  readonly completion: Promise<TurnDeliveryEvidence>;
+}
+
+interface QueuedOutboundChunk {
+  readonly text: string;
+  readonly role: OutboundMessageRole;
+  readonly turnId: string | undefined;
+  readonly turnEvidenceEpoch: number | undefined;
+  readonly chatJid: string;
+  readonly conversationKey: string;
+  readonly sourceInboundSeq: number | undefined;
+}
+
+interface BufferedStreamPart {
+  readonly text: string;
+  readonly role: OutboundMessageRole;
+  readonly turnId: string | undefined;
+  readonly turnEvidenceEpoch: number | undefined;
+  readonly chatJid: string;
+  readonly conversationKey: string;
+  readonly sourceInboundSeq: number | undefined;
+}
+
+interface BufferedToolUpdate {
+  readonly update: ToolUpdate;
+  readonly role: OutboundMessageRole;
+  readonly turnId: string | undefined;
+  readonly turnEvidenceEpoch: number | undefined;
+  readonly chatJid: string;
+  readonly conversationKey: string;
+  readonly sourceInboundSeq: number | undefined;
+}
+
+type OutboundAttribution = Omit<QueuedOutboundChunk, 'text'>;
+
 const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
   reading:   { label: 'Reading',   emoji: '📖' },
   searching: { label: 'Searching', emoji: '🔎' },
@@ -113,7 +165,8 @@ export const PROGRESS_PLACEHOLDER_RATE_FLOOR_MS = 180_000;
 export const MAX_STATUS_MESSAGES_PER_TURN = 10;
 /**
  * PR-E: the single friendly note sent the first time a turn trips the status cap.
- * Routed through enqueueText, so it is CONTENT (never gated) and always lands.
+ * Classified as status delivery evidence, but emitted outside the counter gate so
+ * it cannot recursively consume the exhausted budget or suppress itself.
  */
 export const STATUS_CAP_NOTICE =
   "_(still working — I'll stop the step-by-step and send the result when it's ready)_";
@@ -197,11 +250,11 @@ function formatElapsed(ms: number): string {
  */
 export interface IOutboundQueue {
   lastActivity?: number;
-  enqueueText(text: string): void;
+  enqueueText(text: string, role?: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
-  enqueueStreamingText(text: string): void;
+  enqueueStreamingText(text: string, role?: OutboundMessageRole): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
-  enqueueResultText(text: string): void;
+  enqueueResultText(text: string, role?: OutboundMessageRole): void;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -217,7 +270,7 @@ export interface IOutboundQueue {
   setPollPending(pending: boolean): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
-  abortTurn(): void;
+  abortTurn(options?: { preserveEvidence?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
   /** Opaque echo-guard token. Exposed so a replacement queue can INHERIT the
@@ -233,6 +286,10 @@ export interface IOutboundQueue {
   getLastOpId(): number | undefined;
   /** Clear the tracked last outbound op id without touching durability. */
   clearLastOpId(): void;
+  /** Start collecting durability op ids for one logical turn. */
+  beginTurnEvidence(turnId: string): void;
+  /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
+  flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
   /** Mark the last outbound op created by this queue as terminal. */
   markLastTerminal(options?: { dedupeText?: boolean; skipDurabilityMark?: boolean }): void;
   /** Propagate durability engine after late initialization. */
@@ -260,6 +317,13 @@ export class OutboundQueue implements IOutboundQueue {
   private currentInboundSeq: number | undefined;
   /** The outbound_ops.id of the most recently created op (for markLastTerminal). */
   private lastOpId: number | undefined;
+  /** Mutable evidence for the sole turn currently owned by this queue. */
+  private activeTurnEvidence: MutableTurnDeliveryEvidence | undefined;
+  private nextTurnEvidenceEpoch = 0;
+  /** Last consumed snapshot, retained only to make a repeated flush idempotent. */
+  private completedTurnEvidence: TurnDeliveryEvidence | undefined;
+  /** Single-flight completion for the active evidence epoch. */
+  private turnEvidenceFlush: TurnEvidenceFlush | undefined;
   /** Dedupe key for the most recently submitted text op, promoted only if markLastTerminal follows. */
   private lastSubmittedTextDedupeKey: string | undefined;
   /** Recent terminal text sends. Only terminalized text can suppress a later duplicate. */
@@ -286,15 +350,15 @@ export class OutboundQueue implements IOutboundQueue {
   private maxStatusMessagesPerTurn: number =
     config.operationTracker?.maxStatusMessagesPerTurn ?? MAX_STATUS_MESSAGES_PER_TURN;
 
-  /** Queue of text chunks ready to send. */
-  private sendQueue: string[] = [];
+  /** Queue of text chunks ready to send with enqueue-time attribution. */
+  private sendQueue: QueuedOutboundChunk[] = [];
   /** Whether a send is currently in-flight. */
   private sending = false;
   /** Timestamp (ms) of the last completed send. */
   private lastSentAt = 0;
 
   /** Buffered tool update objects, waiting to be flushed as a batch. */
-  private toolBuffer: ToolUpdate[] = [];
+  private toolBuffer: BufferedToolUpdate[] = [];
   /** Timer handle for the idle batch window (resets on each new tool call). */
   private toolTimer: ReturnType<typeof setTimeout> | null = null;
   /** Timer handle for the max-age flush (set once when the buffer first fills, never reset). */
@@ -308,6 +372,8 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Promise chain used to serialize sends. */
   private chain: Promise<void> = Promise.resolve();
+  /** Sticky drain failure. A poisoned queue is never retried in-place. */
+  private drainFailure: { readonly error: unknown } | undefined;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -412,6 +478,127 @@ export class OutboundQueue implements IOutboundQueue {
     this.currentInboundSeq = seq;
   }
 
+  beginTurnEvidence(turnId: string): void {
+    if (turnId.trim() === '') {
+      throw new Error('Turn evidence requires a non-empty turn id');
+    }
+    if (this.activeTurnEvidence) {
+      if (this.activeTurnEvidence.turnId === turnId) return;
+      throw new Error(
+        `Turn evidence already belongs to ${this.activeTurnEvidence.turnId}; cannot begin ${turnId}`,
+      );
+    }
+    if (this.completedTurnEvidence?.turnId === turnId) {
+      throw new Error(`Turn evidence for ${turnId} was already completed`);
+    }
+    this.completedTurnEvidence = undefined;
+    this.activeTurnEvidence = {
+      turnId,
+      epoch: ++this.nextTurnEvidenceEpoch,
+      opIds: {
+        answer: [],
+        lifecycle: [],
+        status: [],
+      },
+    };
+  }
+
+  async flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence> {
+    const inFlight = this.turnEvidenceFlush;
+    if (inFlight) {
+      if (inFlight.evidence.turnId !== turnId) {
+        throw new Error(`Turn evidence belongs to ${inFlight.evidence.turnId}; cannot flush ${turnId}`);
+      }
+      return OutboundQueue.copyTurnEvidence(await inFlight.completion);
+    }
+
+    const active = this.activeTurnEvidence;
+    if (!active) {
+      if (this.completedTurnEvidence?.turnId === turnId) {
+        return OutboundQueue.copyTurnEvidence(this.completedTurnEvidence);
+      }
+      throw new Error(`No active turn evidence belongs to ${turnId}`);
+    }
+    if (active.turnId !== turnId) {
+      throw new Error(`Turn evidence belongs to ${active.turnId}; cannot flush ${turnId}`);
+    }
+
+    const completion = this.completeTurnEvidence(active);
+    this.turnEvidenceFlush = { evidence: active, completion };
+    return OutboundQueue.copyTurnEvidence(await completion);
+  }
+
+  private async completeTurnEvidence(
+    active: MutableTurnDeliveryEvidence,
+  ): Promise<TurnDeliveryEvidence> {
+    try {
+      await this.flush();
+      this.assertEvidenceComplete();
+      if (this.activeTurnEvidence !== active) {
+        throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
+      }
+
+      const completed = OutboundQueue.freezeTurnEvidence(active);
+      this.activeTurnEvidence = undefined;
+      this.completedTurnEvidence = completed;
+      return completed;
+    } finally {
+      if (this.turnEvidenceFlush?.evidence === active) {
+        this.turnEvidenceFlush = undefined;
+      }
+    }
+  }
+
+  private static freezeTurnEvidence(evidence: MutableTurnDeliveryEvidence): TurnDeliveryEvidence {
+    return Object.freeze({
+      turnId: evidence.turnId,
+      answerOpIds: Object.freeze([...evidence.opIds.answer]),
+      lifecycleOpIds: Object.freeze([...evidence.opIds.lifecycle]),
+      statusOpIds: Object.freeze([...evidence.opIds.status]),
+    });
+  }
+
+  private static copyTurnEvidence(evidence: TurnDeliveryEvidence): TurnDeliveryEvidence {
+    return Object.freeze({
+      turnId: evidence.turnId,
+      answerOpIds: Object.freeze([...evidence.answerOpIds]),
+      lifecycleOpIds: Object.freeze([...evidence.lifecycleOpIds]),
+      statusOpIds: Object.freeze([...evidence.statusOpIds]),
+    });
+  }
+
+  private recordTurnOp(chunk: QueuedOutboundChunk, opId: number): void {
+    if (
+      chunk.turnId === undefined
+      || this.activeTurnEvidence?.turnId !== chunk.turnId
+      || this.activeTurnEvidence.epoch !== chunk.turnEvidenceEpoch
+    ) return;
+    this.activeTurnEvidence.opIds[chunk.role].push(opId);
+  }
+
+  private snapshotAttribution(role: OutboundMessageRole): OutboundAttribution {
+    return {
+      role,
+      turnId: this.activeTurnEvidence?.turnId,
+      turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
+      chatJid: this.chatJid,
+      conversationKey: this.cachedConversationKey,
+      sourceInboundSeq: this.currentInboundSeq,
+    };
+  }
+
+  private static sameAttribution(
+    left: OutboundAttribution,
+    right: OutboundAttribution,
+  ): boolean {
+    return left.role === right.role
+      && left.turnId === right.turnId
+      && left.turnEvidenceEpoch === right.turnEvidenceEpoch
+      && left.chatJid === right.chatJid
+      && left.conversationKey === right.conversationKey
+      && left.sourceInboundSeq === right.sourceInboundSeq;
+  }
+
   /** Return the id of the most recently created outbound op, or undefined if none. */
   getLastOpId(): number | undefined {
     return this.lastOpId;
@@ -447,16 +634,24 @@ export class OutboundQueue implements IOutboundQueue {
   private turnHasVisibleText = false;
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
-  private streamBufferParts: string[] = [];
+  private streamBufferParts: BufferedStreamPart[] = [];
   /** Timer for flushing aggregated streaming text after a pause. */
   private streamTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Enqueue a text message for immediate sending (after pacing). */
-  enqueueText(text: string): void {
+  enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
+    const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
     this.turnHasVisibleText = true;
+    this.enqueuePreparedText(text, attribution);
+  }
+
+  private enqueuePreparedText(
+    text: string,
+    attribution: OutboundAttribution,
+  ): void {
     // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
     // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
     // mirrors the chat runtime's redactInternalArtifacts on the response. Applied
@@ -464,10 +659,10 @@ export class OutboundQueue implements IOutboundQueue {
     // chunks (boundary-safe). Audience-scoped: operator-owned internal groups keep
     // the fleet's coordination vocabulary (paths, hook names, bead `Files:` lists)
     // and only have secrets/emails masked — client chats get the full scrub.
-    const safe = redactInternalArtifacts(text, resolveOutboundAudience(this.chatJid)).text;
+    const safe = redactInternalArtifacts(text, resolveOutboundAudience(attribution.chatJid)).text;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
     for (const chunk of chunks) {
-      this.enqueue(chunk);
+      this.enqueue(chunk, attribution);
     }
   }
 
@@ -477,10 +672,10 @@ export class OutboundQueue implements IOutboundQueue {
    * that emit per-token or per-line deltas. Text is buffered and flushed after
    * TEXT_AGGREGATE_DELAY_MS of silence, producing batched messages instead of spam.
    */
-  enqueueStreamingText(text: string): void {
+  enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text) return;
     this.turnHasVisibleText = true;
-    this.streamBufferParts.push(text);
+    this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
     this.startTyping();
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
@@ -494,17 +689,26 @@ export class OutboundQueue implements IOutboundQueue {
       clearTimeout(this.streamTimer);
       this.streamTimer = null;
     }
-    const text = this.streamBufferParts.join('');
+    const parts = this.streamBufferParts;
     this.streamBufferParts = [];
-    if (!text || text.trim() === '') return;
-    // QR-114: redact operator-local internal artifacts on the assembled buffer
-    // before splitMessage (boundary-safe), same as enqueueText — the streamed
-    // reply path otherwise reaches the user with zero redaction. Audience-scoped.
-    const safe = redactInternalArtifacts(text, resolveOutboundAudience(this.chatJid)).text;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
-    for (const chunk of chunks) {
-      this.enqueue(chunk);
+    let group: BufferedStreamPart[] = [];
+    const flushGroup = (): void => {
+      if (group.length === 0) return;
+      const { text: _firstText, ...attribution } = group[0];
+      const text = group.map((part) => part.text).join('');
+      if (text.trim() !== '') {
+        this.enqueuePreparedText(text, attribution);
+      }
+      group = [];
+    };
+    for (const part of parts) {
+      const prior = group[0];
+      if (prior && !OutboundQueue.sameAttribution(prior, part)) {
+        flushGroup();
+      }
+      group.push(part);
     }
+    flushGroup();
   }
 
   /**
@@ -513,13 +717,13 @@ export class OutboundQueue implements IOutboundQueue {
    * output — Claude Code often appends an internal task summary ("Done — I sent
    * the message and asked for...") that shouldn't reach non-technical users.
    */
-  enqueueResultText(text: string): void {
+  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
     if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
       // Suppress — the user already got the real response during the turn
       return;
     }
-    this.enqueueText(text);
+    this.enqueueText(text, role);
   }
 
   /**
@@ -547,7 +751,7 @@ export class OutboundQueue implements IOutboundQueue {
         return;
       }
     }
-    this.toolBuffer.push(update);
+    this.toolBuffer.push({ update, ...this.snapshotAttribution('status') });
     this.startTyping();
 
     // Idle timer: reset on each new tool call, fires after a pause in tool activity.
@@ -657,6 +861,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   private enqueueProgress(text: string): void {
     const now = Date.now();
+    const attribution = this.snapshotAttribution('status');
 
     // Persistent per-chat rate FLOOR \u2014 checked BEFORE the text-dedupe window.
     // The text window (recentProgressTextAt) is a 30s per-TEXT collapser cleared
@@ -692,13 +897,13 @@ export class OutboundQueue implements IOutboundQueue {
     // already decided this placeholder WOULD emit; enforce the per-turn count
     // now so a single turn can't flood the chat with narration. Past the cap,
     // keep the liveness signal and drop the placeholder — content is never gated.
-    if (this.statusBudgetExhausted()) {
+    if (this.statusBudgetExhausted(attribution)) {
       return;
     }
     this.recentProgressTextAt.set(text, now);
     // Record the floor slot only on an ACTUAL emit (passed both floor and text window).
     this.lastProgressEmittedAt = now;
-    this.enqueue(text);
+    this.enqueue(text, attribution);
   }
 
   /**
@@ -740,6 +945,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.flushStreamBuffer();
     this.flushToolBuffer();
     await this.chain;
+    this.assertDrainComplete();
     await sendFn();
   }
 
@@ -756,8 +962,10 @@ export class OutboundQueue implements IOutboundQueue {
     this.lastActivity = Date.now();
     this.flushStreamBuffer();
     this.flushToolBuffer();
+    this.throwDrainFailure();
     // Wait for the current chain to drain
     await this.chain;
+    this.assertDrainComplete();
     // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
     this.friendlyProgressSent.clear();
@@ -768,6 +976,8 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush pending messages and clear all timers. */
   async shutdown(): Promise<void> {
     await this.flush();
+    this.activeTurnEvidence = undefined;
+    this.completedTurnEvidence = undefined;
     if (this.toolTimer !== null) {
       clearTimeout(this.toolTimer);
       this.toolTimer = null;
@@ -780,7 +990,7 @@ export class OutboundQueue implements IOutboundQueue {
    * naturally on the recipient's side (~10-15s), acting as a soft signal that
    * the session is in trouble.
    */
-  abortTurn(): void {
+  abortTurn(options: { preserveEvidence?: boolean } = {}): void {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
@@ -795,12 +1005,19 @@ export class OutboundQueue implements IOutboundQueue {
     this.turnStatusCount = 0;
     this.turnTotalCount = 0;
     this.statusCapNoticeSent = false;
+    if (!options.preserveEvidence) {
+      this.activeTurnEvidence = undefined;
+      this.completedTurnEvidence = undefined;
+    }
+    // Deliberately retain sendQueue and drainFailure. A failed durability write
+    // leaves op identity unknown; only queue replacement may recover safely.
   }
 
   get targetChatJid(): string { return this.chatJid; }
 
   hasPendingWork(): boolean {
-    return this.sending
+    return this.drainFailure !== undefined
+      || this.sending
       || this.sendQueue.length > 0
       || this.toolBuffer.length > 0
       || this.streamBufferParts.length > 0
@@ -893,13 +1110,14 @@ export class OutboundQueue implements IOutboundQueue {
    * never do, so content is never gated. Past the cap the liveness signal is
    * preserved (startTyping) so the user still sees "typing…" without the flood.
    */
-  private statusBudgetExhausted(): boolean {
+  private statusBudgetExhausted(attribution: OutboundAttribution): boolean {
     if (this.turnStatusCount >= this.maxStatusMessagesPerTurn) {
       this.startTyping(); // keep the liveness signal, drop the narration
       if (!this.statusCapNoticeSent) {
         this.statusCapNoticeSent = true;
-        // CONTENT — routed through enqueueText so it is never gated and always lands.
-        this.enqueueText(STATUS_CAP_NOTICE);
+        this.flushStreamBuffer();
+        this.turnHasVisibleText = true;
+        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
@@ -912,11 +1130,41 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.toolBuffer.length === 0) return;
 
+    const buffered = this.toolBuffer;
+    this.toolBuffer = [];
+    if (this.toolUpdateRedirectJid !== null) {
+      const statusText = this.renderToolUpdates(buffered.map(({ update }) => update));
+      this.messenger.sendMessage(this.toolUpdateRedirectJid, statusText).catch((err) => {
+        log.warn({ err, target: this.toolUpdateRedirectJid, textLength: statusText.length }, 'tool-status redirect send failed');
+      });
+      return;
+    }
+
+    const batches: Array<{ attribution: OutboundAttribution; updates: ToolUpdate[] }> = [];
+    for (const item of buffered) {
+      const batch = batches.at(-1);
+      if (!batch || !OutboundQueue.sameAttribution(batch.attribution, item)) {
+        const { update: _update, ...attribution } = item;
+        batches.push({ attribution, updates: [item.update] });
+      } else {
+        batch.updates.push(item.update);
+      }
+    }
+
+    for (const batch of batches) {
+      if (this.statusBudgetExhausted(batch.attribution)) continue;
+      this.flushStreamBuffer();
+      this.turnHasVisibleText = true;
+      this.enqueuePreparedText(this.renderToolUpdates(batch.updates), batch.attribution);
+    }
+  }
+
+  private renderToolUpdates(updates: readonly ToolUpdate[]): string {
     // Group updates by category, preserving first-appearance order of categories.
     // Deduplicate detail strings within each category to avoid "Checking my notes on X" x2.
     const categoryOrder: ToolCategory[] = [];
     const groups = new Map<ToolCategory, string[]>();
-    for (const { category, detail } of this.toolBuffer) {
+    for (const { category, detail } of updates) {
       if (!groups.has(category)) {
         categoryOrder.push(category);
         groups.set(category, []);
@@ -937,32 +1185,14 @@ export class OutboundQueue implements IOutboundQueue {
       sections.push(`${emoji} ${label}:\n${bullets}`);
     }
 
-    this.toolBuffer = [];
-    const statusText = sections.join('\n\n');
-    if (this.toolUpdateRedirectJid !== null) {
-      this.messenger.sendMessage(this.toolUpdateRedirectJid, statusText).catch((err) => {
-        log.warn({ err, target: this.toolUpdateRedirectJid, textLength: statusText.length }, 'tool-status redirect send failed');
-      });
-      return;
-    }
-
-    // PR-E: cap status narration per turn (the ⚙️ Working on: batches). Past the
-    // per-turn budget, keep typing alive and DROP this batch — content paths are
-    // never gated. Placed after the redirect early-return so an operator status-
-    // log redirect stays uncapped and the user-facing notice never misfires
-    // into the redirect JID.
-    if (this.statusBudgetExhausted()) {
-      return;
-    }
-
-    // Typing indicator stays active — the turn is still in progress.
-    // WhatsApp clears the composing state on delivery, but the heartbeat
-    // will re-assert it within TYPING_REFRESH_MS.
-    this.enqueueText(statusText);
+    return sections.join('\n\n');
   }
 
-  private enqueue(chunk: string): void {
-    if (this.suppressDuplicateTerminalText(chunk)) {
+  private enqueue(
+    chunk: string,
+    attribution: OutboundAttribution,
+  ): void {
+    if (this.suppressDuplicateTerminalText(chunk, attribution.chatJid)) {
       return;
     }
     // PR-E telemetry: count every message actually enqueued this turn (content
@@ -971,43 +1201,72 @@ export class OutboundQueue implements IOutboundQueue {
     // though E deliberately never drops content.
     this.turnTotalCount++;
     if (this.turnTotalCount === HIGH_VOLUME_TURN_WATERMARK) {
-      log.warn({ chatJid: this.chatJid, count: this.turnTotalCount }, 'high-volume turn');
+      log.warn({ chatJid: attribution.chatJid, count: this.turnTotalCount }, 'high-volume turn');
     }
     this.lastActivity = Date.now();
-    this.sendQueue.push(chunk);
+    this.sendQueue.push({ text: chunk, ...attribution });
     if (!this.sending) {
       this.drainQueue();
     }
   }
 
   private drainQueue(): void {
+    if (this.drainFailure) return;
     this.sending = true;
     this.chain = this.chain
       .then(async () => {
         while (this.sendQueue.length > 0) {
-          const chunk = this.sendQueue.shift()!;
+          const chunk = this.sendQueue[0]!;
           await this.sendWithPacing(chunk);
+          this.sendQueue.shift();
           // WA clears the composing indicator on message delivery. Re-assert
           // it immediately so there's no visible gap between mid-turn messages
           // (e.g. compact_boundary notification followed by continued output).
           if (this.isTyping) {
-            this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+            this.messenger.setTyping?.(chunk.chatJid, true).catch(() => {});
           }
         }
         this.sending = false;
       })
       .catch((err) => {
-        // Reset sending flag so the next enqueue() re-triggers draining.
-        // Any items remaining in sendQueue at the time of the error will be
-        // re-drained once a new message arrives and calls enqueue().
-        // (sendWithRetry never throws, so this branch requires a future bug
-        // in sendWithPacing — keeping it here as a safety net.)
-        log.error({ err }, 'drain queue error — resetting');
+        // Keep the failed head chunk and all following work in place. A
+        // durability exception can leave op identity unknown, so retrying it
+        // in-place could duplicate delivery or attach it to a later turn.
+        this.drainFailure ??= { error: err };
+        log.error({ err }, 'drain queue failed — queue poisoned');
         this.sending = false;
       });
   }
 
-  private async sendWithPacing(text: string): Promise<void> {
+  private throwDrainFailure(): void {
+    if (this.drainFailure) throw this.drainFailure.error;
+  }
+
+  private assertDrainComplete(): void {
+    this.throwDrainFailure();
+    if (this.sending || this.sendQueue.length > 0) {
+      const error = new Error('Outbound queue flush completed with pending send work');
+      this.drainFailure = { error };
+      throw error;
+    }
+  }
+
+  private assertEvidenceComplete(): void {
+    this.assertDrainComplete();
+    if (
+      this.toolBuffer.length > 0
+      || this.streamBufferParts.length > 0
+      || this.toolTimer !== null
+      || this.toolMaxAgeTimer !== null
+      || this.streamTimer !== null
+    ) {
+      const error = new Error('Turn evidence flush completed with pending buffered work');
+      this.drainFailure = { error };
+      throw error;
+    }
+  }
+
+  private async sendWithPacing(chunk: QueuedOutboundChunk): Promise<void> {
     const now = Date.now();
     const elapsed = now - this.lastSentAt;
     if (elapsed < MIN_SEND_GAP_MS && this.lastSentAt !== 0) {
@@ -1016,28 +1275,30 @@ export class OutboundQueue implements IOutboundQueue {
     }
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
-    if (!canSendToGroup(this.chatJid, config.echoGuard, this.senderToken)) {
+    if (!canSendToGroup(chunk.chatJid, config.echoGuard, this.senderToken)) {
       return; // silently drop
     }
-    await this.sendWithRetry(text);
+    await this.sendWithRetry(chunk);
     this.lastSentAt = Date.now();
-    recordGroupOutbound(this.chatJid, this.senderToken);
+    recordGroupOutbound(chunk.chatJid, this.senderToken);
   }
 
-  private async sendWithRetry(text: string): Promise<void> {
-    const textDedupeKey = this.terminalTextDedupeKey('text', this.chatJid, text);
+  private async sendWithRetry(chunk: QueuedOutboundChunk): Promise<void> {
+    const { text } = chunk;
+    const textDedupeKey = this.terminalTextDedupeKey('text', chunk.chatJid, text);
     // Create an outbound op before first attempt (if durability is wired)
     let opId: number | undefined;
     if (this.durability) {
       opId = this.durability.createOutboundOp({
-        conversationKey: this.cachedConversationKey,
-        chatJid: this.chatJid,
+        conversationKey: chunk.conversationKey,
+        chatJid: chunk.chatJid,
         opType: 'text',
         payload: JSON.stringify({ text }),
         replayPolicy: 'unsafe',
-        sourceInboundSeq: this.currentInboundSeq,
+        sourceInboundSeq: chunk.sourceInboundSeq,
       });
       this.lastOpId = opId;
+      this.recordTurnOp(chunk, opId);
       this.durability.markSending(opId);
     }
 
@@ -1055,7 +1316,7 @@ export class OutboundQueue implements IOutboundQueue {
         let receipt;
         try {
           receipt = await Promise.race([
-            this.messenger.sendMessage(this.chatJid, text, { messageId: stableMessageId }),
+            this.messenger.sendMessage(chunk.chatJid, text, { messageId: stableMessageId }),
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
                 () => reject(new Error('SEND_TIMEOUT')),
@@ -1078,14 +1339,14 @@ export class OutboundQueue implements IOutboundQueue {
           const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
           const retryAfterMs = OutboundQueue.retryAfterMs(err);
           const delayMs = retryAfterMs ?? jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS);
-          log.warn({ chatJid: this.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }), ...(retryAfterMs !== undefined && { retryAfterMs }) }, 'outbound send failed — retrying');
+          log.warn({ chatJid: chunk.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }), ...(retryAfterMs !== undefined && { retryAfterMs }) }, 'outbound send failed — retrying');
           await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
         }
       }
     }
     // All attempts exhausted — log and give up (do NOT re-throw, queue must keep draining)
     const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
-    log.error({ chatJid: this.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
+    log.error({ chatJid: chunk.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
 
     if (opId !== undefined && this.durability) {
       this.durability.markMaybeSent(opId, (lastErr as Error)?.message ?? 'send_failed');
@@ -1094,7 +1355,7 @@ export class OutboundQueue implements IOutboundQueue {
     // Best-effort: notify the user that part of the response was lost.
     // Send directly (not through queue) to avoid re-entry loops.
     Promise.race([
-      this.messenger.sendMessage(this.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
+      this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
       new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
     ]).catch(() => { /* best effort only */ });
   }
@@ -1105,17 +1366,17 @@ export class OutboundQueue implements IOutboundQueue {
     return Math.min(retryAfterMs, OutboundQueue.SEND_RETRY_MAX_MS);
   }
 
-  private suppressDuplicateTerminalText(text: string): boolean {
+  private suppressDuplicateTerminalText(text: string, chatJid: string): boolean {
     const now = Date.now();
     this.pruneTerminalTextDedupe(now);
-    const key = this.terminalTextDedupeKey('text', this.chatJid, text);
+    const key = this.terminalTextDedupeKey('text', chatJid, text);
     const entry = this.recentTerminalTextKeys.get(key);
     if (!entry) return false;
 
     entry.lastSeenAt = now;
     entry.suppressedCount += 1;
     log.info({
-      chatJid: this.chatJid,
+      chatJid,
       opType: 'text',
       terminal: true,
       payloadHash: this.terminalTextPayloadHash(text),

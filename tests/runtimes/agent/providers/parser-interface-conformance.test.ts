@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
-import { parseEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+// T2-DEFER(T3/T4): conformance keeps the deprecated Claude head shim until all parser APIs are envelopes.
+import { parseEvent as parseDeprecatedHead } from '../../../../src/runtimes/agent/stream-parser.ts';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
 import { parseGeminiAcpEvent } from '../../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import {
@@ -16,6 +17,7 @@ const AGENT_EVENT_TYPES = new Set<AgentEvent['type']>([
   'result',
   'token_usage',
   'ignored',
+  'unknown_block',
   'unknown',
   'parse_error',
 ]);
@@ -65,6 +67,8 @@ function isAgentEvent(value: unknown): value is AgentEvent {
       );
     case 'ignored':
       return true;
+    case 'unknown_block':
+      return typeof record['blockType'] === 'string' && 'raw' in record;
     case 'unknown':
       return 'raw' in record;
     case 'parse_error':
@@ -80,7 +84,7 @@ interface ParserCase {
 }
 
 const parsers: ParserCase[] = [
-  { name: 'parseEvent (claude-cli)', parse: (line) => parseEvent(line) },
+  { name: 'parseEvent (claude-cli)', parse: (line) => parseDeprecatedHead(line) },
   { name: 'parseCodexEvent', parse: (line) => parseCodexEvent(line) },
   { name: 'parseGeminiAcpEvent', parse: (line) => parseGeminiAcpEvent(line) },
   {
@@ -212,6 +216,7 @@ describe('parser interface conformance', () => {
       { type: 'result', text: null, inputTokens: 1, outputTokens: 2 },
       { type: 'token_usage', inputTokens: 1, outputTokens: 2 },
       { type: 'ignored' },
+      { type: 'unknown_block', blockType: 'future_block', raw: { type: 'future_block' } },
       { type: 'unknown', raw: { unexpected: true } },
       { type: 'parse_error', line: '{' },
     ];

@@ -274,7 +274,13 @@ export function updateSessionStatus(db: Database, rowId: number, status: string)
       .run(status, endedAt, rowId);
     log.info({ agentSessionId: rowId, status, endedAt }, 'session.ended');
   } else {
-    db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+    if (status === 'active') {
+      db.raw.prepare(
+        'UPDATE agent_sessions SET status = ?, ended_at = NULL WHERE id = ?',
+      ).run(status, rowId);
+    } else {
+      db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+    }
   }
 }
 

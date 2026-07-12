@@ -132,7 +132,7 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-function makeRuntime(): AgentRuntime {
+function makeRuntime(sessionScope?: 'per_chat'): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
   config['agentProviderConfig'] = undefined;
@@ -140,6 +140,7 @@ function makeRuntime(): AgentRuntime {
   config['agentFallbackModel'] = 'minimax/MiniMax-M2.7';
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: 'claude-opus-4-8[1m]',
+    ...(sessionScope ? { sessionScope } : {}),
   });
 }
 
@@ -381,6 +382,7 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
       stderrPreview?: string;
       sessionId?: string | null;
       dbRowId?: number | null;
+      generationIdentity?: { managerId: string; generation: number };
     }): void;
   };
 
@@ -397,7 +399,7 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     // crash produces zero alerts (the single-crash path has no alert, only the
     // agent_respawn_failed alert fires after exhaustion, which requires repeated
     // calls far beyond what a single clean exit would produce).
-    const runtime = makeRuntime();
+    const runtime = makeRuntime('per_chat');
     const v = view(runtime);
     // Arm the fallback window so the runtime is serving opencode-cli.
     v.activateProviderFallback(null, 'model-unavailable');
@@ -421,20 +423,37 @@ describe('GAP 3 — opencode-cli benign-exit during fallback session', () => {
     // Drive handlePerChatCrash directly — mirrors what onCrash callback does.
     // Single call: no agent_respawn_failed yet (below exhaustion threshold).
     const rv = runtimeView(runtime);
-    rv.handlePerChatCrash('chat@s.whatsapp.net', 'chat@s.whatsapp.net', {
+    const mapKey = 'chat@s.whatsapp.net';
+    const fakeSession = {
+      bindGenerationOwnership: vi.fn(),
+      getStatus: vi.fn(() => ({ active: true })),
+      getDbRowId: vi.fn(() => null),
+    };
+    const state = runtime as unknown as {
+      setOwnedPerChatSession: (key: string, session: unknown) => void;
+      sessionOwnership: {
+        get: (key: string) => { managerId: string; generation: number; state: string } | undefined;
+      };
+      crashes: { count: (key: string) => number };
+    };
+    state.setOwnedPerChatSession(mapKey, fakeSession);
+    const owner = state.sessionOwnership.get(mapKey);
+    if (!owner) throw new Error('missing owned fallback test session');
+    rv.handlePerChatCrash(mapKey, mapKey, {
       exitCode: 1,
       signal: null,
       provider: 'opencode-cli',
       crashClass: 'unknown_terminal',
       sessionId: null,
       dbRowId: null,
+      generationIdentity: { managerId: owner.managerId, generation: owner.generation },
     });
 
     // A single crash is within the auto-respawn window — no alert yet, but
     // crash machinery ran (no throw, no silent swallow).
     expect(alertsFor('agent_respawn_failed')).toHaveLength(0);
-    // The crash was registered — the runtime is aware of it.
-    // (No emitAlertChecked on first crash is correct: auto-respawn handles it.)
+    expect(state.crashes.count(mapKey)).toBe(1);
+    expect(state.sessionOwnership.get(mapKey)?.state).toBe('recoverable_dead');
   });
 
   it('clean opencode-cli exit during active fallback window emits no critical alert', () => {

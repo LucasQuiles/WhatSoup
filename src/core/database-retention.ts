@@ -1,5 +1,6 @@
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
+import { withTransaction } from './db-tx.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -26,6 +27,8 @@ export interface DatabaseRetentionConfig {
 }
 
 export interface DatabaseRetentionResult {
+  turnRecoveryJobs: number;
+  turnTerminalRecords: number;
   inboundEvents: number;
   outboundOps: number;
   toolCalls: number;
@@ -57,59 +60,155 @@ export function runDatabaseRetention(
   const terminalCutoff = daysModifier(retention.terminalDurabilityDays);
   const factCutoff = daysModifier(retention.exportedFactDays);
 
-  const inboundEvents = changes(db.raw.prepare(`
-    DELETE FROM inbound_events
-     WHERE processing_status IN ('complete', 'failed')
-       AND COALESCE(completed_at, received_at) < datetime('now', ?)
-  `).run(terminalCutoff));
+  const result = withTransaction(db, () => {
+    const completedRecoveryTerminals = db.raw.prepare(`
+      DELETE FROM turn_recovery_jobs
+       WHERE state = 'completed'
+         AND completed_at < datetime('now', ?)
+         AND EXISTS (
+           SELECT 1
+           FROM inbound_events i
+           WHERE i.seq = turn_recovery_jobs.source_inbound_seq
+             AND i.message_id = turn_recovery_jobs.source_message_id
+             AND i.conversation_key = turn_recovery_jobs.conversation_key
+             AND i.chat_jid = turn_recovery_jobs.delivery_jid
+             AND i.processing_status IN ('complete', 'failed')
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM turn_terminal_records t
+           JOIN outbound_ops o ON o.id = t.delivery_op_id
+           WHERE t.id = turn_recovery_jobs.terminal_record_id
+             AND t.inbound_disposition = 'transferred_to_recovery_owner'
+             AND t.scope = turn_recovery_jobs.scope
+             AND t.inbound_seq = turn_recovery_jobs.source_inbound_seq
+             AND t.conversation_key = turn_recovery_jobs.conversation_key
+             AND t.delivery_jid = turn_recovery_jobs.delivery_jid
+             AND o.source_inbound_seq = turn_recovery_jobs.source_inbound_seq
+             AND o.conversation_key = turn_recovery_jobs.conversation_key
+             AND o.chat_jid = turn_recovery_jobs.delivery_jid
+             AND o.status IN ('echoed', 'failed_permanent', 'quarantined')
+         )
+      RETURNING terminal_record_id
+    `).all(terminalCutoff) as Array<{ terminal_record_id: number }>;
+    const turnRecoveryJobs = completedRecoveryTerminals.length;
 
-  const outboundOps = changes(db.raw.prepare(`
-    DELETE FROM outbound_ops
-     WHERE status IN ('echoed', 'failed_permanent', 'quarantined')
-       AND created_at < datetime('now', ?)
-  `).run(terminalCutoff));
+    const deleteCompletedRecoveryTerminal = db.raw.prepare(`
+      DELETE FROM turn_terminal_records
+      WHERE id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM turn_recovery_jobs
+          WHERE terminal_record_id = turn_terminal_records.id
+        )
+    `);
+    let turnTerminalRecords = 0;
+    for (const { terminal_record_id: terminalRecordId } of completedRecoveryTerminals) {
+      turnTerminalRecords += changes(deleteCompletedRecoveryTerminal.run(terminalRecordId));
+    }
 
-  const toolCalls = changes(db.raw.prepare(`
-    DELETE FROM tool_calls
-     WHERE status IN ('complete', 'replayed', 'quarantined')
-       AND COALESCE(completed_at, created_at) < datetime('now', ?)
-  `).run(terminalCutoff));
+    turnTerminalRecords += changes(db.raw.prepare(`
+      DELETE FROM turn_terminal_records
+       WHERE created_at < datetime('now', ?)
+         AND inbound_disposition IN (
+           'finalized_replied', 'finalized_no_reply_policy', 'failed_terminal'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_recovery_jobs
+            WHERE terminal_record_id = turn_terminal_records.id
+         )
+         AND (
+           (
+             inbound_seq IS NULL
+             AND inbound_disposition = 'finalized_no_reply_policy'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM inbound_events
+             WHERE seq = turn_terminal_records.inbound_seq
+               AND processing_status IN ('complete', 'failed')
+           )
+         )
+    `).run(terminalCutoff));
 
-  const factExportQueue = changes(db.raw.prepare(`
-    DELETE FROM fact_export_queue
-     WHERE status = 'exported'
-       AND COALESCE(exported_at, created_at) < datetime('now', ?)
-  `).run(factCutoff));
+    const inboundEvents = changes(db.raw.prepare(`
+      DELETE FROM inbound_events
+       WHERE processing_status IN ('complete', 'failed')
+         AND COALESCE(completed_at, received_at) < datetime('now', ?)
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_recovery_jobs
+            WHERE source_inbound_seq = inbound_events.seq
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_terminal_records
+            WHERE inbound_seq = inbound_events.seq
+         )
+    `).run(terminalCutoff));
 
-  // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
-  // (written via toISOString()); datetime(bucket) normalizes it for comparison.
-  // A malformed/unparseable bucket makes datetime(bucket) NULL, and `NULL < x`
-  // is falsy — so without the explicit NULL branch a junk row would NEVER be
-  // pruned (a fail-open leak, the inverse of the bug this retention fixes). Junk
-  // buckets are unreadable by the dashboard (it compares ISO strings), so prune
-  // them too.
-  const metricsCutoff = daysModifier(retention.metricsHourlyDays);
-  const metricsHourly = changes(db.raw.prepare(`
-    DELETE FROM metrics_hourly
-     WHERE datetime(bucket) IS NULL
-        OR datetime(bucket) < datetime('now', ?)
-  `).run(metricsCutoff));
+    const outboundOps = changes(db.raw.prepare(`
+      DELETE FROM outbound_ops
+       WHERE status IN ('echoed', 'failed_permanent', 'quarantined')
+         AND created_at < datetime('now', ?)
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_terminal_records
+            WHERE delivery_op_id = outbound_ops.id
+         )
+    `).run(terminalCutoff));
 
-  // QR-066: decryption_failures gets one row per distinct undecryptable
-  // message_id (resolved rows are only flagged, never deleted), so it must be
-  // pruned like its sibling terminal tables or it grows unbounded. Reap rows
-  // with no activity past the window (last_seen_at), keeping a still-recurring
-  // failure alive; a NULL last_seen_at (shouldn't occur — schema DEFAULTs it)
-  // is also reaped so junk can't leak (mirrors the metrics_hourly NULL branch).
-  const decryptionFailureCutoff = daysModifier(retention.decryptionFailureDays);
-  const decryptionFailures = changes(db.raw.prepare(`
-    DELETE FROM decryption_failures
-     WHERE last_seen_at IS NULL
-        OR datetime(last_seen_at) < datetime('now', ?)
-  `).run(decryptionFailureCutoff));
+    const toolCalls = changes(db.raw.prepare(`
+      DELETE FROM tool_calls
+       WHERE status IN ('complete', 'replayed', 'quarantined')
+         AND COALESCE(completed_at, created_at) < datetime('now', ?)
+    `).run(terminalCutoff));
 
-  const result = { inboundEvents, outboundOps, toolCalls, factExportQueue, metricsHourly, decryptionFailures };
-  const total = inboundEvents + outboundOps + toolCalls + factExportQueue + metricsHourly + decryptionFailures;
+    const factExportQueue = changes(db.raw.prepare(`
+      DELETE FROM fact_export_queue
+       WHERE status = 'exported'
+         AND COALESCE(exported_at, created_at) < datetime('now', ?)
+    `).run(factCutoff));
+
+    // metrics_hourly is an append-only rollup keyed on an ISO-8601 `bucket`
+    // (written via toISOString()); datetime(bucket) normalizes it for comparison.
+    // A malformed/unparseable bucket makes datetime(bucket) NULL, and `NULL < x`
+    // is falsy — so without the explicit NULL branch a junk row would NEVER be
+    // pruned (a fail-open leak, the inverse of the bug this retention fixes). Junk
+    // buckets are unreadable by the dashboard (it compares ISO strings), so prune
+    // them too.
+    const metricsCutoff = daysModifier(retention.metricsHourlyDays);
+    const metricsHourly = changes(db.raw.prepare(`
+      DELETE FROM metrics_hourly
+       WHERE datetime(bucket) IS NULL
+          OR datetime(bucket) < datetime('now', ?)
+    `).run(metricsCutoff));
+
+    // QR-066: decryption_failures gets one row per distinct undecryptable
+    // message_id (resolved rows are only flagged, never deleted), so it must be
+    // pruned like its sibling terminal tables or it grows unbounded. Reap rows
+    // with no activity past the window (last_seen_at), keeping a still-recurring
+    // failure alive; a NULL last_seen_at (shouldn't occur — schema DEFAULTs it)
+    // is also reaped so junk can't leak (mirrors the metrics_hourly NULL branch).
+    const decryptionFailureCutoff = daysModifier(retention.decryptionFailureDays);
+    const decryptionFailures = changes(db.raw.prepare(`
+      DELETE FROM decryption_failures
+       WHERE last_seen_at IS NULL
+          OR datetime(last_seen_at) < datetime('now', ?)
+    `).run(decryptionFailureCutoff));
+
+    return {
+      turnRecoveryJobs,
+      turnTerminalRecords,
+      inboundEvents,
+      outboundOps,
+      toolCalls,
+      factExportQueue,
+      metricsHourly,
+      decryptionFailures,
+    };
+  });
+  const total = Object.values(result).reduce((sum, count) => sum + count, 0);
   if (total > 0) {
     log.info({ ...result, total }, 'database retention: deleted old terminal rows');
   }

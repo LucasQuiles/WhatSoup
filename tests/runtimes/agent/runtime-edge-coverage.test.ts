@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type {
   PendingPollQuestion,
   PollVote,
@@ -43,6 +45,7 @@ const {
   type MockSession = {
     spawnSession: ReturnType<typeof vi.fn>;
     sendTurn: ReturnType<typeof vi.fn>;
+    getProviderId: ReturnType<typeof vi.fn>;
     handleNew: ReturnType<typeof vi.fn>;
     getStatus: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
@@ -52,6 +55,8 @@ const {
     trackToolEnd: ReturnType<typeof vi.fn>;
     getDbRowId: ReturnType<typeof vi.fn>;
     setDurability: ReturnType<typeof vi.fn>;
+    bindGenerationOwnership: ReturnType<typeof vi.fn>;
+    resolveGenerationOwnership: () => SessionGenerationIdentity | null;
     recoverStalledOperation: ReturnType<typeof vi.fn>;
     probeLiveness: ReturnType<typeof vi.fn>;
   };
@@ -324,6 +329,9 @@ type RuntimeView = {
     socketServer?: { updateDeliveryJid: ReturnType<typeof vi.fn> };
   }>;
   perChatInboundSeqQueue: Map<string, number[]>;
+  perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
+  perChatTurnQueues: Map<string, { pending: number; isProcessing: boolean; haltedError: unknown; idle(): Promise<void> }>;
+  currentRuntimeTurnContext: RuntimeTurnContext | null;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
   perChatTurnContentType: Map<string, string>;
@@ -440,9 +448,12 @@ type RuntimeView = {
   recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void;
   handleControlTurn(reportId: string, payload: string): Promise<void>;
   getFallbackState(): { fallbackReason: string | null; fallbackActiveUntil: number | null };
+  setOwnedPerChatSession(mapKey: string, session: unknown): void;
+  deleteOwnedPerChatSession(mapKey: string, expected?: unknown): boolean;
 };
 
 function makeSession() {
+  let resolveGenerationOwnership: (() => SessionGenerationIdentity | null) | null = null;
   return {
     spawnSession: vi.fn(async () => {}),
     sendTurn: vi.fn(async () => {}),
@@ -464,6 +475,10 @@ function makeSession() {
     trackToolEnd: vi.fn(),
     getDbRowId: vi.fn(() => null),
     setDurability: vi.fn(),
+    bindGenerationOwnership: vi.fn((resolve: () => SessionGenerationIdentity | null) => {
+      resolveGenerationOwnership = resolve;
+    }),
+    resolveGenerationOwnership: () => resolveGenerationOwnership?.() ?? null,
     recoverStalledOperation: vi.fn(),
     probeLiveness: vi.fn(),
   };
@@ -494,6 +509,13 @@ function makeQueue(chatJid = 'chat-edge@s.whatsapp.net'): QueueMock {
     markLastTerminal: vi.fn(),
     setDurability: vi.fn(),
     endTurn: vi.fn(),
+    beginTurnEvidence: vi.fn(),
+    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+      turnId,
+      answerOpIds: [],
+      lifecycleOpIds: [],
+      statusOpIds: [],
+    })),
   } as unknown as QueueMock;
 }
 
@@ -581,9 +603,43 @@ function installDurabilityStub(runtime: AgentRuntime) {
     completeTurn: vi.fn(),
     upsertSessionCheckpoint: vi.fn(),
     completeInbound: vi.fn(),
+    markInboundSkipped: vi.fn(),
+    markInboundFailed: vi.fn(),
+    getOutboundDeliverySnapshot: vi.fn(),
+    finalizeTurnTerminal: vi.fn(() => ({
+      applied: true,
+      winnerMatchesRequest: true,
+      recordId: 1,
+      duplicateFinalizeCount: 0,
+      replyGuaranteeDisarmed: true,
+      effectiveReplyGuaranteeDisarmed: true,
+    })),
   };
   (runtime as unknown as { durability: typeof durability }).durability = durability;
   return durability;
+}
+
+function runtimeContext(
+  scope: 'per_chat' | 'shared',
+  conversationKey: string,
+  deliveryJid: string,
+  inboundSeq: number,
+  logicalTurnId: string,
+): RuntimeTurnContext {
+  return createRuntimeTurnContext({
+    identity: { scope, conversationKey, deliveryJid, inboundSeq, logicalTurnId, managerId: `manager-${scope}`, generation: 1 },
+    recoveryOwner: { logicalTurnId: `${logicalTurnId}:recovery`, managerId: 'manager-recovery', generation: 2 },
+    replay: {
+      sourceMessageId: `wamid-${logicalTurnId}`,
+      replaySafe: true,
+      senderJid: 'sender-edge@s.whatsapp.net',
+      senderName: null,
+      text: 'original edge turn',
+      isGroup: false,
+    },
+    contentType: 'text',
+    toolScopeKey: scope === 'per_chat' ? conversationKey : '__global__',
+  });
 }
 
 async function drainMicrotasks(iterations = 8): Promise<void> {
@@ -615,6 +671,7 @@ describe('AgentRuntime edge coverage', () => {
 
   afterEach(() => {
     delete process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'];
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -698,28 +755,6 @@ describe('AgentRuntime edge coverage', () => {
     await expect(promise).rejects.toThrow('Poll abort: MCP client disconnected');
   });
 
-  it('handles non-arming provider failures by sending context notices and shutting down', () => {
-    const runtime = makeRuntime({ sessionScope: 'per_chat' });
-    const queue = makeQueue();
-    const session = makeSession();
-    const recordTurnFailure = vi.fn();
-
-    view(runtime).handleProviderFailureResult(RESPONSE_WORKFLOWS.provider_context_overflow, {
-      queue,
-      session,
-      providerText: 'Prompt is too long for the context window',
-      turnHadToolWork: false,
-      logChatJid: queue.targetChatJid,
-      cleanupArgs: { mapKey: queue.targetChatJid },
-      recordTurnFailure,
-    });
-
-    expect(recordTurnFailure).toHaveBeenCalledWith('context-overflow');
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'));
-    expect(session.shutdown).toHaveBeenCalledTimes(1);
-    expect(view(runtime).getFallbackState().fallbackActiveUntil).toBeNull();
-  });
-
   it('arms fallback from registry provider failures, runs diagnostics, and blocks replay after tool activity', async () => {
     process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] = '1';
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
@@ -758,66 +793,8 @@ describe('AgentRuntime edge coverage', () => {
     );
   });
 
-  it('handles arming provider-failure reason variants without replay state', () => {
-    const cases: Array<{
-      workflow: ResponseWorkflow;
-      reason: 'auth-required' | 'rate-limit' | 'model-unavailable';
-      logMessage: string;
-      providerText: string;
-    }> = [
-      {
-        workflow: RESPONSE_WORKFLOWS.provider_auth_required,
-        reason: 'auth-required',
-        logMessage: 'suppressed provider auth-required message from result — session will be shut down',
-        providerText: 'Authentication required. Sign in to continue.',
-      },
-      {
-        workflow: RESPONSE_WORKFLOWS.provider_rate_limit,
-        reason: 'rate-limit',
-        logMessage: 'terminal provider rate-limit result observed',
-        providerText: 'Rate limit exceeded for this model.',
-      },
-      {
-        workflow: RESPONSE_WORKFLOWS.provider_model_unavailable,
-        reason: 'model-unavailable',
-        logMessage: 'suppressed provider model-unavailable message from result — session will be shut down',
-        providerText: 'The requested model is unavailable.',
-      },
-    ];
-
-    for (const item of cases) {
-      const runtime = makeRuntime({ sessionScope: 'per_chat' });
-      const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
-      const session = makeSession();
-      const recordTurnFailure = vi.fn();
-      mockRuntimeLogger.warn.mockClear();
-
-      view(runtime).handleProviderFailureResult(item.workflow, {
-        queue,
-        session,
-        providerText: item.providerText,
-        turnHadToolWork: false,
-        logChatJid: queue.targetChatJid,
-        scheduleReplayMapKey: queue.targetChatJid,
-        cleanupArgs: { mapKey: queue.targetChatJid },
-        recordTurnFailure,
-      });
-
-      expect(recordTurnFailure).toHaveBeenCalledWith(item.reason);
-      expect(view(runtime).getFallbackState().fallbackReason).toBe(item.reason);
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup'));
-      expect(session.shutdown).toHaveBeenCalledTimes(1);
-      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          chatJid: queue.targetChatJid,
-          textPreview: item.providerText,
-        }),
-        item.logMessage,
-      );
-    }
-  });
-
-  it('per-chat terminal provider results suppress non-arming failures through the direct result handler', () => {
+  it('per-chat terminal provider results suppress non-arming failures through the terminal coordinator', async () => {
+    process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
     const cases: Array<{
       reason: 'policy-block' | 'context-overflow';
       text: string;
@@ -848,18 +825,22 @@ describe('AgentRuntime edge coverage', () => {
       const session = makeSession();
       const durability = installDurabilityStub(runtime);
       const mapKey = `${item.reason}-map`;
+      const conversationKey = `${item.reason}-conversation`;
+      const context = runtimeContext('per_chat', conversationKey, queue.targetChatJid, 41, `turn-${item.reason}`);
 
       mockRuntimeLogger.warn.mockClear();
       mockRuntimeLogger.error.mockClear();
       state.perChatTurnContentType.set(mapKey, 'text');
       state.perChatTurnText.set(mapKey, 'provider text');
       state.perChatAssistantItemText.set(mapKey, new Map([['item-edge', 'partial']]));
+      state.perChatRuntimeTurnContexts.set(mapKey, [context]);
+      state.perChatInboundSeqQueue.set(mapKey, [41]);
 
       state.handleEventWithContext(
         { type: 'result', text: item.text, isError: true },
         queue,
         session,
-        `${item.reason}-conversation`,
+        conversationKey,
         41,
         mapKey,
         mapKey,
@@ -881,12 +862,25 @@ describe('AgentRuntime edge coverage', () => {
         }),
         item.message,
       );
-      expect(durability.upsertSessionCheckpoint).toHaveBeenCalledWith(
-        `${item.reason}-conversation`,
-        expect.objectContaining({ activeTurnId: null, lastInboundSeq: 41 }),
-      );
-      expect(durability.completeInbound).toHaveBeenCalledWith(41, 'response_sent');
-      expect(queue.flush).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminal: expect.objectContaining({
+          logicalTurnId: `turn-${item.reason}`,
+          inboundSeq: 41,
+          attemptKind: item.reason === 'policy-block' ? 'suppressed_by_policy' : 'failed',
+          ...(item.reason === 'context-overflow' ? { attemptFailureClass: item.reason } : {}),
+        }),
+        bookkeeping: expect.objectContaining({
+          checkpoint: {
+            conversationKey,
+            fields: expect.objectContaining({ activeTurnId: null, lastInboundSeq: 41 }),
+          },
+        }),
+      }));
+      expect(durability.completeInbound).not.toHaveBeenCalled();
+      expect(durability.upsertSessionCheckpoint).not.toHaveBeenCalled();
+      expect(queue.flushTurnEvidence).toHaveBeenCalledWith(`turn-${item.reason}`);
+      expect(queue.flush).not.toHaveBeenCalled();
       expect(state.perChatTurnContentType.has(mapKey)).toBe(false);
       expect(state.perChatTurnText.has(mapKey)).toBe(false);
       expect(state.perChatAssistantItemText.has(mapKey)).toBe(false);
@@ -895,7 +889,8 @@ describe('AgentRuntime edge coverage', () => {
     }
   });
 
-  it('per-chat terminal provider results arm fallback variants through the direct result handler', () => {
+  it('per-chat terminal provider results arm fallback variants through the terminal coordinator', async () => {
+    process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
     const cases: Array<{
       reason: 'auth-required' | 'rate-limit' | 'server-error' | 'model-unavailable';
       text: string;
@@ -929,15 +924,19 @@ describe('AgentRuntime edge coverage', () => {
       const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
       const session = makeSession();
       const durability = installDurabilityStub(runtime);
+      const conversationKey = `${item.reason}-conversation`;
+      const context = runtimeContext('per_chat', conversationKey, queue.targetChatJid, 42, `turn-${item.reason}`);
 
       mockRuntimeLogger.warn.mockClear();
       mockEmitAlert.mockClear();
+      state.perChatRuntimeTurnContexts.set(item.reason, [context]);
+      state.perChatInboundSeqQueue.set(item.reason, [42]);
 
       state.handleEventWithContext(
         { type: 'result', text: item.text, isError: true },
         queue,
         session,
-        `${item.reason}-conversation`,
+        conversationKey,
         42,
         item.reason,
         item.reason,
@@ -960,14 +959,23 @@ describe('AgentRuntime edge coverage', () => {
         item.message,
       );
       expect(session.shutdown).toHaveBeenCalledTimes(1);
-      expect(durability.completeInbound).toHaveBeenCalledWith(42, 'response_sent');
-      expect(queue.flush).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminal: expect.objectContaining({
+          logicalTurnId: `turn-${item.reason}`,
+          inboundSeq: 42,
+          attemptKind: 'failed',
+          attemptFailureClass: item.reason,
+        }),
+      }));
+      expect(durability.completeInbound).not.toHaveBeenCalled();
+      expect(queue.flush).not.toHaveBeenCalled();
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
       expect(turnCapability.lastTurnErrorClass).toBe(item.reason);
     }
   });
 
-  it('shared terminal provider results use the same non-arming suppression cleanup', () => {
+  it('shared terminal provider results use the same non-arming terminal transaction', async () => {
     const cases: Array<{
       reason: 'policy-block' | 'context-overflow';
       text: string;
@@ -991,11 +999,13 @@ describe('AgentRuntime edge coverage', () => {
       const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
       const session = makeSession();
       const durability = installDurabilityStub(runtime);
+      const context = runtimeContext('shared', `${item.reason}-conversation`, queue.targetChatJid, 84, `turn-shared-${item.reason}`);
 
       state.session = session;
       state.activeChatJid = queue.targetChatJid;
       state.currentTurnChatJid = queue.targetChatJid;
       state.currentInboundSeq = 84;
+      state.currentRuntimeTurnContext = context;
       state.singleTurnHadToolActivity = true;
       state.outboundQueues.set(queue.targetChatJid, queue);
 
@@ -1010,10 +1020,17 @@ describe('AgentRuntime edge coverage', () => {
       } else {
         expect(queue.enqueueText).not.toHaveBeenCalled();
       }
-      expect(durability.completeInbound).toHaveBeenCalledWith(84, 'response_sent');
+      await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminal: expect.objectContaining({
+          logicalTurnId: `turn-shared-${item.reason}`,
+          inboundSeq: 84,
+          attemptKind: item.reason === 'policy-block' ? 'suppressed_by_policy' : 'failed',
+        }),
+      }));
+      expect(durability.completeInbound).not.toHaveBeenCalled();
       expect(state.currentInboundSeq).toBeUndefined();
-      expect(state.singleTurnHadToolActivity).toBe(false);
-      expect(queue.flush).toHaveBeenCalledTimes(1);
+      expect(queue.flush).not.toHaveBeenCalled();
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, unknown>).turnCapability as { lastTurnErrorClass?: string };
       expect(turnCapability.lastTurnErrorClass).toBe(item.reason);
     }
@@ -1047,6 +1064,10 @@ describe('AgentRuntime edge coverage', () => {
     expect(created.opts.mcpSessionContext?.actorJid).toBe('actor-edge@s.whatsapp.net');
     expect(state.chatSessions.get('group-edge@g.us')).toBe(created.session);
     expect(state.chatQueues.has('group-edge@g.us')).toBe(true);
+    expect(created.session.resolveGenerationOwnership()).toEqual({
+      managerId: expect.any(String),
+      generation: 1,
+    });
 
     created.opts.onEvent({ type: 'result', text: 'stand-in reply' });
     expect(state.handleEventPerChat).toHaveBeenCalledWith(
@@ -1066,6 +1087,7 @@ describe('AgentRuntime edge coverage', () => {
       'group-edge@g.us',
       'group-edge@g.us',
       expect.objectContaining({ sessionId: 'fallback-session' }),
+      created.session,
     );
 
     created.opts.notifyUser?.('fallback session crashed');
@@ -1074,7 +1096,8 @@ describe('AgentRuntime edge coverage', () => {
     created.opts.onResumeFailed?.();
     expect(state.handleResumeFailed).toHaveBeenCalledWith('group-edge@g.us');
 
-    state.chatSessions.delete('group-edge@g.us');
+    expect(state.deleteOwnedPerChatSession('group-edge@g.us', created.session)).toBe(true);
+    expect(created.session.resolveGenerationOwnership()).toBeNull();
     created.opts.onEvent({ type: 'result', text: 'late event' });
     expect(state.handleEventPerChat).toHaveBeenCalledTimes(1);
   });
@@ -1155,7 +1178,7 @@ describe('AgentRuntime edge coverage', () => {
     } as unknown as PendingPollQuestion;
 
     installPollPersistenceStub(runtime);
-    state.chatSessions.set(lidKey, session);
+    state.setOwnedPerChatSession(lidKey, session);
     state.chatQueues.set(lidKey, chatQueue);
     state.perChatInboundSeqQueue.set(lidKey, [7]);
     state.pendingTurnText.set(lidKey, 'pending alias turn');
@@ -1254,15 +1277,19 @@ describe('AgentRuntime edge coverage', () => {
       'per-setup@s.whatsapp.net',
       'per-setup@s.whatsapp.net',
       expect.objectContaining({ sessionId: 'per-session' }),
+      perChatCreated.session,
     );
 
     perChatCreated.opts.notifyUser?.('per-chat crash notice');
     await Promise.resolve();
-    expect(perChatQueue.abortTurn).toHaveBeenCalledTimes(1);
-    expect(perChatMessenger.sendMessage).toHaveBeenCalledWith(
-      'per-setup@s.whatsapp.net',
-      'per-chat crash notice',
-    );
+    expect(perChatQueue.abortTurn).not.toHaveBeenCalled();
+    expect(perChatQueue.enqueueText).toHaveBeenCalledWith('per-chat crash notice');
+    expect(perChatQueue.flush).toHaveBeenCalledTimes(1);
+    expect(perChatMessenger.sendMessage).not.toHaveBeenCalled();
+    expect(
+      perChatState.deleteOwnedPerChatSession('per-setup@s.whatsapp.net', perChatCreated.session),
+    ).toBe(true);
+    expect(perChatCreated.session.resolveGenerationOwnership()).toBeNull();
     perChatCreated.opts.onEvent({ type: 'result', text: 'late event' });
     expect(perChatState.handleEventPerChat).toHaveBeenCalledTimes(1);
 
@@ -1681,6 +1708,7 @@ describe('AgentRuntime edge coverage', () => {
   });
 
   it('flushes image coalesce at the batch cap and cleans failed representative seq state', async () => {
+    vi.useRealTimers();
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
     const state = view(runtime);
     const mapKey = 'image-batch-edge@s.whatsapp.net';
@@ -1695,7 +1723,8 @@ describe('AgentRuntime edge coverage', () => {
     } as never);
     session.sendTurn.mockRejectedValueOnce(new Error('coalesced send failed'));
     const queue = makeQueue(mapKey);
-    state.chatSessions.set(mapKey, session);
+    const durability = installDurabilityStub(runtime);
+    state.setOwnedPerChatSession(mapKey, session);
     state.chatQueues.set(mapKey, queue);
 
     for (let i = 0; i < 20; i += 1) {
@@ -1704,16 +1733,24 @@ describe('AgentRuntime edge coverage', () => {
         mapKey,
         `[image:/tmp/edge-${i}.png]`,
         {
+          messageId: `image-edge-${i}`,
           chatJid: mapKey,
           senderJid: 'sender-edge@s.whatsapp.net',
+          senderName: null,
+          contentType: 'image',
+          isGroup: false,
           ...(i === 0 || i === 1 ? {} : { inboundSeq: i + 1 }),
         },
       );
     }
-    await Promise.resolve();
+    await state.perChatTurnQueues.get(mapKey)!.idle();
 
     expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
     expect(session.sendTurn).toHaveBeenCalledWith(expect.stringContaining('[20 images received]'));
+    expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce();
+    expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({ inboundSeq: 20, attemptKind: 'failed', attemptFailureClass: 'processor_throw' }),
+    }));
     expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
     expect(state.pendingTurnText.has(mapKey)).toBe(false);
     expect(state.pendingTurnActorJid.has(mapKey)).toBe(false);
@@ -1723,9 +1760,9 @@ describe('AgentRuntime edge coverage', () => {
       expect.objectContaining({ mapKey, bufferedCount: 20, maxBatch: 20 }),
       'image coalesce batch limit reached — flushing immediately',
     );
-    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error), mapKey, imageCount: 20 }),
-      'failed to send coalesced image turn',
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), chatJid: mapKey }),
+      'turn processor error — finalizing before queue advance',
     );
   });
 
@@ -1743,7 +1780,7 @@ describe('AgentRuntime edge coverage', () => {
       lastMessageAt: new Date().toISOString(),
     } as never);
     const queue = makeQueue(mapKey);
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.chatQueues.set(mapKey, queue);
 
     await state.coalesceImageTurn(
@@ -1756,6 +1793,8 @@ describe('AgentRuntime edge coverage', () => {
       },
     );
     await state.flushImageCoalesce(mapKey);
+    await drainMicrotasks();
+    await state.perChatTurnQueues.get(mapKey)!.idle();
 
     expect(session.sendTurn).toHaveBeenCalledWith('[image:/tmp/unsequenced.png]');
     expect(queue.setInboundSeq).toHaveBeenCalledWith(undefined);
@@ -1769,7 +1808,7 @@ describe('AgentRuntime edge coverage', () => {
     const mapKey = 'image-resume-edge@s.whatsapp.net';
     const session = makeSession();
     const queue = makeQueue(mapKey);
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.chatQueues.set(mapKey, queue);
 
     await state.coalesceImageTurn(
@@ -1803,7 +1842,7 @@ describe('AgentRuntime edge coverage', () => {
     const unmark = vi.fn<(scopeKey?: string) => void>();
     const coalesceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
 
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
     state.imageCoalesce.buffers.set(mapKey, {
@@ -1862,7 +1901,7 @@ describe('AgentRuntime edge coverage', () => {
     session.sendTurn
       .mockRejectedValueOnce(new Error('context pipe closed'))
       .mockResolvedValueOnce(undefined);
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.pendingTurnText.set(mapKey, 'turn survives context failure');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
     state.pendingSystemResults.mark = mark;
@@ -1900,7 +1939,7 @@ describe('AgentRuntime edge coverage', () => {
     const mapKey = '15551237779';
 
     session.sendTurn.mockRejectedValueOnce(new Error('replay pipe closed'));
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.pendingTurnText.set(mapKey, 'stale pending turn');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
 
@@ -1918,7 +1957,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
 
-  it('aborts resume-failure replay if the fresh session is removed during spawn', async () => {
+  it('cleans a fresh resume-failure session that loses ownership during spawn', async () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
     const state = view(runtime);
     const session = makeSession();
@@ -1926,9 +1965,10 @@ describe('AgentRuntime edge coverage', () => {
     const mapKey = '15551237780';
 
     session.spawnSession.mockImplementationOnce(async () => {
-      state.chatSessions.delete(mapKey);
+      expect(state.deleteOwnedPerChatSession(mapKey, session)).toBe(true);
+      expect(session.resolveGenerationOwnership()).toBeNull();
     });
-    state.chatSessions.set(mapKey, session);
+    state.setOwnedPerChatSession(mapKey, session);
     state.pendingTurnText.set(mapKey, 'do not replay to stale session');
 
     state.handleResumeFailed(chatJid);
@@ -1937,61 +1977,12 @@ describe('AgentRuntime edge coverage', () => {
     expect(session.spawnSession).toHaveBeenCalledTimes(1);
     expect(getRecentMessages).not.toHaveBeenCalled();
     expect(session.sendTurn).not.toHaveBeenCalled();
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ chatJid, mapKey }),
-      'handleResumeFailed: session was replaced or removed during spawn — aborting replay',
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      { err: expect.any(Error) },
+      'failed to spawn fresh session after resume failure',
     );
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
 
-  it('normalizes assistant text deltas across incomplete and complete item events', () => {
-    const runtime = makeRuntime({ sessionScope: 'per_chat' });
-    const state = view(runtime);
-
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'item-edge',
-      text: 'Hello ',
-      complete: false,
-    }, 'delta-edge@s.whatsapp.net')).toBe('Hello ');
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'item-edge',
-      text: 'Hello world',
-      complete: true,
-    }, 'delta-edge@s.whatsapp.net')).toBe('world');
-
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'same-edge',
-      text: 'same text',
-      complete: false,
-    })).toBe('same text');
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'same-edge',
-      text: 'same text',
-      complete: true,
-    })).toBeNull();
-
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'replace-edge',
-      text: 'prior',
-      complete: false,
-    })).toBe('prior');
-    expect(state.normalizeAssistantTextForDelivery({
-      type: 'assistant_text',
-      itemId: 'replace-edge',
-      text: 'replacement',
-      complete: true,
-    })).toBe('replacement');
-
-    const queue = makeQueue('ignored-edge@s.whatsapp.net');
-    state.handleEventWithContext({ type: 'parse_error', line: '{bad' }, queue, makeSession());
-    expect(mockRuntimeLogger.debug).toHaveBeenCalledWith(
-      { event: { type: 'parse_error', line: '{bad' } },
-      'ignored/unknown/parse_error event',
-    );
-  });
 });

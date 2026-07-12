@@ -227,6 +227,11 @@ const addedLinePatterns: GuardPattern[] = [
     regex: /\b(?:describe|it|test)\.skip(?:\s*\(|\.)/,
   },
   {
+    code: 'todo-test',
+    message: 'Todo tests must not be committed.',
+    regex: /\b(?:describe|it|test)\.todo(?:\s*\(|\.)/,
+  },
+  {
     code: 'debugger-statement',
     message: 'debugger statements must not be committed.',
     regex: /\bdebugger\b/,

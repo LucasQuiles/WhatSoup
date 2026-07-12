@@ -63,8 +63,23 @@ function makeMockChild(pid = 12345) {
 
 type MockChild = ReturnType<typeof makeMockChild>;
 
+function exitOnSigkill(child: MockChild): void {
+  child.kill.mockImplementation((signal: NodeJS.Signals | number) => {
+    if (signal === 'SIGKILL') {
+      queueMicrotask(() => child._exitCb?.(null, 'SIGKILL'));
+    }
+    return true;
+  });
+}
+
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
+}));
+
+vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+  killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+    target.kill(signal);
+  }),
 }));
 
 vi.mock('node:fs', () => ({
@@ -466,7 +481,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false });
 
     await sm.spawnSession();
 
@@ -483,7 +498,7 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false });
   });
 
   it('getStatus().turnInFlight tracks the turn watchdog (armed during a turn)', async () => {
@@ -541,6 +556,36 @@ describe('SessionManager', () => {
     expect(events.some((event) => event.type === 'init')).toBe(true);
   });
 
+  it('forwards every event from one multi-block provider envelope in order', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+    });
+    await sm.spawnSession();
+
+    mockChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'tool-1', content: 'ok' },
+          { type: 'tool_result', tool_use_id: 'tool-2', is_error: true },
+          { type: 'tool_result', tool_use_id: 'tool-3', content: 'ok' },
+        ],
+      },
+    })}\n`));
+
+    expect(events).toEqual([
+      { type: 'tool_result', isError: false, toolId: 'tool-1', content: 'ok' },
+      { type: 'tool_result', isError: true, toolId: 'tool-2', content: '' },
+      { type: 'tool_result', isError: false, toolId: 'tool-3', content: 'ok' },
+    ]);
+  });
+
   it('spawnSession is a no-op if already active', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -569,6 +614,7 @@ describe('SessionManager', () => {
     (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
       throw busyError;
     });
+    exitOnSigkill(mockChild);
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
 
@@ -586,6 +632,7 @@ describe('SessionManager', () => {
       messageCount: 0,
       lastMessageAt: null,
       turnInFlight: false,
+      durableFailureClosed: false,
     });
   });
 
@@ -595,6 +642,7 @@ describe('SessionManager', () => {
     (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
       throw new Error('SQLITE_BUSY: database is locked');
     });
+    exitOnSigkill(mockChild);
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await expect(sm.spawnSession()).rejects.toThrow('SQLITE_BUSY');
@@ -615,6 +663,7 @@ describe('SessionManager', () => {
       messageCount: 0,
       lastMessageAt: null,
       turnInFlight: false,
+      durableFailureClosed: false,
     });
   });
 
@@ -735,13 +784,13 @@ describe('SessionManager', () => {
     expect(updateSessionId).toHaveBeenCalledWith(
       db,
       42,
-      expect.stringMatching(new RegExp(`^${provider}-\\d+$`)),
+      expect.stringMatching(new RegExp(`^${provider}-[0-9a-f-]{36}$`)),
     );
     expect(events.some((event) => event.type === 'init')).toBe(true);
     expect(sm.getStatus()).toMatchObject({
       active: true,
       pid: null,
-      sessionId: expect.stringMatching(new RegExp(`^${provider}-\\d+$`)),
+      sessionId: expect.stringMatching(new RegExp(`^${provider}-[0-9a-f-]{36}$`)),
       messageCount: 0,
     });
 
@@ -850,6 +899,7 @@ describe('SessionManager', () => {
     const onCrash = vi.fn();
     const notifyUser = vi.fn();
     const failure = new Error('stream failed');
+    const generationIdentity = { managerId: 'managed-current', generation: 1 };
     vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockRejectedValue(failure);
 
     const sm = new SessionManager({
@@ -861,6 +911,7 @@ describe('SessionManager', () => {
       onCrash,
       notifyUser,
     });
+    sm.bindGenerationOwnership(() => generationIdentity);
 
     await sm.spawnSession();
     await expect(sm.sendTurn('fail this turn')).rejects.toThrow('stream failed');
@@ -869,11 +920,93 @@ describe('SessionManager', () => {
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
       exitCode: null,
       signal: null,
-      sessionId: expect.stringMatching(/^openai-api-\d+$/),
+      sessionId: expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
       dbRowId: 42,
+      generationIdentity,
     }));
     expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('provider request failed'));
     expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
+  });
+
+  it('does not notify when a managed turn failure belongs to a stale generation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    let generationIdentity = { managerId: 'managed-stale-turn', generation: 1 };
+    vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockRejectedValue(new Error('late failure'));
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    generationIdentity = { managerId: 'managed-stale-turn', generation: 2 };
+    vi.mocked(updateSessionStatus).mockClear();
+
+    await expect(sm.sendTurn('late turn')).rejects.toThrow('late failure');
+
+    expect(updateSessionStatus).not.toHaveBeenCalled();
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: true });
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
+  });
+
+  it('does not crash a replacement managed generation when an old turn rejects late', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const crashCallbacks: Array<(info: { exitCode: number | null; signal: string | null; provider: string }) => void> = [];
+    let rejectOldTurn!: (err: Error) => void;
+    const oldTurn = new Promise<void>((_resolve, reject) => {
+      rejectOldTurn = reject;
+    });
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockImplementation(async function (_opts) {
+      crashCallbacks.push(_opts.onCrash as (typeof crashCallbacks)[number]);
+    });
+    vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockReturnValueOnce(oldTurn);
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill');
+    let generationIdentity = { managerId: 'managed-replacement', generation: 1 };
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    const oldTurnResult = sm.sendTurn('generation one').catch((err) => err as Error);
+
+    crashCallbacks[0]!({ exitCode: 1, signal: null, provider: 'openai-api' });
+    generationIdentity = { managerId: 'managed-replacement', generation: 2 };
+    await sm.spawnSession();
+    vi.mocked(updateSessionStatus).mockClear();
+    onCrash.mockClear();
+    notifyUser.mockClear();
+    killSpy.mockClear();
+
+    rejectOldTurn(new Error('late generation-one failure'));
+    const error = await oldTurnResult;
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('late generation-one failure');
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(updateSessionStatus).not.toHaveBeenCalled();
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: true });
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
   });
 
   it('openai-api hard watchdog kills a stalled managed turn and marks it crashed', async () => {
@@ -912,12 +1045,127 @@ describe('SessionManager', () => {
     expect(killSpy).toHaveBeenCalled();
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: expect.stringMatching(/^openai-api-\d+$/),
+      sessionId: expect.stringMatching(/^openai-api-[0-9a-f-]{36}$/),
       dbRowId: 42,
+      generationIdentity: null,
     }));
     expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('10 minutes'));
     expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
     vi.useRealTimers();
+  });
+
+  it('does not notify or kill for a stale managed-provider watchdog', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill');
+    let generationIdentity = { managerId: 'managed-stale-watchdog', generation: 1 };
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    generationIdentity = { managerId: 'managed-stale-watchdog', generation: 2 };
+    vi.mocked(updateSessionStatus).mockClear();
+
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(updateSessionStatus).not.toHaveBeenCalled();
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: true, sessionId: expect.any(String) });
+  });
+
+  it('does not clear a replacement watchdog handle when an old callback runs late', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    const oldWatchdog = { id: 'old-watchdog' } as unknown as ReturnType<typeof setTimeout>;
+    const replacementWatchdog = { id: 'replacement-watchdog' } as unknown as ReturnType<typeof setTimeout>;
+    const state = sm as unknown as {
+      watchdogHard: ReturnType<typeof setTimeout> | null;
+      handleWatchdogHard: (
+        managedProviderSession: null,
+        managedProviderGeneration: null,
+        expectedWatchdog: ReturnType<typeof setTimeout>,
+      ) => void;
+    };
+    state.watchdogHard = replacementWatchdog;
+
+    state.handleWatchdogHard(null, null, oldWatchdog);
+
+    expect(state.watchdogHard).toBe(replacementWatchdog);
+  });
+
+  it('drops a deferred crash notice after its generation is superseded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    let generationIdentity = { managerId: 'deferred-crash-notice', generation: 1 };
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      notifyUser,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    (sm as unknown as {
+      notifyUnexpectedExit: (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+        generationIdentity: { managerId: string; generation: number },
+      ) => void;
+    }).notifyUnexpectedExit(1, null, generationIdentity);
+    generationIdentity = { managerId: 'deferred-crash-notice', generation: 2 };
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(notifyUser).not.toHaveBeenCalled();
+  });
+
+  it('does not apply a late persistent stdin completion to a replacement generation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const firstChild = makeMockChild(31001);
+    const replacementChild = makeMockChild(31002);
+    let finishOldWrite!: (err?: Error | null) => void;
+    firstChild.stdin.write.mockImplementation(
+      (_data: unknown, _encoding?: unknown, callback?: (err?: Error | null) => void) => {
+        if (callback) finishOldWrite = callback;
+        return true;
+      },
+    );
+    (spawn as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(replacementChild);
+    let generationIdentity = { managerId: 'persistent-late-write', generation: 1 };
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    const oldTurn = sm.sendTurn('generation one');
+    generationIdentity = { managerId: 'persistent-late-write', generation: 2 };
+    await sm.shutdown(false);
+    firstChild._exitCb?.(0, null);
+    await sm.spawnSession();
+
+    finishOldWrite();
+    await expect(oldTurn).rejects.toThrow('Session generation was superseded before turn completion.');
+
+    try {
+      expect(sm.getStatus()).toMatchObject({ messageCount: 0, turnInFlight: false });
+    } finally {
+      await sm.shutdown(false);
+      replacementChild._exitCb?.(0, null);
+    }
   });
 
   it('spawnSession with resumeSessionId includes --resume flag', async () => {
@@ -1211,7 +1459,7 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
-  it('spawnSession clears a pending shutdown kill timer before arming a replacement child', async () => {
+  it('repeated resets keep a shutdown escalation timer for every superseded child', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
@@ -1222,19 +1470,23 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).not.toBeNull();
-
     const mockChild2 = makeMockChild(23456);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockChild2);
-
     await sm.spawnSession();
+    await sm.shutdown();
+
+    const mockChild3 = makeMockChild(34567);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockChild3);
+    await sm.spawnSession();
+
     await vi.advanceTimersByTimeAsync(graceMs + 1);
 
-    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).toBeNull();
-    expect(mockChild.kill).toHaveBeenCalledTimes(1);
-    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
-    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
-    expect(sm.getStatus().pid).toBe(23456);
+    expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(mockChild2.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    expect(mockChild2.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    expect(mockChild3.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus().pid).toBe(34567);
 
     vi.useRealTimers();
   });
@@ -1265,7 +1517,9 @@ describe('SessionManager', () => {
 
     expect(mockChild.kill).toHaveBeenCalledTimes(1);
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
-    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).toBeNull();
+    expect(
+      (sm as unknown as { shutdownKillTimers: Map<unknown, unknown> }).shutdownKillTimers.size,
+    ).toBe(0);
 
     vi.useRealTimers();
   });
@@ -3156,27 +3410,29 @@ describe('durability upsert branch coverage', () => {
     vi.restoreAllMocks();
   });
 
-  it('setDurability enables checkpoint upserts during spawnSession', async () => {
+  it('setDurability atomically begins a fresh checkpoint during spawnSession', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const upsert = vi.fn();
-    const durability = { upsertSessionCheckpoint: upsert };
+    const beginFresh = vi.fn();
+    const durability = { beginFreshSessionCheckpoint: beginFresh, upsertSessionCheckpoint: upsert };
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession();
 
-    expect(upsert).toHaveBeenCalledWith(
+    expect(beginFresh).toHaveBeenCalledWith(
       toConversationKey(CHAT_JID),
-      expect.objectContaining({ sessionStatus: 'active' }),
+      12345,
     );
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('setDurability enables checkpoint upserts during shutdown', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const upsert = vi.fn();
-    const durability = { upsertSessionCheckpoint: upsert };
+    const durability = { beginFreshSessionCheckpoint: vi.fn(), upsertSessionCheckpoint: upsert };
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
@@ -3194,7 +3450,7 @@ describe('durability upsert branch coverage', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const upsert = vi.fn();
-    const durability = { upsertSessionCheckpoint: upsert };
+    const durability = { beginFreshSessionCheckpoint: vi.fn(), upsertSessionCheckpoint: upsert };
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
@@ -4101,7 +4357,10 @@ describe('session.ts uncovered-branch coverage', () => {
     const { messenger } = makeMessenger();
     const upsertSessionCheckpoint = vi.fn();
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    sm.setDurability({
+      beginFreshSessionCheckpoint: vi.fn(),
+      upsertSessionCheckpoint,
+    } as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession();
     const child = (sm as unknown as { child: MockChild }).child;
     if (child._exitCb) child._exitCb(2, null);
@@ -4326,7 +4585,10 @@ describe('session.ts uncovered-branch coverage', () => {
     const { messenger } = makeMessenger();
     const upsertSessionCheckpoint = vi.fn();
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    sm.setDurability({
+      beginFreshSessionCheckpoint: vi.fn(),
+      upsertSessionCheckpoint,
+    } as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession();
     upsertSessionCheckpoint.mockClear();
     const handler = (sm as unknown as { handleProviderEvent: (e: AgentEvent) => void }).handleProviderEvent.bind(sm);
@@ -4381,8 +4643,10 @@ describe('session.ts uncovered-branch coverage', () => {
     (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
       throw failure;
     });
+    exitOnSigkill(mockChild);
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await expect(sm.spawnSession()).rejects.toThrow('db write failed');
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
     const child = (sm as unknown as { child: MockChild | null }).child;
     // Child should have been SIGKILLed during cleanup.
     expect(child).toBeNull();
@@ -4791,9 +5055,10 @@ describe('session.ts uncovered-branch coverage', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const onCrash = vi.fn();
-    let crashCb!: (info: { exitCode: number | null; signal: string | null; provider: string; crashClass?: string; stderrPreview?: string }) => void;
+    const crashCallbacks: Array<(info: { exitCode: number | null; signal: string | null; provider: string; crashClass?: string; stderrPreview?: string }) => void> = [];
+    let generationIdentity = { managerId: 'managed-provider-callback', generation: 1 };
     vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockImplementation(async function (this: OpenAIApiProvider, opts) {
-      crashCb = opts.onCrash as typeof crashCb;
+      crashCallbacks.push(opts.onCrash as (typeof crashCallbacks)[number]);
       return Promise.resolve();
     });
     const sm = new SessionManager({
@@ -4804,11 +5069,50 @@ describe('session.ts uncovered-branch coverage', () => {
       provider: 'openai-api',
       onCrash,
     });
+    sm.bindGenerationOwnership(() => generationIdentity);
     await sm.spawnSession();
     vi.mocked(updateSessionStatus).mockClear();
-    crashCb({ exitCode: 1, signal: null, provider: 'openai-api' });
+    crashCallbacks[0]!({ exitCode: 1, signal: null, provider: 'openai-api' });
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
-    expect(onCrash).toHaveBeenCalled();
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ generationIdentity }));
+
+    generationIdentity = { managerId: 'managed-provider-callback', generation: 2 };
+    await sm.spawnSession();
+    vi.mocked(updateSessionStatus).mockClear();
+    onCrash.mockClear();
+
+    crashCallbacks[0]!({ exitCode: 1, signal: null, provider: 'openai-api' });
+
+    expect(updateSessionStatus).not.toHaveBeenCalled();
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: true });
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
+  });
+
+  it('drops managed provider events from a stale generation', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onEvent = vi.fn();
+    let providerEvent!: (event: AgentEvent) => void;
+    let generationIdentity = { managerId: 'managed-provider-event', generation: 1 };
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockImplementation(async function (opts) {
+      providerEvent = opts.onEvent;
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent,
+      provider: 'openai-api',
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    onEvent.mockClear();
+    generationIdentity = { managerId: 'managed-provider-event', generation: 2 };
+
+    providerEvent({ type: 'assistant_text', text: 'stale provider output' });
+
+    expect(onEvent).not.toHaveBeenCalled();
   });
 
   // --- clearShutdownKillTimer clears a pending kill timer (lines 691-695).

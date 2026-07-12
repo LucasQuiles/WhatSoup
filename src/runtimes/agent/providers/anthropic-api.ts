@@ -10,6 +10,8 @@
 // The auth header is computed per-request so late-set keyring entries / key
 // rotations are picked up without a process restart.
 
+import { randomUUID } from 'node:crypto';
+
 import type {
   ProviderCheckpoint,
   ProviderConfig,
@@ -137,7 +139,7 @@ export class AnthropicApiProvider implements ProviderSession {
     this.systemPrompt = opts.systemPrompt;
     this.messages = [];
 
-    opts.onEvent({ type: 'init', sessionId: `anthropic-api-${Date.now()}` });
+    opts.onEvent({ type: 'init', sessionId: `anthropic-api-${randomUUID()}` });
   }
 
   async sendTurn(request: ProviderTurnRequest): Promise<void> {

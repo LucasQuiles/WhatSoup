@@ -13,12 +13,94 @@ import { withTransaction } from './db-tx.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
+import {
+  DELIVERY_STATUS_PROOF,
+  normalizeFinalizeTurnTerminalParams,
+  terminalRecordMatches,
+  validateCompletedCheckpointIdentity,
+} from './turn-finalization-contract.ts';
+import type {
+  CompleteTurnParams,
+  FinalizeTurnTerminalParams,
+  FinalizeTurnTerminalResult,
+  RecordTurnTerminalResult,
+  SessionCheckpointFields,
+  TerminalInboundMutation,
+  TurnBookkeepingParams,
+  TurnTerminalPersistenceParams,
+  TurnTerminalRecordRow,
+} from './turn-finalization-contract.ts';
+import {
+  TURN_RECOVERY_MAX_ID_BYTES,
+  TurnRecoveryStore,
+  validateBoundedRequired,
+  validatePositiveSafeInteger,
+} from './turn-recovery-store.ts';
+import {
+  SessionLifecycleStore,
+  type BeginFreshSessionLifecycleParams,
+  type CloseSessionLifecycleFailureParams,
+  type CloseSessionLifecycleParams,
+  type ReactivateSessionLifecycleParams,
+} from './session-lifecycle-store.ts';
+import type {
+  ClaimTurnRecoveryJobOptions,
+  ClaimTurnRecoveryJobResult,
+  EnqueueTurnRecoveryJobResult,
+  PromoteBlockedTurnRecoveryJobResult,
+  ReassignTurnRecoveryJobResult,
+  RequeueTurnRecoveryJobResult,
+  RenewTurnRecoveryClaimResult,
+  TurnRecoveryAssignmentFence,
+  TurnRecoveryClaimFence,
+  TurnRecoveryEnumerationPage,
+  TurnRecoveryJobPersistenceParams,
+  TurnRecoveryJobRow,
+  TurnRecoveryJobTransitionResult,
+  TurnRecoveryOwnerIdentity,
+  TurnRecoverySourceIdentity,
+  TurnRecoverySupervisorCounts,
+} from './turn-recovery-store.ts';
+
+export { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
+export { TURN_RECOVERY_MAX_ATTEMPTS } from './turn-recovery-store.ts';
+export type {
+  CompleteTurnParams,
+  FinalizeTurnTerminalParams,
+  FinalizeTurnTerminalResult,
+  RecordTurnTerminalResult,
+  SessionCheckpointFields,
+  TerminalInboundMutation,
+  TurnBookkeepingParams,
+  TurnFinalizationBookkeepingParams,
+  TurnTerminalPersistenceParams,
+  TurnTerminalRecordRow,
+} from './turn-finalization-contract.ts';
+export type {
+  ClaimTurnRecoveryJobOptions,
+  ClaimTurnRecoveryJobResult,
+  EnqueueTurnRecoveryJobResult,
+  PromoteBlockedTurnRecoveryJobResult,
+  ReassignTurnRecoveryJobResult,
+  RequeueTurnRecoveryJobResult,
+  RenewTurnRecoveryClaimResult,
+  TurnRecoveryAssignmentFence,
+  TurnRecoveryClaimFence,
+  TurnRecoveryEnumerationPage,
+  TurnRecoveryJobPersistenceParams,
+  TurnRecoveryJobRow,
+  TurnRecoveryJobState,
+  TurnRecoveryJobTransitionResult,
+  TurnRecoveryOwnerIdentity,
+  TurnRecoverySourceIdentity,
+  TurnRecoverySupervisorCounts,
+} from './turn-recovery-store.ts';
 
 const log = createChildLogger('durability');
 
 // ── Status string unions ──
 
-type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
+export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
 type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'replayed' | 'quarantined';
@@ -46,6 +128,17 @@ export interface OutboundOpRow {
   is_terminal: number;
 }
 
+export interface OutboundDeliveryIdentity {
+  conversationKey: string;
+  deliveryJid: string;
+  sourceInboundSeq: number | null;
+}
+
+export interface OutboundDeliverySnapshot extends OutboundDeliveryIdentity {
+  opId: number;
+  status: OutboundStatus;
+}
+
 /** Full row returned by SELECT * on session_checkpoints. */
 export interface SessionCheckpointRow {
   id: number;
@@ -60,6 +153,13 @@ export interface SessionCheckpointRow {
   claude_pid: number | null;
   session_status: string;
   checkpoint_version: number;
+  completed_inbound_seq: number | null;
+  completed_delivery_jid: string | null;
+  completed_delivery_namespace: string | null;
+  completed_scope: string | null;
+  completed_logical_turn_id: string | null;
+  completed_manager_id: string | null;
+  completed_generation: number | null;
   updated_at: string | null;
 }
 
@@ -67,6 +167,7 @@ export interface SessionCheckpointRow {
 export interface ActiveSessionCheckpointRow {
   id: number;
   conversation_key: string;
+  session_id: string | null;
   claude_pid: number | null;
   session_status: string;
 }
@@ -97,35 +198,6 @@ export interface StuckInboundSweepResult {
   failedStale: number;
 }
 
-export interface SessionCheckpointFields {
-  sessionId?: string;
-  transcriptPath?: string;
-  activeTurnId?: string | null;
-  lastInboundSeq?: number;
-  lastFlushedOutboundId?: number;
-  watchdogState?: string;
-  workspacePath?: string;
-  claudePid?: number;
-  sessionStatus?: string;
-}
-
-export interface CompleteTurnParams {
-  sessionTokens?: {
-    dbRowId: number;
-    inputTokens: number;
-    outputTokens: number;
-  };
-  checkpoint?: {
-    conversationKey: string;
-    fields: SessionCheckpointFields;
-  };
-  inbound?: {
-    seq: number;
-    terminalReason: string;
-  };
-  lastOpId?: number;
-}
-
 export interface OutboundOpParams {
   conversationKey: string;
   chatJid: string;
@@ -144,8 +216,11 @@ type DurabilityStatements = {
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
+  markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
+  recordTurnTerminal: PreparedStatement;
+  getTurnTerminal: PreparedStatement;
   createOutboundOp: PreparedStatement;
   markSending: PreparedStatement;
   markSubmitted: PreparedStatement;
@@ -155,6 +230,7 @@ type DurabilityStatements = {
   markFailedPermanent: PreparedStatement;
   markQuarantined: PreparedStatement;
   markTerminal: PreparedStatement;
+  selectOutboundTerminalIdentity: PreparedStatement;
   selectOutboundForEchoMatch: PreparedStatement;
   recordToolCall: PreparedStatement;
   markToolExecuting: PreparedStatement;
@@ -163,6 +239,7 @@ type DurabilityStatements = {
   insertTokenEvent: PreparedStatement;
   upsertSessionCheckpoint: PreparedStatement;
   getSessionCheckpoint: PreparedStatement;
+  getLatestCompletedCheckpointForSession: PreparedStatement;
   getAllActiveCheckpoints: PreparedStatement;
   getResumableCheckpoints: PreparedStatement;
   markSessionOrphaned: PreparedStatement;
@@ -192,6 +269,8 @@ type DurabilityStatements = {
 export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
+  private readonly turnRecovery: TurnRecoveryStore;
+  private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
     this.db = db;
@@ -217,12 +296,47 @@ export class DurabilityEngine {
              continuity_candidate_marked_at = COALESCE(continuity_candidate_marked_at, datetime('now'))
          WHERE seq = ? AND continuity_candidate_reason IS NULL`,
       ),
+      markContinuityCandidateIfUnownedAndNoTerminalOutbound: prepare(
+        `UPDATE inbound_events
+         SET continuity_candidate_reason = ?,
+             continuity_candidate_source = ?,
+             continuity_candidate_marked_at = COALESCE(continuity_candidate_marked_at, datetime('now'))
+         WHERE seq = ?
+           AND continuity_candidate_reason IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t
+             WHERE t.inbound_seq_key = inbound_events.seq
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_ops o
+             WHERE o.source_inbound_seq = inbound_events.seq AND o.is_terminal = 1
+               AND o.status NOT IN ('quarantined', 'failed_permanent')
+           )`,
+      ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
       ),
       selectInboundStatus: prepare(
-        `SELECT processing_status FROM inbound_events WHERE seq = ?`,
+        `SELECT processing_status, conversation_key, chat_jid, message_id
+         FROM inbound_events WHERE seq = ?`,
       ),
+      recordTurnTerminal: prepare(`
+        INSERT INTO turn_terminal_records (
+          scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+          logical_turn_id, manager_id, generation, attempt_kind, attempt_failure_class,
+          inbound_disposition, delivery_kind, delivery_op_id,
+          recovery_owner_logical_turn_id, recovery_owner_manager_id,
+          recovery_owner_generation, reply_guarantee_disarmed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(inbound_seq_key, logical_turn_id, generation) DO UPDATE SET
+          duplicate_finalize_count = turn_terminal_records.duplicate_finalize_count + 1,
+          last_duplicate_at = datetime('now')
+        RETURNING id, duplicate_finalize_count, reply_guarantee_disarmed
+      `),
+      getTurnTerminal: prepare(`
+        SELECT * FROM turn_terminal_records
+        WHERE inbound_seq_key = ? AND logical_turn_id = ? AND generation = ?
+      `),
       createOutboundOp: prepare(
         `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
          VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
@@ -234,13 +348,20 @@ export class DurabilityEngine {
         `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
       ),
       markEchoed: prepare(
-        `UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = ?`,
+        `UPDATE outbound_ops
+         SET status = 'echoed', echoed_at = COALESCE(echoed_at, datetime('now'))
+         WHERE id = ?`,
       ),
       selectEchoedOutboundInbound: prepare(
         // QR-102: also select `status` so markTerminal can detect an op that was
         // ALREADY echoed before being marked terminal (echo-before-terminal ordering)
         // and finalize the linked inbound then.
-        `SELECT source_inbound_seq, is_terminal, status FROM outbound_ops WHERE id = ?`,
+        `SELECT o.source_inbound_seq, o.is_terminal, o.status,
+                EXISTS(
+                  SELECT 1 FROM turn_terminal_records t
+                  WHERE t.inbound_seq_key = o.source_inbound_seq
+                ) AS terminal_record_owned
+         FROM outbound_ops o WHERE o.id = ?`,
       ),
       markMaybeSent: prepare(
         `UPDATE outbound_ops SET status = 'maybe_sent', error = ? WHERE id = ?`,
@@ -250,8 +371,14 @@ export class DurabilityEngine {
       ),
       markQuarantined: prepare(`UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?`),
       markTerminal: prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`),
+      selectOutboundTerminalIdentity: prepare(`
+        SELECT conversation_key, chat_jid, source_inbound_seq, status
+        FROM outbound_ops WHERE id = ?
+      `),
       selectOutboundForEchoMatch: prepare(
-        `SELECT id FROM outbound_ops WHERE wa_message_id = ? AND status = 'submitted'`,
+        `SELECT id FROM outbound_ops
+         WHERE wa_message_id = ?
+           AND status IN ('submitted', 'maybe_sent', 'quarantined', 'failed_permanent')`,
       ),
       recordToolCall: prepare(
         `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
@@ -273,29 +400,97 @@ export class DurabilityEngine {
       ),
       upsertSessionCheckpoint: prepare(`
         INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
-          last_inbound_seq, last_flushed_outbound_id, watchdog_state, workspace_path, claude_pid, session_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_inbound_seq, last_flushed_outbound_id, watchdog_state, workspace_path, claude_pid,
+          session_status, completed_inbound_seq, completed_delivery_jid,
+          completed_delivery_namespace, completed_scope,
+          completed_logical_turn_id, completed_manager_id, completed_generation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(conversation_key) DO UPDATE SET
-          session_id = COALESCE(excluded.session_id, session_id),
-          transcript_path = COALESCE(excluded.transcript_path, transcript_path),
+          session_id = COALESCE(excluded.session_id, session_checkpoints.session_id),
+          transcript_path = COALESCE(excluded.transcript_path, session_checkpoints.transcript_path),
           active_turn_id = excluded.active_turn_id,
-          last_inbound_seq = COALESCE(excluded.last_inbound_seq, last_inbound_seq),
+          last_inbound_seq = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.last_inbound_seq
+            ELSE COALESCE(excluded.last_inbound_seq, session_checkpoints.last_inbound_seq)
+          END,
           last_flushed_outbound_id = COALESCE(excluded.last_flushed_outbound_id, last_flushed_outbound_id),
           watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
           workspace_path = COALESCE(excluded.workspace_path, workspace_path),
           claude_pid = COALESCE(excluded.claude_pid, claude_pid),
           session_status = COALESCE(excluded.session_status, session_status),
+          completed_inbound_seq = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_inbound_seq
+            ELSE COALESCE(excluded.completed_inbound_seq, session_checkpoints.completed_inbound_seq)
+          END,
+          completed_delivery_jid = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_delivery_jid
+            ELSE COALESCE(excluded.completed_delivery_jid, session_checkpoints.completed_delivery_jid)
+          END,
+          completed_delivery_namespace = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_delivery_namespace
+            ELSE COALESCE(excluded.completed_delivery_namespace, session_checkpoints.completed_delivery_namespace)
+          END,
+          completed_scope = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_scope
+            ELSE COALESCE(excluded.completed_scope, session_checkpoints.completed_scope)
+          END,
+          completed_logical_turn_id = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_logical_turn_id
+            ELSE COALESCE(excluded.completed_logical_turn_id, session_checkpoints.completed_logical_turn_id)
+          END,
+          completed_manager_id = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_manager_id
+            ELSE COALESCE(excluded.completed_manager_id, session_checkpoints.completed_manager_id)
+          END,
+          completed_generation = CASE
+            WHEN excluded.session_id IS NOT NULL
+              AND excluded.session_id IS NOT session_checkpoints.session_id
+              THEN excluded.completed_generation
+            ELSE COALESCE(excluded.completed_generation, session_checkpoints.completed_generation)
+          END,
           checkpoint_version = checkpoint_version + 1,
           updated_at = datetime('now')
       `),
       getSessionCheckpoint: prepare(
         `SELECT * FROM session_checkpoints WHERE conversation_key = ?`,
       ),
+      getLatestCompletedCheckpointForSession: prepare(`
+        SELECT * FROM session_checkpoints
+        WHERE session_id = ?
+          AND session_status IN ('active', 'suspended')
+          AND last_inbound_seq IS NOT NULL
+          AND completed_inbound_seq IS NOT NULL
+          AND completed_delivery_jid IS NOT NULL
+          AND completed_delivery_namespace IS NOT NULL
+          AND completed_scope IS NOT NULL
+          AND completed_logical_turn_id IS NOT NULL
+          AND completed_manager_id IS NOT NULL
+          AND completed_generation IS NOT NULL
+        ORDER BY completed_inbound_seq DESC, id DESC
+        LIMIT 1
+      `),
       getAllActiveCheckpoints: prepare(
-        `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active'`,
+        `SELECT id, conversation_key, session_id, claude_pid, session_status
+         FROM session_checkpoints WHERE session_status = 'active'`,
       ),
       getResumableCheckpoints: prepare(
-        `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
+        `SELECT id, conversation_key, session_id, claude_pid, session_status
+         FROM session_checkpoints
+         WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
       ),
       markSessionOrphaned: prepare(
         `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
@@ -317,12 +512,20 @@ export class DurabilityEngine {
         `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
       ),
       getProcessingInboundEvents: prepare(
-        `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
+        `SELECT i.seq FROM inbound_events i
+         WHERE i.processing_status = 'processing'
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )`,
       ),
       // QR-035: events stranded at 'turn_done' (turn completed but
       // markInboundComplete didn't run before a crash) — recovery finalizes them.
       getTurnDoneInboundEvents: prepare(
-        `SELECT seq FROM inbound_events WHERE processing_status = 'turn_done'`,
+        `SELECT i.seq FROM inbound_events i
+         WHERE i.processing_status = 'turn_done'
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )`,
       ),
       getTerminalOutboundForInbound: prepare(
         `SELECT id, status FROM outbound_ops
@@ -345,6 +548,9 @@ export class DurabilityEngine {
            ON o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
          WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
            AND i.received_at < datetime('now', '-5 minutes')
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )
          ORDER BY i.seq ASC
          LIMIT 200`,
       ),
@@ -353,6 +559,9 @@ export class DurabilityEngine {
          FROM inbound_events i
          WHERE i.processing_status = 'turn_done'
            AND i.received_at < datetime('now', '-24 hours')
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )
            AND NOT EXISTS (
              SELECT 1 FROM outbound_ops o
              WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
@@ -365,6 +574,9 @@ export class DurabilityEngine {
          FROM inbound_events i
          WHERE i.processing_status IN ('pending', 'processing')
            AND i.received_at < datetime('now', '-24 hours')
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )
            AND NOT EXISTS (
              SELECT 1 FROM outbound_ops o
              WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
@@ -406,16 +618,28 @@ export class DurabilityEngine {
       `),
       selectNow: prepare(`SELECT datetime('now') AS now`),
     };
+    this.turnRecovery = new TurnRecoveryStore(db, () => (
+      this.statements.selectNow.get() as { now: string }
+    ).now);
+    this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
+    validateCompletedCheckpointIdentity(fields);
     this.statements.upsertSessionCheckpoint.run(
       conversationKey, fields.sessionId ?? null, fields.transcriptPath ?? null,
       fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
       fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
       fields.workspacePath ?? null, fields.claudePid ?? null,
       fields.sessionStatus ?? 'active',
+      fields.completedInboundSeq ?? null,
+      fields.completedDeliveryJid ?? null,
+      fields.completedDeliveryNamespace ?? null,
+      fields.completedScope ?? null,
+      fields.completedLogicalTurnId ?? null,
+      fields.completedManagerId ?? null,
+      fields.completedGeneration ?? null,
     );
   }
 
@@ -425,6 +649,158 @@ export class DurabilityEngine {
       this.markTurnDone(seq);
     }
     this.markInboundComplete(seq, reason);
+  }
+
+  private runTurnBookkeeping(params: TurnBookkeepingParams): void {
+    if (params.sessionTokens) {
+      this.statements.accumulateSessionTokens.run(
+        params.sessionTokens.inputTokens,
+        params.sessionTokens.outputTokens,
+        params.sessionTokens.dbRowId,
+      );
+      this.statements.insertTokenEvent.run(
+        params.sessionTokens.dbRowId,
+        params.sessionTokens.inputTokens,
+        params.sessionTokens.outputTokens,
+      );
+    }
+    if (params.checkpoint) {
+      this.runUpsertSessionCheckpoint(params.checkpoint.conversationKey, params.checkpoint.fields);
+    }
+  }
+
+  private validateTerminalInboundProof(params: FinalizeTurnTerminalParams): void {
+    const { terminal, recoveryJob } = params;
+    if (terminal.inboundSeq === null) {
+      if (terminal.inboundDisposition === 'transferred_to_recovery_owner') {
+        throw new Error('A recovery transfer requires an existing inbound row');
+      }
+      return;
+    }
+    const row = this.statements.selectInboundStatus.get(terminal.inboundSeq) as {
+      processing_status: string;
+      conversation_key: string;
+      chat_jid: string;
+      message_id: string;
+    } | undefined;
+    if (!row) throw new Error('Selected inbound row does not exist');
+    if (
+      row.conversation_key !== terminal.conversationKey ||
+      row.chat_jid !== terminal.deliveryJid
+    ) {
+      throw new Error('Selected inbound identity does not match terminal identity');
+    }
+    if (!['processing', 'turn_done'].includes(row.processing_status)) {
+      throw new Error('Selected inbound row is not eligible for terminal finalization');
+    }
+    if (recoveryJob !== undefined && row.message_id !== recoveryJob.sourceMessageId) {
+      throw new Error('Recovery source message does not match the selected inbound row');
+    }
+  }
+
+  private validateTerminalDeliveryProof(
+    terminal: TurnTerminalPersistenceParams,
+  ): { id: number; status: string } | undefined {
+    if (terminal.deliveryKind === 'none') return undefined;
+    const opId = terminal.deliveryOpId;
+    if (opId === null) throw new Error('Terminal delivery evidence requires a durable op');
+    const row = this.statements.selectOutboundTerminalIdentity.get(opId) as {
+      conversation_key: string;
+      chat_jid: string;
+      source_inbound_seq: number | null;
+      status: string;
+    } | undefined;
+    if (!row) throw new Error('Selected delivery outbound op does not exist');
+    if (
+      row.conversation_key !== terminal.conversationKey ||
+      row.chat_jid !== terminal.deliveryJid ||
+      row.source_inbound_seq !== terminal.inboundSeq
+    ) {
+      throw new Error('Selected outbound identity does not match terminal identity');
+    }
+    const expectedStatus = DELIVERY_STATUS_PROOF[terminal.deliveryKind];
+    if (row.status !== expectedStatus) {
+      throw new Error(`${row.status} does not prove ${terminal.deliveryKind} delivery evidence`);
+    }
+    return { id: opId, status: row.status };
+  }
+
+  private runTerminalInboundMutation(
+    mutation: TerminalInboundMutation,
+    terminal: TurnTerminalPersistenceParams,
+  ): void {
+    const existing = this.statements.selectInboundStatus.get(mutation.seq) as
+      {
+        processing_status: string;
+        conversation_key: string;
+        chat_jid: string;
+      } | undefined;
+    if (!existing) throw new Error('Selected inbound row does not exist');
+    if (
+      existing.conversation_key !== terminal.conversationKey ||
+      existing.chat_jid !== terminal.deliveryJid
+    ) {
+      throw new Error('Selected inbound identity does not match terminal identity');
+    }
+    if (!['processing', 'turn_done'].includes(existing.processing_status)) {
+      throw new Error('Selected inbound row is not eligible for terminal finalization');
+    }
+    if (mutation.kind === 'complete') {
+      if (existing.processing_status === 'processing') this.markTurnDone(mutation.seq);
+      const completed = this.statements.markInboundComplete.run(
+        mutation.terminalReason,
+        mutation.seq,
+      );
+      if (completed.changes !== 1) {
+        throw new Error('Selected inbound completion did not update exactly one row');
+      }
+      return;
+    }
+    const failed = this.statements.markInboundFailed.run(
+      coerceInboundFailureClass(mutation.failureClass),
+      mutation.seq,
+    );
+    if (failed.changes !== 1) {
+      throw new Error('Selected inbound failure did not update exactly one row');
+    }
+  }
+
+  private runRecordTurnTerminal(
+    params: TurnTerminalPersistenceParams,
+  ): RecordTurnTerminalResult {
+    const inboundSeqKey = params.inboundSeq ?? -1;
+    const row = this.statements.recordTurnTerminal.get(
+      params.scope,
+      params.conversationKey,
+      params.deliveryJid,
+      params.inboundSeq,
+      inboundSeqKey,
+      params.logicalTurnId,
+      params.managerId,
+      params.generation,
+      params.attemptKind,
+      params.attemptFailureClass,
+      params.inboundDisposition,
+      params.deliveryKind,
+      params.deliveryOpId,
+      params.recoveryOwnerLogicalTurnId,
+      params.recoveryOwnerManagerId,
+      params.recoveryOwnerGeneration,
+      params.replyGuaranteeDisarmed ? 1 : 0,
+    ) as {
+      id: number;
+      duplicate_finalize_count: number;
+      reply_guarantee_disarmed: number;
+    } | undefined;
+    if (!row) {
+      throw new Error('Terminal CAS did not return its durable record');
+    }
+    return {
+      applied: row.duplicate_finalize_count === 0,
+      recordId: row.id,
+      duplicateFinalizeCount: row.duplicate_finalize_count,
+      replyGuaranteeDisarmed: row.reply_guarantee_disarmed === 1,
+    };
   }
 
   // ── Inbound events ──
@@ -465,9 +841,11 @@ export class DurabilityEngine {
     reason: ContinuityCandidateReason,
     source: ContinuityCandidateSource,
   ): boolean {
-    const terminalOp = this.statements.getTerminalOutboundForInbound.get(seq) as { id: number } | undefined;
-    if (terminalOp) return false;
-    return this.markContinuityCandidate(seq, reason, source);
+    return this.statements.markContinuityCandidateIfUnownedAndNoTerminalOutbound.run(
+      reason,
+      source,
+      seq,
+    ).changes === 1;
   }
 
   markInboundSkipped(seq: number, reason: string): void {
@@ -493,21 +871,7 @@ export class DurabilityEngine {
       this.db.raw.exec('BEGIN IMMEDIATE');
       inTransaction = true;
 
-      if (params.sessionTokens) {
-        this.statements.accumulateSessionTokens.run(
-          params.sessionTokens.inputTokens,
-          params.sessionTokens.outputTokens,
-          params.sessionTokens.dbRowId,
-        );
-        this.statements.insertTokenEvent.run(
-          params.sessionTokens.dbRowId,
-          params.sessionTokens.inputTokens,
-          params.sessionTokens.outputTokens,
-        );
-      }
-      if (params.checkpoint) {
-        this.runUpsertSessionCheckpoint(params.checkpoint.conversationKey, params.checkpoint.fields);
-      }
+      this.runTurnBookkeeping(params);
       if (params.inbound) {
         this.runCompleteInbound(params.inbound.seq, params.inbound.terminalReason);
       }
@@ -534,6 +898,238 @@ export class DurabilityEngine {
       }
       throw err;
     }
+  }
+
+  /**
+   * Applies the terminal winner, its selected inbound disposition, and optional
+   * turn bookkeeping in one immediate transaction. A duplicate winner only
+   * increments the terminal duplicate counter; none of its companion writes
+   * are repeated.
+   */
+  finalizeTurnTerminal(params: FinalizeTurnTerminalParams): FinalizeTurnTerminalResult {
+    const normalized = normalizeFinalizeTurnTerminalParams(params);
+    let inTransaction = false;
+    try {
+      this.db.raw.exec('BEGIN IMMEDIATE');
+      inTransaction = true;
+
+      const result = this.runRecordTurnTerminal(normalized.terminal);
+      let winnerMatchesRequest = result.applied;
+      let recoveryJob: EnqueueTurnRecoveryJobResult | undefined;
+      if (result.applied) {
+        this.validateTerminalInboundProof(normalized);
+        const deliveryOp = this.validateTerminalDeliveryProof(normalized.terminal);
+        if (normalized.recoveryJob !== undefined) {
+          recoveryJob = this.turnRecovery.insertLinkedWithinCallerTransaction(
+            result.recordId,
+            normalized.recoveryJob,
+          );
+        }
+        if (normalized.bookkeeping) this.runTurnBookkeeping(normalized.bookkeeping);
+        if (normalized.inbound) {
+          this.runTerminalInboundMutation(normalized.inbound, normalized.terminal);
+        }
+        if (deliveryOp !== undefined) {
+          const terminalOp = this.statements.markTerminal.run(deliveryOp.id);
+          if (terminalOp.changes !== 1) {
+            throw new Error('Selected terminal outbound op does not exist');
+          }
+        }
+      } else {
+        const winner = this.getTurnTerminal(
+          normalized.terminal.inboundSeq,
+          normalized.terminal.logicalTurnId,
+          normalized.terminal.generation,
+        );
+        winnerMatchesRequest = winner !== undefined &&
+          terminalRecordMatches(winner, normalized.terminal);
+        if (
+          winner !== undefined &&
+          winnerMatchesRequest &&
+          normalized.recoveryJob !== undefined
+        ) {
+          recoveryJob = this.turnRecovery.findExactLinkedReceipt(
+            winner.id,
+            normalized.recoveryJob,
+          );
+          // A transferred terminal and its exact linked recovery envelope are
+          // one durable request. A terminal-only match must not be reported as
+          // an exact winner when its recovery receipt is absent or conflicts.
+          winnerMatchesRequest = recoveryJob !== undefined;
+        }
+      }
+
+      this.db.raw.exec('COMMIT');
+      inTransaction = false;
+      const replyGuaranteeDisarmed = winnerMatchesRequest && result.replyGuaranteeDisarmed;
+      const effectiveReplyGuaranteeDisarmed = replyGuaranteeDisarmed || (
+        winnerMatchesRequest &&
+        normalized.terminal.inboundDisposition === 'transferred_to_recovery_owner' &&
+        normalized.terminal.deliveryKind !== 'delivery_unknown' &&
+        (
+          recoveryJob?.status === 'durably_queued' ||
+          recoveryJob?.status === 'durably_blocked'
+        )
+      );
+      return {
+        ...result,
+        winnerMatchesRequest,
+        replyGuaranteeDisarmed,
+        effectiveReplyGuaranteeDisarmed,
+        ...(recoveryJob === undefined ? {} : { recoveryJob }),
+      };
+    } catch (err) {
+      log.error({
+        logicalTurnId: normalized.terminal.logicalTurnId,
+        generation: normalized.terminal.generation,
+        hasInbound: normalized.inbound !== undefined,
+        hasBookkeeping: normalized.bookkeeping !== undefined,
+        err,
+      }, 'finalizeTurnTerminal.fail');
+      if (inTransaction) {
+        try {
+          this.db.raw.exec('ROLLBACK');
+        } catch (rollbackErr) {
+          log.warn({ err: rollbackErr }, 'finalizeTurnTerminal: rollback failed');
+        }
+      }
+      throw err;
+    }
+  }
+
+  getTurnTerminal(
+    inboundSeq: number | null,
+    logicalTurnId: string,
+    generation: number,
+  ): TurnTerminalRecordRow | undefined {
+    return this.statements.getTurnTerminal.get(
+      inboundSeq ?? -1,
+      logicalTurnId,
+      generation,
+    ) as TurnTerminalRecordRow | undefined;
+  }
+
+  getTurnRecoveryJob(jobId: number): TurnRecoveryJobRow | undefined {
+    return this.turnRecovery.getTurnRecoveryJob(jobId);
+  }
+
+  getTurnRecoveryJobBySource(
+    source: TurnRecoverySourceIdentity,
+  ): TurnRecoveryJobRow | undefined {
+    return this.turnRecovery.getTurnRecoveryJobBySource(source);
+  }
+
+  claimTurnRecoveryJob(
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    options: ClaimTurnRecoveryJobOptions,
+  ): ClaimTurnRecoveryJobResult {
+    return this.turnRecovery.claimTurnRecoveryJob(jobId, owner, options);
+  }
+
+  renewTurnRecoveryClaim(
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryClaimFence,
+    options: { leaseSeconds: number },
+  ): RenewTurnRecoveryClaimResult {
+    return this.turnRecovery.renewTurnRecoveryClaim(jobId, owner, fence, options);
+  }
+
+  completeTurnRecoveryJob(
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryClaimFence,
+  ): TurnRecoveryJobTransitionResult {
+    return this.turnRecovery.completeTurnRecoveryJob(jobId, owner, fence);
+  }
+
+  requeueTurnRecoveryJob(
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryClaimFence,
+    backoffSeconds: number,
+  ): RequeueTurnRecoveryJobResult {
+    return this.turnRecovery.requeueTurnRecoveryJob(jobId, owner, fence, backoffSeconds);
+  }
+
+  recoverStaleTurnRecoveryJobs(limit = 200): { requeued: number; exhausted: number } {
+    return this.turnRecovery.recoverStaleTurnRecoveryJobs(limit);
+  }
+
+  reassignPendingTurnRecoveryJob(
+    jobId: number,
+    currentOwner: TurnRecoveryOwnerIdentity,
+    newOwner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryAssignmentFence,
+  ): ReassignTurnRecoveryJobResult {
+    return this.turnRecovery.reassignPendingTurnRecoveryJob(
+      jobId,
+      currentOwner,
+      newOwner,
+      fence,
+    );
+  }
+
+  reassignBlockedTurnRecoveryJob(
+    jobId: number,
+    currentOwner: TurnRecoveryOwnerIdentity,
+    newOwner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryAssignmentFence,
+  ): ReassignTurnRecoveryJobResult {
+    return this.turnRecovery.reassignBlockedTurnRecoveryJob(
+      jobId,
+      currentOwner,
+      newOwner,
+      fence,
+    );
+  }
+
+  promoteBlockedTurnRecoveryJob(
+    jobId: number,
+    owner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryAssignmentFence,
+    proof: { idempotencyProofId: string },
+  ): PromoteBlockedTurnRecoveryJobResult {
+    return this.turnRecovery.promoteBlockedTurnRecoveryJob(jobId, owner, fence, proof);
+  }
+
+  /**
+   * Enumerates every pending or claimed job for one owner, including pending
+   * backoff. Cursors are scoped to one scan cycle; after scanComplete, reset
+   * afterId to zero on the next poll so a lower-ID state/time transition is
+   * observed in a later cycle. Claim CAS still enforces next_attempt_at.
+   */
+  getRecoverableTurnRecoveryJobs(
+    owner: TurnRecoveryOwnerIdentity,
+    options: { limit?: number; afterId?: number } = {},
+  ): TurnRecoveryEnumerationPage {
+    return this.turnRecovery.getRecoverableTurnRecoveryJobs(owner, options);
+  }
+
+  /**
+   * Supervisor-only discovery across assigned owners. Live claims are hidden;
+   * blocked and exhausted obligations remain operator-visible, while expired
+   * claims remain visible so startup recovery can sweep them and then perform
+   * epoch-fenced pending reassignment. Claim tokens are never returned. Cursors
+   * belong to one bounded scan cycle only: after scanComplete, the next poll
+   * resets afterId to zero so lower-ID state transitions cannot be skipped.
+   */
+  getOutstandingTurnRecoveryJobsForSupervisor(
+    options: { limit?: number; afterId?: number } = {},
+  ): TurnRecoveryEnumerationPage {
+    return this.turnRecovery.getOutstandingTurnRecoveryJobsForSupervisor(options);
+  }
+
+  getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts {
+    return this.turnRecovery.getTurnRecoverySupervisorCounts();
+  }
+
+  hasOutstandingTurnRecoveryForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+  ): boolean {
+    return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey);
   }
 
   // ── Outbound ops ──
@@ -566,13 +1162,31 @@ export class DurabilityEngine {
   }
 
   markEchoed(id: number): void {
-    this.statements.markEchoed.run(id);
-    // If this is a terminal op, complete the linked inbound event
-    const row = this.statements.selectEchoedOutboundInbound.get(id) as
-      { source_inbound_seq: number | null; is_terminal: number; status: string } | undefined;
-    if (row?.is_terminal && row.source_inbound_seq) {
-      this.completeInbound(row.source_inbound_seq, 'response_sent');
-    }
+    withTransaction(this.db, () => {
+      this.statements.markEchoed.run(id);
+      const recovery = this.turnRecovery
+        .settleEchoedTurnRecoveryJobWithinCallerTransaction(id);
+      if (recovery.conflict) {
+        log.warn(
+          { outboundOpId: id, recoveryJobId: recovery.jobId, recoveryState: recovery.state },
+          'echo recorded with a durable recovery settlement conflict',
+        );
+      }
+      if (recovery.matched) return;
+
+      // Preserve pre-CAS legacy completion only. Once a terminal record owns
+      // the op, terminal/recovery settlement is the sole inbound authority.
+      const row = this.statements.selectEchoedOutboundInbound.get(id) as
+        {
+          source_inbound_seq: number | null;
+          is_terminal: number;
+          status: string;
+          terminal_record_owned: number;
+        } | undefined;
+      if (row?.is_terminal && row.source_inbound_seq && !row.terminal_record_owned) {
+        this.completeInbound(row.source_inbound_seq, 'response_sent');
+      }
+    });
   }
 
   markMaybeSent(id: number, error?: string): void {
@@ -589,20 +1203,58 @@ export class DurabilityEngine {
 
   markTerminal(id: number): void {
     this.statements.markTerminal.run(id);
-    // QR-102: markEchoed only completes the linked inbound if the op was ALREADY
-    // terminal at echo time. In the real ordering the reply is sent + echoed
-    // (markEchoed, is_terminal=0 -> skipped) BEFORE markLastTerminal runs, so the
-    // echo-path completion is missed and -- if the process crashes before the direct
-    // completeInbound -- the inbound is stranded (processing/turn_done). Mirror
-    // markEchoed here: if this op is already 'echoed', finalize the inbound now.
-    // completeInbound is idempotent (status-guarded markTurnDone + a redundant
-    // markInboundComplete), so this never double-finalizes when the direct path also
-    // runs, and the terminal-then-echo ordering still completes via markEchoed.
+    // QR-102 legacy echo-before-terminal ordering still completes an unowned
+    // inbound here. A terminal-record-owned op is fenced to the atomic finalizer.
     const row = this.statements.selectEchoedOutboundInbound.get(id) as
-      { source_inbound_seq: number | null; is_terminal: number; status: string } | undefined;
-    if (row?.status === 'echoed' && row.source_inbound_seq) {
+      {
+        source_inbound_seq: number | null;
+        is_terminal: number;
+        status: string;
+        terminal_record_owned: number;
+      } | undefined;
+    if (
+      row?.status === 'echoed' &&
+      row.source_inbound_seq &&
+      !row.terminal_record_owned
+    ) {
       this.completeInbound(row.source_inbound_seq, 'response_sent');
     }
+  }
+
+  /** Read-only delivery truth for a single turn-owned outbound operation. */
+  getOutboundDeliverySnapshot(
+    opId: number,
+    identity: OutboundDeliveryIdentity,
+  ): OutboundDeliverySnapshot | undefined {
+    validatePositiveSafeInteger(opId, 'Outbound delivery op ID');
+    validateBoundedRequired(
+      identity.conversationKey,
+      'Outbound delivery conversation key',
+      TURN_RECOVERY_MAX_ID_BYTES,
+    );
+    validateBoundedRequired(
+      identity.deliveryJid,
+      'Outbound delivery JID',
+      TURN_RECOVERY_MAX_ID_BYTES,
+    );
+    if (identity.sourceInboundSeq !== null) {
+      validatePositiveSafeInteger(identity.sourceInboundSeq, 'Outbound source inbound sequence');
+    }
+    const row = this.statements.selectOutboundTerminalIdentity.get(opId) as {
+      conversation_key: string;
+      chat_jid: string;
+      source_inbound_seq: number | null;
+      status: OutboundStatus;
+    } | undefined;
+    if (!row) return undefined;
+    if (
+      row.conversation_key !== identity.conversationKey ||
+      row.chat_jid !== identity.deliveryJid ||
+      row.source_inbound_seq !== identity.sourceInboundSeq
+    ) {
+      throw new Error('Selected outbound identity does not match the expected turn identity');
+    }
+    return { opId, ...identity, status: row.status };
   }
 
   // ── Echo matching ──
@@ -634,17 +1286,55 @@ export class DurabilityEngine {
   }
 
   // ── Session checkpoints ──
-  upsertSessionCheckpoint(conversationKey: string, fields: {
-    sessionId?: string; transcriptPath?: string; activeTurnId?: string | null;
-    lastInboundSeq?: number; lastFlushedOutboundId?: number;
-    watchdogState?: string; workspacePath?: string;
-    claudePid?: number; sessionStatus?: string;
-  }): void {
+  upsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
     this.runUpsertSessionCheckpoint(conversationKey, fields);
+  }
+
+  beginFreshSessionCheckpoint(conversationKey: string, claudePid?: number): void {
+    this.sessionLifecycle.beginFreshCheckpoint(conversationKey, claudePid);
+  }
+
+  beginFreshSessionLifecycle(params: BeginFreshSessionLifecycleParams): number {
+    return this.sessionLifecycle.beginFreshSessionLifecycle(params);
   }
 
   getSessionCheckpoint(conversationKey: string): SessionCheckpointRow | undefined {
     return this.statements.getSessionCheckpoint.get(conversationKey) as SessionCheckpointRow | undefined;
+  }
+
+  getLatestCompletedCheckpointForSession(sessionId: string): SessionCheckpointRow | undefined {
+    return this.statements.getLatestCompletedCheckpointForSession.get(sessionId) as
+      SessionCheckpointRow | undefined;
+  }
+
+  reactivateSessionLifecycle(params: ReactivateSessionLifecycleParams): number {
+    return this.sessionLifecycle.reactivateSessionLifecycle(params);
+  }
+
+  /** Atomically retire an exact agent row and all checkpoints for its provider session. */
+  retireSessionLifecycle(
+    agentSessionRowId: number | undefined,
+    providerSessionId: string,
+  ): number {
+    return this.sessionLifecycle.retireSessionLifecycle(
+      agentSessionRowId,
+      providerSessionId,
+    );
+  }
+
+  closeSessionLifecycleFailure(params: CloseSessionLifecycleFailureParams): void {
+    this.sessionLifecycle.closeSessionLifecycleFailure(params);
+  }
+
+  closeSessionLifecycle(params: CloseSessionLifecycleParams): void {
+    this.sessionLifecycle.closeSessionLifecycle(params);
+  }
+
+  updateSessionCheckpointsStatusBySessionId(sessionId: string, sessionStatus: string): number {
+    return this.sessionLifecycle.updateSessionCheckpointsStatusBySessionId(
+      sessionId,
+      sessionStatus,
+    );
   }
 
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
@@ -696,6 +1386,18 @@ export class DurabilityEngine {
     };
 
     log.info('preConnectRecovery: starting');
+
+    // Settle exact recovery obligations whose selected delivery was durably
+    // echoed before the prior process could atomically close the source/job.
+    // This precedes generic stuck-inbound handling so the recovery owner keeps
+    // sole authority over the source terminal reason.
+    try {
+      for (const opId of this.turnRecovery.getUnsettledEchoedTurnRecoveryOpIds()) {
+        this.markEchoed(opId);
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error settling already-echoed recovery deliveries');
+    }
 
     // Step 1: Detect orphaned sessions
     try {

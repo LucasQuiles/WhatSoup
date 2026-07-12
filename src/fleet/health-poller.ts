@@ -1,5 +1,9 @@
 import { createChildLogger } from '../logger.ts';
-import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import {
+  clearAlertSourceChecked,
+  emitAlert,
+  type AlertEmissionResult,
+} from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
@@ -9,6 +13,11 @@ import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrot
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
+import {
+  LOOP_LAG_STARVATION_THRESHOLD_MS,
+  LoopLagSampler,
+  type LoopLagSnapshot,
+} from './loop-lag-sampler.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -16,6 +25,13 @@ const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
 const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
   'pairing_required',
   'serverside_logout_irreversible',
+]);
+const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
+  'pairing_required',
+  'serverside_logout_irreversible',
+  'local_corruption_restorable',
+  'local_corruption_unrestorable',
+  'auth_bond_at_risk',
 ]);
 const WEAK_LOGGED_OUT_POLLS = 3;
 const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;
@@ -33,6 +49,8 @@ const HEALTH_BODY_DEGRADED_ALERT_DWELL_MS = readNonNegativeEnvInt(
   10_000,
 );
 const HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD = 'health_probe_timeout_under_proxy_load';
+const HEALTH_SNAPSHOT_MAX_AGE_MS = 30_000;
+const HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
 const ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT = new Set([
   'health_body_degraded',
   'health_probe_auth_failed',
@@ -131,8 +149,12 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' ? value : null;
 }
 
-function numberValue(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+function nonNegativeIntegerValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function positiveIntegerValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function booleanValue(value: unknown): boolean | null {
@@ -146,31 +168,139 @@ function evidenceField(name: string, value: unknown): string {
 
 function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshotClassification {
   const healthStatus = stringValue(health.status);
+  const generatedAtRaw = health.generated_at;
+  const generatedAtMs = typeof generatedAtRaw === 'string' && generatedAtRaw.trim() !== ''
+    ? Date.parse(generatedAtRaw)
+    : Number.NaN;
   const whatsapp = asRecord(health.whatsapp);
   const connected = booleanValue(whatsapp?.connected);
   const accountJid = stringValue(whatsapp?.account_jid);
   const connection = asRecord(whatsapp?.connection);
   const connectionState = stringValue(connection?.state);
   const reconnectPhase = stringValue(connection?.reconnect_phase);
-  const reconnectAttempts = numberValue(connection?.reconnect_attempts);
+  const reconnectAttempts = nonNegativeIntegerValue(connection?.reconnect_attempts);
   const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
-  const lastStatusCode = numberValue(connection?.last_status_code);
+  const lastStatusCode = nonNegativeIntegerValue(connection?.last_status_code);
   const authFailureClass = stringValue(connection?.auth_failure_class);
   const recentDisconnects = asRecord(connection?.recent_disconnects);
-  const recentDisconnectCount = numberValue(recentDisconnects?.count);
-  const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
-  const recentDisconnectWindowMs = numberValue(recentDisconnects?.window_ms);
+  const recentDisconnectCount = nonNegativeIntegerValue(recentDisconnects?.count);
+  const recentDisconnectThreshold = positiveIntegerValue(recentDisconnects?.degraded_threshold);
+  const recentDisconnectWindowMs = positiveIntegerValue(recentDisconnects?.window_ms);
   const recentDisconnectLastAt = stringValue(recentDisconnects?.last_at);
   const recentDisconnectLastReason = stringValue(recentDisconnects?.last_reason);
-  const recentDisconnectLastStatusCode = numberValue(recentDisconnects?.last_status_code);
+  const recentDisconnectLastStatusCode = nonNegativeIntegerValue(recentDisconnects?.last_status_code);
+  const runtime = asRecord(health.runtime);
   const accountJidStatus = accountJid === null
     ? 'missing'
     : accountJid === 'not connected'
       ? 'not_connected'
       : 'present';
 
+  const typeErrors: string[] = [];
+  if (health.status !== undefined && typeof health.status !== 'string') typeErrors.push('status');
+  if (
+    generatedAtRaw !== undefined &&
+    (typeof generatedAtRaw !== 'string' || !Number.isFinite(generatedAtMs))
+  ) {
+    typeErrors.push('generated_at');
+  }
+  if (health.whatsapp !== undefined && whatsapp === undefined) typeErrors.push('whatsapp');
+  if (whatsapp?.connected !== undefined && typeof whatsapp.connected !== 'boolean') {
+    typeErrors.push('whatsapp.connected');
+  }
+  if (whatsapp?.account_jid !== undefined && typeof whatsapp.account_jid !== 'string') {
+    typeErrors.push('whatsapp.account_jid');
+  }
+  if (whatsapp?.connection !== undefined && connection === undefined) {
+    typeErrors.push('whatsapp.connection');
+  }
+  if (connection?.state !== undefined && typeof connection.state !== 'string') {
+    typeErrors.push('whatsapp.connection.state');
+  }
+  if (
+    connection?.reconnect_phase !== undefined &&
+    connection.reconnect_phase !== null &&
+    typeof connection.reconnect_phase !== 'string'
+  ) {
+    typeErrors.push('whatsapp.connection.reconnect_phase');
+  }
+  if (
+    connection?.reconnect_attempts !== undefined &&
+    nonNegativeIntegerValue(connection.reconnect_attempts) === null
+  ) {
+    typeErrors.push('whatsapp.connection.reconnect_attempts');
+  }
+  if (
+    connection?.last_disconnect_reason !== undefined &&
+    connection.last_disconnect_reason !== null &&
+    typeof connection.last_disconnect_reason !== 'string'
+  ) {
+    typeErrors.push('whatsapp.connection.last_disconnect_reason');
+  }
+  if (
+    connection?.last_status_code !== undefined &&
+    connection.last_status_code !== null &&
+    nonNegativeIntegerValue(connection.last_status_code) === null
+  ) {
+    typeErrors.push('whatsapp.connection.last_status_code');
+  }
+  if (
+    connection?.auth_failure_class !== undefined &&
+    connection.auth_failure_class !== null &&
+    typeof connection.auth_failure_class !== 'string'
+  ) {
+    typeErrors.push('whatsapp.connection.auth_failure_class');
+  }
+  if (connection?.recent_disconnects !== undefined && recentDisconnects === undefined) {
+    typeErrors.push('whatsapp.connection.recent_disconnects');
+  }
+  if (
+    recentDisconnects?.count !== undefined &&
+    nonNegativeIntegerValue(recentDisconnects.count) === null
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.count');
+  }
+  if (
+    recentDisconnects?.degraded_threshold !== undefined &&
+    positiveIntegerValue(recentDisconnects.degraded_threshold) === null
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.degraded_threshold');
+  }
+  if (
+    recentDisconnects?.window_ms !== undefined &&
+    positiveIntegerValue(recentDisconnects.window_ms) === null
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.window_ms');
+  }
+  if (
+    recentDisconnects?.last_at !== undefined &&
+    recentDisconnects.last_at !== null &&
+    (
+      typeof recentDisconnects.last_at !== 'string' ||
+      !Number.isFinite(Date.parse(recentDisconnects.last_at))
+    )
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.last_at');
+  }
+  if (
+    recentDisconnects?.last_reason !== undefined &&
+    recentDisconnects.last_reason !== null &&
+    typeof recentDisconnects.last_reason !== 'string'
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.last_reason');
+  }
+  if (
+    recentDisconnects?.last_status_code !== undefined &&
+    recentDisconnects.last_status_code !== null &&
+    nonNegativeIntegerValue(recentDisconnects.last_status_code) === null
+  ) {
+    typeErrors.push('whatsapp.connection.recent_disconnects.last_status_code');
+  }
+  if (health.runtime !== undefined && runtime === undefined) typeErrors.push('runtime');
+
   const baseEvidence = [
     evidenceField('health_status', healthStatus),
+    evidenceField('generated_at', generatedAtRaw),
     evidenceField('whatsapp_connected', connected),
     evidenceField('account_jid_status', accountJidStatus),
     evidenceField('connection_state', connectionState),
@@ -186,7 +316,14 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     evidenceField('recent_disconnect_last_reason', recentDisconnectLastReason),
     evidenceField('recent_disconnect_last_status_code', recentDisconnectLastStatusCode),
   ];
+  const classifiedEvidence = typeErrors.length > 0
+    ? [...baseEvidence, `schema_type_errors=${typeErrors.join(',')}`]
+    : baseEvidence;
 
+  // Type validation is complete before any heuristic consumes diagnostics.
+  // A well-typed explicit failure signal remains authoritative even when an
+  // unrelated optional diagnostic is malformed; otherwise schema errors win
+  // before the body can ever reach the online fallthrough.
   const staleReconnectHint = connected === true && accountJidStatus === 'present' && connectionState === 'connected';
   const loggedOutHeuristic = reconnectPhase === 'backoff' && reconnectAttempts === 0 && !staleReconnectHint;
   const disconnectedCorroboration =
@@ -202,25 +339,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
       status: 'logged_out',
       confidence: 'confirmed',
       reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
-      evidence: baseEvidence,
-    };
-  }
-
-  if (loggedOutHeuristic && disconnectedCorroboration) {
-    return {
-      status: 'degraded',
-      confidence: 'ambiguous',
-      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
-      evidence: baseEvidence,
-    };
-  }
-
-  if (loggedOutHeuristic) {
-    return {
-      status: 'degraded',
-      confidence: 'ambiguous',
-      reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
-      evidence: baseEvidence,
+      evidence: classifiedEvidence,
     };
   }
 
@@ -229,7 +348,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
       status: 'degraded',
       confidence: 'confirmed',
       reason: 'health_body_unhealthy',
-      evidence: baseEvidence,
+      evidence: classifiedEvidence,
     };
   }
 
@@ -238,7 +357,124 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
       status: 'degraded',
       confidence: 'confirmed',
       reason: 'health_body_degraded',
+      evidence: classifiedEvidence,
+    };
+  }
+
+  if (loggedOutHeuristic && disconnectedCorroboration) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
+      evidence: classifiedEvidence,
+    };
+  }
+
+  if (loggedOutHeuristic) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      evidence: classifiedEvidence,
+    };
+  }
+
+  if (typeErrors.length > 0) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_type_error',
+      evidence: classifiedEvidence,
+    };
+  }
+
+  const hasRecognizedHealthShape = health.status !== undefined || health.whatsapp !== undefined || health.runtime !== undefined;
+  if (!hasRecognizedHealthShape || (healthStatus !== null && healthStatus !== 'healthy')) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_unrecognized',
       evidence: baseEvidence,
+    };
+  }
+
+  const incompleteFields: string[] = [];
+  if (healthStatus === null) incompleteFields.push('status');
+  if (generatedAtRaw === undefined) incompleteFields.push('generated_at');
+  if (whatsapp === undefined) incompleteFields.push('whatsapp');
+  if (connected !== true) incompleteFields.push('whatsapp.connected');
+  if (accountJidStatus !== 'present') incompleteFields.push('whatsapp.account_jid');
+  if (connection === undefined) incompleteFields.push('whatsapp.connection');
+  if (connectionState !== 'connected') incompleteFields.push('whatsapp.connection.state');
+  if (connection === undefined || !('reconnect_phase' in connection)) {
+    incompleteFields.push('whatsapp.connection.reconnect_phase');
+  }
+  if (reconnectAttempts === null) incompleteFields.push('whatsapp.connection.reconnect_attempts');
+  if (authFailureClass === null) incompleteFields.push('whatsapp.connection.auth_failure_class');
+  if (runtime === undefined) incompleteFields.push('runtime');
+
+  if (incompleteFields.length > 0) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_incomplete',
+      evidence: [...baseEvidence, `schema_incomplete_fields=${incompleteFields.join(',')}`],
+    };
+  }
+
+  if (
+    authFailureClass !== null
+    && authFailureClass !== 'none'
+    && !NON_HEALTHY_AUTH_FAILURE_CLASSES.has(authFailureClass)
+  ) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_unrecognized',
+      evidence: [
+        ...baseEvidence,
+        'schema_unrecognized_fields=whatsapp.connection.auth_failure_class',
+      ],
+    };
+  }
+
+  const healthBodyConflicts: string[] = [];
+  if (authFailureClass !== null && NON_HEALTHY_AUTH_FAILURE_CLASSES.has(authFailureClass)) {
+    healthBodyConflicts.push(`auth_failure_class=${authFailureClass}`);
+  }
+  if (
+    recentDisconnectCount !== null
+    && recentDisconnectThreshold !== null
+    && recentDisconnectCount >= recentDisconnectThreshold
+  ) {
+    healthBodyConflicts.push(
+      `recent_disconnect_count=${recentDisconnectCount}>=degraded_threshold=${recentDisconnectThreshold}`,
+    );
+  }
+  if (healthBodyConflicts.length > 0) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_unrecognized',
+      evidence: [...baseEvidence, `health_body_conflicts=${healthBodyConflicts.join(',')}`],
+    };
+  }
+
+  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  if (
+    generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS ||
+    generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
+  ) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'health_body_unrecognized',
+      evidence: [
+        ...baseEvidence,
+        `generated_at_age_ms=${generatedAtAgeMs}`,
+        `generated_at_max_age_ms=${HEALTH_SNAPSHOT_MAX_AGE_MS}`,
+        `generated_at_max_future_skew_ms=${HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS}`,
+      ],
     };
   }
 
@@ -276,17 +512,20 @@ export class HealthPoller {
   private healthBodyDegradedPolls: Map<string, number> = new Map();
   private unreachableAlerted: Set<string> = new Set();
   private targetPids: Map<string, number> = new Map();
+  private readonly loopLagSampler: LoopLagSampler;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
     selfName: string,
     getSelfHealth: () => Record<string, unknown>,
     intervalMs = 5_000,
+    loopLagSampler = new LoopLagSampler(),
   ) {
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
+    this.loopLagSampler = loopLagSampler;
     const throttle = loadAlertThrottleDetailed();
     this.persistedAlertThrottle = throttle.entries;
     this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
@@ -314,6 +553,7 @@ export class HealthPoller {
    */
   start(): Promise<void> {
     if (this.pollInterval) return Promise.resolve();
+    this.loopLagSampler.start();
     const initial = this.poll(); // initial poll
     this.pollInterval = setInterval(() => this.poll(), this.intervalMs);
     this.pollInterval.unref();
@@ -324,6 +564,7 @@ export class HealthPoller {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+      this.loopLagSampler.stop();
     }
   }
 
@@ -430,7 +671,12 @@ export class HealthPoller {
                 return;
               }
               const classification = classifyHealthSnapshot(failureHealth);
-              if (isNonOnlineClassification(classification)) {
+              if (
+                isNonOnlineClassification(classification) &&
+                classification.reason !== 'health_body_unrecognized' &&
+                classification.reason !== 'health_body_incomplete' &&
+                classification.reason !== 'health_body_type_error'
+              ) {
                 this.updateFromHealthSnapshot(name, failureHealth, classification);
                 return;
               }
@@ -543,22 +789,19 @@ export class HealthPoller {
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
     const connected = whatsapp?.['connected'] === true && connection?.['state'] === 'connected';
-    const lastStatusCode = connection?.['last_status_code'];
-    const lastReason = String(connection?.['last_disconnect_reason'] ?? '');
-    const authFailureClass = typeof connection?.['auth_failure_class'] === 'string'
-      ? connection['auth_failure_class']
-      : '';
+    const lastStatusCode = nonNegativeIntegerValue(connection?.['last_status_code']);
+    const lastReason = stringValue(connection?.['last_disconnect_reason']) ?? '';
+    const authFailureClass = stringValue(connection?.['auth_failure_class']) ?? '';
     const disconnectClass = typeof connection?.['disconnect_class'] === 'string'
       ? connection['disconnect_class']
       : '';
     const reconnectPhase = connection?.['reconnect_phase'];
-    const reconnectAttempts = connection?.['reconnect_attempts'];
+    const reconnectAttempts = nonNegativeIntegerValue(connection?.['reconnect_attempts']);
     const uptimeSeconds = this.readNumber(health['uptime_seconds']);
 
     const explicit =
       TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass) ||
       lastStatusCode === 401 ||
-      lastStatusCode === '401' ||
       lastReason === 'loggedOut' ||
       lastReason.includes('device_removed');
     if (explicit) {
@@ -975,7 +1218,12 @@ export class HealthPoller {
 
   private updateProbeFailure(name: string, inst: InstanceHealth, err: Error, reached: boolean): void {
     if (this.isProbeAbortBeforeConnect(err, reached)) {
-      this.updateProbeStarved(name, inst, err);
+      const loopLag = this.loopLagSampler.snapshot();
+      if (loopLag.locallyStarved) {
+        this.updateProbeStarved(name, inst, err, loopLag);
+      } else {
+        this.updateFailure(name, err.message);
+      }
       return;
     }
     this.updateFailure(name, err.message, reached);
@@ -990,28 +1238,51 @@ export class HealthPoller {
       message === 'aborted';
   }
 
-  private updateProbeStarved(name: string, inst: InstanceHealth, err: Error): void {
+  private updateProbeStarved(
+    name: string,
+    inst: InstanceHealth,
+    err: Error,
+    loopLag: LoopLagSnapshot,
+  ): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
+    const failures = (existing?.consecutiveFailures ?? 0) + 1;
+    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    this.failureStartedAt.set(name, firstFailureAt);
+    const failureAgeMs = Date.now() - firstFailureAt;
+    const staysUnreachable = existing?.status === 'unreachable';
     const evidence = [
       'reason=probe_aborted_before_connect',
       `health_port=${inst.healthPort}`,
-      'event_loop_suspected=true',
+      'local_starvation=true',
+      `event_loop_lag_p95_ms=${loopLag.p95LagMs ?? 'unknown'}`,
+      `event_loop_lag_samples=${loopLag.sampleCount}`,
+      `event_loop_lag_threshold_ms=${LOOP_LAG_STARVATION_THRESHOLD_MS}`,
+      `consecutive_failures=${failures}`,
+      `failure_age_ms=${failureAgeMs}`,
       `error=${err.message}`,
       this.targetPidEvidence(name),
     ].join(' ');
 
-    log.warn({ name, error: err.message, healthPort: inst.healthPort }, 'health probe aborted before connect; treating as local poller starvation');
-    this.failureStartedAt.delete(name);
+    log.warn({
+      name,
+      error: err.message,
+      healthPort: inst.healthPort,
+      failures,
+      failureAgeMs,
+      loopLagP95Ms: loopLag.p95LagMs,
+      loopLagSamples: loopLag.sampleCount,
+    }, 'health probe aborted before connect with corroborated local poller starvation');
+    this.resetHealthBodyDegradedDebounce(name);
     this.statuses.set(name, {
       name,
       health: existing?.health ?? null,
       lastPollAt: new Date().toISOString(),
-      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      consecutiveFailures: failures,
       everReachable: existing?.everReachable ?? false,
-      status: 'degraded',
-      statusConfidence: 'ambiguous',
-      statusReason: HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD,
+      status: staysUnreachable ? 'unreachable' : 'degraded',
+      statusConfidence: staysUnreachable ? existing.statusConfidence : 'ambiguous',
+      statusReason: staysUnreachable ? existing.statusReason : HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD,
       statusEvidence: evidence.split(/\s+/).filter(Boolean),
       error: `${HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD} ${evidence}`,
       lastAlertAt: this.lastAlertAtFor(name, existing),
@@ -1019,8 +1290,9 @@ export class HealthPoller {
       activeAlertSources: existing?.activeAlertSources ?? [],
     });
 
-    if (prevStatus !== 'degraded') {
-      this.emitStatusChange(name, 'degraded', prevStatus);
+    const nextStatus = staysUnreachable ? 'unreachable' : 'degraded';
+    if (prevStatus !== nextStatus) {
+      this.emitStatusChange(name, nextStatus, prevStatus);
     }
   }
 
@@ -1363,8 +1635,22 @@ export class HealthPoller {
     const throttleEvidence = throttleLoadErrorCode
       ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${throttleLoadErrorCode}`
       : evidence;
-    const emitted = emitAlertChecked(name, source, summary, throttleEvidence, severity, criticalAsset);
-    if (!emitted) return false;
+    let result: AlertEmissionResult;
+    try {
+      result = emitAlert(name, source, summary, throttleEvidence, severity, criticalAsset);
+    } catch (err) {
+      log.warn({ err, name, source }, 'alert emission threw before durable acceptance');
+      return false;
+    }
+    if (result.status !== 'durably_queued') {
+      log.warn({
+        name,
+        source,
+        channel: result.channel,
+        status: result.status,
+      }, 'alert emission was not durably accepted');
+      return false;
+    }
 
     if (existing) {
       const now = new Date().toISOString();

@@ -2,16 +2,25 @@
 // Global FIFO turn queue — serializes turns to Claude Code one at a time.
 
 import { createChildLogger } from '../../logger.ts';
+import type { ContentType } from '../../core/types.ts';
+import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 
 const log = createChildLogger('turn-queue');
 
 export interface QueuedTurn {
+  /** Stable journal/source message id captured at admission; never reconstructed at result time. */
+  sourceMessageId: string;
+  /** Exact conversation key used when the inbound row was journaled. */
+  conversationKey: string;
   chatJid: string;
   senderJid: string;
   senderName: string | null;
   text: string;
   isGroup: boolean;
   groupName?: string;
+  contentType: ContentType;
+  /** Immutable journal-backed context minted at admission for user turns. */
+  runtimeContext?: RuntimeTurnContext;
   /** durability: inbound_events.seq for this turn — threaded to outbound ops */
   inboundSeq?: number;
 }
@@ -19,27 +28,44 @@ export interface QueuedTurn {
 export interface TurnQueueOpts {
   maxDepth?: number;
   onReject?: (turn: QueuedTurn) => void;
+  onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
 }
 
 export class TurnQueue {
   private queue: QueuedTurn[] = [];
   private processing = false;
+  private active: QueuedTurn | null = null;
   private processor: ((turn: QueuedTurn) => Promise<void>) | null = null;
+  private accepting = true;
+  private halted = false;
+  private haltError: unknown;
   private readonly maxDepth: number;
   private readonly onReject?: (turn: QueuedTurn) => void;
+  private readonly onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
 
   constructor(opts?: TurnQueueOpts) {
     this.maxDepth = opts?.maxDepth ?? Infinity;
     this.onReject = opts?.onReject;
+    this.onProcessorError = opts?.onProcessorError;
   }
 
   setProcessor(fn: (turn: QueuedTurn) => Promise<void>): void {
     this.processor = fn;
     // Drain in case items were enqueued before the processor was set.
-    void this.drain();
+    if (!this.halted) void this.drain();
   }
 
   enqueue(turn: QueuedTurn): boolean {
+    if (!this.accepting) {
+      log.warn({ chatJid: turn.chatJid }, 'turn rejected — queue admissions are closed');
+      this.onReject?.(turn);
+      return false;
+    }
+    if (this.halted) {
+      log.error({ chatJid: turn.chatJid }, 'turn rejected — queue is halted after finalization failure');
+      this.onReject?.(turn);
+      return false;
+    }
     if (this.queue.length >= this.maxDepth) {
       log.warn({ chatJid: turn.chatJid, maxDepth: this.maxDepth, pending: this.queue.length },
         'turn rejected — queue depth cap reached');
@@ -64,15 +90,33 @@ export class TurnQueue {
     return this.processing;
   }
 
+  get activeTurn(): QueuedTurn | null {
+    return this.active;
+  }
+
+  closeAndTakePendingTurns(): QueuedTurn[] {
+    this.accepting = false;
+    return this.queue.splice(0);
+  }
+
+  get haltedError(): unknown {
+    return this.halted ? this.haltError : undefined;
+  }
+
   /**
    * Returns a Promise that resolves when the queue is empty and no turn is
    * being processed. Useful in tests to await full drain.
    */
   async idle(): Promise<void> {
-    if (!this.processing && this.queue.length === 0) return;
-    await new Promise<void>((resolve) => {
+    if (!this.processing) {
+      if (this.halted) throw this.haltError;
+      if (this.queue.length === 0) return;
+    }
+    await new Promise<void>((resolve, reject) => {
       const check = (): void => {
-        if (!this.processing && this.queue.length === 0) {
+        if (!this.processing && this.halted) {
+          reject(this.haltError);
+        } else if (!this.processing && this.queue.length === 0) {
           resolve();
         } else {
           setTimeout(check, 1);
@@ -90,10 +134,33 @@ export class TurnQueue {
     try {
       while (this.queue.length > 0) {
         const turn = this.queue.shift()!;
+        this.active = turn;
         try {
           await this.processor(turn);
         } catch (err) {
-          log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — continuing queue');
+          log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — finalizing before queue advance');
+          if (!this.onProcessorError) {
+            this.halted = true;
+            this.haltError = err;
+            log.error(
+              { err, chatJid: turn.chatJid },
+              'turn processor has no failure finalizer — queue halted',
+            );
+            break;
+          }
+          try {
+            await this.onProcessorError(turn, err);
+          } catch (finalizationError) {
+            this.halted = true;
+            this.haltError = finalizationError;
+            log.error(
+              { err: finalizationError, chatJid: turn.chatJid },
+              'turn processor finalization failed — queue halted',
+            );
+            break;
+          }
+        } finally {
+          if (this.active === turn) this.active = null;
         }
       }
     } finally {

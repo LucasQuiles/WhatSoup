@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import { parseCodexEvent } from '../../../src/runtimes/agent/providers/codex-parser.ts';
+import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
 // ─── Part 1: Parser-level tests (pure functions, no mocks needed) ────────────
 
@@ -112,8 +114,11 @@ describe('Codex turn lifecycle — parser level', () => {
 // token_usage and result correctly: only result triggers turn completion,
 // queue shift, and flush.
 
-const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
+const { mockSession, mockQueue, capturedOnEventRef, capturedGenerationOwnershipRef } = vi.hoisted(() => {
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
+  const capturedGenerationOwnershipRef: {
+    current: (() => SessionGenerationIdentity | null) | null;
+  } = { current: null };
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
@@ -134,6 +139,9 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn(() => 1),
     setDurability: vi.fn(() => {}),
+    bindGenerationOwnership: vi.fn((resolve: () => SessionGenerationIdentity | null) => {
+      capturedGenerationOwnershipRef.current = resolve;
+    }),
   };
 
   const mockQueue = {
@@ -151,6 +159,13 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
+    beginTurnEvidence: vi.fn(),
+    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+      turnId,
+      answerOpIds: [],
+      lifecycleOpIds: [],
+      statusOpIds: [],
+    })),
     setToolUpdateMode: vi.fn(),
     setToolUpdateRedirectJid: vi.fn(),
     setTextAggregateDelayMs: vi.fn(),
@@ -159,7 +174,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     targetChatJid: '1234@s.whatsapp.net',
   };
 
-  return { mockSession, mockQueue, capturedOnEventRef };
+  return { mockSession, mockQueue, capturedOnEventRef, capturedGenerationOwnershipRef };
 });
 
 const { mockAccumulateSessionTokens, mockAccumulateTokensWithEvent } = vi.hoisted(() => ({
@@ -316,7 +331,45 @@ function makeDurabilityMock() {
     completeInbound: vi.fn(),
     markInboundFailed: vi.fn(),
     upsertSessionCheckpoint: vi.fn(),
+    getOutboundDeliverySnapshot: vi.fn(),
+    finalizeTurnTerminal: vi.fn(() => ({
+      applied: true,
+      winnerMatchesRequest: true,
+      recordId: 1,
+      duplicateFinalizeCount: 0,
+      replyGuaranteeDisarmed: true,
+      effectiveReplyGuaranteeDisarmed: true,
+    })),
   };
+}
+
+function runtimeContext(scope: 'per_chat' | 'shared', inboundSeq: number) {
+  return createRuntimeTurnContext({
+    identity: {
+      scope,
+      conversationKey: '1234',
+      deliveryJid: '1234@s.whatsapp.net',
+      inboundSeq,
+      logicalTurnId: `turn-${scope}-${inboundSeq}`,
+      managerId: `manager-${scope}`,
+      generation: 1,
+    },
+    recoveryOwner: {
+      logicalTurnId: `turn-${scope}-${inboundSeq}:recovery`,
+      managerId: 'manager-recovery',
+      generation: 2,
+    },
+    replay: {
+      sourceMessageId: `wamid-${inboundSeq}`,
+      replaySafe: true,
+      senderJid: '1234@s.whatsapp.net',
+      senderName: 'Test User',
+      text: 'hello',
+      isGroup: false,
+    },
+    contentType: 'text',
+    toolScopeKey: scope === 'per_chat' ? '1234@s.whatsapp.net' : '__global__',
+  });
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -335,6 +388,7 @@ describe('Codex turn lifecycle — runtime level', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     capturedOnEventRef.current = null;
+    capturedGenerationOwnershipRef.current = null;
     mockSession.getStatus.mockReturnValue({
       active: false,
       pid: null,
@@ -350,7 +404,11 @@ describe('Codex turn lifecycle — runtime level', () => {
   });
 
   afterEach(async () => {
+    const resolveGenerationOwnership = capturedGenerationOwnershipRef.current;
     await runtime?.shutdown();
+    if (resolveGenerationOwnership) {
+      expect(resolveGenerationOwnership()).toBeNull();
+    }
   });
 
   /**
@@ -359,6 +417,17 @@ describe('Codex turn lifecycle — runtime level', () => {
    */
   async function setupSession(overrides: Partial<IncomingMessage> = {}): Promise<(event: AgentEvent) => void> {
     await sendAndDrain(runtime, makeMsg(overrides));
+
+    const state = runtime as unknown as {
+      chatSessions: Map<string, unknown>;
+      chatQueues: Map<string, unknown>;
+    };
+    expect(state.chatSessions.get('1234@s.whatsapp.net')).toBe(mockSession);
+    expect(state.chatQueues.get('1234@s.whatsapp.net')).toBe(mockQueue);
+    expect(capturedGenerationOwnershipRef.current?.()).toEqual({
+      managerId: expect.any(String),
+      generation: 1,
+    });
 
     const onEvent = capturedOnEventRef.current;
     if (!onEvent) throw new Error('onEvent callback not captured — session was not created');
@@ -401,8 +470,9 @@ describe('Codex turn lifecycle — runtime level', () => {
 
     // Turn-completion side effects MUST fire
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
-    expect(mockQueue.markLastTerminal).toHaveBeenCalledOnce();
-    expect(mockQueue.flush).toHaveBeenCalledOnce();
+    expect(mockQueue.endTurn).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
+    expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
   });
 
   it('token_usage then result: tokens recorded from token_usage, completion from result only', async () => {
@@ -417,8 +487,9 @@ describe('Codex turn lifecycle — runtime level', () => {
 
     // Turn completion should have fired exactly once (from result, not token_usage)
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
-    expect(mockQueue.flush).toHaveBeenCalledOnce();
-    expect(mockQueue.markLastTerminal).toHaveBeenCalledOnce();
+    expect(mockQueue.endTurn).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
+    expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
   });
 
   it('inbound sequence queue shifts exactly once per turn, not twice', async () => {
@@ -477,8 +548,9 @@ describe('Codex turn lifecycle — runtime level', () => {
 
     // Each result triggers exactly one flush -> 3 total
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledTimes(3);
-    expect(mockQueue.flush).toHaveBeenCalledTimes(3);
-    expect(mockQueue.markLastTerminal).toHaveBeenCalledTimes(3);
+    expect(mockQueue.endTurn).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledTimes(3));
+    expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
 
     // Token accumulation: 3 from token_usage events (transactional helper)
     // (result events here have no token fields, so they don't accumulate)
@@ -499,35 +571,46 @@ describe('Codex turn lifecycle — runtime level', () => {
     expect(calls).toEqual(['Hello', ' world']);
   });
 
-  it('usage-limit result in per_chat completes inbound, flushes queue, and clears dirty turn state', async () => {
+  it('usage-limit result in per_chat terminalizes the immutable turn and clears its FIFO', async () => {
     const durability = makeDurabilityMock();
     (runtime as any).durability = durability;
-    (runtime as any).currentTurnChatJid = 'stale@s.whatsapp.net';
-    (runtime as any).turnHadVisibleOutput = true;
     // Tool-scope keys are `${mapKey}#${ordinal}` — seed one for this chat so the
     // scoped per_chat cleanup (clearToolScopeFor) clears it.
-    (runtime as any).activeToolNames.set('1234@s.whatsapp.net#1', new Map([['tool-1', 'search_contacts']]));
+    const toolScopeKey = '1234@s.whatsapp.net#manual';
+    (runtime as any).activeToolNames.set(toolScopeKey, new Map([['tool-1', 'search_contacts']]));
     (runtime as any).chatQueues.set('1234@s.whatsapp.net', mockQueue);
     (runtime as any).chatSessions.set('1234@s.whatsapp.net', mockSession);
     (runtime as any).perChatInboundSeqQueue.set('1234@s.whatsapp.net', [77]);
+    (runtime as any).perChatRuntimeTurnContexts.set(
+      '1234@s.whatsapp.net',
+      [runtimeContext('per_chat', 77)],
+    );
 
     (runtime as any).handleEventPerChat('1234@s.whatsapp.net', {
       type: 'result',
       text: "You've reached your usage limit. Try again later.",
-    });
+    }, toolScopeKey);
 
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
     expect(mockSession.shutdown).toHaveBeenCalledOnce();
-    expect(mockQueue.flush).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+    expect(mockQueue.flushTurnEvidence).toHaveBeenCalledOnce();
+    expect(mockQueue.flush).not.toHaveBeenCalled();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
-    expect(durability.completeInbound).toHaveBeenCalledWith(77, 'response_sent');
+    expect(durability.completeInbound).not.toHaveBeenCalled();
+    expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({
+        inboundSeq: 77,
+        attemptKind: 'failed',
+        attemptFailureClass: 'usage-limit',
+      }),
+    }));
     expect((runtime as any).activeToolNames.size).toBe(0);
-    expect((runtime as any).currentTurnChatJid).toBeNull();
-    expect((runtime as any).turnHadVisibleOutput).toBe(false);
-    expect((runtime as any).perChatInboundSeqQueue.get('1234@s.whatsapp.net')).toEqual([]);
+    expect((runtime as any).perChatInboundSeqQueue.has('1234@s.whatsapp.net')).toBe(false);
+    expect((runtime as any).perChatRuntimeTurnContexts.has('1234@s.whatsapp.net')).toBe(false);
   });
 
-  it('usage-limit result in shared mode flushes queue, completes inbound, and resets shared turn state', () => {
+  it('usage-limit result in shared mode terminalizes the immutable turn and resets shared state', async () => {
     runtime = new AgentRuntime(fakeDb, fakeMessenger, 'test', {
       sessionScope: 'shared',
     });
@@ -538,17 +621,27 @@ describe('Codex turn lifecycle — runtime level', () => {
     (runtime as any).activeChatJid = '1234@s.whatsapp.net';
     (runtime as any).currentTurnChatJid = '1234@s.whatsapp.net';
     (runtime as any).currentInboundSeq = 91;
+    (runtime as any).currentRuntimeTurnContext = runtimeContext('shared', 91);
     (runtime as any).turnHadVisibleOutput = true;
-    (runtime as any).activeToolNames.set('tool-1', 'search_contacts');
+    (runtime as any).activeToolNames.set('__global__', new Map([['tool-1', 'search_contacts']]));
     (runtime as any).outboundQueues.set('1234@s.whatsapp.net', mockQueue);
 
     (runtime as any).handleEvent({ type: 'result', text: "You've reached your usage limit. Try again later." });
 
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
     expect(mockSession.shutdown).toHaveBeenCalledOnce();
-    expect(mockQueue.flush).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+    expect(mockQueue.flushTurnEvidence).toHaveBeenCalledOnce();
+    expect(mockQueue.flush).not.toHaveBeenCalled();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
-    expect(durability.completeInbound).toHaveBeenCalledWith(91, 'response_sent');
+    expect(durability.completeInbound).not.toHaveBeenCalled();
+    expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({
+        inboundSeq: 91,
+        attemptKind: 'failed',
+        attemptFailureClass: 'usage-limit',
+      }),
+    }));
     expect((runtime as any).currentInboundSeq).toBeUndefined();
     expect((runtime as any).activeToolNames.size).toBe(0);
     expect((runtime as any).currentTurnChatJid).toBeNull();

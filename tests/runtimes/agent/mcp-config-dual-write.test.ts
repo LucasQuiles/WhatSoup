@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
@@ -162,6 +162,7 @@ vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => ({
     setProcessor = vi.fn();
     enqueue = vi.fn();
     shutdown = vi.fn(async () => {});
+    closeAndTakePendingTurns = vi.fn(() => []);
     getStatus = vi.fn(() => ({ depth: 0, maxDepth: 100 }));
   },
 }));
@@ -224,9 +225,12 @@ function readJson(path: string): Record<string, unknown> {
 
 async function startRuntime(cwd: string, model?: string): Promise<AgentRuntime> {
   const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'dual-write-test', { cwd, model });
+  startedRuntimes.add(runtime);
   await runtime.start();
   return runtime;
 }
+
+const startedRuntimes = new Set<AgentRuntime>();
 
 describe('AgentRuntime startup MCP config dual-write', () => {
   let tmpDirs: string[] = [];
@@ -241,9 +245,25 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     tmpDirs = [];
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const failures: unknown[] = [];
+    const shutdownResults = await Promise.allSettled(
+      [...startedRuntimes].map((runtime) => runtime.shutdown()),
+    );
+    for (const result of shutdownResults) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
+    startedRuntimes.clear();
     for (const dir of tmpDirs) {
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    tmpDirs = [];
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'AgentRuntime test cleanup failed');
     }
   });
 
@@ -345,6 +365,22 @@ describe('AgentRuntime startup MCP config dual-write', () => {
 
     expect(existsSync(join(cwd, '.mcp.json'))).toBe(true);
     expect(existsSync(join(cwd, 'opencode.json'))).toBe(false);
+  });
+
+  it('keeps user-global Claude settings byte-stable while starting a configured workspace', async () => {
+    const cwd = tmp();
+    const globalClaudeDir = join(homedir(), '.claude');
+    const globalSettingsPath = join(globalClaudeDir, 'settings.json');
+    const sentinel = '{\n  "hooks": { "PreToolUse": [] },\n  "sentinel": "unchanged"\n}\n';
+    mkdirSync(globalClaudeDir, { recursive: true });
+    writeFileSync(globalSettingsPath, sentinel);
+
+    const runtime = await startRuntime(cwd);
+    await runtime.shutdown();
+    startedRuntimes.delete(runtime);
+
+    expect(readFileSync(globalSettingsPath, 'utf8')).toBe(sentinel);
+    expect(readJson(join(cwd, '.claude', 'settings.json'))).toHaveProperty('permissions');
   });
 
   it('attempts every chain target, writes each distinct file once, and warns on the shared-target entry', async () => {

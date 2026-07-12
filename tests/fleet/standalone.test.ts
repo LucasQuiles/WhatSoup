@@ -53,7 +53,15 @@ describe('fleet standalone launcher', () => {
     });
     expect(deps.db).toMatchObject({ path: ':memory:' });
     expect(deps.getFleetTokens).toBe(loadOrCreateFleetTokens);
-    expect(deps.getSelfHealth()).toEqual({ status: 'healthy', standalone: true });
+    const beforeHealth = Date.now();
+    const selfHealth = deps.getSelfHealth();
+    const afterHealth = Date.now();
+    expect(selfHealth).toMatchObject({ status: 'healthy', standalone: true });
+    expect(typeof selfHealth.generated_at).toBe('string');
+    const generatedAt = Date.parse(selfHealth.generated_at as string);
+    expect(Number.isNaN(generatedAt)).toBe(false);
+    expect(generatedAt).toBeGreaterThanOrEqual(beforeHealth);
+    expect(generatedAt).toBeLessThanOrEqual(afterHealth);
     expect(start).toHaveBeenCalledWith(9099);
     expect(log.mock.calls.map(([message]) => message)).toEqual([
       'Fleet token: abcdef01...',

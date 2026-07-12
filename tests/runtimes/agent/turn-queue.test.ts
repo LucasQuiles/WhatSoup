@@ -12,11 +12,14 @@ vi.mock('../../../src/logger.ts', () => ({
 
 function makeTurn(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   return {
+    sourceMessageId: 'wamid-test',
+    conversationKey: 'chat',
     chatJid: 'chat@s.whatsapp.net',
     senderJid: 'sender@s.whatsapp.net',
     senderName: 'Test User',
     text: 'hello',
     isGroup: false,
+    contentType: 'text',
     ...overrides,
   };
 }
@@ -123,6 +126,38 @@ describe('TurnQueue', () => {
     expect(queue.pending).toBe(3);
   });
 
+  it('closes admissions while atomically detaching pending turns for shutdown ownership', async () => {
+    const rejected: QueuedTurn[] = [];
+    const processed: QueuedTurn[] = [];
+    const queue = new TurnQueue({
+      onReject: (turn) => rejected.push(turn),
+    });
+    const release = deferred();
+    const active = makeTurn({ text: 'active', inboundSeq: 1 });
+    const pending = makeTurn({ text: 'pending', inboundSeq: 2 });
+    const late = makeTurn({ text: 'late', inboundSeq: 3 });
+
+    queue.setProcessor(async (turn) => {
+      processed.push(turn);
+      if (turn === active) await release.promise;
+    });
+    queue.enqueue(active);
+    queue.enqueue(pending);
+    await vi.waitFor(() => expect(queue.activeTurn).toBe(active));
+
+    expect(queue.closeAndTakePendingTurns()).toEqual([pending]);
+    expect(queue.activeTurn).toBe(active);
+    expect(queue.pending).toBe(0);
+    expect(queue.enqueue(late)).toBe(false);
+    expect(rejected).toEqual([late]);
+
+    release.resolve();
+    await queue.idle();
+
+    expect(processed).toEqual([active]);
+    expect(rejected).toEqual([late]);
+  });
+
   it('pending goes to 0 after all turns processed', async () => {
     const queue = new TurnQueue();
 
@@ -159,13 +194,36 @@ describe('TurnQueue', () => {
     expect(queue.isProcessing).toBe(false);
   });
 
-  it('processor error does not stop subsequent turns', async () => {
+  it('exposes the exact active turn only while its processor owns the FIFO head', async () => {
+    const queue = new TurnQueue();
+    const release = deferred();
+    const active = makeTurn({ text: 'active-turn', inboundSeq: 41 });
+
+    queue.setProcessor(async () => {
+      await release.promise;
+    });
+    queue.enqueue(active);
+
+    await vi.waitFor(() => expect(queue.isProcessing).toBe(true));
+    expect(queue.activeTurn).toBe(active);
+    expect(queue.pending).toBe(0);
+
+    release.resolve();
+    await queue.idle();
+
+    expect(queue.activeTurn).toBeNull();
+    expect(queue.pending).toBe(0);
+    expect(queue.isProcessing).toBe(false);
+  });
+
+  it('halts instead of swallowing a processor error when no finalizer is installed', async () => {
     const queue = new TurnQueue();
     const processed: string[] = [];
+    const processorError = new Error('intentional error');
 
     queue.setProcessor(async (turn) => {
       if (turn.text === 'bad') {
-        throw new Error('intentional error');
+        throw processorError;
       }
       processed.push(turn.text);
     });
@@ -174,9 +232,73 @@ describe('TurnQueue', () => {
     queue.enqueue(makeTurn({ text: 'bad' }));
     queue.enqueue(makeTurn({ text: 'good-after' }));
 
+    await expect(queue.idle()).rejects.toBe(processorError);
+
+    expect(processed).toEqual(['good-before']);
+    expect(queue.pending).toBe(1);
+    expect(queue.haltedError).toBe(processorError);
+  });
+
+  it('awaits processor-error finalization before advancing the FIFO', async () => {
+    const errorFinalized = deferred();
+    const order: string[] = [];
+    const queue = new TurnQueue({
+      onProcessorError: async (turn, err) => {
+        order.push(`error:${turn.text}:${(err as Error).message}`);
+        await errorFinalized.promise;
+        order.push(`finalized:${turn.text}`);
+      },
+    });
+
+    queue.setProcessor(async (turn) => {
+      order.push(`process:${turn.text}`);
+      if (turn.text === 'bad') throw new Error('processor exploded');
+    });
+
+    queue.enqueue(makeTurn({ text: 'bad' }));
+    queue.enqueue(makeTurn({ text: 'next' }));
+
+    await vi.waitFor(() => {
+      expect(order).toEqual([
+        'process:bad',
+        'error:bad:processor exploded',
+      ]);
+    });
+    errorFinalized.resolve();
     await queue.idle();
 
-    expect(processed).toEqual(['good-before', 'good-after']);
+    expect(order).toEqual([
+      'process:bad',
+      'error:bad:processor exploded',
+      'finalized:bad',
+      'process:next',
+    ]);
+  });
+
+  it('halts without advancing when processor-error finalization rejects', async () => {
+    const finalizationFailure = new Error('terminal sink unavailable');
+    const processed: string[] = [];
+    const queue = new TurnQueue({
+      onProcessorError: async () => {
+        throw finalizationFailure;
+      },
+    });
+
+    queue.setProcessor(async (turn) => {
+      processed.push(turn.text);
+      if (turn.text === 'bad') throw new Error('processor exploded');
+    });
+
+    queue.enqueue(makeTurn({ text: 'bad' }));
+    queue.enqueue(makeTurn({ text: 'must-stay-queued' }));
+
+    await expect(queue.idle()).rejects.toBe(finalizationFailure);
+    expect(processed).toEqual(['bad']);
+    expect(queue.pending).toBe(1);
+    expect(queue.isProcessing).toBe(false);
+    expect(queue.haltedError).toBe(finalizationFailure);
+    expect(queue.enqueue(makeTurn({ text: 'rejected-after-halt' }))).toBe(false);
+    expect(queue.pending).toBe(1);
   });
 
   it('turns from different chats are queued in arrival order', async () => {

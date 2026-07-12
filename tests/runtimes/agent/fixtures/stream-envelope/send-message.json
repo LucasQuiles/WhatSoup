@@ -1,0 +1,4 @@
+{
+  "block_types_in_order": ["thinking", "text", "tool_use"],
+  "tool_names": ["SendMessage"]
+}

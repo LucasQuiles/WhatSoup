@@ -6,6 +6,16 @@ describe('DurabilityEngine — session checkpoints', () => {
   let db: Database;
   let engine: DurabilityEngine;
 
+  function insertAgentSession(sessionId: string, workspaceKey: string): number {
+    const result = db.raw.prepare(`
+      INSERT INTO agent_sessions (
+        session_id, claude_pid, started_in_directory, chat_jid,
+        workspace_key, started_at, status
+      ) VALUES (?, 1234, '/tmp', ?, ?, datetime('now'), 'active')
+    `).run(sessionId, `${workspaceKey}@s.whatsapp.net`, workspaceKey);
+    return Number(result.lastInsertRowid);
+  }
+
   beforeEach(() => {
     db = new Database(':memory:');
     db.open();
@@ -82,6 +92,299 @@ describe('DurabilityEngine — session checkpoints', () => {
     });
   });
 
+  describe('getLatestCompletedCheckpointForSession', () => {
+    function completedFields(
+      conversationKey: string,
+      inboundSeq: number,
+      logicalTurnId: string,
+    ) {
+      return {
+        lastInboundSeq: inboundSeq,
+        completedInboundSeq: inboundSeq,
+        completedDeliveryJid: `${conversationKey}@s.whatsapp.net`,
+        completedDeliveryNamespace: 's.whatsapp.net',
+        completedScope: 'shared',
+        completedLogicalTurnId: logicalTurnId,
+        completedManagerId: 'shared-manager',
+        completedGeneration: 2,
+      } as const;
+    }
+
+    it.each([
+      ['unsupported namespace', 'status@broadcast', 'broadcast'],
+      ['multiple separators', 'a@b@lid', 'b@lid'],
+    ])('rejects completed identity with %s', (_name, completedDeliveryJid, completedDeliveryNamespace) => {
+      expect(() => engine.upsertSessionCheckpoint('invalid-completed-identity', {
+        sessionId: 'invalid-completed-session',
+        ...completedFields('invalid-completed-identity', 1, 'invalid-turn'),
+        completedDeliveryJid,
+        completedDeliveryNamespace,
+      })).toThrow(/delivery|namespace/i);
+
+      expect(engine.getSessionCheckpoint('invalid-completed-identity')).toBeUndefined();
+    });
+
+    it('returns the highest completed inbound sequence for a session', () => {
+      engine.upsertSessionCheckpoint('15550108', {
+        sessionId: 'shared-session',
+        ...completedFields('15550108', 8, 'turn-8'),
+      });
+      engine.upsertSessionCheckpoint('15550103', {
+        sessionId: 'shared-session',
+        ...completedFields('15550103', 3, 'turn-3'),
+      });
+      engine.upsertSessionCheckpoint('legacy', {
+        sessionId: 'shared-session',
+        lastInboundSeq: 99,
+      });
+
+      expect(engine.getLatestCompletedCheckpointForSession('shared-session'))
+        .toMatchObject({
+          conversation_key: '15550108',
+          last_inbound_seq: 8,
+          completed_inbound_seq: 8,
+          completed_logical_turn_id: 'turn-8',
+        });
+    });
+
+    it('ignores completed proof from non-resumable checkpoints', () => {
+      engine.upsertSessionCheckpoint('15550109', {
+        sessionId: 'filtered-session',
+        sessionStatus: 'active',
+        ...completedFields('15550109', 9, 'active-turn-9'),
+      });
+      engine.upsertSessionCheckpoint('15550110', {
+        sessionId: 'filtered-session',
+        sessionStatus: 'ended',
+        ...completedFields('15550110', 10, 'ended-turn-10'),
+      });
+
+      expect(engine.getLatestCompletedCheckpointForSession('filtered-session'))
+        .toMatchObject({
+          conversation_key: '15550109',
+          completed_logical_turn_id: 'active-turn-9',
+        });
+
+      engine.upsertSessionCheckpoint('15550109', { sessionStatus: 'ended' });
+      expect(engine.getLatestCompletedCheckpointForSession('filtered-session')).toBeUndefined();
+    });
+
+    it('breaks equal-sequence ties by the newest checkpoint row ID', () => {
+      engine.upsertSessionCheckpoint('15550101', {
+        sessionId: 'tie-session',
+        ...completedFields('15550101', 4, 'turn-older'),
+      });
+      engine.upsertSessionCheckpoint('15550102', {
+        sessionId: 'tie-session',
+        ...completedFields('15550102', 4, 'turn-newer'),
+      });
+
+      expect(engine.getLatestCompletedCheckpointForSession('tie-session'))
+        .toMatchObject({
+          conversation_key: '15550102',
+          completed_logical_turn_id: 'turn-newer',
+        });
+      expect(engine.getLatestCompletedCheckpointForSession('missing-session')).toBeUndefined();
+    });
+
+    it('clears completed-turn proof when the provider session ID rotates', () => {
+      engine.upsertSessionCheckpoint('15550121', {
+        sessionId: 'old-provider-session',
+        ...completedFields('15550121', 21, 'old-turn-21'),
+      });
+
+      engine.upsertSessionCheckpoint('15550121', {
+        sessionId: 'new-provider-session',
+        sessionStatus: 'active',
+      });
+
+      expect(engine.getSessionCheckpoint('15550121')).toMatchObject({
+        session_id: 'new-provider-session',
+        last_inbound_seq: null,
+        completed_delivery_jid: null,
+        completed_inbound_seq: null,
+        completed_delivery_namespace: null,
+        completed_scope: null,
+        completed_logical_turn_id: null,
+        completed_manager_id: null,
+        completed_generation: null,
+      });
+      expect(engine.getLatestCompletedCheckpointForSession('old-provider-session')).toBeUndefined();
+      expect(engine.getLatestCompletedCheckpointForSession('new-provider-session')).toBeUndefined();
+    });
+
+    it('keeps replacement completed-turn proof when session rotation and completion are atomic', () => {
+      engine.upsertSessionCheckpoint('15550123', {
+        sessionId: 'old-provider-session',
+        ...completedFields('15550123', 23, 'old-turn-23'),
+      });
+      const replacement = completedFields('15550123', 24, 'new-turn-24');
+
+      engine.upsertSessionCheckpoint('15550123', {
+        sessionId: 'new-provider-session',
+        sessionStatus: 'active',
+        ...replacement,
+      });
+
+      expect(engine.getSessionCheckpoint('15550123')).toMatchObject({
+        session_id: 'new-provider-session',
+        last_inbound_seq: replacement.lastInboundSeq,
+        completed_inbound_seq: replacement.completedInboundSeq,
+        completed_delivery_jid: replacement.completedDeliveryJid,
+        completed_delivery_namespace: replacement.completedDeliveryNamespace,
+        completed_scope: replacement.completedScope,
+        completed_logical_turn_id: replacement.completedLogicalTurnId,
+        completed_manager_id: replacement.completedManagerId,
+        completed_generation: replacement.completedGeneration,
+      });
+      expect(engine.getLatestCompletedCheckpointForSession('new-provider-session'))
+        .toMatchObject({
+          conversation_key: '15550123',
+          completed_logical_turn_id: 'new-turn-24',
+        });
+    });
+
+    it('preserves completed-turn proof across idempotent same-session updates', () => {
+      const completed = completedFields('15550122', 22, 'same-turn-22');
+      engine.upsertSessionCheckpoint('15550122', {
+        sessionId: 'same-provider-session',
+        ...completed,
+      });
+
+      engine.upsertSessionCheckpoint('15550122', {
+        sessionId: 'same-provider-session',
+        sessionStatus: 'suspended',
+      });
+      engine.upsertSessionCheckpoint('15550122', { sessionStatus: 'active' });
+
+      expect(engine.getSessionCheckpoint('15550122')).toMatchObject({
+        session_id: 'same-provider-session',
+        last_inbound_seq: completed.lastInboundSeq,
+        completed_inbound_seq: completed.completedInboundSeq,
+        completed_delivery_jid: completed.completedDeliveryJid,
+        completed_delivery_namespace: completed.completedDeliveryNamespace,
+        completed_scope: completed.completedScope,
+        completed_logical_turn_id: completed.completedLogicalTurnId,
+        completed_manager_id: completed.completedManagerId,
+        completed_generation: completed.completedGeneration,
+      });
+      expect(engine.getLatestCompletedCheckpointForSession('same-provider-session'))
+        .toMatchObject({
+          conversation_key: '15550122',
+          completed_logical_turn_id: 'same-turn-22',
+        });
+    });
+  });
+
+  describe('retireSessionLifecycle', () => {
+    it('ends the exact agent row and every sibling checkpoint without touching unrelated state', () => {
+      const targetRowId = insertAgentSession('shared-provider-session', '15550201');
+      const unrelatedRowId = insertAgentSession('unrelated-provider-session', '15550299');
+      engine.upsertSessionCheckpoint('15550201', {
+        sessionId: 'shared-provider-session',
+        sessionStatus: 'active',
+      });
+      engine.upsertSessionCheckpoint('15550202', {
+        sessionId: 'shared-provider-session',
+        sessionStatus: 'suspended',
+      });
+      engine.upsertSessionCheckpoint('15550299', {
+        sessionId: 'unrelated-provider-session',
+        sessionStatus: 'active',
+      });
+
+      engine.retireSessionLifecycle(targetRowId, 'shared-provider-session');
+
+      expect(db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(targetRowId)).toMatchObject({ status: 'ended', ended_at: expect.any(String) });
+      expect(db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(unrelatedRowId)).toMatchObject({ status: 'active', ended_at: null });
+      expect(engine.getSessionCheckpoint('15550201')?.session_status).toBe('ended');
+      expect(engine.getSessionCheckpoint('15550202')?.session_status).toBe('ended');
+      expect(engine.getSessionCheckpoint('15550299')?.session_status).toBe('active');
+    });
+
+    it('rolls back the agent-row retirement when no exact checkpoint exists', () => {
+      const targetRowId = insertAgentSession('missing-checkpoint-session', '15550301');
+      engine.upsertSessionCheckpoint('15550399', {
+        sessionId: 'unrelated-provider-session',
+        sessionStatus: 'active',
+      });
+
+      expect(() => engine.retireSessionLifecycle(
+        targetRowId,
+        'missing-checkpoint-session',
+      )).toThrow(/checkpoint/i);
+
+      expect(db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(targetRowId)).toMatchObject({ status: 'active', ended_at: null });
+      expect(engine.getSessionCheckpoint('15550399')?.session_status).toBe('active');
+    });
+
+    it('fails closed without changing checkpoints when the row does not match the session ID', () => {
+      const mismatchedRowId = insertAgentSession('other-agent-session', '15550401');
+      engine.upsertSessionCheckpoint('15550402', {
+        sessionId: 'checkpoint-session',
+        sessionStatus: 'active',
+      });
+
+      expect(() => engine.retireSessionLifecycle(
+        mismatchedRowId,
+        'checkpoint-session',
+      )).toThrow(/agent session/i);
+
+      expect(db.raw.prepare(
+        'SELECT status, ended_at FROM agent_sessions WHERE id = ?',
+      ).get(mismatchedRowId)).toMatchObject({ status: 'active', ended_at: null });
+      expect(engine.getSessionCheckpoint('15550402')?.session_status).toBe('active');
+    });
+
+    it('rejects a lifecycle that was already terminal without repainting checkpoints', () => {
+      const endedRowId = insertAgentSession('already-ended-session', '15550501');
+      db.raw.prepare(
+        `UPDATE agent_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
+      ).run(endedRowId);
+      engine.upsertSessionCheckpoint('15550501', {
+        sessionId: 'already-ended-session',
+        sessionStatus: 'active',
+      });
+
+      expect(() => engine.retireSessionLifecycle(
+        endedRowId,
+        'already-ended-session',
+      )).toThrow(/agent session/i);
+      expect(engine.getSessionCheckpoint('15550501')?.session_status).toBe('active');
+    });
+  });
+
+  describe('updateSessionCheckpointsStatusBySessionId', () => {
+    it('updates every checkpoint for the exact session ID and no others', () => {
+      engine.upsertSessionCheckpoint('15550111', {
+        sessionId: 'shared-session-status',
+        sessionStatus: 'active',
+      });
+      engine.upsertSessionCheckpoint('15550112', {
+        sessionId: 'shared-session-status',
+        sessionStatus: 'active',
+      });
+      engine.upsertSessionCheckpoint('15550113', {
+        sessionId: 'different-session',
+        sessionStatus: 'active',
+      });
+
+      expect(engine.updateSessionCheckpointsStatusBySessionId(
+        'shared-session-status',
+        'orphaned',
+      )).toBe(2);
+      expect(engine.getSessionCheckpoint('15550111')?.session_status).toBe('orphaned');
+      expect(engine.getSessionCheckpoint('15550112')?.session_status).toBe('orphaned');
+      expect(engine.getSessionCheckpoint('15550113')?.session_status).toBe('active');
+    });
+  });
+
   describe('getAllActiveCheckpoints', () => {
     it('returns only active checkpoints', () => {
       engine.upsertSessionCheckpoint('conv-1', { sessionStatus: 'active' });
@@ -99,6 +402,22 @@ describe('DurabilityEngine — session checkpoints', () => {
       engine.upsertSessionCheckpoint('conv-1', { sessionStatus: 'orphaned' });
       const active = engine.getAllActiveCheckpoints();
       expect(active).toHaveLength(0);
+    });
+  });
+
+  describe('getResumableCheckpoints', () => {
+    it('returns the exact persisted session ID needed for completed-checkpoint lookup', () => {
+      engine.upsertSessionCheckpoint('conv-resume', {
+        sessionId: 'session-resume',
+        sessionStatus: 'suspended',
+      });
+
+      expect(engine.getResumableCheckpoints()).toEqual([
+        expect.objectContaining({
+          conversation_key: 'conv-resume',
+          session_id: 'session-resume',
+        }),
+      ]);
     });
   });
 

@@ -7,11 +7,13 @@ import {
   type ReplyGuaranteeDurability,
 } from '../../src/core/reply-guarantee.ts';
 import { Database } from '../../src/core/database.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
+import type { Messenger } from '../../src/core/types.ts';
+import { finalizeRuntimeTurn } from '../../src/runtimes/agent/turn-finalizer.ts';
 
 function makeDurability(status: string | undefined = 'processing'): ReplyGuaranteeDurability {
   return {
     getInboundStatus: vi.fn(() => status),
-    completeTurn: vi.fn(),
   };
 }
 
@@ -24,7 +26,47 @@ describe('ReplyGuaranteeManager', () => {
     vi.useRealTimers();
   });
 
-  it('sends one audited fallback and completes the inbound turn when a turn stays open', async () => {
+  it('leaves terminal ownership open after a liveness timeout so provider CAS can still win', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      const deliveryJid = '15550100000@s.whatsapp.net';
+      const seq = durability.journalInbound('wamid-rgp-cas', '15550100000', deliveryJid, 'agent');
+      const manager = new ReplyGuaranteeManager({
+        durability,
+        sendFallback: vi.fn(async () => ({ terminalReason: 'rgp_liveness_nudged' })),
+        timeoutMs: 100,
+        rateLimitMs: 1_000,
+      });
+
+      manager.arm({ inboundSeq: seq, chatJid: deliveryJid });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(durability.getInboundStatus(seq)).toBe('processing');
+      const terminal = finalizeRuntimeTurn({
+        instanceName: 'test',
+        durability,
+        identity: {
+          scope: 'singleton',
+          conversationKey: '15550100000',
+          deliveryJid,
+          inboundSeq: seq,
+          logicalTurnId: 'turn-rgp-cas',
+          managerId: 'manager-rgp-cas',
+          generation: 1,
+        },
+        attemptOutcome: { kind: 'suppressed_by_policy' },
+        answerEvidence: { kind: 'ready', opIds: [] },
+      });
+      expect(terminal).toMatchObject({ kind: 'terminal' });
+      expect(durability.getTurnTerminal(seq, 'turn-rgp-cas', 1)).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('sends one liveness fallback without taking terminal ownership from the provider turn', async () => {
     const durability = makeDurability('processing');
     const sendFallback = vi.fn(async () => ({ transportId: 'wamid.rgp' }));
     const manager = new ReplyGuaranteeManager({
@@ -44,15 +86,10 @@ describe('ReplyGuaranteeManager', () => {
       text: DEFAULT_REPLY_GUARANTEE_TEXT,
       inboundSeq: 7,
     });
-    expect(durability.completeTurn).toHaveBeenCalledWith({
-      inbound: {
-        seq: 7,
-        terminalReason: 'rgp_fallback_sent',
-      },
-    });
+    expect(durability.getInboundStatus(7)).toBe('processing');
   });
 
-  it('uses a sender-provided terminal reason for non-text liveness fallbacks', async () => {
+  it('accepts sender metadata without interpreting it as a terminal reason', async () => {
     const durability = makeDurability('processing');
     const sendFallback = vi.fn(async () => ({ terminalReason: 'rgp_liveness_nudged' }));
     const manager = new ReplyGuaranteeManager({
@@ -67,20 +104,11 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).toHaveBeenCalledOnce();
-    expect(durability.completeTurn).toHaveBeenCalledWith({
-      inbound: {
-        seq: 17,
-        terminalReason: 'rgp_liveness_nudged',
-      },
-    });
+    expect(durability.getInboundStatus(17)).toBe('processing');
   });
 
-  it('QR-107: a completeTurn failure AFTER a successful send does not release the rate-limit slot (no duplicate burst)', async () => {
+  it('keeps the rate-limit slot after a successful liveness send', async () => {
     const durability = makeDurability('processing');
-    // completeTurn throws (e.g. SQLITE_BUSY) AFTER sendFallback has already delivered.
-    (durability.completeTurn as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      throw new Error('SQLITE_BUSY: database is locked');
-    });
     const sendFallback = vi.fn(async () => ({ transportId: 'wamid.rgp' }));
     const chatJid = '15550100009@s.whatsapp.net';
     const manager = new ReplyGuaranteeManager({
@@ -90,14 +118,13 @@ describe('ReplyGuaranteeManager', () => {
       rateLimitMs: 30_000,
     });
 
-    // Turn A: fallback succeeds, but completeTurn throws.
+    // Turn A: the liveness fallback succeeds.
     manager.arm({ inboundSeq: 1, chatJid });
     await vi.advanceTimersByTimeAsync(100);
-    expect(sendFallback).toHaveBeenCalledOnce(); // the "still working" message WAS delivered
+    expect(sendFallback).toHaveBeenCalledOnce();
 
     // Turn B on the SAME chat times out well inside rateLimitMs. The slot must
-    // remain reserved (a fallback was already delivered) — otherwise the finalize
-    // failure is misread as a send failure and a DUPLICATE burst goes out.
+    // remain reserved because a liveness fallback was already emitted.
     manager.arm({ inboundSeq: 2, chatJid });
     await vi.advanceTimersByTimeAsync(100);
 
@@ -138,7 +165,6 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).not.toHaveBeenCalled();
-    expect(durability.completeTurn).not.toHaveBeenCalled();
   });
 
   it('rechecks durability and skips fallback when the inbound row already completed', async () => {
@@ -156,7 +182,6 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).not.toHaveBeenCalled();
-    expect(durability.completeTurn).not.toHaveBeenCalled();
   });
 
   it('rate-limits fallback sends per chat', async () => {
@@ -175,7 +200,6 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).toHaveBeenCalledOnce();
-    expect(durability.completeTurn).toHaveBeenCalledOnce();
   });
 
   it('keeps inbound open when fallback send fails', async () => {
@@ -195,7 +219,6 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).toHaveBeenCalledOnce();
-    expect(durability.completeTurn).not.toHaveBeenCalled();
   });
 
   it('does not send concurrent duplicate fallbacks for the same chat (TOCTOU)', async () => {
@@ -249,6 +272,65 @@ describe('ReplyGuaranteeManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(sendFallback).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-arms an open inbound after a real typing adapter failure', async () => {
+    const durability = makeDurability('processing');
+    const messenger = {
+      sendMessage: vi.fn(async () => ({ waMessageId: 'unused' })),
+      setTyping: vi.fn()
+        .mockRejectedValueOnce(new Error('typing transport unavailable'))
+        .mockResolvedValue(undefined),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback: createReplyGuaranteeLivenessSender({ messenger }),
+      timeoutMs: 100,
+      rateLimitMs: 10_000,
+    });
+
+    manager.arm({ inboundSeq: 43, chatJid: 'chatB@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(messenger.setTyping).toHaveBeenCalledTimes(1);
+    expect(manager.isArmed(43)).toBe(true);
+
+    // The failed adapter call released its rate slot and the same still-open
+    // inbound remained monitored, so it retries after another bounded window.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(messenger.setTyping).toHaveBeenCalledTimes(2);
+    expect(manager.isArmed(43)).toBe(true);
+
+    (durability.getInboundStatus as ReturnType<typeof vi.fn>).mockReturnValue('complete');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(messenger.setTyping).toHaveBeenCalledTimes(2);
+    expect(manager.isArmed(43)).toBe(false);
+  });
+
+  it('releases the rate slot and keeps monitoring when the typing adapter is missing', async () => {
+    const durability = makeDurability('processing');
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async () => ({ waMessageId: 'unused' })),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+    const manager = new ReplyGuaranteeManager({
+      durability,
+      sendFallback: createReplyGuaranteeLivenessSender({ messenger }),
+      timeoutMs: 100,
+      rateLimitMs: 10_000,
+    });
+
+    manager.arm({ inboundSeq: 44, chatJid: 'chatB@s.whatsapp.net' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(manager.isArmed(44)).toBe(true);
+
+    const setTyping = vi.fn(async () => undefined);
+    messenger.setTyping = setTyping;
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(setTyping).toHaveBeenCalledOnce();
+    expect(manager.isArmed(44)).toBe(true);
   });
 
   it('notifyActivity resets the silence window so an active turn does not fire prematurely', async () => {
@@ -405,5 +487,39 @@ describe('createReplyGuaranteeLivenessSender', () => {
     } finally {
       db.close();
     }
+  });
+
+  it('fails when the messenger has no typing adapter', async () => {
+    const sender = createReplyGuaranteeLivenessSender({
+      messenger: {
+        sendMessage: vi.fn(async () => ({ waMessageId: 'unused' })),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      },
+    });
+
+    await expect(sender({
+      inboundSeq: 22,
+      chatJid: '15550100022@s.whatsapp.net',
+      text: DEFAULT_REPLY_GUARANTEE_TEXT,
+    })).rejects.toThrow(/typing/i);
+  });
+
+  it('propagates a rejected typing adapter call', async () => {
+    const transportError = new Error('typing transport unavailable');
+    const sender = createReplyGuaranteeLivenessSender({
+      messenger: {
+        sendMessage: vi.fn(async () => ({ waMessageId: 'unused' })),
+        setTyping: vi.fn(async () => {
+          throw transportError;
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      },
+    });
+
+    await expect(sender({
+      inboundSeq: 23,
+      chatJid: '15550100023@s.whatsapp.net',
+      text: DEFAULT_REPLY_GUARANTEE_TEXT,
+    })).rejects.toBe(transportError);
   });
 });

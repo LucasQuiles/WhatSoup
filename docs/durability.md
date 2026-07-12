@@ -16,7 +16,7 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 2. **Echo never arrives** — the message was delivered but the WebSocket echo was lost (e.g., brief disconnect). The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this.
 
-3. **Interrupted inbound processing** — an incoming message started a Claude agent turn but the process crashed before the agent replied. Pre-connect recovery marks such events `failed`. There is currently no re-queue consumer: a message that was mid-processing at crash time is recorded as `failed` but is not retried or re-notified. Closing this gap is tracked by the bot-errors reliability workstream.
+3. **Interrupted inbound processing** — an incoming message started an agent turn but the process crashed before the terminal transaction. Recovery never blindly replays that prompt. A turn with exact immutable identity and unresolved delivery evidence can transfer to a proof-linked recovery job; an arbitrary open inbound with no provable owner is marked `failed` and remains operator-visible instead of risking duplicate provider or tool side effects.
 
 ---
 
@@ -28,7 +28,7 @@ Every message that enters the bot's processing pipeline is written to `inbound_e
 
 The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
 
-An inbound event is considered "done" only when its associated terminal outbound op transitions to `echoed`. This closes the loop: the bot confirms delivery before it considers the conversation turn complete.
+An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
 ### 2.2 Outbound Operations Journal (`outbound_ops`)
 
@@ -109,6 +109,9 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
+| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`) winner |
+| `processing` / `turn_done` | `failed` | `finalizeTurnTerminal()` — one atomic `failed_terminal` winner with its bounded failure class |
+| `processing` / `turn_done` | unchanged (recovery-owned) | `finalizeTurnTerminal()` — no inbound mutation; the linked recovery job and selected unresolved delivery become the durable owner in the same transaction, and later proof settles the source |
 | open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
 
 Note: `completeInbound()` is a guarded helper — if the row is still `processing` when called, it applies `markTurnDone()` first before `markInboundComplete()`. This handles cases where the agent completes a turn without an explicit `markTurnDone()` call.
@@ -314,6 +317,38 @@ opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns unt
 sweep is idempotent — once a row is terminal it falls out of every bucket's open-status
 filter — and never re-touches rows already finalized by `preConnectRecovery`.
 
+### 4.6 Runtime Terminal Finalization Supervisor
+
+Each admitted agent turn carries immutable scope, delivery, inbound, manager, and generation
+identity. At turn end, the runtime flushes its ordered answer-operation evidence and asks
+`finalizeTurnTerminal()` to commit the terminal winner, inbound disposition, optional recovery
+job, and checkpoint bookkeeping in one transaction. The receipt distinguishes a newly applied
+winner, an exact idempotent duplicate, and a conflicting duplicate; only the first two may run
+terminal post-effects.
+
+If delivery proof cannot be read or the terminal transaction fails, the runtime emits the
+`agent_turn_finalization_failed` BOT ERRORS alert with bounded, hashed identity evidence and
+retains the exact finalization request. A delivery-proof failure blocks the affected lane; a
+terminal-write failure with already-frozen evidence may let the queue advance while retry
+ownership remains retained. If both terminal persistence and durable alerting fail, the scope is
+sticky-degraded and accepts no more turns until the same request recovers.
+
+Retries are single-flight, run after **5 seconds**, process at most **16** retained records per
+pass with a rotating cursor, and stop after **5** attempts per record. Exhausted work remains
+retained and its scope remains blocked; it is never discarded. Admission stops at the
+128-record high-watermark, while already-owned work is still retained. A successful retry must
+return `winnerMatchesRequest=true` before post-effects run and the scope can unblock. The health
+snapshot exposes retained/degraded gauges plus cumulative attempt, recovery, and exhaustion
+counters; any retained finalization degrades runtime health. Shutdown cancels the retry timer.
+
+Per-chat crash exhaustion follows the same proof boundary. The runtime first marks the current
+manager owner `exhausted` and cancels auto-respawn. When an immutable crash context exists,
+session, queue, and ownership cleanup is registered as an after-terminal action and cannot run
+until the crash evidence has reached durable terminal state. If a journaled inbound has no
+provable immutable context, destructive cleanup is withheld entirely. Crash history is
+preserved after terminal cleanup, so health remains degraded and the exhausted episode stays
+visible.
+
 ---
 
 ## 5. Operational Notes
@@ -322,7 +357,9 @@ filter — and never re-touches rows already finalized by `preConnectRecovery`.
 
 An op is quarantined when it is `unsafe` to replay — specifically, when its delivery status is ambiguous (`maybe_sent`) and re-sending it would create a visible duplicate for the recipient.
 
-Quarantined ops require **manual inspection and resolution**. The bot continues operating normally; quarantined ops do not block new sends.
+Quarantined ops require read-only inspection and evidence-backed resolution. A standalone
+quarantined op does not globally stop the bot, but a quarantined selected delivery in an
+outstanding recovery job blocks its affected scope and degrades health.
 
 **To inspect quarantined ops:**
 
@@ -332,34 +369,29 @@ SELECT
   o.id,
   o.conversation_key,
   o.op_type,
-  o.payload,
+  o.payload_hash,
   o.wa_message_id,
   o.submitted_at,
   o.error,
   o.source_inbound_seq,
-  i.processing_status AS inbound_status
+  i.processing_status AS inbound_status,
+  t.id AS terminal_record_id,
+  j.id AS recovery_job_id,
+  j.state AS recovery_state
 FROM outbound_ops o
 LEFT JOIN inbound_events i ON i.seq = o.source_inbound_seq
+LEFT JOIN turn_terminal_records t ON t.delivery_op_id = o.id
+LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
 WHERE o.status = 'quarantined'
 ORDER BY o.id DESC;
 ```
 
-**To resolve a quarantined op manually:**
-
-If you have confirmed the message was delivered (e.g., visible in WhatsApp):
-```sql
-UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = <id>;
-```
-
-If you have confirmed the message was NOT delivered and it is safe to re-send:
-```sql
-UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = <id>;
-```
-
-If the op should be abandoned permanently:
-```sql
-UPDATE outbound_ops SET status = 'failed_permanent', error = 'manually_abandoned' WHERE id = <id>;
-```
+Do not resolve this by directly updating `outbound_ops` or deleting/updating linked terminal and
+recovery rows. Such writes bypass terminal CAS, exact source settlement, completion proof,
+reply-guarantee disarm, and late-echo conflict handling; a fabricated `echoed` status is not
+transport evidence. Back up the database, preserve the query result, and use an audited
+application recovery path. If the deployed build has no supported resolver for the required
+operator decision, leave the chain intact for a reviewed repair.
 
 ### 5.2 Quarantined Tool Calls
 
@@ -458,7 +490,10 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ## 6. Database Schema
 
-All durability tables are created in Migration 2 of `src/core/database.ts`.
+Migration 2 creates the original durability tables. Migrations 37 and 38 add terminal-decision
+and recovery-job ledgers, Migration 39 extends `session_checkpoints` with a seven-field
+completed-turn identity, and Migration 40 binds every recovery transfer and job to exact
+delivery proof while adding auditable completion and conflict evidence.
 
 ### `inbound_events`
 
@@ -498,6 +533,75 @@ All durability tables are created in Migration 2 of `src/core/database.ts`.
 
 Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`.
 
+### `turn_terminal_records` (Migration 37)
+
+One immutable terminal winner per `(inbound_seq_key, logical_turn_id, generation)`. A repeated
+CAS increments `duplicate_finalize_count`; the receipt separately proves whether the stored
+winner exactly matches the request, so a conflicting duplicate cannot masquerade as recovery.
+
+| Column group | Description |
+|---|---|
+| `id`, `created_at` | Terminal record identity and creation time. |
+| `scope`, `conversation_key`, `delivery_jid`, `inbound_seq`, `inbound_seq_key` | Exact routing and inbound identity. Null inbound sequences use the collision-safe key `-1`. |
+| `logical_turn_id`, `manager_id`, `generation` | Immutable turn-owner identity and CAS key. |
+| `attempt_kind`, `attempt_failure_class` | Bounded terminal attempt outcome. |
+| `inbound_disposition`, `delivery_kind`, `delivery_op_id` | Selected inbound and delivery evidence. `delivery_op_id` is indexed when present. |
+| `recovery_owner_*` | Complete recovery owner tuple, allowed only for a transferred disposition. |
+| `reply_guarantee_disarmed` | Conservative 0/1 decision; unknown delivery cannot disarm the guarantee. |
+| `duplicate_finalize_count`, `last_duplicate_at` | Idempotent or conflicting duplicate observations for the same CAS key. |
+
+### `turn_recovery_jobs` (Migration 38)
+
+Exactly one recovery job may link to a terminal record. Its replay envelope and source owner are
+immutable; assignment changes require a monotonically fenced assignment epoch.
+
+Migration 40 makes this ledger delivery-reconciliation ownership, not a generic restart prompt
+replay queue. A transfer is valid only for a selected `enqueued`, `flushed`, or
+`delivery_unknown` op whose persisted status and inbound/routing identity match. Provider fallback
+keeps the original live runtime turn and FIFO owner during its one same-process stand-in
+continuation; it does not claim a recovery job or manufacture a restart replay. If that process
+cannot prove completion, the unresolved delivery remains blocked and operator-visible.
+
+An exact repeat of the complete terminal-and-recovery request returns the existing linked job
+receipt and increments `duplicate_enqueue_count` transactionally. A conflicting duplicate may
+increment the terminal record's separate `duplicate_finalize_count`, but it receives no recovery
+receipt and never increments the job counter. This keeps retry telemetry distinct from attempted
+payload substitution.
+
+`markEchoed()` preserves the first echo timestamp and records the selected op as `echoed`. When
+the exact linked job is unsettled and its source is `processing`/`turn_done` (or already completed
+as `response_echoed`), the source inbound and job settle in the same SQLite transaction. Startup
+also scans a bounded set of already-echoed exact links, closing the crash gap between transport
+truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
+failed source, delivery truth is not rolled back: the completed job retains its original
+completion proof and records a durable `echo_conflict_at`/reason for operator review.
+
+Database triggers keep every linked source inbound and selected outbound proof immutable and
+retained while its job exists, including completed jobs. Retention selects only an old
+`completed` job whose exact source inbound is still terminal (`complete`/`failed`) and whose
+selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). The job deletion
+uses `RETURNING terminal_record_id`; only those returned records can drive terminal and then
+unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
+Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
+delivery proof. Recent chains and every unresolved/retry/orphan/corrupt obligation remain.
+Runtime health reports the total outstanding count, every job-state bucket (including live
+claims), quarantined selected deliveries, orphan transfers, corrupt links, and echo conflicts.
+Outstanding work blocks only the affected per-chat or global scope; corrupt proof or a recorded
+echo conflict also keeps health degraded until operator/retention resolution.
+
+| Column group | Description |
+|---|---|
+| `id`, `terminal_record_id` | Job identity and unique FK to the terminal winner (`ON DELETE RESTRICT`). |
+| `scope`, `conversation_key`, `delivery_jid`, `source_inbound_seq*` | Exact recovery routing and source inbound identity. |
+| `source_*`, `owner_*`, `assigned_owner_*`, `assignment_epoch` | Source, original recovery owner, and current fenced owner tuples. Source and owner must differ. |
+| `replay_safe`, `replay_safety_proof_id`, `sender_*`, `replay_text`, `is_group`, `group_name` | Bounded immutable replay envelope. Unsafe work starts blocked and requires a one-way promotion proof. |
+| `state` | `blocked_unsafe`, `pending`, `claimed`, `completed`, or `exhausted`; database constraints enforce coherent state fields. |
+| `attempt_count`, `claim_epoch`, `claim_token`, `claimed_at`, `claim_expires_at` | Five-attempt claim lifecycle with epoch and lease fencing. |
+| `last_requeue_*`, `next_attempt_at` | Idempotent requeue receipt and bounded backoff scheduling. |
+| `completion_kind`, `completion_proof_id` | Required, bounded proof for completed work (`worker` or exact transport `echo`). |
+| `echo_conflict_at`, `echo_conflict_reason` | Durable late-echo contradiction evidence; transport truth is retained instead of rolled back. |
+| `duplicate_enqueue_count`, `created_at`, `updated_at`, `completed_at` | Exact duplicate-enqueue observations and lifecycle audit fields; conflicting envelopes do not increment this job counter. |
+
 ### `tool_calls`
 
 | Column | Type | Description |
@@ -518,11 +622,18 @@ Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(s
 
 One row per conversation (UNIQUE on `conversation_key`). Upserted on checkpoint events; read during orphan detection.
 
+Migration 39 adds the completed-turn identity bundle below. The seven fields are either
+all null (legacy or not-yet-completed checkpoints) or all populated; database triggers
+reject partial bundles. Terminal finalization derives the bundle from the same validated
+terminal identity and writes it in the terminal transaction, rejecting caller-supplied
+values that contradict that identity. `last_inbound_seq` remains independent progress state;
+only `completed_inbound_seq` identifies the resumable completed turn.
+
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PK | Auto-incrementing row ID. |
 | `conversation_key` | TEXT NOT NULL UNIQUE | Canonical chat identity. |
-| `session_id` | TEXT | Claude Code session identifier. |
+| `session_id` | TEXT | Provider session identifier. |
 | `transcript_path` | TEXT | Path to the agent's transcript file. |
 | `active_turn_id` | TEXT | ID of the in-flight conversation turn, or null if idle. |
 | `last_inbound_seq` | INTEGER | Most recently processed inbound event seq. |
@@ -532,8 +643,61 @@ One row per conversation (UNIQUE on `conversation_key`). Upserted on checkpoint 
 | `claude_pid` | INTEGER | PID of the Claude Code subprocess. Used for orphan detection via `kill -0`. |
 | `checkpoint_version` | INTEGER | Monotonically incrementing counter, incremented on every upsert. |
 | `session_status` | TEXT NOT NULL | `active`, `suspended`, `orphaned`, `ended`. Default `'active'`. |
+| `completed_inbound_seq` | INTEGER | Exact inbound sequence for the most recently completed resumable turn. Part of the all-or-none completed identity bundle. |
+| `completed_delivery_jid` | TEXT | Exact raw delivery JID for the most recently completed inbound turn. Part of the all-or-none completed identity bundle. |
+| `completed_delivery_namespace` | TEXT | Persisted JID domain (`s.whatsapp.net`, `lid`, or `g.us`); must match `completed_delivery_jid`. |
+| `completed_scope` | TEXT | Completing turn scope: `per_chat`, `shared`, or `singleton`. |
+| `completed_logical_turn_id` | TEXT | Logical turn ID that completed the checkpoint. |
+| `completed_manager_id` | TEXT | Session manager ID that owned the completing turn. |
+| `completed_generation` | INTEGER | Positive manager generation that owned the completing turn. |
 | `created_at` | TEXT | Row creation timestamp. |
 | `updated_at` | TEXT | Last upsert timestamp. |
+
+Resume selection preserves the recorded identity rather than reconstructing one. For a
+shared or single session, the latest eligible completed checkpoint for the exact
+`session_id` is selected by `completed_inbound_seq DESC, id DESC`. The persisted JID must
+round-trip to `conversation_key`, its stored namespace must equal its actual domain, and
+the scope and turn-owner tuple must be complete and valid. Legacy, partial, malformed, or
+contradictory identity fails closed; the runtime never appends a guessed namespace to a
+conversation key. When the runtime knows an exact `session_id`, lifecycle status changes
+update every checkpoint row for that ID so all conversations attached to a shared session
+move together.
+
+A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
+transaction before provider initialization. The reset clears stale session, turn, watchdog,
+delivery, and completed-turn identity while making the new lifecycle active. If persistence
+fails after a persistent child was spawned, the manager kills and waits for that child before
+fully resetting; managed and spawn-per-turn managers reset without becoming ready. A later
+non-null `session_id` rotation replaces the completed identity with the all-or-none bundle
+supplied by that same upsert; without replacement proof, the old proof is cleared.
+Migration 40 also clears pre-existing six-field bundles whose completed inbound sequence was
+never persisted; it deliberately does not infer that sequence from independent progress state.
+
+Persisted resume is supported only by `claude-cli`, `codex-cli`, and `opencode-cli`.
+Reactivation is an exact compare-and-set on the agent row ID (when supplied), provider session
+ID, and a resumable status; it clears stale `ended_at` and activates every resumable checkpoint
+for that provider session in the same transaction. `gemini-cli`, `openai-api`, and
+`anthropic-api` do not support resume. An attempted resume on those providers first atomically
+retires the exact lifecycle to `ended` (resolving exactly one resumable row when the caller has
+no row ID) and then rejects, allowing the caller to choose a fresh/context recovery path. That
+retirement is permanent for the failed manager: its durable failure-closed latch prevents a
+later cleanup shutdown from repainting the lifecycle `suspended`. OpenCode uses the supplied
+provider session ID on its first spawned turn.
+
+Failure closure is also one transaction: an initialized lifecycle matches the exact agent row
+and provider session ID and orphans every checkpoint for that session; a pre-init failure
+matches the exact row plus its null-session conversation checkpoint. Graceful shutdown writes
+`suspended` or `ended` only after child/provider termination succeeds. If termination fails,
+the lifecycle becomes `crashed`/`orphaned`, the manager retains the live handle, and later
+cleanup cannot repaint it resumable. Completed-turn proof lookup considers only `active` and
+`suspended` checkpoints, so retired or failed proof cannot authorize a resume.
+
+At runtime shutdown, every session is attempted even if an earlier one fails. Successfully
+closed managers release their ownership; a failed singleton or per-chat manager remains attached
+to its session/owner so a later shutdown call can retry it. Queue and auxiliary cleanup still
+runs, then the original single error or an `AggregateError` is propagated. A partial shutdown is
+therefore never reported as success and never drops the only handle capable of proving later
+termination.
 
 ### `recovery_runs`
 
