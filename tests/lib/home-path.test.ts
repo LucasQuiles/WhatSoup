@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { expandHomePath, hasUnsupportedTildePrefix } from '../../src/lib/home-path.ts';
+import {
+  expandHomePath,
+  hasUnsupportedTildePrefix,
+  isSamePhysicalDirectory,
+} from '../../src/lib/home-path.ts';
 
 describe('expandHomePath', () => {
   it('expands a bare ~ to the home directory', () => {
@@ -81,5 +86,82 @@ describe('hasUnsupportedTildePrefix', () => {
 
   it('trims whitespace before checking the prefix', () => {
     expect(hasUnsupportedTildePrefix('  ~user/foo  ')).toBe(true);
+  });
+});
+
+describe('isSamePhysicalDirectory', () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+    roots.length = 0;
+  });
+
+  function makeRoot(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-path-identity-'));
+    roots.push(root);
+    return root;
+  }
+
+  it('recognizes a symlink alias to the same directory', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    const alias = path.join(root, 'home-alias');
+    fs.mkdirSync(home);
+    fs.symlinkSync(home, alias);
+
+    expect(isSamePhysicalDirectory(alias, home)).toBe(true);
+  });
+
+  it('keeps a real child and a symlink alias to that child distinct from home', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    const workspace = path.join(home, 'workspace');
+    const alias = path.join(home, 'workspace-alias');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.symlinkSync(workspace, alias);
+
+    expect(isSamePhysicalDirectory(workspace, home)).toBe(false);
+    expect(isSamePhysicalDirectory(alias, home)).toBe(false);
+  });
+
+  it('keeps a new child distinct when its nearest existing parent is readable', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    fs.mkdirSync(home);
+
+    expect(isSamePhysicalDirectory(path.join(home, 'new-workspace'), home)).toBe(false);
+  });
+
+  it('fails closed when the candidate is an existing regular file', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    const file = path.join(home, 'not-a-workspace');
+    fs.mkdirSync(home);
+    fs.writeFileSync(file, 'not a directory');
+
+    expect(() => isSamePhysicalDirectory(file, home)).toThrow(/determine physical directory identity/i);
+  });
+
+  it('fails closed when the candidate is a symlink to a regular file', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    const file = path.join(home, 'not-a-workspace');
+    const alias = path.join(home, 'not-a-workspace-alias');
+    fs.mkdirSync(home);
+    fs.writeFileSync(file, 'not a directory');
+    fs.symlinkSync(file, alias);
+
+    expect(() => isSamePhysicalDirectory(alias, home)).toThrow(/determine physical directory identity/i);
+  });
+
+  it('fails closed when a dangling symlink makes physical identity ambiguous', () => {
+    const root = makeRoot();
+    const home = path.join(root, 'home');
+    const dangling = path.join(home, 'dangling-workspace');
+    fs.mkdirSync(home);
+    fs.symlinkSync(path.join(root, 'missing-target'), dangling);
+
+    expect(() => isSamePhysicalDirectory(dangling, home)).toThrow(/determine physical directory identity/i);
   });
 });

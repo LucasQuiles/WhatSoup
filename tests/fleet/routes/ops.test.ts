@@ -924,6 +924,69 @@ describe('handleCreateLine', () => {
     expect(fs.existsSync(path.join(process.cwd(), '.claude', 'CLAUDE.md'))).toBe(false);
   });
 
+  it('rejects an existing cwd symlink alias that resolves exactly to HOME during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-alias-create');
+    const homeAlias = path.join(homeDir, 'home-alias');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    fs.symlinkSync(homeDir, homeAlias);
+    process.env.HOME = homeDir;
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'home-alias-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: homeAlias, sessionScope: 'per_chat' },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/cwd.*home directory/i);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'home-alias-agent'))).toBe(false);
+  });
+
+  it('rejects an existing regular file as cwd during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-file-create');
+    const fileCwd = path.join(homeDir, 'not-a-workspace');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(fileCwd, 'not a directory');
+    process.env.HOME = homeDir;
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'file-cwd-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: fileCwd, sessionScope: 'per_chat' },
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/cwd.*home directory/i);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'file-cwd-agent'))).toBe(false);
+    expect(fs.readFileSync(fileCwd, 'utf-8')).toBe('not a directory');
+  });
+
   it('expands a wizard tilde cwd to the home directory before writing CLAUDE.md during create', async () => {
     const homeDir = path.join(tmpDir, 'home-tilde');
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
