@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-10T20:34:00Z",
+  "generated_at": "2026-07-12T03:56:34Z",
   "repo": "WhatSoup",
-  "git_head": "4932c38d296e7a32297818184dc419c84c0a7fa4",
+  "git_head": "3542a9dd40b1d9c24992479928293375ffaffb41",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 52,
+  "total": 53,
   "schema_version": 5,
   "rows": [
     {
@@ -629,6 +629,18 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-10",
       "size_bytes": 32213
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md",
+      "kind": "spec",
+      "topic_raw": "2026-07-11-turn-lifecycle-fitness-extraction-design",
+      "topic": "turn-lifecycle-fitness-extraction-design",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-11",
+      "size_bytes": 5564
     }
   ],
   "cross_tree_topics": {

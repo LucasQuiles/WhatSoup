@@ -6,21 +6,26 @@
 ## Context
 
 The canonical turn-lifecycle consolidation passes its focused behavior suites, but the full release
-gate identified four file-size ratchet violations:
+gate identified five file-size ratchet violations:
 
 - `src/core/database.ts` grew from 1,501 to 2,372 lines.
 - `tests/core/migration-safety.test.ts` grew from 1,607 to 2,453 lines.
 - `tests/runtimes/agent/runtime-terminal-coordinator-integration.test.ts` is a new 2,176-line file.
 - `src/runtimes/agent/runtime.ts` grew from 9,640 to 9,920 lines despite extracting substantial
   lifecycle logic into focused modules.
+- `tests/runtimes/agent/runtime.test.ts` grew from 12,653 to 13,007 lines, exceeding its recorded
+  baseline ceiling (identified during implementation preflight; ratchet disposition approved by the
+  owner on 2026-07-11).
 
 The release fix must preserve migrations 37–40, their safety coverage, and all turn-terminal
 behavior. It must not silence the fitness gate by broadly grandfathering newly oversized files.
 
 ## Decision
 
-Use behavior-preserving extractions for the three newly oversized files. Consciously ratchet only
-the already-grandfathered `AgentRuntime` file after measuring its final line count.
+Use behavior-preserving extractions for the three newly oversized files. Consciously ratchet the
+two already-grandfathered files — `src/runtimes/agent/runtime.ts` and
+`tests/runtimes/agent/runtime.test.ts` — after measuring their final line counts. No other file
+receives a ceiling adjustment.
 
 ## Production Structure
 
@@ -56,13 +61,18 @@ paths remain unchanged except where an import/export boundary is required.
 After the extractions and bug fixes are complete:
 
 1. Measure all affected files with `wc -l`.
-2. Confirm the three extracted source/test files are below the 2,000-line warning threshold.
-3. Update the `src/runtimes/agent/runtime.ts` `lines` and `maxLines` values in
-   `.claude/fitness/baseline.json` to its exact final count.
-4. Update the matching row in `docs/architecture/fitness-taxonomy.md` to the same count.
+2. Confirm all six extraction outputs are below the 2,000-line warning threshold:
+   `src/core/database.ts`, `src/core/database-migrations-37-40.ts`,
+   `tests/core/migration-safety.test.ts`, `tests/core/migration-turn-lifecycle.test.ts`,
+   `tests/runtimes/agent/runtime-terminal-coordinator-integration.test.ts`, and
+   `tests/runtimes/agent/lib/runtime-terminal-coordinator-harness.ts`.
+3. Update the `lines` and `maxLines` values for BOTH `src/runtimes/agent/runtime.ts` and
+   `tests/runtimes/agent/runtime.test.ts` in `.claude/fitness/baseline.json` to their exact
+   final counts.
+4. Update the two matching rows in `docs/architecture/fitness-taxonomy.md` to the same counts.
 
-No new baseline entries will be added for `database.ts`, the migration test, or the terminal
-integration test.
+No new baseline entries will be added for `database.ts`, the migration tests, the terminal
+integration test, or any extracted module.
 
 ## Failure Handling
 
@@ -82,10 +92,14 @@ Run, in order:
    and per-chat empty-output tests.
 3. `npm run typecheck:all`.
 4. `npm test -- tests/scripts/fitness-file-size-warning-budget.test.ts --pool=forks`.
-5. Source-runtime, documentation, publication, Test Integrity, and repository guards.
-6. The complete unmasked `npm run verify:release` gate.
+5. `npm run work-index:regen` followed by a clean `npm run guard:work-index` (this design document
+   is indexed work).
+6. Source-runtime, documentation, publication, Test Integrity, and repository guards, then the
+   complete `npm run verify:push:branch` battery.
+7. The complete unmasked `npm run verify:release` gate.
 
-Only a clean, unmasked release result authorizes push, pull-request creation, or merge.
+Every gate above is mandatory; a skipped, masked, or interrupted run does not count. Only a clean,
+unmasked release result authorizes push, pull-request creation, or merge.
 
 ## Non-goals
 
