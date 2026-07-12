@@ -3,6 +3,7 @@ import {
   parseWhatsAppDeliveryNamespace,
   type WhatsAppDeliveryNamespace,
 } from '../../core/jid-constants.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import type { TurnIdentity } from './turn-terminal.ts';
 
 export type ResumeDeliveryNamespace = WhatsAppDeliveryNamespace;
@@ -17,10 +18,6 @@ const RESUME_SCOPES: ReadonlySet<TurnIdentity['scope']> = new Set([
   'shared',
   'singleton',
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isExactNonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.trim() === value;
