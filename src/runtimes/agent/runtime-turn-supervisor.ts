@@ -74,6 +74,12 @@ function createRecoveryWaiter(): RecoveryWaiter {
 }
 
 export class RuntimeTurnSupervisor<TPostEffects> {
+  private readonly instanceName: string;
+  private readonly durability: () => RuntimeTurnFinalizerDurability | null;
+  private readonly applyRecovered: (
+    result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+    retained: RetainedRuntimeTurnFinalization<TPostEffects>,
+  ) => void | Promise<void>;
   private readonly retained = new Map<string, RetainedRuntimeTurnFinalization<TPostEffects>>();
   private readonly blockedTurnsByScope = new Map<string, Set<string>>();
   private readonly recoveryWaiters = new Map<string, RecoveryWaiter>();
@@ -86,13 +92,17 @@ export class RuntimeTurnSupervisor<TPostEffects> {
   private closed = false;
 
   constructor(
-    private readonly instanceName: string,
-    private readonly durability: () => RuntimeTurnFinalizerDurability | null,
-    private readonly applyRecovered: (
+    instanceName: string,
+    durability: () => RuntimeTurnFinalizerDurability | null,
+    applyRecovered: (
       result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
       retained: RetainedRuntimeTurnFinalization<TPostEffects>,
     ) => void | Promise<void>,
-  ) {}
+  ) {
+    this.instanceName = instanceName;
+    this.durability = durability;
+    this.applyRecovered = applyRecovered;
+  }
 
   scopeKey(context: RuntimeTurnContext): string {
     return context.identity.scope === 'per_chat'
