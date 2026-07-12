@@ -46,7 +46,7 @@ scoped markdown files currently on disk.
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
-| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-12 |
+| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
 ### Cross-tree topic clusters (1)
 
@@ -139,9 +139,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | active | body-marker | wall-to-wall-audit-remediation-design | 2026-07-10 |  |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
-| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-12 |  |
+| `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-11 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-12T07:46:02Z from commit `384db60ddb82c6e7fb46d07fa6e617694699edf0`
+- Generated at 2026-07-12T07:48:59Z from commit `a9d01d58a9a894134d63d908dcb1b51a148ecde7`
