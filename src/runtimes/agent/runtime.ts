@@ -73,6 +73,7 @@ import {
   clearFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
@@ -2372,6 +2373,8 @@ export class AgentRuntime implements Runtime {
       pruneExpired(this.db);
     }
 
+    const sandboxHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
+
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
       const cwd = this.cwd ?? homedir();
@@ -2386,10 +2389,6 @@ export class AgentRuntime implements Runtime {
             p.startsWith('~/') ? join(homedir(), p.slice(2)) : resolve(p),
           ),
         };
-        const hookPath = resolve(
-          new URL('.', import.meta.url).pathname,
-          '../../../deploy/hooks/agent-sandbox.sh',
-        );
         const pollLintHookPath = resolve(
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/poll-interaction-lint.mjs',
@@ -2398,8 +2397,8 @@ export class AgentRuntime implements Runtime {
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/post-tool-use-log.sh',
         );
-        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
-        log.info({ cwd, hookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, sandboxHookPath, pollLintHookPath, postToolUseLogHookPath);
+        log.info({ cwd, hookPath: sandboxHookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -2413,14 +2412,13 @@ export class AgentRuntime implements Runtime {
       try {
         const claudeDir = join(cwd, '.claude');
         ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
-        // Non-sandbox agents whose cwd != home also carry the user-level ~/.claude
-        // settings (cwd-independent, applied to every Claude session). An orphaned
-        // fail-closed agent-sandbox hook there is not covered by the cwd-derived
-        // reconcile above, so sweep it too. No-op when cwd == home (same dir).
+        // User-level settings are not owned by this instance. Startup only
+        // inspects for its exact hook and warns; it never repairs or normalizes
+        // global hooks, permissions, or plugins.
         if (!this.sandbox) {
           const homeClaudeDir = join(homedir(), '.claude');
           if (homeClaudeDir !== claudeDir) {
-            ensurePermissionsSettings(homeClaudeDir, 'agent', undefined, { hasSandbox: false });
+            inspectUserClaudeSettings(homeClaudeDir, sandboxHookPath);
           }
         }
       } catch (err) {

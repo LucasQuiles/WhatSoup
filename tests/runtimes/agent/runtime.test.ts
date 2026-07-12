@@ -321,6 +321,10 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   writePrivateFileSync: vi.fn(),
 }));
 
+vi.mock('../../../src/core/user-claude-settings.ts', () => ({
+  inspectUserClaudeSettings: vi.fn(),
+}));
+
 // Mock WhatSoupSocketServer so tests don't bind real Unix sockets.
 // mockSocketServerInstance is hoisted so vi.mock factory can reference it,
 // and MockWhatSoupSocketServer is a vi.fn() so tests can inspect constructor calls.
@@ -1066,24 +1070,20 @@ describe('AgentRuntime', () => {
     );
   });
 
-  it('start() also reconciles the user-level ~/.claude orphan when cwd != home', async () => {
+  it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
     const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
+    const { inspectUserClaudeSettings } = await import('../../../src/core/user-claude-settings.ts');
     const { homedir } = await import('node:os');
     const { join } = await import('node:path');
     const db = makeDb();
     const { messenger } = makeMessenger();
-
     // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
     // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
     const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
     await runtime.start();
 
-    expect(ensurePermissionsSettings).toHaveBeenCalledWith(
-      join(homedir(), '.claude'),
-      'agent',
-      undefined,
-      { hasSandbox: false },
-    );
+    expect(inspectUserClaudeSettings).toHaveBeenCalledWith(join(homedir(), '.claude'), expect.stringMatching(/deploy\/hooks\/agent-sandbox\.sh$/));
+    expect(ensurePermissionsSettings).toHaveBeenCalledTimes(1);
   });
 
   it('handleMessage ignores null content', async () => {
