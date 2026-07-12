@@ -88,6 +88,15 @@ describe('bot-errors-release-proof-run.sh', () => {
     expect(ledgerLines(fx)[0]).toContain('--reporter --once');
   });
 
+  it('propagates detector exit 1 (event-write failure)', () => {
+    const fx = makeFixture('emit');
+    writeFileSync(join(fx.bin, 'python3'), `#!/usr/bin/env bash\necho "python3 $*" >> "${fx.ledger}"\nexit 1\n`);
+    chmodSync(join(fx.bin, 'python3'), 0o755);
+    const res = runRunner(fx, ['tree']);
+    expect(res.status).toBe(1);
+    expect(ledgerLines(fx)).toHaveLength(1);
+  });
+
   it('observe + runtime-staleness → --dry-run --once', () => {
     const fx = makeFixture('observe');
     const res = runRunner(fx, ['runtime-staleness']);
