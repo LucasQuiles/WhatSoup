@@ -1604,4 +1604,71 @@ describe('Migration-numbering split-brain guard (static structural invariants)',
       `runMigration<K> defined but not wired into MIGRATIONS (see received value)`,
     ).toEqual([]);
   });
+
+  // ── Module-aware extension ─────────────────────────────────────────────────
+  // Migrations 37–40 live in database-migrations-37-40.ts behind thin wrappers
+  // in database.ts. Uniqueness is asserted PER FILE: the intentional
+  // wrapper/implementation pair for each K must never read as a duplicate, and
+  // a wrapper silently delegating to the wrong implementation number is a
+  // split-brain the map-key checks above cannot see.
+  const MIGRATIONS_MODULE_TS = resolve(
+    import.meta.dirname,
+    '../../src/core/database-migrations-37-40.ts',
+  );
+  const moduleSource = readFileSync(MIGRATIONS_MODULE_TS, 'utf8');
+  const moduleDefNumbers = Array.from(
+    moduleSource.matchAll(/function\s+runMigration(\d+)\s*\(/g),
+  ).map((m) => Number(m[1]));
+  const EXTRACTED_MIGRATIONS = [37, 38, 39, 40];
+
+  it('extracted module defines exactly runMigration37–40, each exactly once', () => {
+    const counts = new Map<number, number>();
+    for (const k of moduleDefNumbers) counts.set(k, (counts.get(k) ?? 0) + 1);
+    expect(
+      [...counts.keys()].sort((a, b) => a - b),
+      'database-migrations-37-40.ts must define exactly the extracted migration set',
+    ).toEqual(EXTRACTED_MIGRATIONS);
+    const dupDefs = [...counts.entries()]
+      .filter(([, c]) => c > 1)
+      .map(([k]) => k)
+      .sort((a, b) => a - b);
+    expect(
+      dupDefs,
+      'duplicate runMigration<K> definition inside database-migrations-37-40.ts (split-brain in the extracted module)',
+    ).toEqual([]);
+  });
+
+  it('each extracted migration wrapper delegates to its MATCHING implementation exactly once', () => {
+    for (const k of EXTRACTED_MIGRATIONS) {
+      const wrapper = new RegExp(
+        `function runMigration${k}\\(db: DatabaseSync\\): void \\{\\s*runMigration${k}Impl\\(db\\);\\s*\\}`,
+        'g',
+      );
+      expect(
+        Array.from(source.matchAll(wrapper)).length,
+        `database.ts wrapper for migration ${k} must delegate to runMigration${k}Impl exactly once (a wrapper pointing at a different implementation number is a silent mis-wire)`,
+      ).toBe(1);
+      expect(
+        Array.from(source.matchAll(new RegExp(`runMigration${k}Impl\\(db\\)`, 'g'))).length,
+        `runMigration${k}Impl must be called exactly once in database.ts`,
+      ).toBe(1);
+      expect(
+        source.includes(`runMigration${k} as runMigration${k}Impl`),
+        `database.ts must alias-import runMigration${k} as runMigration${k}Impl`,
+      ).toBe(true);
+    }
+  });
+
+  it('wrapper/implementation pairs are intentional: each extracted K is defined once per file', () => {
+    for (const k of EXTRACTED_MIGRATIONS) {
+      expect(
+        {
+          migration: k,
+          database_ts: defNumbers.filter((n) => n === k).length,
+          module: moduleDefNumbers.filter((n) => n === k).length,
+        },
+        `migration ${k}: exactly one wrapper in database.ts and one implementation in the module`,
+      ).toEqual({ migration: k, database_ts: 1, module: 1 });
+    }
+  });
 });
