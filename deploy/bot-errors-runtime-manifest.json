@@ -5,6 +5,26 @@
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
+      "path": "deploy/scripts/bot-errors-collector.py",
+      "sha256": "8d83e03b11ecedcb511caf27742a15d53b7a5ca70a9af4db6e3d2f25f2e8ea33",
+      "mustContain": [
+        "append_private_jsonl",
+        "refusing to use private directory through symlink",
+        "configuredRemoteHosts",
+        "meta_alert_recovery_deferred",
+        "recovery_successes_required",
+        "tailscale_online_ssh_timeout",
+        "tailscale_online_ssh_remote_error",
+        "preflight_remote_unreachable",
+        "remote_writefail_claim_skipped_unreachable",
+        "reset_tailscale_cache",
+        "_is_ssh_transport_failure",
+        "best-effort-remote",
+        "redact_collector_text",
+        "tcp_probe_reachable"
+      ]
+    },
+    {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
       "sha256": "cbe56f4251fddb218e88e3b580fd46cc3fd8153f634c772595738fd5fba6cad4",
       "mustContain": [
@@ -17,17 +37,36 @@
       ]
     },
     {
-      "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "6b287906de52f744f60668111aa1d1916102083b9ea467cfc3c7e510f0fb95d6",
+      "path": "deploy/scripts/bot-errors-emit.py",
+      "sha256": "bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad",
       "mustContain": [
-        "tree_provenance_inventory",
-        "def redact_ref",
-        "def redact_path_segment"
+        "O_NOFOLLOW",
+        "refusing to use private directory through symlink",
+        "outbox_write_failure"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
+      "sha256": "5e78a09b4ff271ab3ccb993602302386b7d1c5bbae34b57720682b5c6b40877c",
+      "mustContain": [
+        "classify_gui_session",
+        "gui_targets_from_fleet",
+        "policy_for_target",
+        "guiSessionExpected",
+        "distill_boot_id",
+        "detect_reboot",
+        "classify_with_reboot",
+        "post_reboot_regression",
+        "build_emit_argv",
+        "gui_session_monitor",
+        "privateMonitorOverrideRequired",
+        "private_override_contract_error",
+        "config_check"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "06b59610ef88a799d98807455ea047ffe2b704a613f884238c3ad133fa088b72",
+      "sha256": "d97b2fd74e63f81c085b8cfd96e42e0e17e787ee18664acb66e396253439968d",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -108,43 +147,12 @@
       ]
     },
     {
-      "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc",
+      "path": "deploy/scripts/bot-errors-release-proof-run.sh",
+      "sha256": "69cd1d714c99847b8afed48bd978f4dd361e13dcc7ba67c301745d0d2e003387",
       "mustContain": [
-        "AUTHORIZATION_BEARER",
-        "WHATSAPP_SERVICE_UNIT",
-        "constants.O_NOFOLLOW",
-        "redactOutboxValue(event)",
-        "recordBotErrorsWritefail"
-      ]
-    },
-    {
-      "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "8d83e03b11ecedcb511caf27742a15d53b7a5ca70a9af4db6e3d2f25f2e8ea33",
-      "mustContain": [
-        "append_private_jsonl",
-        "refusing to use private directory through symlink",
-        "configuredRemoteHosts",
-        "meta_alert_recovery_deferred",
-        "recovery_successes_required",
-        "tailscale_online_ssh_timeout",
-        "tailscale_online_ssh_remote_error",
-        "preflight_remote_unreachable",
-        "remote_writefail_claim_skipped_unreachable",
-        "reset_tailscale_cache",
-        "_is_ssh_transport_failure",
-        "best-effort-remote",
-        "redact_collector_text",
-        "tcp_probe_reachable"
-      ]
-    },
-    {
-      "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "bcac5e797a7bf421e8f98f9991b5fc7ff8fc1712f8b77ffbdb1dacc00bb38bad",
-      "mustContain": [
-        "O_NOFOLLOW",
-        "refusing to use private directory through symlink",
-        "outbox_write_failure"
+        "BOT_ERRORS_RELEASE_PROOF_MODE",
+        "exit 75",
+        "flock -n 9"
       ]
     },
     {
@@ -157,77 +165,11 @@
       ]
     },
     {
-      "path": "deploy/scripts/lib/__init__.py",
-      "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0",
+      "path": "deploy/scripts/bot-errors-runtime-staleness.py",
+      "sha256": "86ddbd4a273afef50d770c466b3a9d83fd023fef65fa52a84a34f38a9c7a08ea",
       "mustContain": [
-        "Shared helpers for manifest-tracked BOT ERRORS deploy scripts"
-      ]
-    },
-    {
-      "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
-      "mustContain": [
-        "redact_bot_errors_text",
-        "CREDENTIAL_PATH_RE",
-        ".config/secrets/",
-        "AUTHORIZATION_BEARER_RE",
-        "AUTHORIZATION_KEYED_RE",
-        "WHATSAPP_SERVICE_UNIT_RE",
-        "PEM_PRIVATE_KEY_RE"
-      ]
-    },
-    {
-      "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
-      "mustContain": [
-        "daily_health_host_from_payload",
-        "normalize_hub_host",
-        "remoteHost"
-      ]
-    },
-    {
-      "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "5e78a09b4ff271ab3ccb993602302386b7d1c5bbae34b57720682b5c6b40877c",
-      "mustContain": [
-        "classify_gui_session",
-        "gui_targets_from_fleet",
-        "policy_for_target",
-        "guiSessionExpected",
-        "distill_boot_id",
-        "detect_reboot",
-        "classify_with_reboot",
-        "post_reboot_regression",
-        "build_emit_argv",
-        "gui_session_monitor",
-        "privateMonitorOverrideRequired",
-        "private_override_contract_error",
-        "config_check"
-      ]
-    },
-    {
-      "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
-      "sha256": "88dbf5fb4da2372926e96ce95f965df70a52a1ea132084c4434332a87ee9dcde",
-      "mustContain": [
-        "read_env_value",
-        "env_or_default",
-        "run_config_check",
-        "render_systemd_timer",
-        "render_launchd_plist",
-        "bot-errors-gui-session-monitor.py",
-        "--dry-run",
-        "--config-check"
-      ]
-    },
-    {
-      "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "be0fb4a07bd7a1962a115924e430a749771ae718dd5a5dc76856eb48054ba290",
-      "mustContain": [
-        "PLACEHOLDER_TOKENS",
-        "EXIT_UNSUBSTITUTED",
-        "EXIT_BAD_PORT",
-        "def cmd_render",
-        "def cmd_verify",
-        "find_placeholders"
+        "Runtime code-staleness monitor",
+        "runtime_stale"
       ]
     },
     {
@@ -247,6 +189,67 @@
       ]
     },
     {
+      "path": "deploy/scripts/bot-errors-tree-provenance.py",
+      "sha256": "a842a8dfd745c0c8e7bf98b8d9dfb004574a56f5acf861acdd8701bcc3d5efb3",
+      "mustContain": [
+        "tree_provenance_inventory",
+        "def redact_ref",
+        "def redact_path_segment"
+      ]
+    },
+    {
+      "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
+      "sha256": "88dbf5fb4da2372926e96ce95f965df70a52a1ea132084c4434332a87ee9dcde",
+      "mustContain": [
+        "read_env_value",
+        "env_or_default",
+        "run_config_check",
+        "render_systemd_timer",
+        "render_launchd_plist",
+        "bot-errors-gui-session-monitor.py",
+        "--dry-run",
+        "--config-check"
+      ]
+    },
+    {
+      "path": "deploy/scripts/install-bot-errors-release-proof.sh",
+      "sha256": "890a0b7786937fecb470bb2735da92c8c4a7b7e5fbb285acd8676fa3fa97fb25",
+      "mustContain": [
+        "host gate",
+        "RECEIPT",
+        "daemon-reload"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/__init__.py",
+      "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0",
+      "mustContain": [
+        "Shared helpers for manifest-tracked BOT ERRORS deploy scripts"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_daily_health.py",
+      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
+      "mustContain": [
+        "daily_health_host_from_payload",
+        "normalize_hub_host",
+        "remoteHost"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_redaction.py",
+      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
+      "mustContain": [
+        "redact_bot_errors_text",
+        "CREDENTIAL_PATH_RE",
+        ".config/secrets/",
+        "AUTHORIZATION_BEARER_RE",
+        "AUTHORIZATION_KEYED_RE",
+        "WHATSAPP_SERVICE_UNIT_RE",
+        "PEM_PRIVATE_KEY_RE"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/classify_health.py",
       "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
       "mustContain": [
@@ -262,11 +265,26 @@
       ]
     },
     {
-      "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "6897f37a9b3a3fbf9b06be04a917965008e69e833a331fb93b9f25a5e1568160",
+      "path": "deploy/scripts/render-watchdog.py",
+      "sha256": "be0fb4a07bd7a1962a115924e430a749771ae718dd5a5dc76856eb48054ba290",
       "mustContain": [
-        "Runtime code-staleness monitor",
-        "runtime_stale"
+        "PLACEHOLDER_TOKENS",
+        "EXIT_UNSUBSTITUTED",
+        "EXIT_BAD_PORT",
+        "def cmd_render",
+        "def cmd_verify",
+        "find_placeholders"
+      ]
+    },
+    {
+      "path": "src/lib/bot-errors-outbox.ts",
+      "sha256": "f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc",
+      "mustContain": [
+        "AUTHORIZATION_BEARER",
+        "WHATSAPP_SERVICE_UNIT",
+        "constants.O_NOFOLLOW",
+        "redactOutboxValue(event)",
+        "recordBotErrorsWritefail"
       ]
     }
   ]
