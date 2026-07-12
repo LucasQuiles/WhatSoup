@@ -66,7 +66,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d97b2fd74e63f81c085b8cfd96e42e0e17e787ee18664acb66e396253439968d",
+      "sha256": "061270815f5af97f836d59f48f792f00e16cbb16bcf1797a9878c15ba5155820",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -148,7 +148,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "69cd1d714c99847b8afed48bd978f4dd361e13dcc7ba67c301745d0d2e003387",
+      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",
@@ -190,7 +190,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "a842a8dfd745c0c8e7bf98b8d9dfb004574a56f5acf861acdd8701bcc3d5efb3",
+      "sha256": "36988be27aff1a4dfc167b06b73d226ef6e30298cbbd308697fdb80e508dcd5a",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",

@@ -1,5 +1,7 @@
 # Central Hub Release-Proof Pilot Implementation Plan
 
+**Status:** Active — Gate 0 tasks implemented locally on this branch; pushes, merges, and pilot-host rollout remain owner-gated
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement Gate 0 of `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` — honest detectors, scheduler runner, hardened monitor units, narrow installer, manifest coverage, dispatcher drill test, and docs — entirely as local repository changes.

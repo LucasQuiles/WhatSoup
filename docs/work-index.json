@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-12T05:21:30Z",
+  "generated_at": "2026-07-12T07:00:30Z",
   "repo": "WhatSoup",
-  "git_head": "d1aad3bceb1db2ff63e76af21fd55330921872c8",
+  "git_head": "08262fe453563dd27435aeffb2bb443601d2773c",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 54,
   "schema_version": 5,
@@ -431,12 +431,12 @@
       "kind": "plan",
       "topic_raw": "2026-07-11-central-hub-release-proof-pilot",
       "topic": "central-hub-release-proof-pilot",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "active",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-07-11",
-      "size_bytes": 97535
+      "last_modified": "2026-07-12",
+      "size_bytes": 97666
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",
@@ -647,12 +647,12 @@
       "kind": "spec",
       "topic_raw": "2026-07-11-central-hub-release-proof-pilot-design",
       "topic": "central-hub-release-proof-pilot-design",
-      "status": "unknown",
+      "status": "active",
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-11",
-      "size_bytes": 29089
+      "last_modified": "2026-07-12",
+      "size_bytes": 29141
     }
   ],
   "cross_tree_topics": {

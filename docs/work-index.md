@@ -25,8 +25,8 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | handoff=4, plan=31, review=3, spec=15, state=1 |
-| Status | active=1, closed=4, completed=31, deferred=7, pending=9, unknown=2 |
-| Status source | body-marker=52, fallback=1, state-md-status=1 |
+| Status | active=3, closed=4, completed=31, deferred=7, pending=9 |
+| Status source | body-marker=53, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,18 +34,13 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (1)
+### Active (3)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
-
-### Unknown-status — triage needed (2)
-
-| Path | Kind | Topic | Last Mod |
-|------|------|-------|----------|
-| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | 2026-07-11 |
-| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | 2026-07-11 |
+| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 
 ### Cross-tree topic clusters (1)
 
@@ -109,7 +104,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | unknown | fallback | central-hub-release-proof-pilot | 2026-07-11 |  |
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -137,9 +132,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | completed | body-marker | pr-0a-aqs | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | active | body-marker | wall-to-wall-audit-remediation-design | 2026-07-10 |  |
-| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | unknown | body-marker | central-hub-release-proof-pilot-design | 2026-07-11 |  |
+| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-12T05:21:30Z from commit `d1aad3bceb1db2ff63e76af21fd55330921872c8`
+- Generated at 2026-07-12T07:00:30Z from commit `08262fe453563dd27435aeffb2bb443601d2773c`

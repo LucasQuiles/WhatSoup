@@ -791,7 +791,7 @@ def load_runtime_manifest() -> tuple[dict[str, Any] | None, str | None]:
 
 
 def _run_git_rev_parse(repo_root: Path) -> tuple[str, str, int]:
-    """Run ``git -C <repo_root> rev-parse HEAD`` and return (stdout, stderr, returncode).
+    """Run ``git --no-optional-locks -C <repo_root> rev-parse HEAD`` and return (stdout, stderr, returncode).
 
     Raises FileNotFoundError if git is not on PATH, subprocess.TimeoutExpired on timeout.
     Callers are responsible for catching those exceptions.

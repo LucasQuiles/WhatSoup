@@ -209,16 +209,10 @@ describe('integration: staleness verdict and emit routing', () => {
     expect(r.stdout).not.toContain('fresh');
   });
 
-  it('malformed MainPID is a probe error, not a not-running skip', () => {
-    // The fake systemctl echoes FAKE_MAINPID verbatim; "notapid" is non-numeric
-    // so parse_main_pid returns None. Under the amended spec (B1) this is a
-    // probe error — unknown observations must never be reported as skips.
-    const r = run(['--instance', 'demo'], {
-      FAKE_MAINPID: 'notapid',
-      FAKE_SRC_EPOCH: '9999999999',
-    });
-    expect(r.status).toBe(2);
-  });
+  // NOTE: the former 'malformed MainPID is a probe error, not a not-running
+  // skip' case was deleted as redundant — its assertions are a strict subset
+  // of the probe-honesty (B1) 'malformed MainPID output → exit 2, distinct
+  // from not-running' test below, which also asserts stderr and no emit.
 
   it('exit 0 on successful run even when instance is STALE', () => {
     const nowApprox = Math.floor(Date.now() / 1000);

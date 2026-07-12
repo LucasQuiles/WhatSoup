@@ -13,6 +13,11 @@
 #   1   detector event-write failure (propagated)
 #   2   usage error, invalid/missing mode, missing dependency or detector
 #   75  lock contention: cycle skipped, recorded on stderr
+#
+# Early environment failures (e.g. an unwritable state dir at mkdir -p) also
+# surface as a nonzero exit before the lock is ever taken. Detector exit
+# codes propagate unchanged through the final exec: exit 2 (probe/inspection
+# error) passes through exactly like exit 1.
 set -euo pipefail
 
 usage() {

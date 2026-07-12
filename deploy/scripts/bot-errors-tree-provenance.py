@@ -39,9 +39,11 @@ Design constraints:
     reads a successfully-detected drift finding as a process failure. Without
     ``--reporter`` the interactive exit contract is unchanged:
     ``{"info": 0, "warning": 1, "critical": 2}``, GitError -> 1.
-  * Every git invocation runs with ``--no-optional-locks`` (see ``_git``), so
-    offline inspection never takes the ``.git/index`` lock and can't race a
-    concurrent commit/checkout on the same bot tree.
+  * Every OFFLINE git invocation (everything routed through ``_git``) runs
+    with ``--no-optional-locks``, so offline inspection never takes the
+    ``.git/index`` lock and can't race a concurrent commit/checkout on the
+    same bot tree.  The opt-in ``--fetch`` network call (``fetch_upstream``)
+    is exempt: it does not go through ``_git`` and does not pass the flag.
   * Thresholds are configurable via environment (see the ``BOT_ERRORS_TREE_*``
     constants below).
   * All emitted text is redacted: branch names and paths are basename/fingerprint
@@ -649,6 +651,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.reporter and args.fetch:
         parser.error("--reporter rejects --fetch: scheduled runs must stay offline")
+    if args.reporter and args.json:
+        parser.error("--reporter does not combine with --json")
     return args
 
 

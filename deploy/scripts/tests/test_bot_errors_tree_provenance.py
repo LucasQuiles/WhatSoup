@@ -419,6 +419,14 @@ def test_reporter_rejects_fetch(tmp_path: Path):
     assert exc.value.code == 2
 
 
+def test_reporter_rejects_json(tmp_path: Path):
+    # --json ignores reporter semantics (GitError -> 1, not 2), so the
+    # combination is a usage error rather than a silently different contract.
+    with pytest.raises(SystemExit) as exc:
+        _mod.main(["--reporter", "--json"])
+    assert exc.value.code == 2
+
+
 def test_interactive_severity_exits_unchanged(tmp_path: Path, monkeypatch):
     _, work = _make_origin_and_clone(tmp_path, branch="develop")
     (work / "junk.txt").write_text("dirty\n")

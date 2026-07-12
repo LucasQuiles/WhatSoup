@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 
-**Status:** Approved design; ready for implementation planning after written-spec review
+**Status:** Active — approved design; Gate 0 implemented locally on this branch; pushes, merges, and pilot-host rollout remain owner-gated
 
 **Audited WhatSoup base:** `fafe0c6580389b20011e98624c7e36e73a61d122`
 
