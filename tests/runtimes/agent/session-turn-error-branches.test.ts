@@ -79,6 +79,7 @@ import {
   getProviderBinary,
   opencodeUsesConfigModel,
   __provider_switch_for_test,
+  type SessionCrashInfo,
 } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -457,6 +458,8 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
   async function startTurn(opts: {
     notifyUser?: (m: string) => void;
     messenger?: Messenger;
+    onCrash?: (info: SessionCrashInfo) => void;
+    providerConfig?: Record<string, unknown>;
   }) {
     const sm = new SessionManager({
       db: makeDb(),
@@ -464,8 +467,9 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
-      onCrash: vi.fn(),
+      onCrash: opts.onCrash ?? vi.fn(),
       notifyUser: opts.notifyUser,
+      providerConfig: opts.providerConfig,
     });
     await sm.spawnSession();
     // Begin a turn so a fresh spawn-per-turn child + exit handler is wired.
@@ -515,15 +519,32 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     expect(sentMessages[0].text).toMatch(/exited with code 2/);
   });
 
-  // NOTE: the signal-only termination case is intentionally NOT tested via the
-  // spawn-per-turn exit handler. That handler (session.ts ~1684) gates the crash
-  // path on `code !== 0 && code !== null`, so a signal-only exit (code === null)
-  // never reaches notifyUnexpectedExit on this path — by design, spawn-per-turn
-  // treats a fresh per-turn process exit as normal turn completion. The signal
-  // branch INSIDE notifyUnexpectedExit (`terminated by signal …`) is reached only
-  // via the persistent-provider exit handler (session.ts ~1311), which is covered
-  // by the persistent-session suites. Asserting it here would mis-model the
-  // spawn-per-turn flow, so the original "signal-terminated exit" test is excised.
+  it('signal-only exit routes crash, notification, and budget cancellation', async () => {
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+    const sm = await startTurn({
+      notifyUser,
+      onCrash,
+      providerConfig: { budget: { requestsPerMinute: 10 } },
+    });
+    const budget = (sm as unknown as {
+      budget: { cancelPending(): void } | null;
+    }).budget;
+    if (!budget) throw new Error('test budget was not initialized');
+    const cancelPending = vi.spyOn(budget, 'cancelPending');
+
+    mockChild.emitExit(null, 'SIGTERM');
+    await flushImmediates();
+
+    expect(cancelPending).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: 'SIGTERM',
+    }));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(String(notifyUser.mock.calls[0][0])).toMatch(/terminated by signal SIGTERM/);
+  });
 
   it('rate-limits a second crash notice within the cooldown window', async () => {
     const notifyUser = vi.fn();
@@ -535,6 +556,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
     // Drive a second turn + crash immediately (within CRASH_NOTIFY_COOLDOWN_MS).
     const secondChild = makeMockChild(4243);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(secondChild);
+    await sm.spawnSession();
     await sm.sendTurn('again');
     sm.clearTurnWatchdog(); // disarm watchdog so the flush stays within the cooldown window
     secondChild.emitExit(1, null);

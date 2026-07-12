@@ -30,6 +30,11 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../src/lib/emit-alert.ts', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  emitAlert: vi.fn(() => ({ ok: true, channel: 'sink', status: 'durably_queued' })),
+}));
+
 vi.mock('../../src/core/command-router.ts', () => ({
   isAdminMessage: vi.fn().mockReturnValue(false),
   parseAdminCommand: vi.fn().mockReturnValue(null),

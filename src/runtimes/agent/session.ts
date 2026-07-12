@@ -2,6 +2,7 @@
 // SessionManager owns the Claude Code child process lifecycle.
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { createSession, incrementMessageCount, updateSessionId, updateSessionStatus, updateTranscriptPath } from './session-db.ts';
-import { parseEvent } from './stream-parser.ts';
+import { parseEvents } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
@@ -35,6 +36,7 @@ import {
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { killSessionTree } from './process-tree.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -68,6 +70,22 @@ export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'openai-api': 'OpenAI API',
 };
 
+/** Exact provider capability matrix for persisted conversation resume. */
+export function providerSupportsResume(provider: ProviderId): boolean {
+  switch (provider) {
+    case 'claude-cli':
+    case 'codex-cli':
+    case 'opencode-cli':
+      return true;
+    case 'gemini-cli':
+    case 'openai-api':
+    case 'anthropic-api':
+      return false;
+    default:
+      return assertNeverProvider(provider, 'session-manager:providerSupportsResume');
+  }
+}
+
 const POLL_DECISION_GUIDANCE = [
   'Decision polling:',
   '- For bounded user decisions that block progress, use AskUserQuestion when available; WhatSoup sends a WhatsApp poll.',
@@ -92,6 +110,18 @@ export interface SessionCrashInfo {
   crashClass?: string;
   /** Redacted, bounded stderr preview from the provider process. */
   stderrPreview?: string;
+  /** Manager generation captured by the child/provider that emitted this crash. Null for unbound sessions. */
+  generationIdentity?: SessionGenerationIdentity | null;
+}
+
+export interface SessionGenerationIdentity {
+  readonly managerId: string;
+  readonly generation: number;
+}
+
+interface ShutdownKillTimerEntry {
+  readonly generation: SessionGenerationIdentity | null;
+  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 export interface SessionManagerOptions {
@@ -391,15 +421,21 @@ function resolveProviderArgs(
 }
 
 /** Resolve the line-parser for a CLI-backed provider's stdout stream. */
+type ProviderEventParser = (line: string) => AgentEvent[];
+
+function singleEventEnvelope(event: AgentEvent | null): AgentEvent[] {
+  return event === null ? [] : [event];
+}
+
 function resolveProviderParser(
   provider: ProviderId,
   openCodeParser: OpenCodeParser,
-): (line: string) => AgentEvent | null {
+): ProviderEventParser {
   switch (provider) {
-    case 'claude-cli': return parseEvent;
-    case 'codex-cli': return parseCodexEvent;
-    case 'gemini-cli': return parseGeminiAcpEvent;
-    case 'opencode-cli': return (line: string) => openCodeParser.parse(line);
+    case 'claude-cli': return parseEvents;
+    case 'codex-cli': return (line: string) => singleEventEnvelope(parseCodexEvent(line));
+    case 'gemini-cli': return (line: string) => singleEventEnvelope(parseGeminiAcpEvent(line));
+    case 'opencode-cli': return (line: string) => singleEventEnvelope(openCodeParser.parse(line));
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -444,7 +480,7 @@ export const __provider_switch_for_test = {
     }
     return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs, providerConfig);
   },
-  getParser(provider: string): (line: string) => AgentEvent | null {
+  getParser(provider: string): ProviderEventParser {
     if (!isProviderId(provider)) {
       throw new Error(
         `[session-manager:test] unknown provider id: ${JSON.stringify(provider)}. ` +
@@ -459,9 +495,11 @@ export const __provider_switch_for_test = {
 
 export class SessionManager {
   private static readonly SHUTDOWN_GRACE_MS = 5_000;
+  private static readonly SPAWN_FAILURE_KILL_TIMEOUT_MS = 1_000;
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly chatJid: string;
+  private readonly conversationKey: string;
   private readonly onEvent: (event: AgentEvent) => void;
   private readonly instanceName: string;
   private configuredCwd: string | undefined;
@@ -515,6 +553,8 @@ export class SessionManager {
   private providerReadyResolve: (() => void) | null = null;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
+  /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
+  private durableFailureClosed = false;
   /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
    *  Used to detect error responses and trigger fallback to a fresh thread. */
   private codexResumeThreadStartReqId: string | null = null;
@@ -532,8 +572,18 @@ export class SessionManager {
 
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
-  private shutdownKillTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly childGenerations = new WeakMap<
+    ReturnType<typeof spawn>,
+    SessionGenerationIdentity | null
+  >();
+  private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  private readonly shutdownKillTimers = new Map<
+    ReturnType<typeof spawn>,
+    ShutdownKillTimerEntry
+  >();
   private crashStderrPreview = '';
+  private resolveGenerationOwnership: (() => SessionGenerationIdentity | null) | null = null;
+  private managedProviderGeneration: SessionGenerationIdentity | null = null;
 
   private durability: DurabilityEngine | null = null;
 
@@ -547,6 +597,7 @@ export class SessionManager {
     this.db = opts.db;
     this.messenger = opts.messenger;
     this.chatJid = opts.chatJid;
+    this.conversationKey = toConversationKey(opts.chatJid);
     this.onEvent = opts.onEvent;
     this.instanceName = opts.instanceName ?? 'personal';
     this.onResumeFailed = opts.onResumeFailed;
@@ -678,7 +729,7 @@ export class SessionManager {
     return systemPrompt;
   }
 
-  private getParser(): (line: string) => AgentEvent | null {
+  private getParser(): ProviderEventParser {
     const provider = this.assertKnownProvider('getParser');
     return resolveProviderParser(provider, this.openCodeParser);
   }
@@ -704,11 +755,60 @@ export class SessionManager {
     this.stdoutBufferStr = '';
   }
 
-  private clearShutdownKillTimer(): void {
-    if (this.shutdownKillTimer !== null) {
-      clearTimeout(this.shutdownKillTimer);
-      this.shutdownKillTimer = null;
+  private sameGeneration(
+    left: SessionGenerationIdentity | null,
+    right: SessionGenerationIdentity | null,
+  ): boolean {
+    if (left === null || right === null) return left === right;
+    return left.managerId === right.managerId && left.generation === right.generation;
+  }
+
+  private clearShutdownKillTimer(
+    child: ReturnType<typeof spawn>,
+    generation: SessionGenerationIdentity | null,
+  ): void {
+    const entry = this.shutdownKillTimers.get(child);
+    if (!entry || !this.sameGeneration(entry.generation, generation)) return;
+    clearTimeout(entry.timer);
+    this.shutdownKillTimers.delete(child);
+  }
+
+  private armShutdownKillTimer(child: ReturnType<typeof spawn>): void {
+    const generation = this.childGenerations.get(child) ?? null;
+    const timer = setTimeout(() => {
+      const entry = this.shutdownKillTimers.get(child);
+      if (
+        !entry ||
+        entry.timer !== timer ||
+        !this.sameGeneration(entry.generation, generation)
+      ) return;
+
+      this.shutdownKillTimers.delete(child);
+      void this.killChildTree(child, 'SIGKILL').then(() => {
+        log.warn({ pid: child.pid ?? null, chatJid: this.chatJid }, 'child did not exit after SIGTERM, sent SIGKILL');
+      }).catch((err) => {
+        log.debug({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'child exited before SIGKILL escalation');
+      });
+    }, SessionManager.SHUTDOWN_GRACE_MS);
+    this.shutdownKillTimers.set(child, { generation, timer });
+  }
+
+  private killChildTree(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+  ): Promise<void> {
+    let generationMarker = this.childTreeMarkers.get(child);
+    if (generationMarker === undefined) {
+      const generation = this.childGenerations.get(child) ?? null;
+      generationMarker = generation === null
+        ? `unbound:${randomUUID()}`
+        : `${generation.managerId}:${generation.generation}:${randomUUID()}`;
+      this.childTreeMarkers.set(child, generationMarker);
     }
+    return killSessionTree(child, signal, {
+      generationMarker,
+      termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
+    });
   }
 
   private materializeStdoutChunks(): void {
@@ -794,7 +894,7 @@ export class SessionManager {
       }
 
       if (this.durability) {
-        this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), {
+        this.durability.upsertSessionCheckpoint(this.conversationKey, {
           sessionId: this.sessionId,
         });
       }
@@ -951,22 +1051,225 @@ export class SessionManager {
     this.durability = engine;
   }
 
-  async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
-    this.clearShutdownKillTimer();
+  private updateCheckpointStatus(
+    sessionStatus: string,
+    exactSessionId: string | null = this.sessionId ?? this.resumeAttemptId,
+  ): void {
+    if (!this.durability) return;
+    if (
+      exactSessionId !== null
+      && typeof this.durability.updateSessionCheckpointsStatusBySessionId === 'function'
+    ) {
+      this.durability.updateSessionCheckpointsStatusBySessionId(
+        exactSessionId,
+        sessionStatus,
+      );
+      return;
+    }
+    this.durability.upsertSessionCheckpoint(this.conversationKey, { sessionStatus });
+  }
 
+  private persistSessionLifecycleStart(
+    pid: number,
+    cwd: string,
+    resumeSessionId: string | undefined,
+    existingRowId: number | undefined,
+  ): number {
+    if (
+      this.durability
+      && resumeSessionId === undefined
+      && typeof this.durability.beginFreshSessionLifecycle === 'function'
+    ) {
+      return this.durability.beginFreshSessionLifecycle({
+        pid,
+        cwd,
+        chatJid: this.chatJid,
+        workspaceKey: this.conversationKey,
+        provider: this.provider,
+        conversationKey: this.conversationKey,
+      });
+    }
+    if (
+      this.durability
+      && resumeSessionId !== undefined
+      && typeof this.durability.reactivateSessionLifecycle === 'function'
+    ) {
+      return this.durability.reactivateSessionLifecycle({
+        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        providerSessionId: resumeSessionId,
+        pid,
+      });
+    }
+
+    const rowId = existingRowId === undefined
+      ? createSession(
+          this.db,
+          pid,
+          cwd,
+          this.chatJid,
+          this.conversationKey,
+          this.provider,
+        )
+      : existingRowId;
+    if (existingRowId !== undefined) updateSessionStatus(this.db, rowId, 'active');
+    if (this.durability) {
+      if (
+        resumeSessionId === undefined
+        && typeof this.durability.beginFreshSessionCheckpoint === 'function'
+      ) {
+        this.durability.beginFreshSessionCheckpoint(
+          this.conversationKey,
+          pid || undefined,
+        );
+      } else {
+        this.updateCheckpointStatus('active', resumeSessionId ?? null);
+      }
+    }
+    return rowId;
+  }
+
+  private resetFailedSessionStart(preservedChild: ReturnType<typeof spawn> | null = null): void {
+    this.clearTurnWatchdog();
+    this.active = false;
+    this.child = preservedChild;
+    this.managedProviderSession = null;
+    this.managedProviderGeneration = null;
+    this.dbRowId = null;
+    this.sessionId = null;
+    this.resetStdoutBuffers();
+    this.startedAt = null;
+    this.messageCount = 0;
+    this.lastMessageAt = null;
+    this.pendingToolIds.clear();
+    this.codexThreadId = null;
+    this.codexRequestSeq = 0;
+    this.geminiSessionId = null;
+    this.geminiRequestSeq = 0;
+    this.providerReadyPromise = null;
+    this.providerReadyResolve = null;
+    this.resumeAttemptId = null;
+    this.codexResumeThreadStartReqId = null;
+  }
+
+  private retireUnsupportedResume(
+    providerSessionId: string,
+    existingRowId: number | undefined,
+  ): void {
+    if (
+      this.durability
+      && typeof this.durability.retireSessionLifecycle === 'function'
+    ) {
+      this.durability.retireSessionLifecycle(existingRowId, providerSessionId);
+    } else {
+      if (existingRowId !== undefined) updateSessionStatus(this.db, existingRowId, 'ended');
+      this.updateCheckpointStatus('ended', providerSessionId);
+    }
+    this.durableFailureClosed = true;
+  }
+
+  private closeDurableFailureLifecycle(
+    exactSessionId: string | null,
+    exactRowId: number | null,
+    rowStatus: 'crashed' | 'resume_failed' = 'crashed',
+  ): void {
+    if (
+      exactRowId !== null
+      && this.durability
+      && typeof this.durability.closeSessionLifecycleFailure === 'function'
+    ) {
+      this.durability.closeSessionLifecycleFailure({
+        agentSessionRowId: exactRowId,
+        providerSessionId: exactSessionId,
+        conversationKey: this.conversationKey,
+        agentStatus: rowStatus,
+      });
+    } else {
+      if (exactRowId !== null) updateSessionStatus(this.db, exactRowId, rowStatus);
+      this.updateCheckpointStatus('orphaned', exactSessionId);
+    }
+    this.durableFailureClosed = true;
+  }
+
+  bindGenerationOwnership(resolve: () => SessionGenerationIdentity | null): void {
+    this.resolveGenerationOwnership = resolve;
+  }
+
+  private isCurrentPersistentChild(
+    child: ReturnType<typeof spawn>,
+    captured: SessionGenerationIdentity | null,
+  ): boolean {
+    if (this.child !== child) return false;
+    return this.isCurrentGeneration(captured);
+  }
+
+  private isCurrentGeneration(captured: SessionGenerationIdentity | null): boolean {
+    if (this.resolveGenerationOwnership === null) return captured === null;
+    if (captured === null) return false;
+    const current = this.resolveGenerationOwnership();
+    return current?.managerId === captured.managerId && current.generation === captured.generation;
+  }
+
+  private isCurrentManagedProviderSession(
+    providerSession: ProviderSession | null,
+    generationIdentity: SessionGenerationIdentity | null,
+  ): boolean {
+    return providerSession !== null &&
+      this.active &&
+      this.managedProviderSession === providerSession &&
+      this.sameGeneration(this.managedProviderGeneration, generationIdentity) &&
+      this.isCurrentGeneration(generationIdentity);
+  }
+
+  private async killFailedSpawnAndWait(child: ReturnType<typeof spawn>): Promise<void> {
+    if (
+      typeof child.exitCode === 'number' ||
+      (child.signalCode !== null && child.signalCode !== undefined)
+    ) return;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const exited = new Promise<void>((resolve, reject) => {
+      child.on('exit', () => {
+        if (timeout !== null) clearTimeout(timeout);
+        timeout = null;
+        resolve();
+      });
+      timeout = setTimeout(() => {
+        timeout = null;
+        reject(new Error(`Timed out waiting for failed spawn process ${child.pid ?? 'unknown'} to exit`));
+      }, SessionManager.SPAWN_FAILURE_KILL_TIMEOUT_MS);
+    });
+
+    try {
+      await Promise.all([
+        this.killChildTree(child, 'SIGKILL'),
+        exited,
+      ]);
+    } catch (err) {
+      if (timeout !== null) clearTimeout(timeout);
+      throw err;
+    }
+  }
+
+  async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
+    const provider = this.assertKnownProvider('spawnSession');
+    if (resumeSessionId !== undefined && !providerSupportsResume(provider)) {
+      this.retireUnsupportedResume(resumeSessionId, existingRowId);
+      throw new Error(`Provider '${provider}' does not support persisted session resume`);
+    }
+    this.durableFailureClosed = false;
 
     const cwd = this.configuredCwd ?? homedir();
-    const workspaceKey = toConversationKey(this.chatJid);
 
     const systemPrompt = this.buildSystemPrompt();
 
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();
+      const managedGeneration = this.resolveGenerationOwnership?.() ?? null;
 
       this.managedProviderSession = providerSession;
+      this.managedProviderGeneration = managedGeneration;
       this.active = true;
       this.resetStdoutBuffers();
       this.crashStderrPreview = '';
@@ -978,21 +1281,15 @@ export class SessionManager {
       this.resumeAttemptId = null;
 
       try {
-        if (existingRowId !== undefined) {
-          this.dbRowId = existingRowId;
-          updateSessionStatus(this.db, existingRowId, 'active');
-        } else {
-          this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey, this.provider);
-        }
+        this.dbRowId = this.persistSessionLifecycleStart(
+          0,
+          cwd,
+          resumeSessionId,
+          existingRowId,
+        );
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
-        this.active = false;
-        this.managedProviderSession = null;
-        this.dbRowId = null;
-        this.sessionId = null;
-        this.startedAt = null;
-        this.messageCount = 0;
-        this.lastMessageAt = null;
+        this.resetFailedSessionStart();
         throw err;
       }
 
@@ -1004,22 +1301,36 @@ export class SessionManager {
           pluginDirs: this.pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
-          onEvent: (event) => this.handleProviderEvent(event),
+          onEvent: (event) => {
+            if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) return;
+            this.handleProviderEvent(event);
+          },
           onCrash: ({ exitCode, signal, provider, crashClass, stderrPreview }) => {
+            if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) {
+              log.debug({
+                chatJid: this.chatJid,
+                managerId: managedGeneration?.managerId ?? null,
+                generation: managedGeneration?.generation ?? null,
+              }, 'managed provider crash dropped — superseded generation');
+              return;
+            }
             const crashedSessionId = this.sessionId;
             const crashedDbRowId = this.dbRowId;
-            if (this.dbRowId !== null) {
-              updateSessionStatus(this.db, this.dbRowId, 'crashed');
-            }
+            this.closeDurableFailureLifecycle(
+              crashedSessionId ?? resumeSessionId ?? null,
+              crashedDbRowId,
+            );
             this.clearTurnWatchdog();
             this.active = false;
             this.managedProviderSession = null;
+            this.managedProviderGeneration = null;
             this.sessionId = null;
             this.onCrash?.({
               exitCode,
               signal: signal as NodeJS.Signals | null,
               sessionId: crashedSessionId,
               dbRowId: crashedDbRowId,
+              generationIdentity: managedGeneration,
               ...this.buildCrashMetadata(crashClass, stderrPreview, provider ?? this.provider),
             });
           },
@@ -1027,12 +1338,14 @@ export class SessionManager {
         });
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'managed provider failed to initialize');
-        if (this.dbRowId !== null) {
-          updateSessionStatus(this.db, this.dbRowId, 'crashed');
-        }
+        this.closeDurableFailureLifecycle(
+          this.sessionId ?? resumeSessionId ?? null,
+          this.dbRowId,
+        );
         this.clearTurnWatchdog();
         this.active = false;
         this.managedProviderSession = null;
+        this.managedProviderGeneration = null;
         this.dbRowId = null;
         this.sessionId = null;
         this.startedAt = null;
@@ -1041,11 +1354,7 @@ export class SessionManager {
         throw err;
       }
 
-      if (this.durability) {
-        this.durability.upsertSessionCheckpoint(workspaceKey, {
-          sessionStatus: 'active',
-        });
-      }
+      this.updateCheckpointStatus('active', this.sessionId ?? resumeSessionId ?? null);
 
       log.info({
         provider: this.provider,
@@ -1067,11 +1376,18 @@ export class SessionManager {
       this.systemPrompt = systemPrompt;
       this.configuredCwd = cwd;
       this.crashStderrPreview = '';
-      // Record in DB with pid=0 (no process yet)
-      if (existingRowId !== undefined) {
-        this.dbRowId = existingRowId;
-      } else {
-        this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey, this.provider);
+      this.sessionId = resumeSessionId ?? null;
+      try {
+        this.dbRowId = this.persistSessionLifecycleStart(
+          0,
+          cwd,
+          resumeSessionId,
+          existingRowId,
+        );
+      } catch (err) {
+        log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
+        this.resetFailedSessionStart();
+        throw err;
       }
       log.info({
         provider: this.provider,
@@ -1082,7 +1398,10 @@ export class SessionManager {
         resumeSessionId: resumeSessionId ?? null,
       }, 'spawn-per-turn session armed');
       // Emit a synthetic init event so the runtime knows the session is ready
-      this.onEvent({ type: 'init', sessionId: `${this.provider}-${Date.now()}` });
+      this.onEvent({
+        type: 'init',
+        sessionId: resumeSessionId ?? `${this.provider}-${Date.now()}`,
+      });
       return;
     }
 
@@ -1091,6 +1410,7 @@ export class SessionManager {
 
     const child = spawn(binary, args, {
       cwd,
+      detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       // Security: explicit env allowlist prevents credential leakage to child processes.
       // Without this, Node.js inherits process.env in full — meaning ALL secrets
@@ -1109,6 +1429,14 @@ export class SessionManager {
       ),
     });
 
+    const childGeneration = this.resolveGenerationOwnership?.() ?? null;
+    this.childGenerations.set(child, childGeneration);
+    this.childTreeMarkers.set(
+      child,
+      childGeneration === null
+        ? `unbound:${randomUUID()}`
+        : `${childGeneration.managerId}:${childGeneration.generation}:${randomUUID()}`,
+    );
     this.child = child;
     this.active = true;
     this.resetStdoutBuffers();
@@ -1118,53 +1446,33 @@ export class SessionManager {
     this.lastMessageAt = null;
     this.resumeAttemptId = resumeSessionId ?? null;
 
-    // Record in DB — reuse existing row when provided (avoids duplicate rows on resume)
+    // Persist the exact row/checkpoint lifecycle after spawn. If this fails the
+    // detached child must be reaped before the manager can be considered reset.
     const pid = child.pid ?? 0;
     try {
-      if (existingRowId !== undefined) {
-        this.dbRowId = existingRowId;
-        updateSessionStatus(this.db, existingRowId, 'active');
-      } else {
-        this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey, this.provider);
-      }
+      this.dbRowId = this.persistSessionLifecycleStart(
+        pid,
+        cwd,
+        resumeSessionId,
+        existingRowId,
+      );
     } catch (err) {
-      log.error({ err, pid, chatJid: this.chatJid, existingRowId: existingRowId ?? null }, 'session: failed to persist spawned child');
-      this.clearTurnWatchdog();
+      log.error({ err, pid, chatJid: this.chatJid, existingRowId: existingRowId ?? null }, 'session: failed to persist spawned child lifecycle');
+      let cleanupError: unknown = null;
       try {
-        child.kill('SIGKILL');
+        await this.killFailedSpawnAndWait(child);
       } catch (killErr) {
+        cleanupError = killErr;
         log.warn({ err: killErr, pid, chatJid: this.chatJid }, 'session: failed to kill child after db persistence error');
       }
-      this.active = false;
-      this.child = null;
-      this.dbRowId = null;
-      this.sessionId = null;
-      this.resetStdoutBuffers();
-      this.startedAt = null;
-      this.messageCount = 0;
-      this.lastMessageAt = null;
-      this.pendingToolIds.clear();
-      this.codexThreadId = null;
-      this.codexRequestSeq = 0;
-      this.geminiSessionId = null;
-      this.geminiRequestSeq = 0;
-      this.providerReadyPromise = null;
-      this.providerReadyResolve = null;
-      this.resumeAttemptId = null;
-      this.codexResumeThreadStartReqId = null;
+      this.resetFailedSessionStart(cleanupError === null ? null : child);
+      if (cleanupError !== null) {
+        throw new AggregateError([err, cleanupError], 'Session spawn persistence and child cleanup both failed');
+      }
       throw err;
     }
 
     log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null, provider: this.provider, binary }, `spawned ${binary} process`);
-
-    // Checkpoint: record spawn in durability engine
-    if (this.durability) {
-      const conversationKey = toConversationKey(this.chatJid);
-      this.durability.upsertSessionCheckpoint(conversationKey, {
-        claudePid: pid || undefined,
-        sessionStatus: 'active',
-      });
-    }
 
     // Create deferred ready promise for providers that need async init
     if (this.provider === 'codex-cli' || this.provider === 'gemini-cli') {
@@ -1213,6 +1521,10 @@ export class SessionManager {
 
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
     child.on('error', (err: NodeJS.ErrnoException) => {
+      if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+      const failedSessionId = this.sessionId ?? this.resumeAttemptId;
+      this.closeDurableFailureLifecycle(failedSessionId, this.dbRowId);
+      this.resumeAttemptId = null;
       if (err.code === 'ENOENT') {
         // Binary not installed — configuration error, not a crash
         this.active = false;
@@ -1235,6 +1547,7 @@ export class SessionManager {
         signal: null,
         sessionId: null,
         dbRowId: null,
+        generationIdentity: childGeneration,
         ...this.buildCrashMetadata('spawn_error', err.message),
       });
     });
@@ -1242,6 +1555,15 @@ export class SessionManager {
     // Pipe stdout through line parser — use provider-specific parser
     const parse = this.getParser();
     child.stdout.on('data', (chunk: Buffer) => {
+      if (!this.isCurrentPersistentChild(child, childGeneration)) {
+        log.debug({
+          chatJid: this.chatJid,
+          pid: child.pid ?? null,
+          managerId: childGeneration?.managerId ?? null,
+          generation: childGeneration?.generation ?? null,
+        }, 'persistent child stdout dropped — superseded generation');
+        return;
+      }
       const lines = this.appendStdoutChunk(chunk);
       for (const line of lines) {
         // Codex app-server: intercept server-initiated requests (approval callbacks)
@@ -1288,20 +1610,23 @@ export class SessionManager {
           }
         }
 
-        const event = parse(line);
-        if (event === null) continue;
-
-        if (event.type === 'init' && this.dbRowId !== null) {
+        for (const event of parse(line)) {
           this.handleProviderEvent(event);
-          continue;
         }
-
-        this.handleProviderEvent(event);
       }
     });
 
     // Log stderr but don't act on it
     child.stderr.on('data', (chunk: Buffer) => {
+      if (!this.isCurrentPersistentChild(child, childGeneration)) {
+        log.debug({
+          chatJid: this.chatJid,
+          pid: child.pid ?? null,
+          managerId: childGeneration?.managerId ?? null,
+          generation: childGeneration?.generation ?? null,
+        }, 'persistent child stderr dropped — superseded generation');
+        return;
+      }
       const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
       if (nextPreview === this.crashStderrPreview) return;
       this.crashStderrPreview = nextPreview;
@@ -1316,35 +1641,40 @@ export class SessionManager {
 
     // Handle unexpected exit
     child.on('exit', (code, signal) => {
-      this.clearShutdownKillTimer();
-      this.clearStalledOpKill();
-
       // Ignore exit events from superseded child processes.
       // This prevents a race where /new kills P1 and spawns P2, then P1's
       // delayed SIGTERM exit fires against P2's active state.
-      if (this.child !== child) {
+      const superseded = this.child !== child;
+      this.clearShutdownKillTimer(child, childGeneration);
+      if (superseded) return;
+
+      if (!this.active) {
+        // Clean shutdown — the caller retains its local child reference while
+        // process-tree proof finishes, but this manager must not retain an
+        // already-exited exact child handle. Pointer identity above prevents a
+        // stale generation from clearing a replacement child.
+        this.child = null;
         return;
       }
 
-      if (!this.active) {
-        // Clean shutdown — already handled
-        return;
-      }
+      if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+
+      this.clearStalledOpKill();
 
       // Drain any buffered stdout lines before crash processing.
       // The process may have written final output that was not yet newline-terminated.
       const bufferedLines = this.drainBufferedStdoutLines();
       if (bufferedLines.length > 0) {
         for (const line of bufferedLines) {
-          const event = parse(line);
-          if (event) this.handleProviderEvent(event);
+          for (const event of parse(line)) this.handleProviderEvent(event);
         }
       }
 
       // Detect resume failure: --resume was used, Claude exited code 1, and
       // no init event arrived (session_id was never set). This means the saved
       // session ID was expired/unknown to Claude's backend.
-      const wasResumeAttempt = this.resumeAttemptId !== null;
+      const attemptedSessionId = this.resumeAttemptId;
+      const wasResumeAttempt = attemptedSessionId !== null;
       const initReceived = this.sessionId !== null;
       const isResumeFail = wasResumeAttempt && code === 1 && !initReceived;
 
@@ -1352,22 +1682,17 @@ export class SessionManager {
 
       if (isResumeFail) {
         log.warn({ code, rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, wasResumeAttempt, initReceived }, 'claude resume failed — session expired');
-        if (this.dbRowId !== null) {
-          log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: child.pid ?? null }, 'session: resume-failed');
-          updateSessionStatus(this.db, this.dbRowId, 'resume_failed');
-        }
-        if (this.durability) {
-          this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
-        }
+        this.closeDurableFailureLifecycle(
+          this.sessionId ?? attemptedSessionId,
+          this.dbRowId,
+          'resume_failed',
+        );
       } else {
         log.warn({ exitCode: code, signal, rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, wasResumeAttempt, initReceived }, 'claude process exited unexpectedly');
-        if (this.dbRowId !== null) {
-          log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: child.pid ?? null }, 'session: crashed');
-          updateSessionStatus(this.db, this.dbRowId, 'crashed');
-        }
-        if (this.durability) {
-          this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
-        }
+        this.closeDurableFailureLifecycle(
+          this.sessionId ?? attemptedSessionId,
+          this.dbRowId,
+        );
       }
 
       // Capture before clearing — onCrash handlers need these for auto-resume
@@ -1391,43 +1716,45 @@ export class SessionManager {
           signal,
           sessionId: crashedSessionId,
           dbRowId: crashedDbRowId,
+          generationIdentity: childGeneration,
           ...this.buildCrashMetadata(),
         });
-        this.notifyUnexpectedExit(code, signal);
+        this.notifyUnexpectedExit(code, signal, childGeneration);
       }
     });
   }
 
-  private notifyUnexpectedExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private notifyUnexpectedExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    generationIdentity: SessionGenerationIdentity | null,
+  ): void {
     // Exit code 0 = normal shutdown (e.g. /new, graceful stop) — skip notification entirely.
     if (code === 0 && !signal) {
       log.info({ rowId: this.dbRowId }, 'session exited cleanly (code 0) — no crash notification');
       return;
     }
 
-    const now = Date.now();
-    const rateLimited =
-      this.lastCrashNotifiedAt !== null &&
-      now - this.lastCrashNotifiedAt < SessionManager.CRASH_NOTIFY_COOLDOWN_MS;
-
-    if (rateLimited) {
-      log.warn({ rowId: this.dbRowId }, 'crash notification suppressed (rate limited)');
-      return;
-    }
-
-    this.lastCrashNotifiedAt = now;
     const reason = signal
       ? `terminated by signal ${signal}`
       : `exited with code ${code}`;
     const msg = `Agent session ended (${reason}). Send any message to start a new session.`;
-    if (this.notifyUser) {
-      // Route through runtime's outbound queue so it arrives after buffered turn output.
-      setImmediate(() => this.notifyUser!(msg));
-      return;
-    }
-
     const chatJid = this.chatJid;
     setImmediate(() => {
+      if (!this.isCurrentGeneration(generationIdentity)) return;
+      const now = Date.now();
+      const rateLimited =
+        this.lastCrashNotifiedAt !== null &&
+        now - this.lastCrashNotifiedAt < SessionManager.CRASH_NOTIFY_COOLDOWN_MS;
+      if (rateLimited) {
+        log.warn({ rowId: this.dbRowId }, 'crash notification suppressed (rate limited)');
+        return;
+      }
+      this.lastCrashNotifiedAt = now;
+      if (this.notifyUser) {
+        this.notifyUser(msg);
+        return;
+      }
       this.messenger
         .sendMessage(chatJid, msg)
         .catch((err) => log.error({ err }, 'failed to send crash notice'));
@@ -1493,7 +1820,10 @@ export class SessionManager {
       'stalled-operation kill fired — SIGKILL hung provider',
     );
     this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
-    this.child.kill('SIGKILL');
+    const child = this.child;
+    void this.killChildTree(child, 'SIGKILL').catch((err) => {
+      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+    });
   }
 
   /**
@@ -1512,26 +1842,47 @@ export class SessionManager {
     }
   }
 
-  private armWatchdog(): void {
+  private armWatchdog(
+    managedProviderSession = this.managedProviderSession,
+    managedProviderGeneration = this.managedProviderGeneration,
+  ): void {
     // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker.
     // The timeout honors the provider's descriptor (API providers: 10 min; CLI providers: 30 min)
     // instead of a single hardcoded constant (L1-F1).
-    this.watchdogHard = setTimeout(() => this.handleWatchdogHard(), watchdogHardMsForProvider(this.provider));
+    const watchdog = setTimeout(
+      () => this.handleWatchdogHard(managedProviderSession, managedProviderGeneration, watchdog),
+      watchdogHardMsForProvider(this.provider),
+    );
+    this.watchdogHard = watchdog;
   }
 
-  private handleWatchdogHard(): void {
+  private handleWatchdogHard(
+    managedProviderSession = this.managedProviderSession,
+    managedProviderGeneration = this.managedProviderGeneration,
+    expectedWatchdog?: ReturnType<typeof setTimeout>,
+  ): void {
+    if (expectedWatchdog !== undefined && this.watchdogHard !== expectedWatchdog) return;
     this.watchdogHard = null;
     if (!this.active) return;
 
     const inactivityMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
     const terminationNotice = `_Session terminated after ${inactivityMinutes} minutes of inactivity — restarting._`;
 
-    if (this.managedProviderSession !== null) {
-      log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
-      this.notifyUser?.(terminationNotice);
-      this.crashManagedProviderSession('managed provider turn watchdog fired');
+    if (managedProviderSession !== null) {
+      const accepted = this.crashManagedProviderSession(
+        'managed provider turn watchdog fired',
+        undefined,
+        managedProviderSession,
+        managedProviderGeneration,
+      );
+      if (accepted && this.isCurrentGeneration(managedProviderGeneration)) {
+        log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
+        this.notifyUser?.(terminationNotice);
+      }
       return;
     }
+
+    if (this.managedProviderSession !== null) return;
 
     if (this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
@@ -1539,19 +1890,34 @@ export class SessionManager {
     // notice ("Agent session crashed") follows via the exit handler, but this
     // message explains WHY it was terminated.
     this.notifyUser?.(terminationNotice);
-    this.child?.kill('SIGKILL');
+    const child = this.child;
+    void this.killChildTree(child, 'SIGKILL').catch((err) => {
+      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+    });
   }
 
-  private crashManagedProviderSession(reason: string, err?: unknown): void {
-    if (this.managedProviderSession === null && !this.active) return;
-
+  private crashManagedProviderSession(
+    reason: string,
+    err?: unknown,
+    providerSession = this.managedProviderSession,
+    generationIdentity = this.managedProviderGeneration,
+  ): boolean {
     const crashedSessionId = this.sessionId;
     const crashedDbRowId = this.dbRowId;
-    const providerSession = this.managedProviderSession;
+    if (!this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
+      log.debug({
+        chatJid: this.chatJid,
+        managerId: generationIdentity?.managerId ?? null,
+        generation: generationIdentity?.generation ?? null,
+        reason,
+      }, 'managed provider crash dropped — superseded generation');
+      return false;
+    }
 
     this.clearTurnWatchdog();
     this.active = false;
     this.managedProviderSession = null;
+    this.managedProviderGeneration = null;
     this.sessionId = null;
 
     if (providerSession !== null) {
@@ -1562,13 +1928,7 @@ export class SessionManager {
       }
     }
 
-    if (this.dbRowId !== null) {
-      updateSessionStatus(this.db, this.dbRowId, 'crashed');
-    }
-
-    if (this.durability) {
-      this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
-    }
+    this.closeDurableFailureLifecycle(crashedSessionId, crashedDbRowId);
 
     log.warn({ err, provider: this.provider, chatJid: this.chatJid, sessionId: crashedSessionId, dbRowId: crashedDbRowId, reason }, 'managed provider session crashed');
     const errText = err instanceof Error ? `${err.name}: ${err.message}` : err === undefined ? undefined : String(err);
@@ -1579,8 +1939,10 @@ export class SessionManager {
       signal: null,
       sessionId: crashedSessionId,
       dbRowId: crashedDbRowId,
+      generationIdentity,
       ...this.buildCrashMetadata(fallbackClass, extraText),
     });
+    return true;
   }
 
   private buildCrashMetadata(
@@ -1616,27 +1978,36 @@ export class SessionManager {
       if (this.managedProviderSession === null) {
         throw new Error('Managed provider session is not initialized. Call spawnSession() first.');
       }
+      const providerSession = this.managedProviderSession;
+      const generationIdentity = this.managedProviderGeneration;
 
       this.clearTurnWatchdog();
-      this.armWatchdog();
+      this.armWatchdog(providerSession, generationIdentity);
       try {
-        await this.managedProviderSession.sendTurn({
+        await providerSession.sendTurn({
           role: 'user',
-          conversationKey: toConversationKey(this.chatJid),
+          conversationKey: this.conversationKey,
           parts: [{ kind: 'text', text }],
           ...(this.model ? { model: this.model } : {}),
         });
       } catch (err) {
-        if (this.active || this.managedProviderSession !== null) {
-          this.crashManagedProviderSession('managed provider turn failed', err);
+        const accepted = this.crashManagedProviderSession(
+          'managed provider turn failed',
+          err,
+          providerSession,
+          generationIdentity,
+        );
+        if (accepted && this.isCurrentGeneration(generationIdentity)) {
           this.notifyUser?.('Agent provider request failed — send any message to start a new session.');
         }
         throw err;
       } finally {
-        this.clearTurnWatchdog();
+        if (this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
+          this.clearTurnWatchdog();
+        }
       }
 
-      if (!this.active || this.managedProviderSession === null) {
+      if (!this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
         throw new Error('Managed provider session ended before the turn completed.');
       }
 
@@ -1648,6 +2019,8 @@ export class SessionManager {
       return;
     }
 
+    let persistentTurnChild: ReturnType<typeof spawn> | null = null;
+    let persistentTurnGeneration: SessionGenerationIdentity | null = null;
     if (this.isSpawnPerTurn) {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
@@ -1663,7 +2036,15 @@ export class SessionManager {
       // Spawn-per-turn providers: kill any existing process and spawn a new one
       // with the user prompt appended as a CLI argument.
       if (this.child) {
-        this.child.kill('SIGTERM');
+        const child = this.child;
+        try {
+          await this.killChildTree(child, 'SIGTERM');
+        } catch (err) {
+          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
+          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
+            cause: err,
+          });
+        }
         this.child = null;
       }
 
@@ -1675,6 +2056,7 @@ export class SessionManager {
 
       const child = spawn(binary, args, {
         cwd,
+        detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: buildChildEnv(
           this.provider,
@@ -1689,6 +2071,14 @@ export class SessionManager {
         ),
       });
 
+      const childGeneration = this.resolveGenerationOwnership?.() ?? null;
+      this.childGenerations.set(child, childGeneration);
+      this.childTreeMarkers.set(
+        child,
+        childGeneration === null
+          ? `unbound:${randomUUID()}`
+          : `${childGeneration.managerId}:${childGeneration.generation}:${randomUUID()}`,
+      );
       this.child = child;
 
       // Spawn-per-turn providers receive their prompt as CLI args, not stdin.
@@ -1697,8 +2087,13 @@ export class SessionManager {
       child.stdin.end();
 
       child.on('error', (err: NodeJS.ErrnoException) => {
+        if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         // Release the pessimistic budget reservation — response will never arrive
         this.budget?.cancelPending();
+        const failedSessionId = this.sessionId ?? this.resumeAttemptId;
+        this.closeDurableFailureLifecycle(failedSessionId, this.dbRowId);
+        this.resumeAttemptId = null;
+        this.sessionId = null;
 
         if (err.code === 'ENOENT') {
           // Binary not installed — configuration error, not a transient crash
@@ -1719,20 +2114,21 @@ export class SessionManager {
           signal: null,
           sessionId: null,
           dbRowId: null,
+          generationIdentity: childGeneration,
           ...this.buildCrashMetadata('spawn_error', err.message),
         });
       });
 
       child.stdout.on('data', (chunk: Buffer) => {
+        if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         const lines = this.appendStdoutChunk(chunk);
         for (const line of lines) {
-          const event = parse(line);
-          if (event === null) continue;
-          this.handleProviderEvent(event);
+          for (const event of parse(line)) this.handleProviderEvent(event);
         }
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
+        if (!this.isCurrentPersistentChild(child, childGeneration)) return;
         const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
         if (nextPreview === this.crashStderrPreview) return;
         this.crashStderrPreview = nextPreview;
@@ -1749,21 +2145,27 @@ export class SessionManager {
       // Emit any remaining buffered output, then mark the turn as complete.
       // Use setImmediate to let pending stdout data chunks drain before we process.
       child.on('exit', (code, signal) => {
-        this.clearShutdownKillTimer();
-        this.clearStalledOpKill();
+        const superseded = this.child !== child;
+        this.clearShutdownKillTimer(child, childGeneration);
+        if (superseded) return;
+        if (!this.active) {
+          this.child = null;
+          return;
+        }
+        if (!this.isCurrentPersistentChild(child, childGeneration)) return;
 
-        if (this.child !== child) return; // superseded
+        this.clearStalledOpKill();
 
         // Defer drain to next tick — stdout 'data' events may still be queued
         // in the event loop after the 'exit' event fires.
         setImmediate(() => {
+          if (!this.isCurrentPersistentChild(child, childGeneration)) return;
 
         // Drain buffered output
         const bufferedLines = this.drainBufferedStdoutLines();
         if (bufferedLines.length > 0) {
           for (const line of bufferedLines) {
-            const event = parse(line);
-            if (event) {
+            for (const event of parse(line)) {
               if (this.provider !== 'claude-cli') {
                 log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn exit drain');
               }
@@ -1774,19 +2176,30 @@ export class SessionManager {
 
         this.clearTurnWatchdog();
 
-        // Non-zero exit on spawn-per-turn = error for this turn, but session stays active
-        if (code !== 0 && code !== null) {
+        // Non-clean exit deactivates the manager so the owning runtime can recover it.
+        if ((code !== 0 && code !== null) || signal !== null) {
+          const crashedSessionId = this.sessionId;
+          const crashedDbRowId = this.dbRowId;
+          this.closeDurableFailureLifecycle(
+            crashedSessionId ?? this.resumeAttemptId,
+            crashedDbRowId,
+          );
+          this.resumeAttemptId = null;
+          this.active = false;
+          this.child = null;
+          this.sessionId = null;
           // Release pessimistic budget reservation if the turn crashed without a result event
           this.budget?.cancelPending();
           log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
           this.onCrash?.({
             exitCode: code,
             signal,
-            sessionId: this.sessionId,
-            dbRowId: this.dbRowId,
+            sessionId: crashedSessionId,
+            dbRowId: crashedDbRowId,
+            generationIdentity: childGeneration,
             ...this.buildCrashMetadata(),
           });
-          this.notifyUnexpectedExit(code, signal);
+          this.notifyUnexpectedExit(code, signal, childGeneration);
         }
         }); // end setImmediate
       });
@@ -1794,6 +2207,11 @@ export class SessionManager {
       // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex/Gemini)
       if (this.child === null) {
         throw new Error('No active session. Call spawnSession() first.');
+      }
+      persistentTurnChild = this.child;
+      persistentTurnGeneration = this.childGenerations.get(persistentTurnChild) ?? null;
+      if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+        throw new Error('Session generation was superseded before turn dispatch.');
       }
 
       // Gemini ACP: wait for sessionId from session/new response, then write session/prompt
@@ -1811,12 +2229,18 @@ export class SessionManager {
           } finally {
             if (timer !== null) clearTimeout(timer);
           }
+          if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+            throw new Error('Session generation was superseded before turn dispatch.');
+          }
           if (!this.geminiSessionId) {
             throw new Error('Gemini sessionId not captured after 15s.');
           }
         }
+        if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+          throw new Error('Session generation was superseded before turn dispatch.');
+        }
         const req = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
-        this.child.stdin!.write(req);
+        persistentTurnChild.stdin!.write(req);
         if (this.dbRowId !== null) {
           incrementMessageCount(this.db, this.dbRowId);
         }
@@ -1844,6 +2268,9 @@ export class SessionManager {
           } finally {
             if (timer !== null) clearTimeout(timer);
           }
+          if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+            throw new Error('Session generation was superseded before turn dispatch.');
+          }
           if (!this.codexThreadId) {
             throw new Error('Codex threadId not captured after 15s. app-server may have failed to initialize.');
           }
@@ -1866,7 +2293,7 @@ export class SessionManager {
         });
       }
 
-      const stdin = this.child.stdin;
+      const stdin = persistentTurnChild.stdin;
       if (!stdin) throw new Error('Child process stdin is not available');
 
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -1888,6 +2315,13 @@ export class SessionManager {
       } finally {
         if (timeoutHandle !== null) clearTimeout(timeoutHandle);
       }
+    }
+
+    if (
+      persistentTurnChild !== null &&
+      !this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)
+    ) {
+      throw new Error('Session generation was superseded before turn completion.');
     }
 
     if (this.dbRowId !== null) {
@@ -1914,6 +2348,7 @@ export class SessionManager {
     messageCount: number;
     lastMessageAt: string | null;
     turnInFlight: boolean;
+    durableFailureClosed: boolean;
   } {
     return {
       active: this.active,
@@ -1922,6 +2357,7 @@ export class SessionManager {
       startedAt: this.startedAt,
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
+      durableFailureClosed: this.durableFailureClosed,
       // Derived signal: the turn watchdog is armed for the duration of an
       // in-flight turn (armWatchdog on dispatch, tickWatchdog on progress,
       // clearTurnWatchdog at turn end), so an armed hard watchdog == a turn is
@@ -1950,51 +2386,78 @@ export class SessionManager {
     this.active = false; // Suppress crash notification for clean shutdown
 
     const currentPid = this.child?.pid ?? null;
-
-    // DB update and durability checkpoint run unconditionally when dbRowId exists.
-    // For spawn-per-turn providers, there may be no child in-flight at shutdown time,
-    // but the session row still needs to be closed out.
-    if (this.dbRowId !== null) {
-      if (suspend) {
-        log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: suspended');
-        updateSessionStatus(this.db, this.dbRowId, 'suspended');
-      } else {
-        log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: ended');
-        updateSessionStatus(this.db, this.dbRowId, 'ended');
-      }
-    }
-
-    // Checkpoint: record suspend/end status (runs regardless of child presence)
-    if (this.durability) {
-      const conversationKey = toConversationKey(this.chatJid);
-      this.durability.upsertSessionCheckpoint(conversationKey, {
-        sessionStatus: suspend ? 'suspended' : 'ended',
-      });
-    }
+    const closingSessionId = this.sessionId ?? this.resumeAttemptId;
 
     // Kill the child only if one is running
     if (this.child !== null) {
       const terminatedSessionId = this.sessionId;
       const child = this.child;
-      child.kill('SIGTERM');
-      this.shutdownKillTimer = setTimeout(() => {
-        this.shutdownKillTimer = null;
+      try {
+        const treeCleanup = this.killChildTree(child, 'SIGTERM');
+        this.armShutdownKillTimer(child);
+        await treeCleanup;
+      } catch (err) {
         try {
-          child.kill('SIGKILL');
-          log.warn({ pid: child.pid ?? null, chatJid: this.chatJid }, 'child did not exit after SIGTERM, sent SIGKILL');
-        } catch (err) {
-          log.debug({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'child exited before SIGKILL escalation');
+          this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
+        } catch (persistenceErr) {
+          throw new AggregateError(
+            [err, persistenceErr],
+            'Child termination and durable failure closure both failed',
+          );
         }
-      }, SessionManager.SHUTDOWN_GRACE_MS);
+        throw err;
+      }
       this.child = null;
       log.info({ chatJid: this.chatJid, sessionId: terminatedSessionId, pid: currentPid }, 'claude process terminated');
     }
 
     if (this.managedProviderSession !== null) {
       const providerSession = this.managedProviderSession;
+      try {
+        await providerSession.shutdown(suspend ? 'suspend' : 'end');
+      } catch (err) {
+        try {
+          this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
+        } catch (persistenceErr) {
+          throw new AggregateError(
+            [err, persistenceErr],
+            'Managed provider termination and durable failure closure both failed',
+          );
+        }
+        throw err;
+      }
       this.managedProviderSession = null;
-      await providerSession.shutdown(suspend ? 'suspend' : 'end');
+      this.managedProviderGeneration = null;
       log.info({ chatJid: this.chatJid, sessionId: this.sessionId, provider: this.provider }, 'managed provider session terminated');
+    }
+
+    // Persist graceful state only after provider/process termination succeeds.
+    // A failed persistence leaves the row identity attached so shutdown can be retried.
+    if (!this.durableFailureClosed) {
+      const lifecycleStatus = suspend ? 'suspended' : 'ended';
+      if (
+        this.dbRowId !== null
+        && this.durability
+        && typeof this.durability.closeSessionLifecycle === 'function'
+      ) {
+        this.durability.closeSessionLifecycle({
+          agentSessionRowId: this.dbRowId,
+          providerSessionId: closingSessionId,
+          conversationKey: this.conversationKey,
+          status: lifecycleStatus,
+        });
+      } else {
+        if (this.dbRowId !== null) {
+          updateSessionStatus(this.db, this.dbRowId, lifecycleStatus);
+        }
+        this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
+      }
+      log.info({
+        rowId: this.dbRowId,
+        chatJid: this.chatJid,
+        sessionId: closingSessionId,
+        pid: currentPid,
+      }, suspend ? 'session: suspended' : 'session: ended');
     }
 
     this.sessionId = null;

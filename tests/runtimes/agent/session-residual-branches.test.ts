@@ -209,10 +209,11 @@ describe('managed-provider turn — model option threading', () => {
 describe('crashManagedProviderSession error/durability branches', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('upserts an orphaned checkpoint (durability) and stringifies a non-Error rejection', async () => {
+  it('orphans the exact managed-provider checkpoint and stringifies a non-Error rejection', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const upsertSessionCheckpoint = vi.fn();
+    const updateSessionCheckpointsStatusBySessionId = vi.fn(() => 1);
     const onCrash = vi.fn();
     // Reject with a NON-Error value so `err instanceof Error` is false and the
     // `err === undefined ? undefined : String(err)` else-branch runs (String).
@@ -227,14 +228,19 @@ describe('crashManagedProviderSession error/durability branches', () => {
       provider: 'openai-api',
       onCrash,
     });
-    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    sm.setDurability({
+      beginFreshSessionCheckpoint: vi.fn(),
+      upsertSessionCheckpoint,
+      updateSessionCheckpointsStatusBySessionId,
+    } as unknown as Parameters<typeof sm.setDurability>[0]);
 
     await sm.spawnSession();
+    updateSessionCheckpointsStatusBySessionId.mockClear();
     await expect(sm.sendTurn('boom')).rejects.toBe('string-failure');
 
-    expect(upsertSessionCheckpoint).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ sessionStatus: 'orphaned' }),
+    expect(updateSessionCheckpointsStatusBySessionId).toHaveBeenCalledWith(
+      expect.stringMatching(/^openai-api-/),
+      'orphaned',
     );
     expect(onCrash).toHaveBeenCalledWith(
       expect.objectContaining({ exitCode: null, signal: null, dbRowId: 42 }),
@@ -277,7 +283,10 @@ describe('persistent claude-cli exit/stderr residual branches', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
     });
-    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    sm.setDurability({
+      beginFreshSessionCheckpoint: vi.fn(),
+      upsertSessionCheckpoint,
+    } as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession();
     const firstChild = mockChild;
 
@@ -296,11 +305,12 @@ describe('persistent claude-cli exit/stderr residual branches', () => {
     expect((sm as unknown as { active: boolean }).active).toBe(true);
   });
 
-  it('upserts an orphaned checkpoint on a resume-failure exit when durability is set', async () => {
+  it('orphans the exact attempted checkpoint on a resume-failure exit', async () => {
     // --resume + exit code 1 + no init event = resume failure; with durability
     // set this drives the `if (this.durability)` branch inside the isResumeFail
     // arm (distinct from the non-resume crash arm covered by the drain test).
     const upsertSessionCheckpoint = vi.fn();
+    const updateSessionCheckpointsStatusBySessionId = vi.fn(() => 1);
     const onResumeFailed = vi.fn();
     const sm = new SessionManager({
       db: makeDb(),
@@ -309,15 +319,19 @@ describe('persistent claude-cli exit/stderr residual branches', () => {
       onEvent: vi.fn(),
       onResumeFailed,
     });
-    sm.setDurability({ upsertSessionCheckpoint } as unknown as Parameters<typeof sm.setDurability>[0]);
+    sm.setDurability({
+      upsertSessionCheckpoint,
+      updateSessionCheckpointsStatusBySessionId,
+    } as unknown as Parameters<typeof sm.setDurability>[0]);
     await sm.spawnSession('expired-session-id');
     upsertSessionCheckpoint.mockClear(); // drop the spawn-time 'active' checkpoint
+    updateSessionCheckpointsStatusBySessionId.mockClear();
 
     mockChild.emitExit(1, null); // resume attempt, code 1, init never received
     expect(onResumeFailed).toHaveBeenCalledTimes(1);
-    expect(upsertSessionCheckpoint).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ sessionStatus: 'orphaned' }),
+    expect(updateSessionCheckpointsStatusBySessionId).toHaveBeenCalledWith(
+      'expired-session-id',
+      'orphaned',
     );
   });
 
@@ -388,7 +402,7 @@ describe('spawnSession already-active short-circuit', () => {
     });
     await sm.spawnSession();
     const firstSessionId = sm.getStatus().sessionId;
-    expect(firstSessionId).toMatch(/^openai-api-\d+$/);
+    expect(firstSessionId).toMatch(/^openai-api-[0-9a-f-]{36}$/);
 
     // Second spawn must short-circuit (active && managedProviderSession !== null):
     // the session id is unchanged and no spawn/turn happened.

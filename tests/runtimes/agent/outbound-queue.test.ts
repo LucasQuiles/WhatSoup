@@ -18,6 +18,7 @@ import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
 import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
@@ -277,12 +278,41 @@ describe('OutboundQueue', () => {
   it('buffers streaming fragments in parts and clears them after flush', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
-    const queueState = queue as unknown as { streamBufferParts?: string[] };
+    const queueState = queue as unknown as {
+      streamBufferParts?: Array<{
+        text: string;
+        role: string;
+        turnId: string | undefined;
+        turnEvidenceEpoch: number | undefined;
+        chatJid: string;
+        conversationKey: string;
+        sourceInboundSeq: number | undefined;
+      }>;
+    };
 
     queue.enqueueStreamingText('Hel');
     queue.enqueueStreamingText('lo');
 
-    expect(queueState.streamBufferParts).toEqual(['Hel', 'lo']);
+    expect(queueState.streamBufferParts).toEqual([
+      {
+        text: 'Hel',
+        role: 'answer',
+        turnId: undefined,
+        turnEvidenceEpoch: undefined,
+        chatJid: CHAT_JID,
+        conversationKey: toConversationKey(CHAT_JID),
+        sourceInboundSeq: undefined,
+      },
+      {
+        text: 'lo',
+        role: 'answer',
+        turnId: undefined,
+        turnEvidenceEpoch: undefined,
+        chatJid: CHAT_JID,
+        conversationKey: toConversationKey(CHAT_JID),
+        sourceInboundSeq: undefined,
+      },
+    ]);
 
     await queue.flush();
 
@@ -1024,12 +1054,20 @@ describe('OutboundQueue', () => {
     expect(successCalls.some((t) => t === 'good message')).toBe(true);
   });
 
-  it('resets sending when the drain safety-net catches an unexpected pacing failure', async () => {
+  it('poisons the queue when the drain safety-net catches an unexpected pacing failure', async () => {
     mockLog.error.mockClear();
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
     const internals = queue as unknown as {
-      sendWithPacing: (text: string) => Promise<void>;
+      sendWithPacing: (chunk: {
+        text: string;
+        role: string;
+        turnId: string | undefined;
+        turnEvidenceEpoch: number | undefined;
+        chatJid: string;
+        conversationKey: string;
+        sourceInboundSeq: number | undefined;
+      }) => Promise<void>;
       sending: boolean;
       chain: Promise<void>;
     };
@@ -1041,10 +1079,18 @@ describe('OutboundQueue', () => {
     queue.enqueueText('message that trips the safety net');
     await internals.chain;
 
-    expect(internals.sendWithPacing).toHaveBeenCalledWith('message that trips the safety net');
+    expect(internals.sendWithPacing).toHaveBeenCalledWith({
+      text: 'message that trips the safety net',
+      role: 'answer',
+      turnId: undefined,
+      turnEvidenceEpoch: undefined,
+      chatJid: CHAT_JID,
+      conversationKey: toConversationKey(CHAT_JID),
+      sourceInboundSeq: undefined,
+    });
     expect(mockLog.error).toHaveBeenCalledWith(
       { err: pacingError },
-      'drain queue error — resetting',
+      'drain queue failed — queue poisoned',
     );
     expect(internals.sending).toBe(false);
   });
@@ -2858,10 +2904,10 @@ describe('OutboundQueue', () => {
       queue.abortTurn();
     });
 
-    // R3: STATUS_CAP_NOTICE routes through enqueueText (content), so it must NOT
-    // count as a status message. Driving exactly cap+1 status yields exactly `cap`
-    // status messages (the notice occupies no status slot) plus one notice.
-    it('does not count STATUS_CAP_NOTICE as status narration (R3)', async () => {
+    // R3: STATUS_CAP_NOTICE is a status evidence role, but it is emitted outside
+    // the exhausted counter gate. Driving cap+1 status yields exactly `cap`
+    // budgeted messages plus one non-recursive notice.
+    it('emits STATUS_CAP_NOTICE outside recursive status-budget accounting (R3)', async () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('friendly');

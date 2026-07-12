@@ -26,8 +26,11 @@ describe('prepared statement caching', () => {
     const prepareSpy = vi.spyOn(db.raw, 'prepare');
     const engine = new DurabilityEngine(db);
 
-    // 46 pre-existing + 3 stuck-inbound sweep statements (echoed-terminal, stale turn_done, stale open)
-    expect(prepareSpy).toHaveBeenCalledTimes(49);
+    // Fixed constructor statements, including turn finalization, recovery lifecycle,
+    // echo settlement/health diagnostics, duplicate receipts, completed-session lookup,
+    // exact-session lifecycle transitions, and the cached BEGIN/COMMIT/ROLLBACK runner.
+    // Lifecycle methods must not prepare SQL per call.
+    expect(prepareSpy).toHaveBeenCalledTimes(99);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -136,6 +139,14 @@ describe('prepared statement caching', () => {
       sessionsRestored: 0,
     };
     engine.logRecoveryRun('manual', emptyStats);
+
+    engine.beginFreshSessionCheckpoint('conv-fresh');
+    engine.getLatestCompletedCheckpointForSession('sess-1');
+    engine.updateSessionCheckpointsStatusBySessionId('sess-1', 'suspended');
+    db.raw.exec(
+      `UPDATE agent_sessions SET session_id = 'sess-1', status = 'active' WHERE id = 999`,
+    );
+    engine.retireSessionLifecycle(999, 'sess-1');
 
     expect(prepareSpy).not.toHaveBeenCalled();
   });

@@ -10,13 +10,18 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
+import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks — must mirror the existing test file so module resolution is
 // consistent when both suites are run together.
 // ---------------------------------------------------------------------------
 const alertFns = vi.hoisted(() => ({
-  emitAlert: vi.fn(() => true),
+  emitAlert: vi.fn((): AlertEmissionResult => ({
+    ok: true,
+    channel: 'outbox',
+    status: 'durably_queued',
+  })),
   clearAlertSource: vi.fn(() => true),
 }));
 const logger = vi.hoisted(() => ({
@@ -59,6 +64,14 @@ vi.mock('../../src/logger.ts', () => ({
 // ---------------------------------------------------------------------------
 type AlertMockCall = [string, string, ...unknown[]];
 
+function durableAlertResult(): AlertEmissionResult {
+  return { ok: true, channel: 'outbox', status: 'durably_queued' };
+}
+
+function failedAlertResult(): AlertEmissionResult {
+  return { ok: false, channel: 'none', status: 'failed' };
+}
+
 function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
   return {
     name: 'remote-1',
@@ -72,6 +85,33 @@ function makeInstance(overrides: Partial<InstanceHealth> = {}): InstanceHealth {
 
 function makeInstances(...items: [string, InstanceHealth][]): Map<string, InstanceHealth> {
   return new Map(items);
+}
+
+function onlineHealth(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const whatsappOverrides = typeof overrides.whatsapp === 'object' && overrides.whatsapp !== null
+    ? overrides.whatsapp as Record<string, unknown>
+    : {};
+  const connectionOverrides = typeof whatsappOverrides.connection === 'object' && whatsappOverrides.connection !== null
+    ? whatsappOverrides.connection as Record<string, unknown>
+    : {};
+  return {
+    status: 'healthy',
+    generated_at: new Date().toISOString(),
+    runtime: {},
+    ...overrides,
+    whatsapp: {
+      connected: true,
+      account_jid: 'redacted-account@s.whatsapp.net',
+      ...whatsappOverrides,
+      connection: {
+        state: 'connected',
+        reconnect_phase: null,
+        reconnect_attempts: 0,
+        auth_failure_class: 'none',
+        ...connectionOverrides,
+      },
+    },
+  };
 }
 
 /** Build a minimal health payload that satisfies hasVerifiedRelinkRecovery. */
@@ -102,9 +142,16 @@ function makeRelinkHealth(overrides: {
 
   return {
     status: 'healthy',
+    generated_at: new Date().toISOString(),
     whatsapp: {
       connected,
-      connection: { state: connectionState, reconnect_phase: null, reconnect_attempts: 0 },
+      account_jid: 'redacted-account@s.whatsapp.net',
+      connection: {
+        state: connectionState,
+        reconnect_phase: null,
+        reconnect_attempts: 0,
+        auth_failure_class: 'none',
+      },
       auth_bond: {
         status: authBondStatus,
         ...overrides.authBond,
@@ -121,12 +168,8 @@ function makeRelinkHealth(overrides: {
     outbound_sends: {
       latest_successful_send_at: latestSendAt,
     },
+    runtime: {},
   };
-}
-
-/** A health payload that is clearly online (no auth signals). */
-function onlineHealth(): Record<string, unknown> {
-  return { status: 'healthy' };
 }
 
 /** Standard logged-out JSON body using explicit status-code evidence. */
@@ -191,7 +234,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     logger.error.mockClear();
     logger.debug.mockClear();
     alertFns.emitAlert.mockReset();
-    alertFns.emitAlert.mockReturnValue(true);
+    alertFns.emitAlert.mockReturnValue(durableAlertResult());
     alertFns.clearAlertSource.mockReset();
     alertFns.clearAlertSource.mockReturnValue(true);
     alertThrottleStore.loadAlertThrottle.mockReset();
@@ -362,10 +405,10 @@ describe('HealthPoller — branch coverage supplement', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Branch 44 arm 1 (line 412): healthStatus coercion — status field is not a string
+  // Branch 44 arm 1 (line 412): healthStatus field is not a string.
   // -------------------------------------------------------------------------
-  describe('healthStatus: numeric status field coerced to empty string', () => {
-    it('does not falsely classify a numeric status field as degraded or unhealthy', async () => {
+  describe('healthStatus: numeric status field fails closed', () => {
+    it('classifies a numeric status field as an ambiguous type error', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({
@@ -376,7 +419,11 @@ describe('HealthPoller — branch coverage supplement', () => {
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
       await privatePoll(poller);
-      expect(poller.getStatus('remote-1')!.status).toBe('online');
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'degraded',
+        statusConfidence: 'ambiguous',
+        statusReason: 'health_body_type_error',
+      });
     });
   });
 
@@ -437,15 +484,16 @@ describe('HealthPoller — branch coverage supplement', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Branches 67+72+73 (lines 535, 540, 541): classifyLoggedOutSignal evidence
-  // — string '401' is treated as explicit logout (last_status_code as string)
+  // Typed health diagnostics: producer last_status_code is number|null. A
+  // string "401" cannot promote an unhealthy body to confirmed logged-out.
   // -------------------------------------------------------------------------
-  describe('classifyLoggedOutSignal: string "401" as last_status_code triggers explicit logout', () => {
-    it('emits logged_out for string last_status_code "401"', async () => {
+  describe('classifyLoggedOutSignal: string "401" fails closed without auth promotion', () => {
+    it('preserves explicit unhealthy classification and records the type error', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({
           status: 'unhealthy',
+          generated_at: new Date().toISOString(),
           uptime_seconds: 200,
           whatsapp: {
             connected: false,
@@ -461,8 +509,15 @@ describe('HealthPoller — branch coverage supplement', () => {
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
       await privatePoll(poller);
-      expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
-      expectAlertEmitted('remote-1', 'instance_logged_out');
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'degraded',
+        statusConfidence: 'confirmed',
+        statusReason: 'health_body_unhealthy',
+      });
+      expect(poller.getStatus('remote-1')!.statusEvidence.join(' ')).toContain(
+        'schema_type_errors=whatsapp.connection.last_status_code',
+      );
+      expectAlertNotEmitted('remote-1', 'instance_logged_out');
     });
   });
 
@@ -889,11 +944,11 @@ describe('HealthPoller — branch coverage supplement', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Branch 169 arm 1 (line 908): updateProbeStarved — prevStatus already 'degraded'
-  // so emitStatusChange is NOT called
+  // A target failure following an existing degraded state does not emit another
+  // statusChange when no loop-lag evidence corroborates local starvation.
   // -------------------------------------------------------------------------
-  describe('updateProbeStarved: no status-change event when already degraded', () => {
-    it('does not emit a status-change when probe starvation follows an existing degraded state', async () => {
+  describe('abort-before-connect: no status-change event when already degraded', () => {
+    it('does not emit a status-change when an uncorroborated abort follows an existing degraded state', async () => {
       const abortErr = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
       mockFetch
         .mockResolvedValueOnce({
@@ -914,7 +969,8 @@ describe('HealthPoller — branch coverage supplement', () => {
 
       await vi.advanceTimersByTimeAsync(1_000);
       expect(poller.getStatus('remote-1')!.status).toBe('degraded');
-      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_probe_timeout_under_proxy_load');
+      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_poll_failed_transient');
+      expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(1);
       expect(listener.mock.calls.length).toBe(callsAfterFirst);
       poller.stop();
     });
@@ -960,7 +1016,7 @@ describe('HealthPoller — branch coverage supplement', () => {
   // -------------------------------------------------------------------------
   describe('updateFromHealthSnapshot: online classification causes early return', () => {
     it('does not call updateDegraded when self-health classification is online', async () => {
-      const getSelfHealth = vi.fn().mockReturnValue({ status: 'healthy' });
+      const getSelfHealth = vi.fn().mockReturnValue(onlineHealth());
       const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
       const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
       await privatePoll(poller);
@@ -1018,7 +1074,7 @@ describe('HealthPoller — branch coverage supplement', () => {
   // -------------------------------------------------------------------------
   describe('clearRecoveredAlert: belt-and-suspenders adds instance_logged_out from prevStatus', () => {
     it('attempts clear of instance_logged_out even when it was never added to activeAlertSources', async () => {
-      alertFns.emitAlert.mockReturnValueOnce(false); // first logged_out alert fails
+      alertFns.emitAlert.mockReturnValueOnce(failedAlertResult()); // first logged_out alert fails
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeRelinkHealth()) });
@@ -1054,7 +1110,11 @@ describe('HealthPoller — branch coverage supplement', () => {
       poller.start();
       await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(poller.getStatus('remote-1')!.status).toBe('online');
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'degraded',
+        statusConfidence: 'ambiguous',
+        statusReason: 'health_body_incomplete',
+      });
       expectClearNotEmitted('remote-1', 'instance_logged_out');
       expect(poller.getStatus('remote-1')!.activeAlertSources).toContain('instance_logged_out');
       poller.stop();
@@ -1091,11 +1151,10 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('withholds clear when auth_bond is absent from recovery health', async () => {
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: { connected: true, connection: { state: 'connected' } },
           outbound_sends: { latest_successful_send_at: '2026-05-20T12:00:10.000Z' },
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
@@ -1249,8 +1308,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('resolves latest_successful_send_at from camelCase latestSuccessfulSendAt key', async () => {
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -1260,7 +1318,7 @@ describe('HealthPoller — branch coverage supplement', () => {
             },
           },
           outboundSends: { latestSuccessfulSendAt: '2026-05-20T12:00:10.000Z' },
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
@@ -1285,8 +1343,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('uses creds.sha256 as fingerprint when hash is absent', async () => {
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -1296,7 +1353,7 @@ describe('HealthPoller — branch coverage supplement', () => {
             },
           },
           outbound_sends: { latest_successful_send_at: '2026-05-20T12:00:10.000Z' },
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
@@ -1316,8 +1373,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('sets fingerprint to undefined when neither hash nor sha256 is present', async () => {
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -1327,7 +1383,7 @@ describe('HealthPoller — branch coverage supplement', () => {
             },
           },
           outbound_sends: { latest_successful_send_at: '2026-05-20T12:00:10.000Z' },
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
@@ -1351,8 +1407,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     it('withholds clear when no outbound_sends or outboundSends key exists', async () => {
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(loggedOutBody()) })
-        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({
-          status: 'healthy',
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(onlineHealth({
           whatsapp: {
             connected: true,
             connection: { state: 'connected' },
@@ -1362,7 +1417,7 @@ describe('HealthPoller — branch coverage supplement', () => {
             },
           },
           // no outbound_sends or outboundSends
-        }) });
+        })) });
 
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
@@ -1522,12 +1577,12 @@ describe('HealthPoller — branch coverage supplement', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Branch 270 arm 1 (line 1258): trackActiveAlertSource skips when !emitted
-  // and !hasConfirmedAlert
+  // Branch 270 arm 1 (line 1258): trackActiveAlertSource skips when an alert
+  // is not durably accepted and there is no confirmed prior alert.
   // -------------------------------------------------------------------------
   describe('trackActiveAlertSource: source not tracked when alert fails and no throttle entry', () => {
-    it('leaves activeAlertSources empty when emitAlert returns false with no prior throttle entry', async () => {
-      alertFns.emitAlert.mockReturnValue(false);
+    it('leaves activeAlertSources empty when emitAlert reports failure with no prior throttle entry', async () => {
+      alertFns.emitAlert.mockReturnValue(failedAlertResult());
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({
@@ -1553,7 +1608,7 @@ describe('HealthPoller — branch coverage supplement', () => {
     });
 
     it('adds source when emitAlert fails but persisted throttle has a prior entry', async () => {
-      alertFns.emitAlert.mockReturnValue(false);
+      alertFns.emitAlert.mockReturnValue(failedAlertResult());
       alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
         entries: new Map([['remote-1:instance_logged_out', '2026-05-20T11:55:00.000Z']]),
         loadError: null,
@@ -1650,21 +1705,22 @@ describe('HealthPoller — branch coverage supplement', () => {
   // isProbeAbortBeforeConnect: additional abort message variants
   // -------------------------------------------------------------------------
   describe('isProbeAbortBeforeConnect: additional abort message variants', () => {
-    it('treats "aborted" error as probe starvation', async () => {
+    it('treats "aborted" as a target failure without corroborating loop lag', async () => {
       mockFetch.mockRejectedValue(new Error('aborted'));
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
       await privatePoll(poller);
-      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_probe_timeout_under_proxy_load');
-      expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(0);
+      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_poll_failed_transient');
+      expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(1);
     });
 
-    it('treats "this operation was aborted" as probe starvation', async () => {
+    it('treats "this operation was aborted" as a target failure without corroborating loop lag', async () => {
       mockFetch.mockRejectedValue(new Error('this operation was aborted'));
       const instances = makeInstances(['remote-1', makeInstance()]);
       const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
       await privatePoll(poller);
-      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_probe_timeout_under_proxy_load');
+      expect(poller.getStatus('remote-1')!.statusReason).toBe('health_poll_failed_transient');
+      expect(poller.getStatus('remote-1')!.consecutiveFailures).toBe(1);
     });
   });
 

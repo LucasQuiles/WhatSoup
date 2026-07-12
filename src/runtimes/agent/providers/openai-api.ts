@@ -11,6 +11,8 @@
 // The auth header is computed per-request so late-set keyring entries / key
 // rotations are picked up without a process restart.
 
+import { randomUUID } from 'node:crypto';
+
 import type {
   ProviderCheckpoint,
   ProviderConfig,
@@ -132,7 +134,7 @@ export class OpenAIApiProvider implements ProviderSession {
     // System prompt as the first conversation message
     this.messages = [{ role: 'system', content: opts.systemPrompt }];
 
-    opts.onEvent({ type: 'init', sessionId: `openai-api-${Date.now()}` });
+    opts.onEvent({ type: 'init', sessionId: `openai-api-${randomUUID()}` });
   }
 
   async sendTurn(request: ProviderTurnRequest): Promise<void> {

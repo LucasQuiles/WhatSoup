@@ -61,7 +61,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "042be5089ab9ce6d143b62148b3c56fcea9b7c49ebc8c4eb1d33d1fc8bb12fe2",
+      "sha256": "d0464d51a2671f967e9415d96bcb67cae65edc0d962c3b070fb4a6adbe694711",
       "mustContain": [
         "composeWithExactLineDedup"
       ],
@@ -69,7 +69,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "0fa53c3d45b9bb0102ecef74c945d1de9589e76b50d732a6bad0f6b3348778e4",
+      "sha256": "80abc11230a363005c66db7fbe7e34ab33ad689c59c03c75cfc871eef5db6d4b",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],

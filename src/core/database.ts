@@ -5,6 +5,12 @@ import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { MIGRATION_23 as SUBSTRATE_MIGRATION } from './substrate/schema.ts';
+import {
+  runMigration37 as runMigration37Impl,
+  runMigration38 as runMigration38Impl,
+  runMigration39 as runMigration39Impl,
+  runMigration40 as runMigration40Impl,
+} from './database-migrations-37-40.ts';
 
 const log = createChildLogger('database');
 
@@ -734,6 +740,10 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [34, runMigration34],
   [35, runMigration35],
   [36, runMigration36],
+  [37, runMigration37],
+  [38, runMigration38],
+  [39, runMigration39],
+  [40, runMigration40],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -900,6 +910,27 @@ function runMigration36(db: DatabaseSync): void {
     db.exec('ALTER TABLE inbound_events ADD COLUMN failure_class TEXT');
   }
 }
+
+// ─── Migrations 37–40: turn lifecycle (implementations in ./database-migrations-37-40.ts) ──
+// Thin real-function wrappers keep the ordered MIGRATIONS map and the static
+// migration-numbering guard anchored to declarations in this file.
+
+function runMigration37(db: DatabaseSync): void {
+  runMigration37Impl(db);
+}
+
+function runMigration38(db: DatabaseSync): void {
+  runMigration38Impl(db);
+}
+
+function runMigration39(db: DatabaseSync): void {
+  runMigration39Impl(db);
+}
+
+function runMigration40(db: DatabaseSync): void {
+  runMigration40Impl(db);
+}
+
 
 /**
  * QR-115: guard the FTS `'delete'` command against a since-soft-deleted row on

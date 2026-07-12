@@ -1,5 +1,4 @@
 import { createChildLogger } from '../logger.ts';
-import type { CompleteTurnParams } from './durability.ts';
 import type { Messenger } from './types.ts';
 
 const log = createChildLogger('reply-guarantee');
@@ -12,7 +11,6 @@ export type InboundProcessingStatus = 'processing' | 'turn_done' | 'complete' | 
 
 export interface ReplyGuaranteeDurability {
   getInboundStatus(seq: number): InboundProcessingStatus | string | undefined;
-  completeTurn(params: CompleteTurnParams): void;
 }
 
 export interface ReplyGuaranteeFallbackInput {
@@ -101,8 +99,9 @@ export class ReplyGuaranteeManager {
   }
 
   private armTimer(inboundSeq: number, chatJid: string): ReturnType<typeof setTimeout> {
-    const timer = this.setTimer(() => {
-      void this.onTimeout(inboundSeq, chatJid);
+    let timer: ReturnType<typeof setTimeout>;
+    timer = this.setTimer(() => {
+      void this.onTimeout(inboundSeq, chatJid, timer);
     }, this.timeoutMs);
     timer.unref?.();
     return timer;
@@ -127,12 +126,30 @@ export class ReplyGuaranteeManager {
     this.armed.clear();
   }
 
-  private async onTimeout(inboundSeq: number, chatJid: string): Promise<void> {
-    this.armed.delete(inboundSeq);
-    if (!this.durability) return;
+  private rearmIfStillOpen(active: ArmedTurn, firedTimer: ReturnType<typeof setTimeout>): void {
+    if (this.armed.get(active.inboundSeq) !== active || active.timer !== firedTimer) return;
+    if (!isOpenInboundStatus(this.durability?.getInboundStatus(active.inboundSeq))) {
+      this.armed.delete(active.inboundSeq);
+      return;
+    }
+    active.timer = this.armTimer(active.inboundSeq, active.chatJid);
+  }
+
+  private async onTimeout(
+    inboundSeq: number,
+    chatJid: string,
+    firedTimer: ReturnType<typeof setTimeout>,
+  ): Promise<void> {
+    const active = this.armed.get(inboundSeq);
+    if (!active || active.chatJid !== chatJid || active.timer !== firedTimer) return;
+    if (!this.durability) {
+      this.armed.delete(inboundSeq);
+      return;
+    }
 
     const status = this.durability.getInboundStatus(inboundSeq);
     if (!isOpenInboundStatus(status)) {
+      this.armed.delete(inboundSeq);
       return;
     }
 
@@ -140,6 +157,7 @@ export class ReplyGuaranteeManager {
     const lastFallbackAt = this.lastFallbackByChat.get(chatJid);
     if (lastFallbackAt !== undefined && now - lastFallbackAt < this.rateLimitMs) {
       log.warn({ inboundSeq, chatJid, status }, 'reply guarantee fallback suppressed by rate limit');
+      this.rearmIfStillOpen(active, firedTimer);
       return;
     }
 
@@ -148,41 +166,17 @@ export class ReplyGuaranteeManager {
     // pass the guard above before any of them recorded success (TOCTOU), causing
     // duplicate liveness fallbacks. Reserving synchronously closes the race.
     this.lastFallbackByChat.set(chatJid, now);
-    // QR-107: separate a FALLBACK failure from a FINALIZE failure. The single try
-    // previously wrapped both sendFallback and completeTurn, and the catch
-    // unconditionally released the rate-limit reservation. A completeTurn/DB
-    // failure AFTER a successful fallback was thus conflated with a fallback
-    // failure, releasing the slot and allowing a duplicate same-chat timeout.
-    let fallbackSucceeded = false;
     try {
-      const result = await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
-      fallbackSucceeded = true;
-      this.durability.completeTurn({
-        inbound: {
-          seq: inboundSeq,
-          terminalReason: fallbackTerminalReason(result),
-        },
-      });
+      await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
     } catch (err) {
-      if (!fallbackSucceeded) {
-        // TRUE fallback failure: no liveness signal was emitted. Release the reservation
-        // (only if no other send claimed the slot meanwhile) so a future
-        // legitimate fallback is not blocked — preserves retry-after-failure.
-        if (this.lastFallbackByChat.get(chatJid) === now) {
-          this.lastFallbackByChat.delete(chatJid);
-        }
-        log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback failed');
-      } else {
-        // The fallback succeeded but completeTurn (durability write) failed.
-        // Do NOT release the slot — releasing would allow a duplicate fallback
-        // for a signal the user already received. The inbound is left
-        // unfinalized for durability recovery to reconcile.
-        log.error(
-          { err, inboundSeq, chatJid },
-          'reply guarantee fallback succeeded but completeTurn failed — inbound left for recovery',
-        );
+      // No liveness signal was emitted. Release the reservation only if no
+      // other send claimed the slot meanwhile so a later turn can retry.
+      if (this.lastFallbackByChat.get(chatJid) === now) {
+        this.lastFallbackByChat.delete(chatJid);
       }
+      log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback failed');
     }
+    this.rearmIfStillOpen(active, firedTimer);
   }
 }
 
@@ -192,22 +186,12 @@ export function createReplyGuaranteeLivenessSender({
   messenger: Messenger;
 }): ReplyGuaranteeFallbackSender {
   return async ({ chatJid }) => {
-    await messenger.setTyping?.(chatJid, 'composing').catch(() => undefined);
+    if (!messenger.setTyping) {
+      throw new Error('Reply guarantee typing adapter is unavailable');
+    }
+    await messenger.setTyping(chatJid, 'composing');
     return { terminalReason: 'rgp_liveness_nudged' };
   };
-}
-
-function fallbackTerminalReason(result: unknown): string {
-  if (
-    result !== null &&
-    typeof result === 'object' &&
-    'terminalReason' in result &&
-    typeof result.terminalReason === 'string' &&
-    result.terminalReason.trim().length > 0
-  ) {
-    return result.terminalReason;
-  }
-  return 'rgp_fallback_sent';
 }
 
 function isOpenInboundStatus(status: string | undefined): boolean {

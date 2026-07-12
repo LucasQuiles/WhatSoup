@@ -6,13 +6,20 @@
 import type { Messenger } from '../../core/types.ts';
 import { sendTracked } from '../../core/durability.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
-import type { IOutboundQueue, ToolUpdate } from './outbound-queue.ts';
+import type {
+  IOutboundQueue,
+  OutboundMessageRole,
+  ToolUpdate,
+  TurnDeliveryEvidence,
+} from './outbound-queue.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
 
 export class ControlQueue implements IOutboundQueue {
   private chatJid: string;
   private readonly messenger: Messenger;
   private log: string[] = [];
+  private activeTurnId: string | undefined;
+  private completedTurnEvidence: TurnDeliveryEvidence | undefined;
 
   constructor(chatJid: string, messenger: Messenger) {
     this.chatJid = chatJid;
@@ -21,16 +28,16 @@ export class ControlQueue implements IOutboundQueue {
 
   // ─── IOutboundQueue ──────────────────────────────────────────────────────
 
-  enqueueText(text: string): void {
+  enqueueText(text: string, _role: OutboundMessageRole = 'answer'): void {
     this.log.push(text);
   }
 
   /** No-op aggregation — control sessions buffer all text via enqueueText. */
-  enqueueStreamingText(text: string): void {
+  enqueueStreamingText(text: string, _role: OutboundMessageRole = 'answer'): void {
     this.log.push(text);
   }
 
-  enqueueResultText(text: string): void {
+  enqueueResultText(text: string, _role: OutboundMessageRole = 'answer'): void {
     this.log.push(text);
   }
 
@@ -83,14 +90,17 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
-  /** No-op — no timers or resources to release. */
+  /** Clear evidence ownership; control queues have no timers or send resources. */
   async shutdown(): Promise<void> {
-    // intentional no-op
+    this.activeTurnId = undefined;
+    this.completedTurnEvidence = undefined;
   }
 
   /** Clear the log buffer (mirrors OutboundQueue.abortTurn semantics). */
   abortTurn(): void {
     this.log = [];
+    this.activeTurnId = undefined;
+    this.completedTurnEvidence = undefined;
   }
 
   get targetChatJid(): string {
@@ -120,6 +130,45 @@ export class ControlQueue implements IOutboundQueue {
   /** No-op — control sessions never retain outbound op ids. */
   clearLastOpId(): void {
     // intentional no-op
+  }
+
+  beginTurnEvidence(turnId: string): void {
+    if (turnId.trim() === '') {
+      throw new Error('Turn evidence requires a non-empty turn id');
+    }
+    if (this.activeTurnId !== undefined) {
+      if (this.activeTurnId === turnId) return;
+      throw new Error(`Turn evidence already belongs to ${this.activeTurnId}; cannot begin ${turnId}`);
+    }
+    if (this.completedTurnEvidence?.turnId === turnId) {
+      throw new Error(`Turn evidence for ${turnId} was already completed`);
+    }
+    this.completedTurnEvidence = undefined;
+    this.activeTurnId = turnId;
+  }
+
+  async flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence> {
+    if (this.activeTurnId === undefined) {
+      if (this.completedTurnEvidence?.turnId === turnId) {
+        return ControlQueue.emptyEvidence(turnId);
+      }
+      throw new Error(`No active turn evidence belongs to ${turnId}`);
+    }
+    if (this.activeTurnId !== turnId) {
+      throw new Error(`Turn evidence belongs to ${this.activeTurnId}; cannot flush ${turnId}`);
+    }
+    this.activeTurnId = undefined;
+    this.completedTurnEvidence = ControlQueue.emptyEvidence(turnId);
+    return ControlQueue.emptyEvidence(turnId);
+  }
+
+  private static emptyEvidence(turnId: string): TurnDeliveryEvidence {
+    return Object.freeze({
+      turnId,
+      answerOpIds: Object.freeze([]),
+      lifecycleOpIds: Object.freeze([]),
+      statusOpIds: Object.freeze([]),
+    });
   }
 
   /** No-op — no outbound ops to mark terminal. */

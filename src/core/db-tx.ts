@@ -22,22 +22,37 @@
  */
 import type { Database } from './database.ts';
 
-export function withTransaction<T>(db: Database, fn: () => T): T {
+export type TransactionRunner = <T>(fn: () => T) => T;
+
+const transactionRunners = new WeakMap<Database, TransactionRunner>();
+
+/** Prepare one reusable transaction runner for a database instance. */
+export function getTransactionRunner(db: Database): TransactionRunner {
+  const cached = transactionRunners.get(db);
+  if (cached) return cached;
   const begin = db.raw.prepare('BEGIN');
   const commit = db.raw.prepare('COMMIT');
   const rollback = db.raw.prepare('ROLLBACK');
 
-  begin.run();
-  let opened = true;
-  try {
-    const result = fn();
-    commit.run();
-    opened = false;
-    return result;
-  } catch (err) {
-    if (opened) {
-      try { rollback.run(); } catch { /* best-effort rollback */ }
+  const runner: TransactionRunner = <T>(fn: () => T): T => {
+    begin.run();
+    let opened = true;
+    try {
+      const result = fn();
+      commit.run();
+      opened = false;
+      return result;
+    } catch (err) {
+      if (opened) {
+        try { rollback.run(); } catch { /* best-effort rollback */ }
+      }
+      throw err;
     }
-    throw err;
-  }
+  };
+  transactionRunners.set(db, runner);
+  return runner;
+}
+
+export function withTransaction<T>(db: Database, fn: () => T): T {
+  return getTransactionRunner(db)(fn);
 }

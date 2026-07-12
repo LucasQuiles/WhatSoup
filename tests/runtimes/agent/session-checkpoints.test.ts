@@ -29,6 +29,11 @@ vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../../helpers/child-process.ts');
   return childProcessMock();
 });
+vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+  killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+    target.kill(signal);
+  }),
+}));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -45,6 +50,7 @@ import { spawn } from 'node:child_process';
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 type UpsertSessionCheckpointCall = Parameters<DurabilityEngine['upsertSessionCheckpoint']>;
+type BeginFreshSessionCheckpointCall = Parameters<DurabilityEngine['beginFreshSessionCheckpoint']>;
 
 function makeDb(): Database {
   return {
@@ -59,9 +65,17 @@ function makeMessenger(): Messenger {
   };
 }
 
-function makeDurability(): { durability: DurabilityEngine; upsertCalls: UpsertSessionCheckpointCall[] } {
+function makeDurability(): {
+  durability: DurabilityEngine;
+  upsertCalls: UpsertSessionCheckpointCall[];
+  beginFreshCalls: BeginFreshSessionCheckpointCall[];
+} {
   const upsertCalls: UpsertSessionCheckpointCall[] = [];
+  const beginFreshCalls: BeginFreshSessionCheckpointCall[] = [];
   const durability: DurabilityEngine = {
+    beginFreshSessionCheckpoint: vi.fn((...call: BeginFreshSessionCheckpointCall) => {
+      beginFreshCalls.push(call);
+    }),
     upsertSessionCheckpoint: vi.fn((...call: UpsertSessionCheckpointCall) => {
       upsertCalls.push(call);
     }),
@@ -69,7 +83,7 @@ function makeDurability(): { durability: DurabilityEngine; upsertCalls: UpsertSe
     getSessionCheckpoint: vi.fn(),
     getAllActiveCheckpoints: vi.fn(() => []),
   } as unknown as DurabilityEngine;
-  return { durability, upsertCalls };
+  return { durability, upsertCalls, beginFreshCalls };
 }
 
 function makeMockChild(pid = 12345) {
@@ -115,17 +129,16 @@ describe('SessionManager — durability checkpoints', () => {
     expect(() => sm.setDurability(durability)).not.toThrow();
   });
 
-  it('spawnSession calls upsertSessionCheckpoint with active status', async () => {
+  it('spawnSession atomically begins a fresh active checkpoint', async () => {
     const db = makeDb();
-    const { durability, upsertCalls } = makeDurability();
+    const { durability, upsertCalls, beginFreshCalls } = makeDurability();
     const sm = new SessionManager({ db, messenger: makeMessenger(), chatJid: CHAT_JID, onEvent: vi.fn() });
     sm.setDurability(durability);
 
     await sm.spawnSession();
 
-    expect(upsertCalls).toStrictEqual([
-      [CONVERSATION_KEY, { claudePid: 12345, sessionStatus: 'active' }],
-    ]);
+    expect(beginFreshCalls).toStrictEqual([[CONVERSATION_KEY, 12345]]);
+    expect(upsertCalls).toStrictEqual([]);
   });
 
   it('works fine without durability set (no crash)', async () => {

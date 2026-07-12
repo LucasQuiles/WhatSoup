@@ -1161,6 +1161,9 @@ describe('database.ts uncovered-branch coverage', () => {
       .map((c) => c.name);
     const beforeSessCols = (db.raw.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>)
       .map((c) => c.name);
+    const migrationsBefore = (
+      db.raw.prepare('SELECT count(*) AS n FROM schema_migrations').get() as { n: number }
+    ).n;
     db.close();
 
     // Wipe the migration records for every guarded migration so they re-run.
@@ -1170,7 +1173,7 @@ describe('database.ts uncovered-branch coverage', () => {
     ).run();
     const remaining = wipe.prepare('SELECT count(*) AS n FROM schema_migrations').get() as { n: number };
     wipe.close();
-    expect(remaining.n).toBeLessThan(29);
+    expect(remaining.n).toBe(migrationsBefore - 8);
 
     // Reopen — migration functions re-execute but every guard skips the ALTER.
     const db2 = new Database(path);

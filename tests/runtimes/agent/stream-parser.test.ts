@@ -1,7 +1,11 @@
 // @check CHK-020
 // @traces REQ-005.AC-04
 import { describe, it, expect } from 'vitest';
-import { parseEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+// T2-DEFER(T3/T4): this compatibility suite intentionally exercises the deprecated head shim.
+import {
+  parseEvent as parseDeprecatedHead,
+  parseEvents,
+} from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 
 function line(obj: unknown): string {
@@ -11,69 +15,69 @@ function line(obj: unknown): string {
 describe('parseEvent', () => {
   describe('empty / whitespace lines', () => {
     it('returns null for an empty string', () => {
-      expect(parseEvent('')).toBeNull();
+      expect(parseDeprecatedHead('')).toBeNull();
     });
 
     it('returns null for a whitespace-only string', () => {
-      expect(parseEvent('   \t\n  ')).toBeNull();
+      expect(parseDeprecatedHead('   \t\n  ')).toBeNull();
     });
   });
 
   describe('malformed JSON', () => {
     it('returns parse_error for invalid JSON', () => {
-      const result = parseEvent('{not valid json}');
+      const result = parseDeprecatedHead('{not valid json}');
       expect(result).toEqual({ type: 'parse_error', line: '{not valid json}' });
     });
 
     it('returns parse_error and preserves the original line', () => {
       const badLine = 'hello world';
-      const result = parseEvent(badLine);
+      const result = parseDeprecatedHead(badLine);
       expect(result).toEqual({ type: 'parse_error', line: badLine });
     });
 
     it('does not throw on malformed input', () => {
-      expect(() => parseEvent('{bad')).not.toThrow();
+      expect(() => parseDeprecatedHead('{bad')).not.toThrow();
     });
   });
 
   describe('system init event', () => {
     it('maps subtype=init to { type: init, sessionId }', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'system', subtype: 'init', session_id: 'ses_abc123' }),
       );
       expect(result).toEqual({ type: 'init', sessionId: 'ses_abc123' });
     });
 
     it('handles missing session_id gracefully', () => {
-      const result = parseEvent(line({ type: 'system', subtype: 'init' }));
+      const result = parseDeprecatedHead(line({ type: 'system', subtype: 'init' }));
       expect(result).toEqual({ type: 'init', sessionId: '' });
     });
   });
 
   describe('system compact_boundary event', () => {
     it('maps subtype=compact_boundary correctly', () => {
-      const result = parseEvent(line({ type: 'system', subtype: 'compact_boundary' }));
+      const result = parseDeprecatedHead(line({ type: 'system', subtype: 'compact_boundary' }));
       expect(result).toEqual({ type: 'compact_boundary' });
     });
   });
 
   describe('system hook events', () => {
     it('maps subtype starting with "hook" to ignored', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'system', subtype: 'hook_pre_tool_call' }),
       );
       expect(result).toEqual({ type: 'ignored' });
     });
 
     it('maps hook_post_tool_call to ignored', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'system', subtype: 'hook_post_tool_call' }),
       );
       expect(result).toEqual({ type: 'ignored' });
     });
 
     it('maps subtype "hooks" (exact prefix) to ignored', () => {
-      const result = parseEvent(line({ type: 'system', subtype: 'hooks_fired' }));
+      const result = parseDeprecatedHead(line({ type: 'system', subtype: 'hooks_fired' }));
       expect(result).toEqual({ type: 'ignored' });
     });
   });
@@ -81,14 +85,14 @@ describe('parseEvent', () => {
   describe('system unknown subtype', () => {
     it('maps unrecognized subtype to unknown', () => {
       const raw = { type: 'system', subtype: 'something_new' };
-      const result = parseEvent(line(raw));
+      const result = parseDeprecatedHead(line(raw));
       expect(result).toEqual({ type: 'unknown', raw });
     });
   });
 
   describe('assistant text events', () => {
     it('maps text content block to assistant_text', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: {
@@ -100,7 +104,7 @@ describe('parseEvent', () => {
     });
 
     it('extracts the first text block when multiple content blocks exist', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: {
@@ -115,7 +119,7 @@ describe('parseEvent', () => {
     });
 
     it('handles empty text field', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: { content: [{ type: 'text', text: '' }] },
@@ -124,24 +128,29 @@ describe('parseEvent', () => {
       expect(result).toEqual({ type: 'assistant_text', text: '' });
     });
 
-    it('skips invalid blocks before text and defaults missing text to empty string', () => {
-      const result = parseEvent(
+    it('emits invalid blocks and rejects a text block with a missing text field', () => {
+      const malformedText = { type: 'text' };
+      const result = parseEvents(
         line({
           type: 'assistant',
-          message: { content: [null, 'ignored', { type: 'text' }] },
+          message: { content: [null, 'ignored', malformedText] },
         }),
       );
-      expect(result).toEqual({ type: 'assistant_text', text: '' });
+      expect(result).toEqual([
+        { type: 'unknown_block', blockType: '<non-object>', raw: null },
+        { type: 'unknown_block', blockType: '<non-object>', raw: 'ignored' },
+        { type: 'unknown_block', blockType: 'text', raw: malformedText },
+      ]);
     });
   });
 
   describe('assistant tool_use events', () => {
     it('maps tool_use content block to tool_use event', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: {
-            content: [{ type: 'tool_use', id: 'toolu_01', name: 'Read' }],
+            content: [{ type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} }],
           },
         }),
       );
@@ -149,12 +158,12 @@ describe('parseEvent', () => {
     });
 
     it('returns tool_use when it appears before text in the content array', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: {
             content: [
-              { type: 'tool_use', id: 'toolu_02', name: 'Bash' },
+              { type: 'tool_use', id: 'toolu_02', name: 'Bash', input: {} },
               { type: 'text', text: 'some text' },
             ],
           },
@@ -164,7 +173,7 @@ describe('parseEvent', () => {
     });
 
     it('returns unknown when message has no content array', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'assistant', message: { content: null } }),
       );
       expect(result).toEqual({
@@ -173,58 +182,66 @@ describe('parseEvent', () => {
       });
     });
 
-    it('skips unrelated content and preserves object tool input with missing defaults', () => {
-      const result = parseEvent(
+    it('emits unknown_block for tool_use blocks with missing or malformed required fields', () => {
+      const missingIdentity = { type: 'tool_use', input: { command: 'npm test' } };
+      const blankIdentity = { type: 'tool_use', id: ' ', name: '', input: {} };
+      const invalidIdentity = { type: 'tool_use', id: 7, name: { tool: 'Bash' }, input: {} };
+      const result = parseEvents(
         line({
           type: 'assistant',
           message: {
             content: [
-              { type: 'image', source: 'redacted' },
-              { type: 'tool_use', input: { command: 'npm test' } },
+              missingIdentity,
+              blankIdentity,
+              invalidIdentity,
             ],
           },
         }),
       );
-      expect(result).toEqual({
-        type: 'tool_use',
-        toolName: '',
-        toolId: '',
-        toolInput: { command: 'npm test' },
-      });
+      expect(result).toEqual([
+        { type: 'unknown_block', blockType: 'tool_use', raw: missingIdentity },
+        { type: 'unknown_block', blockType: 'tool_use', raw: blankIdentity },
+        { type: 'unknown_block', blockType: 'tool_use', raw: invalidIdentity },
+      ]);
     });
 
-    it('defaults array tool input to an empty object', () => {
-      const result = parseEvent(
+    it('rejects a tool_use block whose input is missing or not a record', () => {
+      const missingInput = { type: 'tool_use', id: 'toolu_missing', name: 'Bash' };
+      const arrayInput = { type: 'tool_use', id: 'toolu_array', name: 'Bash', input: [] };
+      const result = parseDeprecatedHead(
         line({
           type: 'assistant',
           message: {
-            content: [
-              { type: 'tool_use', id: 'toolu_array', name: 'Bash', input: [] },
-            ],
+            content: [missingInput, arrayInput],
           },
         }),
       );
-      expect(result).toEqual({
-        type: 'tool_use',
-        toolName: 'Bash',
-        toolId: 'toolu_array',
-        toolInput: {},
-      });
+      expect(result).toEqual({ type: 'unknown_block', blockType: 'tool_use', raw: missingInput });
+      expect(parseEvents(line({ type: 'assistant', message: { content: [arrayInput] } }))).toEqual([
+        { type: 'unknown_block', blockType: 'tool_use', raw: arrayInput },
+      ]);
     });
 
-    it('returns unknown when assistant content has no recognizable blocks', () => {
+    it('returns one unknown_block per unrecognized assistant content block', () => {
       const raw = {
         type: 'assistant',
         message: { content: [null, { type: 'image', source: 'redacted' }] },
       };
-      const result = parseEvent(line(raw));
-      expect(result).toEqual({ type: 'unknown', raw });
+      const result = parseEvents(line(raw));
+      expect(result).toEqual([
+        { type: 'unknown_block', blockType: '<non-object>', raw: null },
+        {
+          type: 'unknown_block',
+          blockType: 'image',
+          raw: { type: 'image', source: 'redacted' },
+        },
+      ]);
     });
   });
 
   describe('user tool_result events', () => {
     it('maps unknown skill local-command failure to a terminal result', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'user',
           message: {
@@ -236,7 +253,7 @@ describe('parseEvent', () => {
     });
 
     it('maps tool_result block (is_error=false) to tool_result', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'user',
           message: {
@@ -250,7 +267,7 @@ describe('parseEvent', () => {
     });
 
     it('maps tool_result block with is_error=true to isError=true', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'user',
           message: {
@@ -264,7 +281,7 @@ describe('parseEvent', () => {
     });
 
     it('defaults isError to false when is_error is absent', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'user',
           message: {
@@ -277,33 +294,69 @@ describe('parseEvent', () => {
 
     it('returns unknown for ordinary direct user text without a message object', () => {
       const raw = { type: 'user', content: 'ordinary user text' };
-      const result = parseEvent(line(raw));
+      const result = parseDeprecatedHead(line(raw));
       expect(result).toEqual({ type: 'unknown', raw });
     });
 
-    it('skips invalid user blocks and maps string tool_result content', () => {
-      const result = parseEvent(
+    it('emits invalid and ignored user blocks and rejects tool_result without an id', () => {
+      const missingId = { type: 'tool_result', is_error: true, content: 'tool failed' };
+      const result = parseEvents(
         line({
           type: 'user',
           message: {
             content: [
               null,
               { type: 'text', text: 'ignored' },
-              { type: 'tool_result', is_error: true, content: 'tool failed' },
+              missingId,
             ],
           },
         }),
       );
-      expect(result).toEqual({
-        type: 'tool_result',
-        isError: true,
-        toolId: '',
-        content: 'tool failed',
-      });
+      expect(result).toEqual([
+        { type: 'unknown_block', blockType: '<non-object>', raw: null },
+        {
+          type: 'ignored',
+          blockType: 'text',
+          reason: 'user-originated context, no provider output side effects',
+        },
+        { type: 'unknown_block', blockType: 'tool_result', raw: missingId },
+      ]);
     });
 
-    it('joins text blocks from array tool_result content', () => {
-      const result = parseEvent(
+    it('rejects a tool_result whose is_error or content has the wrong type', () => {
+      const invalidError = {
+        type: 'tool_result',
+        tool_use_id: 'toolu_error',
+        is_error: 'true',
+      };
+      const invalidContent = {
+        type: 'tool_result',
+        tool_use_id: 'toolu_content',
+        content: { text: 'not an allowed content shape' },
+      };
+
+      expect(parseEvents(line({
+        type: 'user',
+        message: { content: [invalidError, invalidContent] },
+      }))).toEqual([
+        { type: 'unknown_block', blockType: 'tool_result', raw: invalidError },
+        { type: 'unknown_block', blockType: 'tool_result', raw: invalidContent },
+      ]);
+    });
+
+    it('preserves outer tool_result and emits every nested non-text or malformed item in order', () => {
+      const malformedText = { type: 'text' };
+      const image = { type: 'image', source: 'redacted' };
+      const document = { type: 'document', source: 'redacted' };
+      const nestedToolResult = {
+        type: 'tool_result',
+        tool_use_id: 'nested',
+        content: 'nested result',
+      };
+      const future = { type: 'future_payload', sanitized: true };
+      const missingType = {};
+      const invalidType = { type: 42 };
+      const result = parseEvents(
         line({
           type: 'user',
           message: {
@@ -313,21 +366,51 @@ describe('parseEvent', () => {
                 tool_use_id: 'toolu_array_content',
                 content: [
                   null,
-                  { type: 'image', source: 'redacted' },
+                  image,
                   { type: 'text', text: 'first line' },
-                  { type: 'text' },
+                  malformedText,
+                  document,
+                  nestedToolResult,
+                  future,
+                  missingType,
+                  invalidType,
                 ],
               },
+              { type: 'tool_result', tool_use_id: 'toolu_after' },
             ],
           },
         }),
       );
-      expect(result).toEqual({
-        type: 'tool_result',
-        isError: false,
-        toolId: 'toolu_array_content',
-        content: 'first line\n',
-      });
+      expect(result).toEqual([
+        {
+          type: 'tool_result',
+          isError: false,
+          toolId: 'toolu_array_content',
+          content: 'first line',
+        },
+        { type: 'unknown_block', blockType: '<non-object>', raw: null },
+        {
+          type: 'ignored',
+          blockType: 'image',
+          reason: 'user-originated media, no provider output side effects',
+        },
+        { type: 'unknown_block', blockType: 'text', raw: malformedText },
+        {
+          type: 'ignored',
+          blockType: 'document',
+          reason: 'user-originated document, no provider output side effects',
+        },
+        { type: 'unknown_block', blockType: 'tool_result', raw: nestedToolResult },
+        { type: 'unknown_block', blockType: 'future_payload', raw: future },
+        { type: 'unknown_block', blockType: '<missing>', raw: missingType },
+        { type: 'unknown_block', blockType: '<invalid>', raw: invalidType },
+        {
+          type: 'tool_result',
+          isError: false,
+          toolId: 'toolu_after',
+          content: '',
+        },
+      ]);
     });
   });
 
@@ -336,59 +419,59 @@ describe('parseEvent', () => {
     // Rendering result.result on success would double-send every reply.
 
     it('returns text: null for a successful result (is_error absent)', () => {
-      const result = parseEvent(line({ type: 'result', result: 'Task complete.', is_error: false }));
+      const result = parseDeprecatedHead(line({ type: 'result', result: 'Task complete.', is_error: false }));
       expect(result).toEqual({ type: 'result', text: null });
     });
 
     it('returns text: null for a successful result with content field', () => {
-      const result = parseEvent(line({ type: 'result', content: 'Task complete.' }));
+      const result = parseDeprecatedHead(line({ type: 'result', content: 'Task complete.' }));
       expect(result).toEqual({ type: 'result', text: null });
     });
 
     it('returns text: null for a successful result with content array', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'result', content: [{ type: 'text', text: 'Done!' }] }),
       );
       expect(result).toEqual({ type: 'result', text: null });
     });
 
     it('returns text: null when no content or result fields are present', () => {
-      const result = parseEvent(line({ type: 'result' }));
+      const result = parseDeprecatedHead(line({ type: 'result' }));
       expect(result).toEqual({ type: 'result', text: null });
     });
 
     // Error results: text must be surfaced so the user sees context-limit / turn-error messages.
 
     it('returns text from result field when is_error is true', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'result', result: 'Context window exceeded.', is_error: true }),
       );
       expect(result).toEqual({ type: 'result', text: 'Context window exceeded.', isError: true });
     });
 
     it('returns text from string content field when is_error is true', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'result', content: 'Turn error.', is_error: true }),
       );
       expect(result).toEqual({ type: 'result', text: 'Turn error.', isError: true });
     });
 
     it('returns text from content array text block when is_error is true', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'result', content: [{ type: 'text', text: 'Error details.' }], is_error: true }),
       );
       expect(result).toEqual({ type: 'result', text: 'Error details.', isError: true });
     });
 
     it('returns text: null for an empty string content error result', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({ type: 'result', content: '', is_error: true }),
       );
       expect(result).toEqual({ type: 'result', text: null, isError: true });
     });
 
     it('skips invalid error content blocks and returns null for empty text', () => {
-      const result = parseEvent(
+      const result = parseDeprecatedHead(
         line({
           type: 'result',
           content: [null, { type: 'image' }, { type: 'text' }],
@@ -399,19 +482,19 @@ describe('parseEvent', () => {
     });
 
     it('returns text: null for an empty result field error result', () => {
-      const result = parseEvent(line({ type: 'result', result: '', is_error: true }));
+      const result = parseDeprecatedHead(line({ type: 'result', result: '', is_error: true }));
       expect(result).toEqual({ type: 'result', text: null, isError: true });
     });
 
     it('returns text: null for error result with no content', () => {
-      const result = parseEvent(line({ type: 'result', is_error: true }));
-      expect(result).toEqual({ type: 'result', text: null });
+      const result = parseDeprecatedHead(line({ type: 'result', is_error: true }));
+      expect(result).toEqual({ type: 'result', text: null, isError: true });
     });
 
     // Token usage extraction — including cache tokens
 
     it('extracts inputTokens and outputTokens from usage field', () => {
-      const result = parseEvent(line({
+      const result = parseDeprecatedHead(line({
         type: 'result', is_error: false,
         usage: { input_tokens: 500, output_tokens: 100 },
       }));
@@ -419,7 +502,7 @@ describe('parseEvent', () => {
     });
 
     it('sums cache_creation_input_tokens into inputTokens', () => {
-      const result = parseEvent(line({
+      const result = parseDeprecatedHead(line({
         type: 'result', is_error: false,
         usage: { input_tokens: 3, cache_creation_input_tokens: 33243, output_tokens: 32 },
       }));
@@ -427,7 +510,7 @@ describe('parseEvent', () => {
     });
 
     it('sums cache_read_input_tokens into inputTokens', () => {
-      const result = parseEvent(line({
+      const result = parseDeprecatedHead(line({
         type: 'result', is_error: false,
         usage: { input_tokens: 3, cache_read_input_tokens: 33346, output_tokens: 5 },
       }));
@@ -435,7 +518,7 @@ describe('parseEvent', () => {
     });
 
     it('sums both cache creation and read into inputTokens', () => {
-      const result = parseEvent(line({
+      const result = parseDeprecatedHead(line({
         type: 'result', is_error: false,
         usage: {
           input_tokens: 3,
@@ -448,7 +531,7 @@ describe('parseEvent', () => {
     });
 
     it('returns undefined tokens when usage field is absent', () => {
-      const result = parseEvent(line({ type: 'result', is_error: false }));
+      const result = parseDeprecatedHead(line({ type: 'result', is_error: false }));
       expect(result).toMatchObject({ type: 'result' });
       expect((result as any).inputTokens).toBeUndefined();
       expect((result as any).outputTokens).toBeUndefined();
@@ -458,17 +541,17 @@ describe('parseEvent', () => {
   describe('unknown events', () => {
     it('returns unknown for unrecognized top-level type', () => {
       const raw = { type: 'internal_debug', data: 'xyz' };
-      const result = parseEvent(line(raw));
+      const result = parseDeprecatedHead(line(raw));
       expect(result).toEqual({ type: 'unknown', raw });
     });
 
     it('returns unknown for a JSON primitive (non-object)', () => {
-      const result = parseEvent('42');
+      const result = parseDeprecatedHead('42');
       expect(result).toEqual({ type: 'unknown', raw: 42 });
     });
 
     it('returns unknown for null JSON value', () => {
-      const result = parseEvent('null');
+      const result = parseDeprecatedHead('null');
       // null parses as non-object, handled as unknown
       expect((result as AgentEvent).type).toBe('unknown');
     });
@@ -488,7 +571,7 @@ describe('parseEvent', () => {
         line({ type: 'user', message: {} }),
       ];
       for (const input of inputs) {
-        expect(() => parseEvent(input)).not.toThrow();
+        expect(() => parseDeprecatedHead(input)).not.toThrow();
       }
     });
   });

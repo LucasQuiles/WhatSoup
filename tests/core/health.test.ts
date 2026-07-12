@@ -208,12 +208,19 @@ describe('GET /health', () => {
   });
 
   it('returns 200 with healthy status when connected', async () => {
+    const requestedAt = Date.now();
     const { status, body } = await httpReq(port, '/health', 'GET');
+    const receivedAt = Date.now();
     expect(status).toBe(200);
     const json = JSON.parse(body);
     expect(json.status).toBe('healthy');
     expect(json.whatsapp.connected).toBe(true);
     expect(typeof json.uptime_seconds).toBe('number');
+    expect(typeof json.generated_at).toBe('string');
+    const generatedAt = Date.parse(json.generated_at);
+    expect(Number.isNaN(generatedAt)).toBe(false);
+    expect(generatedAt).toBeGreaterThanOrEqual(requestedAt);
+    expect(generatedAt).toBeLessThanOrEqual(receivedAt);
   });
 
   it('surfaces safe ARC binding metadata from runtime health', async () => {
@@ -1278,6 +1285,39 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
     expect(json.runtime.agent.effectiveProvider).toBe('openai-api');
+    db2.close();
+  });
+
+  it('publishes turn-finalization recovery counters and degraded status', async () => {
+    db.close();
+    const db2 = makeDb();
+    const recoveryHealth = {
+      proactiveResumeIdentityRejects: 3,
+      turnFinalizationRetainedRetries: 2,
+      turnFinalizationDegradedScopes: 1,
+      turnFinalizationRetryAttempts: 7,
+      turnFinalizationRetryRecoveries: 4,
+      turnFinalizationRetryExhaustions: 1,
+    };
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: { activeSessions: 1, ...recoveryHealth },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.runtime.agent).toMatchObject(recoveryHealth);
     db2.close();
   });
 

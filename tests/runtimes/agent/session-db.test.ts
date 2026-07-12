@@ -461,6 +461,18 @@ describe('agent session-db', () => {
     expect(row.ended_at).toStrictEqual(null);
   });
 
+  it('updateSessionStatus clears stale ended_at when reactivating a terminal row', () => {
+    const id = createSession(db, 1234, '/tmp');
+    updateSessionStatus(db, id, 'crashed');
+
+    updateSessionStatus(db, id, 'active');
+
+    const row = db.raw.prepare(
+      'SELECT ended_at, status FROM agent_sessions WHERE id = ?',
+    ).get(id) as { ended_at: string | null; status: string };
+    expect(row).toEqual({ ended_at: null, status: 'active' });
+  });
+
   it('accumulateTokensWithEvent rolls back both writes on failure', () => {
     const id = createSession(db, 90001, '/tmp/atomic-test');
 

@@ -25,6 +25,17 @@ export const JID_GROUP = `@${DOMAIN_GROUP}`;
 /** SMS transport JID suffix */
 export const JID_SMS = `@${DOMAIN_SMS}`;
 
+export type WhatsAppDeliveryNamespace =
+  | typeof DOMAIN_PERSONAL
+  | typeof DOMAIN_LID
+  | typeof DOMAIN_GROUP;
+
+const WHATSAPP_DELIVERY_NAMESPACES: ReadonlySet<string> = new Set([
+  DOMAIN_PERSONAL,
+  DOMAIN_LID,
+  DOMAIN_GROUP,
+]);
+
 // ── JID builders ────────────────────────────────────────────────────────────
 
 /** Build a personal JID from a phone number */
@@ -104,6 +115,31 @@ export function isWhatsAppAuthenticatedJid(jid: string | null | undefined): bool
 }
 
 // ── JID parsing ─────────────────────────────────────────────────────────────
+
+/**
+ * Return the exact namespace of a canonical WhatsApp delivery JID.
+ * Completed-turn identity deliberately excludes transport and broadcast
+ * pseudo-JIDs, and accepts exactly one local/namespace separator.
+ */
+export function parseWhatsAppDeliveryNamespace(
+  jid: string,
+): WhatsAppDeliveryNamespace | null {
+  if (typeof jid !== 'string' || jid.length === 0 || jid.trim() !== jid || /\s/.test(jid)) {
+    return null;
+  }
+  const separator = jid.indexOf('@');
+  if (
+    separator <= 0 ||
+    separator !== jid.lastIndexOf('@') ||
+    separator === jid.length - 1
+  ) {
+    return null;
+  }
+  const namespace = jid.slice(separator + 1);
+  return WHATSAPP_DELIVERY_NAMESPACES.has(namespace)
+    ? namespace as WhatsAppDeliveryNamespace
+    : null;
+}
 
 /** Extract the local part (everything before @) from a JID. Returns the input if no @ present. */
 export function bareNumber(jid: string): string {
