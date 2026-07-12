@@ -797,7 +797,7 @@ def _run_git_rev_parse(repo_root: Path) -> tuple[str, str, int]:
     Callers are responsible for catching those exceptions.
     """
     proc = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        ["git", "--no-optional-locks", "-C", str(repo_root), "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
         timeout=10,
