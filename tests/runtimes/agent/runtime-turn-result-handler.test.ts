@@ -126,6 +126,7 @@ function makeHarness(options: {
     postTurnGate: new Set<string>(),
     turnHadToolActivity: new Set<string>(),
     perChatRouteMarkerHold: new Map<string, string>(),
+    pendingTurnText: new Map<string, string>(),
     pendingTurnActorJid: new Map<string, string | undefined>(),
     perChatTurnText: new Map<string, string>(),
     perChatAssistantItemText: new Map<string, Map<string, string>>(),
@@ -258,4 +259,78 @@ describe('runtime result terminal provider notices', () => {
       });
     }
   }
+});
+
+describe('journaled result without runtime turn context (invariant-violation path)', () => {
+  it('releases the per-chat replay latch when a journaled completed result has no runtime turn context', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const host = harness.host as unknown as {
+      durability: unknown;
+      pendingTurnText: Map<string, string>;
+      pendingTurnActorJid: Map<string, string | undefined>;
+      runtimeTurnCoordinator: {
+        runtimeTurnContext: ReturnType<typeof vi.fn>;
+        attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+      };
+    };
+    // Durability is present and the result is journaled (inboundSeq defined),
+    // but the immutable runtime turn context is missing — the invariant-violation
+    // branch. The completed turn must still release the replay/eviction latch.
+    host.durability = {};
+    host.runtimeTurnCoordinator.runtimeTurnContext.mockReturnValue(null);
+    host.runtimeTurnCoordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    host.pendingTurnText.set('15550190050', 'queued user turn');
+    host.pendingTurnActorJid.set('15550190050', 'user@s.whatsapp.net');
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'done', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(host.pendingTurnText.has('15550190050')).toBe(false);
+    expect(host.pendingTurnActorJid.has('15550190050')).toBe(false);
+  });
+
+  it('preserves the replay latch on the invariant path when the turn did not complete cleanly', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const host = harness.host as unknown as {
+      durability: unknown;
+      pendingTurnText: Map<string, string>;
+      pendingTurnActorJid: Map<string, string | undefined>;
+      runtimeTurnCoordinator: {
+        runtimeTurnContext: ReturnType<typeof vi.fn>;
+        attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+      };
+    };
+    host.durability = {};
+    host.runtimeTurnCoordinator.runtimeTurnContext.mockReturnValue(null);
+    host.runtimeTurnCoordinator.attemptOutcomeForResult.mockReturnValue({
+      kind: 'failed',
+      class: 'rate-limit',
+    });
+    host.pendingTurnText.set('15550190050', 'queued user turn');
+    host.pendingTurnActorJid.set('15550190050', 'user@s.whatsapp.net');
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'API Error 429: rate limit exceeded', isError: true },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(host.pendingTurnText.get('15550190050')).toBe('queued user turn');
+    expect(host.pendingTurnActorJid.get('15550190050')).toBe('user@s.whatsapp.net');
+  });
 });
