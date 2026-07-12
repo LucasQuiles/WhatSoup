@@ -621,6 +621,14 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
     }
     host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
   } else if (!isSystemResult && inboundSeq !== undefined && host.durability) {
+    // Invariant violation: the journaled result should have carried an immutable
+    // runtime turn context. The turn is nonetheless terminal — release the
+    // replay/eviction latch exactly like the unowned path so the stale entry
+    // cannot feed a later fallback replay.
+    if (mapKey !== undefined && clearReplayOnSuccess) {
+      host.pendingTurnText.delete(mapKey);
+      host.pendingTurnActorJid.delete(mapKey);
+    }
     log.error({ mapKey, inboundSeq }, 'journaled per-chat result has no immutable runtime turn context');
   }
 }
