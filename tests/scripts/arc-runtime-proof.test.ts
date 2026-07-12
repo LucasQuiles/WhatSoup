@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +10,11 @@ const SHA_B = `sha256:${'b'.repeat(64)}`;
 const tempRoots: string[] = [];
 
 function makeRoot(): string {
-  const root = path.join(tmpdir(), `whatsoup-arc-proof-${randomUUID()}`);
+  // The script scans its own `out=` diagnostic with assertNoSecretLike, which rejects
+  // any 10+ digit run as phone-number-like. mkdtemp's 6-char suffix keeps the temp
+  // path below that threshold; a full randomUUID() occasionally produced an all-decimal
+  // 12-char segment and flaked the happy-path tests.
+  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-arc-proof-'));
   mkdirSync(path.join(root, '.arc'), { recursive: true });
   tempRoots.push(root);
   return root;
@@ -143,6 +146,19 @@ describe('arc-runtime-proof', () => {
       '--repo-root',
       root,
     ], root);
+
+    expect(code).toBe(1);
+    expect(existsSync(out)).toBe(false);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('redaction_violation'));
+  });
+
+  it('fails closed when the output path itself contains a secret-like digit run', () => {
+    const root = makeRoot();
+    writeArcFiles(root, { emits: ['verification-record'] });
+    const out = path.join(root, '9'.repeat(12), 'runtime-enforcement.verification-record.json');
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const code = run(['--health-json', healthJson(root), '--out', out, '--repo-root', root], root);
 
     expect(code).toBe(1);
     expect(existsSync(out)).toBe(false);
