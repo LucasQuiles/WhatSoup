@@ -74,6 +74,7 @@ import {
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
+import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
@@ -2354,6 +2355,7 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
     // Crash-safe latch table for the one-message handoff collapse. Idempotent;
     // created eagerly so an unconsumed notice from a prior process can flush.

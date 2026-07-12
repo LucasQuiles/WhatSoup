@@ -77,6 +77,7 @@ function makeDeps(instance: DiscoveredInstance): OpsDeps {
       getInstances: () => map,
       refresh: vi.fn(),
     },
+    realtime: { publish: vi.fn() },
   } as unknown as OpsDeps;
 }
 
@@ -109,6 +110,91 @@ afterEach(() => {
 });
 
 describe('handleConfigUpdate symlink-escape defense (regression)', () => {
+  it('REJECTS an existing cwd symlink alias that resolves exactly to HOME', async () => {
+    const configPath = path.join(HOME, 'config.json');
+    const workspace = path.join(HOME, 'workspace');
+    const homeAlias = path.join(HOME, 'home-alias');
+    fs.mkdirSync(workspace);
+    fs.symlinkSync(HOME, homeAlias);
+    const config = {
+      ...baseAgentConfig,
+      agentOptions: { cwd: workspace, sessionScope: 'per_chat' },
+    };
+    writeConfig(configPath, config);
+
+    const req = mockReq(
+      JSON.stringify({ agentOptions: { cwd: homeAlias, sessionScope: 'per_chat' } }),
+    );
+    const res = mockRes();
+    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+
+    expect(res._status).toBe(400);
+    expect(res._body).toContain('agentOptions.cwd');
+    expectPersistedConfig(configPath, config);
+  });
+
+  it('REJECTS an existing regular file as cwd without persisting it', async () => {
+    const configPath = path.join(HOME, 'config.json');
+    const workspace = path.join(HOME, 'workspace');
+    const file = path.join(HOME, 'not-a-workspace');
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(file, 'not a directory');
+    const config = {
+      ...baseAgentConfig,
+      agentOptions: { cwd: workspace, sessionScope: 'per_chat' },
+    };
+    writeConfig(configPath, config);
+
+    const req = mockReq(
+      JSON.stringify({ agentOptions: { cwd: file, sessionScope: 'per_chat' } }),
+    );
+    const res = mockRes();
+    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+
+    expect(res._status).toBe(400);
+    expect(res._body).toContain('agentOptions.cwd');
+    expectPersistedConfig(configPath, config);
+  });
+
+  it('accepts a cwd symlink alias to a physically distinct child directory', async () => {
+    const configPath = path.join(HOME, 'config.json');
+    const workspace = path.join(HOME, 'workspace');
+    const workspaceAlias = path.join(HOME, 'workspace-alias');
+    fs.mkdirSync(workspace);
+    fs.symlinkSync(workspace, workspaceAlias);
+    writeConfig(configPath, baseAgentConfig);
+
+    const req = mockReq(
+      JSON.stringify({ agentOptions: { cwd: workspaceAlias, sessionScope: 'per_chat' } }),
+    );
+    const res = mockRes();
+    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+
+    expect(res._status).toBe(200);
+    expectPersistedConfig(configPath, {
+      ...baseAgentConfig,
+      agentOptions: { cwd: workspaceAlias, sessionScope: 'per_chat' },
+    });
+  });
+
+  it('accepts a new child cwd below HOME', async () => {
+    const configPath = path.join(HOME, 'config.json');
+    const newWorkspace = path.join(HOME, 'new-workspace');
+    writeConfig(configPath, baseAgentConfig);
+
+    const req = mockReq(
+      JSON.stringify({ agentOptions: { cwd: newWorkspace, sessionScope: 'per_chat' } }),
+    );
+    const res = mockRes();
+    await handleConfigUpdate(req, res, makeDeps(makeInstance(configPath)), { name: 'sym-test' });
+
+    expect(res._status).toBe(200);
+    expectPersistedConfig(configPath, {
+      ...baseAgentConfig,
+      agentOptions: { cwd: newWorkspace, sessionScope: 'per_chat' },
+    });
+  });
+
   it('REJECTS an agentOptions.cwd that points at a symlink leading outside HOME', async () => {
     const configPath = path.join(HOME, 'config.json');
     writeConfig(configPath, baseAgentConfig);
