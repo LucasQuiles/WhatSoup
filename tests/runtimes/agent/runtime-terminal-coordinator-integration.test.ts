@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Database } from '../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
-import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
-import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 import {
@@ -11,10 +10,15 @@ import {
   peekStandbyNotice,
 } from '../../../src/runtimes/agent/standby-notice.ts';
 import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../../src/core/conversation-key.ts';
-import type {
-  FinalizeTurnTerminalResult,
-  OutboundDeliverySnapshot,
-} from '../../../src/core/durability.ts';
+import {
+  type RuntimeState,
+  context,
+  durabilityMock,
+  makeRuntimeState,
+  queueStub,
+  replyGuaranteeMock,
+  sessionStub,
+} from './lib/runtime-terminal-coordinator-harness.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => ({
   ok: true,
@@ -40,313 +44,6 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   emitAlertChecked: emitAlert,
 }));
 
-interface RuntimeState {
-  durability: ReturnType<typeof durabilityMock>;
-  replyGuarantee: ReturnType<typeof replyGuaranteeMock>;
-  perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
-  perChatInboundSeqQueue: Map<string, number[]>;
-  perChatTurnQueues: Map<string, {
-    activeTurn: QueuedTurn | null;
-    idle(): Promise<void>;
-  }>;
-  currentRuntimeTurnContext: RuntimeTurnContext | null;
-  currentInboundSeq?: number;
-  currentTurnChatJid: string | null;
-  activeChatJid: string | null;
-  turnHadVisibleOutput: boolean;
-  outboundQueues: Map<string, IOutboundQueue>;
-  chatQueues: Map<string, IOutboundQueue>;
-  chatSessions: Map<string, ReturnType<typeof sessionStub>>;
-  perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
-  pendingTurnText: Map<string, string>;
-  runtimeTurnAfterTerminal: Map<string, (result: unknown) => void | Promise<void>>;
-  scheduleFallbackReplay(args: {
-    activation: {
-      primaryProvider: string;
-      fallbackProvider: string;
-      fallbackModel: string | undefined;
-      reason: 'usage-limit';
-      resetAt: Date | null;
-      activeUntil: number;
-      extended: boolean;
-      keyPresent: boolean | null;
-      recoveryProbeRequired: boolean;
-    };
-    chatJid: string;
-    mapKey?: string;
-    oldSession: ReturnType<typeof sessionStub> | null;
-    hadToolActivity: boolean;
-  }): boolean;
-  replayTurnOnFallback(args: unknown): Promise<void>;
-  notifyProviderFallbackActivated(
-    queue: IOutboundQueue,
-    activation: {
-      primaryProvider: string;
-      fallbackProvider: string;
-      fallbackModel: string | undefined;
-      reason: 'usage-limit';
-      resetAt: Date | null;
-      activeUntil: number;
-      extended: boolean;
-      keyPresent: boolean | null;
-      recoveryProbeRequired: boolean;
-    },
-    replay: { replayScheduled: boolean; blockedByToolActivity?: boolean },
-  ): void;
-  runtimeTurnCoordinator: {
-    finalizeRuntimeTurnContext(args: {
-      context: RuntimeTurnContext;
-      queue: IOutboundQueue;
-      attemptOutcome: { kind: 'failed'; class: 'crash' } | { kind: 'completed' };
-      session: ReturnType<typeof sessionStub> | null;
-      mapKey?: string;
-    }): Promise<unknown>;
-    finalizeRuntimeCrash(
-      context: RuntimeTurnContext,
-      queue: IOutboundQueue,
-      session: ReturnType<typeof sessionStub> | null,
-      mapKey?: string,
-    ): void;
-    awaitActiveFinalizations(): Promise<void>;
-    beginRuntimeTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void;
-    consumeRuntimeTurnContinuationDeferral(context: RuntimeTurnContext): boolean;
-    enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean;
-    finalizeRejectedRuntimeTurn(turn: QueuedTurn): void;
-    awaitRejectedRuntimeTurnFinalizations(): Promise<void>;
-    retryRuntimeTurnFinalizations(): Promise<{
-      attempted: number;
-      recovered: number;
-      remaining: number;
-      degradedScopes: number;
-    }>;
-  };
-  sessionOwnership: {
-    claim(mapKey: string, managerId: string): { generation: number };
-  };
-  managerIdFor(session: ReturnType<typeof sessionStub>): string;
-  crashes: { record(scopeKey: string): number };
-  handlePerChatCrash(
-    mapKey: string,
-    chatJid: string,
-    info: {
-      exitCode: number;
-      signal: null;
-      sessionId: string | null;
-      dbRowId: number;
-      generationIdentity: { managerId: string; generation: number };
-    },
-    expectedSession: ReturnType<typeof sessionStub>,
-  ): void;
-  beginPerChatRuntimeTurn(
-    session: ReturnType<typeof sessionStub>,
-    chatJid: string,
-    mapKey: string,
-    context: RuntimeTurnContext,
-    scopeRef?: { value: string },
-  ): { context: RuntimeTurnContext; promise: Promise<void> } | null;
-  processTurn(turn: QueuedTurn): Promise<void>;
-  finalizeRuntimeCrash(
-    context: RuntimeTurnContext,
-    queue: IOutboundQueue,
-    session: ReturnType<typeof sessionStub> | null,
-    mapKey?: string,
-  ): void;
-  maybeStartAutoCompact(session: ReturnType<typeof sessionStub> | null, mapKey?: string): void;
-  turnQueue: {
-    enqueue(turn: QueuedTurn): boolean;
-    idle(): Promise<void>;
-  };
-  pendingSystemResults: {
-    mark(scopeKey: string): void;
-    consumeIfPending(scopeKey: string): boolean;
-  };
-  sendTurnNonShared(
-    chatJid: string,
-    text: string,
-    actorJid: string,
-    source: {
-      sourceMessageId: string;
-      conversationKey: string;
-      senderJid: string;
-      senderName: string | null;
-      contentType: 'text';
-      isGroup: false;
-    },
-    inboundSeq: number,
-  ): Promise<void>;
-  sendTurnToSession(
-    session: ReturnType<typeof sessionStub>,
-    chatJid: string,
-    text: string,
-    mapKey?: string,
-    actorJid?: string,
-    beforeUserSend?: () => void,
-  ): Promise<void>;
-  ensureSessionAndQueueSync: ReturnType<typeof vi.fn>;
-  handleEventWithContext(
-    event: AgentEvent,
-    queue: IOutboundQueue,
-    session: ReturnType<typeof sessionStub>,
-    conversationKey?: string,
-    inboundSeq?: number,
-    mapKey?: string,
-    toolScopeKey?: string,
-    isSystemResult?: boolean,
-  ): void;
-  handleEvent(event: AgentEvent): void;
-  sendTurnPerChat(
-    chatJid: string,
-    text: string,
-    mapKey: string,
-    actorJid: string,
-    context: RuntimeTurnContext,
-  ): Promise<void>;
-  processPerChatTurn(scopeRef: { value: string }, turn: QueuedTurn): Promise<void>;
-  normalizeAssistantTextForDelivery(
-    event: Extract<AgentEvent, { type: 'assistant_text' }>,
-    mapKey?: string,
-  ): string | null;
-}
-
-function context(
-  scope: 'per_chat' | 'shared' | 'singleton',
-  conversationKey: string,
-  inboundSeq: number,
-  logicalTurnId: string,
-): RuntimeTurnContext {
-  return createRuntimeTurnContext({
-    identity: {
-      scope,
-      conversationKey,
-      deliveryJid: `${conversationKey}@s.whatsapp.net`,
-      inboundSeq,
-      logicalTurnId,
-      managerId: `manager-${scope}`,
-      generation: 1,
-    },
-    recoveryOwner: {
-      logicalTurnId: `${logicalTurnId}:recovery`,
-      managerId: 'manager-recovery',
-      generation: 2,
-    },
-    replay: {
-      sourceMessageId: `wamid-${logicalTurnId}`,
-      replaySafe: true,
-      senderJid: '15550190002@s.whatsapp.net',
-      senderName: null,
-      text: 'exact admitted turn',
-      isGroup: false,
-    },
-    contentType: 'text',
-    toolScopeKey: scope === 'per_chat' ? conversationKey : '__global__',
-  });
-}
-
-function durabilityMock() {
-  return {
-    markInboundFailed: vi.fn(),
-    hasOutstandingTurnRecoveryForScope: vi.fn<(
-      scope: 'per_chat' | 'shared' | 'singleton',
-      conversationKey: string,
-    ) => boolean>(() => false),
-    getTurnRecoverySupervisorCounts: vi.fn(() => ({
-      outstanding: 0,
-      blockedUnsafe: 0,
-      pending: 0,
-      liveClaimed: 0,
-      expiredClaimed: 0,
-      exhausted: 0,
-      quarantinedDelivery: 0,
-      corruptLinks: 0,
-      orphanTransfers: 0,
-      echoConflicts: 0,
-    })),
-    getOutboundDeliverySnapshot: vi.fn<(opId: number, expected: {
-      conversationKey: string;
-      deliveryJid: string;
-      sourceInboundSeq: number | null;
-    }) => OutboundDeliverySnapshot | undefined>(
-      (opId, expected) => ({ opId, ...expected, status: 'echoed' }),
-    ),
-    finalizeTurnTerminal: vi.fn<(_params: unknown) => FinalizeTurnTerminalResult>(() => ({
-      applied: true,
-      winnerMatchesRequest: true,
-      recordId: 1,
-      duplicateFinalizeCount: 0,
-      replyGuaranteeDisarmed: true,
-      effectiveReplyGuaranteeDisarmed: true,
-    })),
-  };
-}
-
-function replyGuaranteeMock() {
-  return {
-    arm: vi.fn(),
-    disarm: vi.fn(),
-    notifyActivity: vi.fn(),
-    isArmed: vi.fn(() => false),
-    shutdown: vi.fn(),
-  };
-}
-
-function queueStub(chatJid: string): IOutboundQueue {
-  return {
-    targetChatJid: chatJid,
-    enqueueText: vi.fn(),
-    enqueueStreamingText: vi.fn(),
-    enqueueResultText: vi.fn(),
-    enqueueToolUpdate: vi.fn(),
-    enqueueProgressUpdate: vi.fn(),
-    setToolUpdateMode: vi.fn(),
-    setToolUpdateRedirectJid: vi.fn(),
-    setTextAggregateDelayMs: vi.fn(),
-    indicateTyping: vi.fn(),
-    enqueuePoll: vi.fn(async (fn) => { await fn(); }),
-    hasPendingPoll: vi.fn(() => false),
-    setPollPending: vi.fn(),
-    flush: vi.fn(async () => {}),
-    shutdown: vi.fn(async () => {}),
-    abortTurn: vi.fn(),
-    updateDeliveryJid: vi.fn(),
-    setInboundSeq: vi.fn(),
-    getLastOpId: vi.fn(() => undefined),
-    clearLastOpId: vi.fn(),
-    markLastTerminal: vi.fn(),
-    setDurability: vi.fn(),
-    endTurn: vi.fn(),
-    beginTurnEvidence: vi.fn(),
-    flushTurnEvidence: vi.fn(async (turnId: string) => ({
-      turnId,
-      answerOpIds: [],
-      lifecycleOpIds: [],
-      statusOpIds: [],
-    })),
-  } as unknown as IOutboundQueue;
-}
-
-function sessionStub() {
-  return {
-    clearTurnWatchdog: vi.fn(),
-    tickWatchdog: vi.fn(),
-    sendTurn: vi.fn(async () => {}),
-    spawnSession: vi.fn(async () => {}),
-    shutdown: vi.fn(async () => {}),
-    getDbRowId: vi.fn(() => 41),
-    getStatus: vi.fn<() => {
-      active: boolean;
-      sessionId: string | null;
-      pid: number | null;
-      durableFailureClosed?: boolean;
-    }>(() => ({ active: true, sessionId: 'session-41', pid: 4100 })),
-  };
-}
-
-function messenger() {
-  return {
-    sendMessage: vi.fn(async () => ({ waMessageId: null })),
-    sendMedia: vi.fn(async () => ({ waMessageId: null })),
-  };
-}
 
 beforeEach(() => {
   emitAlert.mockClear();
@@ -374,10 +71,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const durability = durabilityMock();
       durability.hasOutstandingTurnRecoveryForScope.mockImplementation(
         (scope, conversationKey) => scope === 'per_chat' && conversationKey === 'blocked-chat',
@@ -404,10 +100,9 @@ describe('runtime terminal coordinator integration', () => {
       const db = new Database(':memory:');
       db.open();
       try {
-        const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+        const { runtime, state } = makeRuntimeState(db, {
           ...(scope === 'shared' ? { shared: true } : {}),
         });
-        const state = runtime as unknown as RuntimeState;
         const durability = durabilityMock();
         durability.hasOutstandingTurnRecoveryForScope.mockImplementation(
           (candidateScope) => candidateScope === scope,
@@ -429,8 +124,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const runtimeContext = context('singleton', '15550190001', 7, 'turn-barrier');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       let releaseEvidence!: () => void;
@@ -469,10 +163,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         runtimeTurnSupervisor: { health(): { degradedScopes: number } };
-      };
+      }>(db);
       const runtimeContext = context('singleton', '15550190041', 51, 'turn-unproven-handoff');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       vi.mocked(queue.flushTurnEvidence).mockResolvedValue({
@@ -528,8 +221,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const runtimeContext = context('singleton', '15550190042', 52, 'turn-proven-handoff');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       vi.mocked(queue.flushTurnEvidence).mockResolvedValue({
@@ -587,15 +279,14 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         currentRuntimeTurnCompletion: {
           context: RuntimeTurnContext;
           promise: Promise<void>;
           resolve(): void;
           reject(error: unknown): void;
         } | null;
-      };
+      }>(db);
       const runtimeContext = context('singleton', '15550190008', 14, 'turn-action-barrier');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       state.durability = durabilityMock();
@@ -642,8 +333,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const runtimeContext = context('singleton', '15550190009', 15, 'turn-action-failure');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       state.durability = durabilityMock();
@@ -676,10 +366,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190014';
       const runtimeContext = context('per_chat', mapKey, 44, 'turn-fallback-continuation');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -766,10 +455,9 @@ describe('runtime terminal coordinator integration', () => {
     try {
       process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = '1';
       ensureStandbyNoticeSchema(db);
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190015';
       const runtimeContext = context('per_chat', mapKey, 45, 'turn-fallback-send-failure');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -849,8 +537,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const queue = queueStub('15550190016@s.whatsapp.net');
 
       state.notifyProviderFallbackActivated(queue, fallbackActivation(), {
@@ -871,10 +558,9 @@ describe('runtime terminal coordinator integration', () => {
     try {
       process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = '1';
       ensureStandbyNoticeSchema(db);
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190017';
       const runtimeContext = context('per_chat', mapKey, 46, 'turn-fallback-crash');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -914,8 +600,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const runtimeContext = context('singleton', '15550190002', 8, 'turn-crash-evidence');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       state.durability = durabilityMock();
@@ -944,10 +629,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
-        sessionScope: 'per_chat',
-      });
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         crashes: { record(scopeKey: string): number };
         handlePerChatCrash(
           mapKey: string,
@@ -961,7 +643,9 @@ describe('runtime terminal coordinator integration', () => {
           },
           expectedSession: ReturnType<typeof sessionStub>,
         ): void;
-      };
+      }>(db, {
+        sessionScope: 'per_chat',
+      });
       const mapKey = '15550190018';
       const session = sessionStub();
       session.getStatus.mockReturnValue({
@@ -1030,10 +714,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190024';
       const session = sessionStub();
       const managerId = state.managerIdFor(session);
@@ -1152,10 +835,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190025';
       const session = sessionStub();
       const managerId = state.managerIdFor(session);
@@ -1220,10 +902,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const session = sessionStub();
       const beforeUserSend = vi.fn();
       state.pendingSystemResults.mark('chat-system-barrier');
@@ -1253,10 +934,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190010';
       const runtimeContext = context('per_chat', mapKey, 16, 'turn-compact-order');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -1296,10 +976,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190003';
       const runtimeContext = context('per_chat', mapKey, 9, 'turn-partial-output');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -1327,10 +1006,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190004';
       const runtimeContext = context('per_chat', mapKey, 10, 'turn-null-result');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -1377,10 +1055,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190005';
       const queuedContext = context('per_chat', mapKey, 11, 'turn-owner-rebind');
       const replacement = sessionStub();
@@ -1413,12 +1090,11 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+      }>(db, {
         shared: true,
       });
-      const state = runtime as unknown as RuntimeState & {
-        session: ReturnType<typeof sessionStub> | null;
-      };
       const queuedContext = context('shared', '15550190006', 12, 'turn-shared-owner-rebind');
       const replacement = sessionStub();
       const replacementManagerId = state.managerIdFor(replacement);
@@ -1459,12 +1135,11 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+      }>(db, {
         shared: true,
       });
-      const state = runtime as unknown as RuntimeState & {
-        session: ReturnType<typeof sessionStub> | null;
-      };
       const runtimeContext = context('shared', '15550190007', 13, 'turn-stdin-timeout');
       const session = sessionStub();
       session.sendTurn.mockRejectedValue(new Error('STDIN_WRITE_TIMEOUT: child stdin stalled'));
@@ -1508,12 +1183,11 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
+        session: ReturnType<typeof sessionStub> | null;
+      }>(db, {
         shared: true,
       });
-      const state = runtime as unknown as RuntimeState & {
-        session: ReturnType<typeof sessionStub> | null;
-      };
       const runtimeContext = context('shared', '15550190008', 14, 'turn-shared-admission');
       const session = sessionStub();
       const queue = queueStub(runtimeContext.identity.deliveryJid);
@@ -1569,9 +1243,7 @@ describe('runtime terminal coordinator integration', () => {
     try {
       const conversationKey = scope === 'per_chat' ? '15550190011' : '15550190012';
       const chatJid = `${conversationKey}@s.whatsapp.net`;
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration',
-        scope === 'per_chat' ? { sessionScope: 'per_chat' } : { shared: true });
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db, scope === 'per_chat' ? { sessionScope: 'per_chat' } : { shared: true });
       const durability = durabilityMock();
       const guarantee = replyGuaranteeMock();
       const queue = queueStub(chatJid);
@@ -1648,10 +1320,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const durability = durabilityMock();
       const guarantee = replyGuaranteeMock();
       const mapKey = '15550190021';
@@ -1697,7 +1368,6 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
       const queue = queueStub('15550190031@s.whatsapp.net');
       const runtimeContext = context('singleton', '15550190031', 41, 'turn-shutdown-order');
       let sessionShutdownComplete = false;
@@ -1710,11 +1380,11 @@ describe('runtime terminal coordinator integration', () => {
         queueReachable: boolean;
         contextReachable: boolean;
       } | null = null;
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         session: typeof session | null;
         queue: IOutboundQueue | null;
         runtimeTurnSupervisor: { shutdown(): Promise<void> };
-      };
+      }>(db);
       state.session = session;
       state.queue = queue;
       state.currentRuntimeTurnContext = runtimeContext;
@@ -1753,10 +1423,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190033';
       const runtimeContext = context('per_chat', mapKey, 63, 'turn-shutdown-unproven-handoff');
       const session = sessionStub();
@@ -1806,11 +1475,10 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         session: ReturnType<typeof sessionStub> | null;
         queue: IOutboundQueue | null;
-      };
+      }>(db);
       const chatJid = '15550190034@s.whatsapp.net';
       const session = sessionStub();
       const queue = queueStub(chatJid);
@@ -1857,11 +1525,10 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState & {
+      const { runtime, state } = makeRuntimeState<RuntimeState & {
         session: ReturnType<typeof sessionStub> | null;
         queue: IOutboundQueue | null;
-      };
+      }>(db);
       const chatJid = '15550190035@s.whatsapp.net';
       const session = sessionStub();
       const queue = queueStub(chatJid);
@@ -1926,10 +1593,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const durability = durabilityMock();
       const mapKey = '15550190032';
       const session = sessionStub();
@@ -2013,10 +1679,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const mapKey = '15550190036';
       const session = sessionStub();
       const queue = queueStub(`${mapKey}@s.whatsapp.net`);
@@ -2060,8 +1725,7 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration');
-      const state = runtime as unknown as RuntimeState;
+      const { runtime, state } = makeRuntimeState(db);
       const runtimeContext = context('singleton', '15550190013', 43, 'turn-closed-checkpoint');
       const queue = queueStub(runtimeContext.identity.deliveryJid);
       const session = sessionStub();
@@ -2101,10 +1765,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
       const durability = durabilityMock();
       const guarantee = replyGuaranteeMock();
       const queue = queueStub('15550190041@s.whatsapp.net');
@@ -2134,10 +1797,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const runtime = new AgentRuntime(db, messenger() as never, 'terminal-integration', {
+      const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
       });
-      const state = runtime as unknown as RuntimeState;
 
       expect(state.normalizeAssistantTextForDelivery({
         type: 'assistant_text', itemId: 'item-edge', text: 'Hello ', complete: false,
