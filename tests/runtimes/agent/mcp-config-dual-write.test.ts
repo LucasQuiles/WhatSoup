@@ -383,6 +383,41 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     expect(readJson(join(cwd, '.claude', 'settings.json'))).toHaveProperty('permissions');
   });
 
+  it.each(['non-sandbox', 'sandbox'] as const)(
+    'rejects a configured %s cwd alias to HOME before changing user-global Claude artifacts',
+    async (mode) => {
+      const root = tmp();
+      const alias = join(root, 'home-alias');
+      const globalClaudeDir = join(homedir(), '.claude');
+      const settingsPath = join(globalClaudeDir, 'settings.json');
+      const policyPath = join(globalClaudeDir, 'sandbox-policy.json');
+      const priorSettings = existsSync(settingsPath) ? readFileSync(settingsPath) : null;
+      const priorPolicy = existsSync(policyPath) ? readFileSync(policyPath) : null;
+      const sentinel = Buffer.from(`{"sentinel":"${mode}"}\n`);
+      mkdirSync(globalClaudeDir, { recursive: true });
+      writeFileSync(settingsPath, sentinel);
+      rmSync(policyPath, { force: true });
+      symlinkSync(homedir(), alias);
+      const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'home-alias-test', {
+        cwd: alias,
+        ...(mode === 'sandbox'
+          ? { sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } } }
+          : {}),
+      });
+
+      try {
+        await expect(runtime.start()).rejects.toThrow(/cwd.*home directory/i);
+        expect(readFileSync(settingsPath)).toEqual(sentinel);
+        expect(existsSync(policyPath)).toBe(false);
+      } finally {
+        if (priorSettings) writeFileSync(settingsPath, priorSettings);
+        else rmSync(settingsPath, { force: true });
+        if (priorPolicy) writeFileSync(policyPath, priorPolicy);
+        else rmSync(policyPath, { force: true });
+      }
+    },
+  );
+
   it('attempts every chain target, writes each distinct file once, and warns on the shared-target entry', async () => {
     // Chain: primary claude-cli + [opencode-cli, gemini-cli]. Three targets are
     // attempted; .mcp.json is written once (primary shape — gemini-cli shares it

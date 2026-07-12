@@ -33,7 +33,11 @@ import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 import { systemdUnitName, type ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
-import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
+import {
+  expandHomePath,
+  hasUnsupportedTildePrefix,
+  isSamePhysicalDirectory,
+} from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 import { stripPlaintextProviderKeys } from '../../lib/config-plaintext-keys.ts';
 import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
@@ -722,6 +726,15 @@ function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: Serve
   if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
   const safeCwd = resolveHomeConfinedPath(cwd, res, 'agentOptions.cwd must be within the home directory');
   if (safeCwd === null) return null;
+  try {
+    if (isSamePhysicalDirectory(safeCwd, os.homedir())) {
+      jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+      return null;
+    }
+  } catch {
+    jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+    return null;
+  }
   agentOptions.cwd = safeCwd;
   return safeCwd;
 }
