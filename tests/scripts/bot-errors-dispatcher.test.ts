@@ -1379,3 +1379,120 @@ describe('bot-errors-dispatcher', () => {
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "dead_lettered"');
   });
 });
+
+describe('release-proof drill: two-run alert/clear traversal', () => {
+  const DRILL_SOURCE = 'release_proof_drill';
+  const DRILL_INSTANCE = 'drill-synthetic';
+  // bot-errors-emit.py stamps runtime.provenance.test=true whenever any of
+  // these vars are present in ITS OWN process env (STRONG_TEST_SIGNAL_KEYS in
+  // deploy/scripts/bot-errors-emit.py). The dispatcher's
+  // suppress_test_provenance_events() backstop then refuses any such event
+  // before it ever reaches should_suppress_send. This drill exists to prove
+  // the real incident lifecycle (open / duplicate / clear / orphan), so the
+  // emitted event must look production-shaped rather than vitest-shaped —
+  // strip the signals from the emitter's env only (the dispatcher itself
+  // never reads these vars, confirmed by grep of bot-errors-dispatcher.py).
+  const TEST_SIGNAL_ENV_KEYS = ['VITEST', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'];
+
+  function emitDrill(root: string, extra: string[]): void {
+    const env = { ...process.env, BOT_ERRORS_STATE_DIR: root, BOT_ERRORS_INLINE_LOG_TAIL: '0' };
+    for (const key of TEST_SIGNAL_ENV_KEYS) delete env[key];
+    execFileSync('python3', ['deploy/scripts/bot-errors-emit.py', ...extra], {
+      cwd: process.cwd(),
+      env,
+    });
+  }
+
+  function dispatchOnce(root: string, capture: string): string {
+    return execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: root,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capture,
+        BOT_ERRORS_INLINE_LOG_TAIL: '0',
+      },
+    });
+  }
+
+  function dirCount(root: string, name: string): number {
+    const dir = join(root, name);
+    return existsSync(dir) ? readdirSync(dir).length : 0;
+  }
+
+  it('one warning then one same-key clear; duplicates suppressed; queues drain', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-drill-'));
+    const capture = join(tmpRoot, 'capture.jsonl');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const alertArgs = [
+      '--severity', 'warning',
+      '--source', DRILL_SOURCE,
+      '--instance', DRILL_INSTANCE,
+      '--summary', 'release-proof drill alert',
+    ];
+    const clearArgs = ['--clear', '--source', DRILL_SOURCE, '--instance', DRILL_INSTANCE];
+
+    // Run 1: alert opens an incident and lands in sent/.
+    emitDrill(tmpRoot, alertArgs);
+    const alertRun = dispatchOnce(tmpRoot, capture);
+    expect(JSON.parse(alertRun)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
+    expect(dirCount(tmpRoot, 'outbox')).toBe(0);
+    expect(dirCount(tmpRoot, 'sent')).toBe(1);
+    const incidentsAfterAlert = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
+      openIncidents: Record<string, unknown>;
+    };
+    // incident-state.json also carries a flapState ledger (Pattern F trip
+    // counters) keyed the same way, which never clears on a same-key clear —
+    // a whole-file substring check would false-pass a still-closed incident.
+    // openIncidents is the actual open/closed observable, so assert on it
+    // directly, matching the structured-parse idiom this file already uses
+    // (see the daily-health-fail incident-close test above).
+    const openIncidentKeys = Object.keys(incidentsAfterAlert.openIncidents);
+    expect(openIncidentKeys).toHaveLength(1);
+    const incidentKey = openIncidentKeys[0]!;
+    expect(incidentKey).toContain(DRILL_SOURCE);
+    expect(incidentKey).toContain(DRILL_INSTANCE);
+
+    // Duplicate alert with the same key while the incident is still open. The
+    // real observable (see should_suppress_send in
+    // deploy/scripts/bot-errors-dispatcher.py) is the "incident already open
+    // for {key}; duplicate suppressed" branch: the event is archived to
+    // suppressed/, dispatch.jsonl logs a "suppressed" entry carrying that
+    // reason, and — unlike the renotify-after-INCIDENT_RENOTIFY_SECONDS path —
+    // no new line lands in capture.jsonl, since these two runs happen well
+    // inside the (6h default) renotify window.
+    emitDrill(tmpRoot, alertArgs);
+    const duplicateRun = dispatchOnce(tmpRoot, capture);
+    expect(JSON.parse(duplicateRun)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(dirCount(tmpRoot, 'outbox')).toBe(0);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('duplicate suppressed');
+    const alertMessagesAfterDuplicate = captureMessages(capture).filter((text) => text.includes('release-proof drill alert'));
+    expect(alertMessagesAfterDuplicate).toHaveLength(1);
+
+    // Run 2: same-key clear closes the incident.
+    emitDrill(tmpRoot, clearArgs);
+    const clearRun = dispatchOnce(tmpRoot, capture);
+    expect(JSON.parse(clearRun)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
+    const incidentsAfterClear = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
+      openIncidents: Record<string, unknown>;
+    };
+    expect(incidentsAfterClear.openIncidents).not.toHaveProperty(incidentKey);
+
+    // Orphan clear: the incident is already closed, so this clear has no open
+    // incident to recover. should_suppress_send's "clear has no open incident
+    // for {key}; stale recovery suppressed" branch fires — the same "no open
+    // incident" wording asserted in
+    // deploy/scripts/tests/test_bot_errors_orphan_clear_suppression.py.
+    emitDrill(tmpRoot, clearArgs);
+    const orphanRun = dispatchOnce(tmpRoot, capture);
+    expect(JSON.parse(orphanRun)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('no open incident');
+
+    for (const queue of ['outbox', 'processing', 'writefail', 'dead-letter', 'quarantine']) {
+      expect(dirCount(tmpRoot, queue), `${queue} not drained`).toBe(0);
+    }
+    const rendered = readFileSync(capture, 'utf8');
+    expect(rendered).toContain('release-proof drill alert');
+  });
+});
