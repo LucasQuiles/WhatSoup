@@ -401,6 +401,48 @@ def test_reporter_inspection_failure_exits_two_and_emits_nothing(tmp_path: Path,
     assert not (state / "outbox").exists()
 
 
+def _reporter_git_probe_failure_result(
+    tmp_path: Path, monkeypatch, failed_probe: str
+) -> tuple[int, bool]:
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    state = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    real_run = _mod.subprocess.run
+
+    def fail_selected_probe(argv, **kwargs):
+        is_target = (
+            (failed_probe == "head" and argv[-2:] == ["rev-parse", "HEAD"])
+            or (failed_probe in {"status", "rev-list"} and failed_probe in argv)
+        )
+        if argv and argv[0] == "git" and is_target:
+            return subprocess.CompletedProcess(
+                argv, 128, stdout="", stderr=f"simulated {failed_probe} failure"
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(_mod.subprocess, "run", fail_selected_probe)
+    rc = _mod.main(["--reporter", "--once", "--repo", str(work)])
+    return rc, (state / "outbox").exists()
+
+
+def test_reporter_head_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "head")
+    assert rc == 2
+    assert not outbox_exists
+
+
+def test_reporter_status_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "status")
+    assert rc == 2
+    assert not outbox_exists
+
+
+def test_reporter_ancestry_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "rev-list")
+    assert rc == 2
+    assert not outbox_exists
+
+
 def test_reporter_event_write_failure_exits_one(tmp_path: Path, monkeypatch):
     _, work = _make_origin_and_clone(tmp_path, branch="develop")
     monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))

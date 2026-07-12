@@ -176,7 +176,12 @@ Operator sequence (each gate separately owner-gated):
 1. **Gate 1 — isolated dry proof:** stage with
    `install-bot-errors-release-proof.sh dry-run --host <host> --mode observe
    --bundle-sha <merged-sha>`; run both detectors against temporary
-   `BOT_ERRORS_STATE_DIR`; prove no application path changed.
+   `BOT_ERRORS_STATE_DIR`; prove no application path changed. Before any
+   standalone timer install, capture the effective daily-health profile and
+   require
+   `python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("expectTreeProvenance", False) is False' <effective-profile-path>`
+   to exit 0. Missing or unreadable effective-profile evidence is
+   Inconclusive and stops the pilot.
 2. **Gate 2 — controlled alert drill:** one warning + same-key clear through
    the production dispatcher (`--source release_proof_drill`, unique
    conservative instance, `BOT_ERRORS_INLINE_LOG_TAIL=0`). Requires
@@ -193,5 +198,6 @@ Operator sequence (each gate separately owner-gated):
 
 Rollback at any point: `install-bot-errors-release-proof.sh rollback
 --host <host> --receipt <receipt-dir>` (printed by `install`). Rollback
-touches only monitor artifacts and never invokes an application service
-command.
+accepts only owner-private receipts under
+`~/.local/state/whatsoup/release-proof-installer/receipts/`, touches only
+monitor artifacts, and never invokes an application service command.

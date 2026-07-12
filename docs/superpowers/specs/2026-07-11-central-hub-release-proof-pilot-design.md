@@ -247,15 +247,20 @@ rollback <receipt>
 It must:
 
 1. require an operator-supplied expected hostname, compare it exactly after canonicalization, and print only its fingerprint; tests use synthetic hostnames;
-2. verify source files and manifest hashes before any destination write;
+2. require the supplied bundle SHA to equal the source checkout's `HEAD`, and
+   verify the selected source files are unchanged from that commit plus match
+   manifest hashes before any destination write;
 3. render all files into a temporary directory on the destination filesystem;
 4. run shell parsing and systemd unit validation before activation;
 5. acquire a single installer lock;
-6. back up prior bundle pointer, mode file, unit bytes, and timer enabled/active state;
+6. back up prior bundle pointer, mode file, unit bytes, and recognized timer
+   enabled/active state into an owner-private receipt root outside the monitor
+   services' writable BOT ERRORS state tree;
 7. atomically replace only the four monitor unit files and current bundle pointer;
 8. run `systemctl --user daemon-reload`;
 9. enable or change only the two monitor timers;
-10. verify installed bytes, loaded fragment paths, drop-ins, timer state, and mode;
+10. verify installed bytes, loaded fragment paths, drop-ins, enabled and active
+    timer state, and mode;
 11. print a receipt and exact rollback command.
 
 `--dry-run` may print rendered content and intended commands but may not create a directory, file, lock, backup, outbox event, or systemd invocation.

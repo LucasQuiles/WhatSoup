@@ -484,9 +484,13 @@ the in-place-git central pilot host. Design:
   `dry-run` / `install --mode observe` / `set-mode` / `verify` /
   `rollback --receipt <dir>`. Manages ONLY the bundle under
   `~/.local/lib/whatsoup/release-proof/<sha>/`, the `current` symlink, the
-  mode file, the four monitor units, and the two monitor timer enablements.
-  `install` accepts only observe mode; emit is a separate `set-mode` after
-  the observe soak. Dry-run performs zero writes.
+  mode file, isolated receipts under
+  `~/.local/state/whatsoup/release-proof-installer/receipts/`, the four
+  monitor units, and the two monitor timer enablements. The supplied SHA must
+  equal the source checkout's clean `HEAD`; existing same-SHA bundles are
+  immutable and reused only after exact verification. `install` accepts only
+  observe mode; emit is a separate `set-mode` after the observe soak. Dry-run
+  performs zero writes.
 - Units: `bot-errors-tree-provenance.{service,timer}`,
   `bot-errors-runtime-staleness.{service,timer}` — oneshot, 30-minute
   `OnUnitInactiveSec` cadence with distinct bootstrap offsets, resource-capped
@@ -514,4 +518,5 @@ The pilot always passes all four monitor unit names explicitly:
       --wrapper
 
 plus `install-bot-errors-release-proof.sh verify`, which additionally checks
-loaded fragment paths and drop-ins via `systemctl --user show`.
+loaded fragment paths and drop-ins via `systemctl --user show`, and requires
+both monitor timers to be enabled and active.

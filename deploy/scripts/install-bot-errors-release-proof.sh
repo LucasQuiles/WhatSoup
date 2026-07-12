@@ -25,6 +25,7 @@
 # inconclusive (a check that could not run); 4 rollback completed with one
 # or more failed steps (partial state — inspect the receipt and stderr).
 set -Eeuo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${RELEASE_PROOF_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -34,9 +35,9 @@ MANIFEST="${RELEASE_PROOF_MANIFEST:-$SOURCE_ROOT/deploy/bot-errors-runtime-manif
 
 BUNDLE_PARENT="$HOME_DIR/.local/lib/whatsoup/release-proof"
 MODE_FILE="$HOME_DIR/.config/whatsoup/bot-errors-release-proof.env"
-STATE_DIR="${BOT_ERRORS_STATE_DIR:-$HOME_DIR/.local/state/bot-errors}"
-RECEIPT_PARENT="$STATE_DIR/release-proof-receipts"
-INSTALL_LOCK="$STATE_DIR/release-proof-install.lock"
+INSTALL_STATE_DIR="${RELEASE_PROOF_INSTALL_STATE_DIR:-$HOME_DIR/.local/state/whatsoup/release-proof-installer}"
+RECEIPT_PARENT="$INSTALL_STATE_DIR/receipts"
+INSTALL_LOCK="$INSTALL_STATE_DIR/install.lock"
 
 BUNDLE_FILES=(
   "deploy/scripts/bot-errors-release-proof-run.sh"
@@ -56,6 +57,14 @@ TIMER_UNITS=(
   "bot-errors-tree-provenance.timer"
   "bot-errors-runtime-staleness.timer"
 )
+SOURCE_COMMIT_PATHS=(
+  "${BUNDLE_FILES[@]}"
+  "deploy/bot-errors-runtime-manifest.json"
+  "deploy/scripts/install-bot-errors-release-proof.sh"
+)
+for unit in "${UNIT_FILES[@]}"; do
+  SOURCE_COMMIT_PATHS+=("deploy/$unit")
+done
 
 fail() { echo "release-proof-install: $*" >&2; exit 2; }
 
@@ -122,11 +131,24 @@ verify_sources() {
     require_no_symlink "$src"
     [ -e "$src" ] || fail "missing unit source: deploy/$rel"
   done
+  command -v git >/dev/null 2>&1 || fail "missing dependency: git"
+  local source_head
+  source_head="$(git --no-optional-locks -C "$SOURCE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+    || fail "source root is not a usable git work tree"
+  [ "$source_head" = "$BUNDLE_SHA" ] \
+    || fail "bundle sha $BUNDLE_SHA does not match source HEAD $source_head"
+  for rel in "${SOURCE_COMMIT_PATHS[@]}"; do
+    git --no-optional-locks -C "$SOURCE_ROOT" cat-file -e "$BUNDLE_SHA:$rel" 2>/dev/null \
+      || fail "bundle commit does not contain required source path: $rel"
+  done
+  git --no-optional-locks -C "$SOURCE_ROOT" diff --quiet "$BUNDLE_SHA" -- "${SOURCE_COMMIT_PATHS[@]}" \
+    || fail "selected source files differ from bundle commit $BUNDLE_SHA"
   echo "sources verified against manifest ($(basename "$MANIFEST"))"
 }
 
 require_lock() {
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$INSTALL_STATE_DIR"
+  chmod 0700 "$INSTALL_STATE_DIR"
   exec 8>"$INSTALL_LOCK"
   if command -v flock >/dev/null 2>&1; then
     flock -n 8 || fail "installer lock held: $INSTALL_LOCK"
@@ -137,22 +159,40 @@ require_lock() {
 
 sctl() { systemctl --user "$@"; }
 
-# Called inside do_install's trap-armed region: failures here must flow
-# through the ERR trap (which rolls back the bundle and `current` symlink),
-# so this reports and raises via `false` instead of fail()'s exit 2.
-# systemd-analyze presence is preflighted in do_install before any mutation.
-# The runner is checked in the MATERIALIZED bundle (the bytes that will
-# actually execute); units are still the staged copies, pre-install.
+# Validate copies whose ExecStart points at the staged bundle. This keeps the
+# live `current` pointer unchanged until every unit has passed validation.
 validate_units_staged() {
-  local stage="$1" bundle_dir="$2" unit
-  if ! bash -n "$bundle_dir/deploy/scripts/bot-errors-release-proof-run.sh"; then
+  local stage="$1" unit source validation
+  if ! bash -n "$stage/bundle/deploy/scripts/bot-errors-release-proof-run.sh"; then
     echo "release-proof-install: runner failed bash -n" >&2
-    false
+    return 1
   fi
+  mkdir -p "$stage/validation-units"
   for unit in "${UNIT_FILES[@]}"; do
-    if ! systemd-analyze --user verify "$stage/units/$unit"; then
+    source="$stage/units/$unit"
+    validation="$stage/validation-units/$unit"
+    if [[ "$unit" == *.service ]]; then
+      if ! python3 - "$source" "$validation" "$stage/bundle" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, bundle = map(Path, sys.argv[1:])
+text = source.read_text(encoding="utf-8")
+prefix = "ExecStart=%h/.local/lib/whatsoup/release-proof/current/"
+if text.count(prefix) != 1:
+    raise SystemExit("expected exactly one release-proof current ExecStart")
+destination.write_text(text.replace(prefix, f"ExecStart={bundle}/"), encoding="utf-8")
+PY
+      then
+        echo "release-proof-install: could not render validation unit $unit" >&2
+        return 1
+      fi
+    else
+      cp "$source" "$validation"
+    fi
+    if ! systemd-analyze --user verify "$validation"; then
       echo "release-proof-install: systemd verify rejected $unit" >&2
-      false
+      return 1
     fi
   done
 }
@@ -193,30 +233,162 @@ render_stage() {
   done
 }
 
+verify_materialized_bundle() {
+  local bundle_dir="$1" rel path want got unexpected_node actual_files expected_files
+  if [ -L "$bundle_dir" ] || [ ! -d "$bundle_dir" ]; then
+    echo "verify: bundle path is not a real directory: $bundle_dir" >&2
+    return 1
+  fi
+  unexpected_node="$(find "$bundle_dir" ! -type d ! -type f -print -quit)"
+  if [ -n "$unexpected_node" ]; then
+    echo "verify: bundle contains non-file entry: $unexpected_node" >&2
+    return 1
+  fi
+  for rel in "${BUNDLE_FILES[@]}"; do
+    path="$bundle_dir/$rel"
+    if [ ! -f "$path" ] || [ -L "$path" ]; then
+      echo "verify: bundle file missing or not regular: $rel" >&2
+      return 1
+    fi
+    want="$(manifest_sha_of "$rel")"
+    got="$(sha256_of "$path")"
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+      echo "verify: bundle hash drift: $rel" >&2
+      return 1
+    fi
+  done
+  if [ ! -x "$bundle_dir/deploy/scripts/bot-errors-release-proof-run.sh" ]; then
+    echo "verify: bundle runner is not executable" >&2
+    return 1
+  fi
+  actual_files="$(cd "$bundle_dir" && find . -type f -print | LC_ALL=C sort)"
+  expected_files="$(printf './%s\n' "${BUNDLE_FILES[@]}" | LC_ALL=C sort)"
+  if [ "$actual_files" != "$expected_files" ]; then
+    echo "verify: bundle file set differs from the managed manifest subset" >&2
+    return 1
+  fi
+}
+
 atomic_symlink() {
   python3 -c '
-import os, sys
+import os, secrets, sys
 target, link = sys.argv[1], sys.argv[2]
-tmp = link + ".tmp-swap"
-if os.path.islink(tmp) or os.path.exists(tmp):
-    os.unlink(tmp)
-os.symlink(target, tmp)
-os.replace(tmp, link)
+for _ in range(32):
+    tmp = link + ".tmp-swap." + secrets.token_hex(8)
+    try:
+        os.symlink(target, tmp)
+        break
+    except FileExistsError:
+        continue
+else:
+    raise RuntimeError("could not allocate temporary symlink")
+try:
+    os.replace(tmp, link)
+finally:
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
 ' "$1" "$2"
+}
+
+atomic_copy_file() {
+  local source="$1" destination="$2" mode="$3" dir base tmp
+  dir="$(dirname "$destination")"
+  base="$(basename "$destination")"
+  tmp="$(mktemp "$dir/.$base.tmp.XXXXXX")" || return 1
+  if ! cp "$source" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$destination"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 write_mode_file() {
   mkdir -p "$(dirname "$MODE_FILE")"
-  local tmp="$MODE_FILE.tmp"
+  local tmp
+  tmp="$(mktemp "$(dirname "$MODE_FILE")/.bot-errors-release-proof.env.tmp.XXXXXX")"
   printf 'BOT_ERRORS_RELEASE_PROOF_MODE=%s\n' "$1" > "$tmp"
   chmod 0600 "$tmp"
   mv -f "$tmp" "$MODE_FILE"
 }
 
+is_managed_bundle_target() {
+  local target="$1" name
+  case "$target" in
+    "$BUNDLE_PARENT"/*) name="${target#"$BUNDLE_PARENT"/}" ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$name" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+probe_unit_state() {
+  local probe="$1" unit="$2" value
+  value="$(sctl "$probe" "$unit" 2>/dev/null || true)"
+  value="$(printf '%s\n' "$value" | head -n 1 | tr -d '[:space:]')"
+  case "$probe:$value" in
+    is-enabled:enabled|is-enabled:enabled-runtime|is-enabled:linked|is-enabled:linked-runtime|\
+    is-enabled:alias|is-enabled:static|is-enabled:indirect|is-enabled:generated|\
+    is-enabled:transient|is-enabled:disabled|is-enabled:masked|is-enabled:not-found|\
+    is-active:active|is-active:reloading|is-active:inactive|is-active:failed|\
+    is-active:activating|is-active:deactivating|is-active:maintenance|is-active:unknown)
+      printf '%s' "$value"
+      ;;
+    *)
+      echo "release-proof-install: timer state probe failed: $probe $unit returned no recognized state" >&2
+      return 1
+      ;;
+  esac
+}
+
+validate_receipt_path() {
+  python3 - "$RECEIPT_PARENT" "$1" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+parent_arg, receipt_arg = sys.argv[1:]
+try:
+    parent = Path(parent_arg).resolve(strict=True)
+    receipt = Path(receipt_arg)
+    if not receipt.is_absolute():
+        receipt = Path.cwd() / receipt
+    receipt_stat = receipt.lstat()
+    resolved = receipt.resolve(strict=True)
+except (FileNotFoundError, OSError):
+    raise SystemExit(1)
+if stat.S_ISLNK(receipt_stat.st_mode) or not stat.S_ISDIR(receipt_stat.st_mode):
+    raise SystemExit(1)
+if resolved.parent != parent or not re.fullmatch(r"\d{8}T\d{6}Z-\d+", resolved.name):
+    raise SystemExit(1)
+if receipt_stat.st_uid != os.getuid() or stat.S_IMODE(receipt_stat.st_mode) & 0o077:
+    raise SystemExit(1)
+meta = resolved / "receipt.meta"
+try:
+    meta_stat = meta.lstat()
+    meta_text = meta.read_text(encoding="utf-8")
+except (FileNotFoundError, OSError, UnicodeError):
+    raise SystemExit(1)
+if not stat.S_ISREG(meta_stat.st_mode) or meta_stat.st_uid != os.getuid():
+    raise SystemExit(1)
+if not re.fullmatch(r"schemaVersion=1\nhostFingerprint=[0-9a-f]{12}\n", meta_text):
+    raise SystemExit(1)
+for path in resolved.rglob("*"):
+    item = path.lstat()
+    if stat.S_ISLNK(item.st_mode) or not (stat.S_ISDIR(item.st_mode) or stat.S_ISREG(item.st_mode)):
+        raise SystemExit(1)
+    if item.st_uid != os.getuid() or stat.S_IMODE(item.st_mode) & 0o077:
+        raise SystemExit(1)
+PY
+}
+
 take_backup() {
   RECEIPT="$RECEIPT_PARENT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -p "$RECEIPT/units-prior"
-  local unit installed
+  chmod 0700 "$RECEIPT" "$RECEIPT/units-prior"
+  printf 'schemaVersion=1\nhostFingerprint=%s\n' \
+    "$(fingerprint "$(canon_host "$EXPECT_HOST")")" > "$RECEIPT/receipt.meta"
+  chmod 0600 "$RECEIPT/receipt.meta"
+  local unit installed prior_target enabled_state active_state
   for unit in "${UNIT_FILES[@]}"; do
     installed="$SYSTEMD_DIR/$unit"
     require_no_symlink "$installed"
@@ -227,9 +399,21 @@ take_backup() {
     fi
   done
   if [ -L "$BUNDLE_PARENT/current" ]; then
-    readlink "$BUNDLE_PARENT/current" > "$RECEIPT/current-prior.txt"
+    prior_target="$(readlink "$BUNDLE_PARENT/current")"
+    if ! is_managed_bundle_target "$prior_target" || [ ! -d "$prior_target" ]; then
+      echo "release-proof-install: current points outside a live managed bundle" >&2
+      return 1
+    fi
+    printf '%s\n' "$prior_target" > "$RECEIPT/current-prior.txt"
+  elif [ -e "$BUNDLE_PARENT/current" ]; then
+    echo "release-proof-install: current exists but is not a symlink" >&2
+    return 1
   else
     : > "$RECEIPT/current-prior.was-absent"
+  fi
+  if [ -L "$MODE_FILE" ]; then
+    echo "release-proof-install: mode file is a symlink" >&2
+    return 1
   fi
   if [ -f "$MODE_FILE" ]; then
     cp "$MODE_FILE" "$RECEIPT/mode-prior.env"
@@ -237,9 +421,14 @@ take_backup() {
     : > "$RECEIPT/mode-prior.was-absent"
   fi
   for unit in "${TIMER_UNITS[@]}"; do
+    if ! enabled_state="$(probe_unit_state is-enabled "$unit")"; then
+      return 1
+    fi
+    if ! active_state="$(probe_unit_state is-active "$unit")"; then
+      return 1
+    fi
     printf '%s enabled=%s active=%s\n' "$unit" \
-      "$(sctl is-enabled "$unit" 2>/dev/null || true)" \
-      "$(sctl is-active "$unit" 2>/dev/null || true)" >> "$RECEIPT/timer-state-prior.txt"
+      "$enabled_state" "$active_state" >> "$RECEIPT/timer-state-prior.txt"
   done
   echo "backup receipt: $RECEIPT"
 }
@@ -252,17 +441,20 @@ take_backup() {
 # stderr otherwise (the standalone rollback op surfaces that as exit 4).
 do_rollback_from() {
   local receipt="$1" unit prior frag failures=0
-  if [ ! -d "$receipt" ]; then
-    echo "release-proof-install: receipt not found: $receipt" >&2
+  if ! validate_receipt_path "$receipt"; then
+    echo "release-proof-install: receipt is not a confined installer receipt" >&2
     return 2
   fi
   for unit in "${TIMER_UNITS[@]}"; do
-    sctl disable --now "$unit" || true
+    if ! sctl disable --now "$unit"; then
+      echo "release-proof-install: rollback: failed to disable $unit" >&2
+      failures=$((failures + 1))
+    fi
   done
   for unit in "${UNIT_FILES[@]}"; do
     prior="$receipt/units-prior/$unit"
     if [ -f "$prior" ]; then
-      if ! cp "$prior" "$SYSTEMD_DIR/.$unit.tmp" || ! mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"; then
+      if ! atomic_copy_file "$prior" "$SYSTEMD_DIR/$unit" 0644; then
         echo "release-proof-install: rollback: failed to restore unit $unit" >&2
         failures=$((failures + 1))
       fi
@@ -274,7 +466,11 @@ do_rollback_from() {
     fi
   done
   if [ -f "$receipt/current-prior.txt" ]; then
-    if ! atomic_symlink "$(cat "$receipt/current-prior.txt")" "$BUNDLE_PARENT/current"; then
+    prior="$(cat "$receipt/current-prior.txt")"
+    if ! is_managed_bundle_target "$prior" || [ ! -d "$prior" ]; then
+      echo "release-proof-install: rollback: prior current target is not a live managed bundle" >&2
+      failures=$((failures + 1))
+    elif ! atomic_symlink "$prior" "$BUNDLE_PARENT/current"; then
       echo "release-proof-install: rollback: failed to restore current symlink" >&2
       failures=$((failures + 1))
     fi
@@ -285,7 +481,7 @@ do_rollback_from() {
     fi
   fi
   if [ -f "$receipt/mode-prior.env" ]; then
-    if ! cp "$receipt/mode-prior.env" "$MODE_FILE.tmp" || ! mv -f "$MODE_FILE.tmp" "$MODE_FILE"; then
+    if ! atomic_copy_file "$receipt/mode-prior.env" "$MODE_FILE" 0600; then
       echo "release-proof-install: rollback: failed to restore mode file" >&2
       failures=$((failures + 1))
     fi
@@ -355,13 +551,9 @@ do_verify() {
     echo "verify: current symlink does not point at $BUNDLE_SHA" >&2
     failures=$((failures + 1))
   fi
-  local rel
-  for rel in "${BUNDLE_FILES[@]}"; do
-    if [ "$(sha256_of "$BUNDLE_PARENT/$BUNDLE_SHA/$rel")" != "$(manifest_sha_of "$rel")" ]; then
-      echo "verify: bundle hash drift: $rel" >&2
-      failures=$((failures + 1))
-    fi
-  done
+  if ! verify_materialized_bundle "$BUNDLE_PARENT/$BUNDLE_SHA"; then
+    failures=$((failures + 1))
+  fi
   local mode_value
   if [ ! -f "$MODE_FILE" ]; then
     echo "verify: mode file missing" >&2
@@ -377,11 +569,16 @@ do_verify() {
         ;;
     esac
   fi
-  local enabled_state
+  local enabled_state active_state
   for unit in "${TIMER_UNITS[@]}"; do
     enabled_state="$(sctl is-enabled "$unit" 2>/dev/null || true)"
     if [ "$enabled_state" != "enabled" ]; then
       echo "verify: timer $unit is-enabled reports '$enabled_state', expected enabled" >&2
+      failures=$((failures + 1))
+    fi
+    active_state="$(sctl is-active "$unit" 2>/dev/null || true)"
+    if [ "$active_state" != "active" ]; then
+      echo "verify: timer $unit is-active reports '$active_state', expected active" >&2
       failures=$((failures + 1))
     fi
   done
@@ -411,46 +608,56 @@ do_install() {
   verify_sources
   require_lock
   mkdir -p "$BUNDLE_PARENT"
+  mkdir -p "$SYSTEMD_DIR"
   sweep_stale_stages
+  local unit
+  for unit in "${UNIT_FILES[@]}"; do
+    require_no_symlink "$SYSTEMD_DIR/$unit"
+  done
+  require_no_symlink "$MODE_FILE"
+  local bundle_dir="$BUNDLE_PARENT/$BUNDLE_SHA" bundle_preexisting=0 bundle_created=0
+  if [ -L "$bundle_dir" ]; then
+    fail "refusing symlink in managed bundle path: $bundle_dir"
+  elif [ -e "$bundle_dir" ]; then
+    if ! verify_materialized_bundle "$bundle_dir"; then
+      fail "existing bundle $BUNDLE_SHA is not the exact immutable managed bundle"
+    fi
+    bundle_preexisting=1
+  fi
   local stage
   stage="$(mktemp -d "$BUNDLE_PARENT/.stage-XXXXXX")"
   render_stage "$stage"
-  take_backup
+  if ! validate_units_staged "$stage"; then
+    rm -rf "$stage"
+    fail "staged unit validation failed"
+  fi
+  if ! take_backup; then
+    rm -rf "$stage"
+    [ -z "${RECEIPT:-}" ] || rm -rf "$RECEIPT"
+    fail "timer state backup failed; live state is unchanged"
+  fi
   # The rollback call is guarded (|| …) so a partial rollback cannot abort
   # the trap: an explicit banner is printed and the install still exits 1.
   trap 'echo "release-proof-install: failure after backup — rolling back" >&2
     rm -rf "$stage" || true
-    rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA" || true
+    if [ "${bundle_created:-0}" -eq 1 ]; then rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA" || true; fi
     do_rollback_from "$RECEIPT" || echo "release-proof-install: ROLLBACK_FAILED during install recovery — partial state; inspect receipt $RECEIPT" >&2
     exit 1' ERR
 
-  # Reinstalling an already-current bundle sha destroys the dir a
-  # rollback-restored `current` symlink points at; record the hazard.
-  if [ -f "$RECEIPT/current-prior.txt" ] && [ "$(cat "$RECEIPT/current-prior.txt")" = "$BUNDLE_PARENT/$BUNDLE_SHA" ]; then
-    printf 'reinstall of bundle %s: prior current pointed at this bundle dir, which this install replaces; a rollback restores the symlink but it may dangle until the next successful install\n' \
-      "$BUNDLE_SHA" > "$RECEIPT/reinstall-dangling-current.note"
+  if [ "$bundle_preexisting" -eq 1 ]; then
+    echo "release-proof-install: reusing verified immutable bundle $BUNDLE_SHA"
+  else
+    mv "$stage/bundle" "$bundle_dir"
+    bundle_created=1
   fi
-  rm -rf "$BUNDLE_PARENT/$BUNDLE_SHA"
-  mv "$stage/bundle" "$BUNDLE_PARENT/$BUNDLE_SHA"
-  atomic_symlink "$BUNDLE_PARENT/$BUNDLE_SHA" "$BUNDLE_PARENT/current"
-
-  # Staged-unit validation runs AFTER the bundle dir and `current` symlink
-  # exist (the units' ExecStart targets …/release-proof/current/…, so on a
-  # virgin host earlier validation always fails) and BEFORE any unit copy,
-  # daemon-reload, or timer enablement (spec 6.5 "before activation"). A
-  # rejection rolls the bundle and symlink back via the ERR trap.
-  validate_units_staged "$stage" "$BUNDLE_PARENT/$BUNDLE_SHA"
-
-  mkdir -p "$SYSTEMD_DIR"
-  local unit
+  atomic_symlink "$bundle_dir" "$BUNDLE_PARENT/current"
   for unit in "${UNIT_FILES[@]}"; do
     # ERR-flow guard: fail() here would exit 2 and bypass the armed trap.
     if [ -L "$SYSTEMD_DIR/$unit" ]; then
       echo "release-proof-install: refusing symlink in managed path: $SYSTEMD_DIR/$unit" >&2
       false
     fi
-    cp "$stage/units/$unit" "$SYSTEMD_DIR/.$unit.tmp"
-    mv -f "$SYSTEMD_DIR/.$unit.tmp" "$SYSTEMD_DIR/$unit"
+    atomic_copy_file "$stage/units/$unit" "$SYSTEMD_DIR/$unit" 0644
   done
   rm -rf "$stage"
 
@@ -471,7 +678,10 @@ do_install() {
 
 do_set_mode() {
   require_lock
-  take_backup
+  if ! take_backup; then
+    [ -z "${RECEIPT:-}" ] || rm -rf "$RECEIPT"
+    fail "timer state backup failed; mode is unchanged"
+  fi
   write_mode_file "$MODE"
   printf 'operation=set-mode\nmode=%s\nreceipt=%s\n' "$MODE" "$RECEIPT" > "$RECEIPT/receipt.txt"
   echo "RECEIPT=$RECEIPT"
@@ -538,6 +748,8 @@ case "$OP" in
   rollback)
     require_host
     [ -n "$RECEIPT_ARG" ] || fail "rollback requires --receipt <dir>"
+    validate_receipt_path "$RECEIPT_ARG" \
+      || fail "receipt is not a confined installer receipt"
     require_lock
     # Explicit propagation: 4 = rollback ran to completion with failed steps.
     do_rollback_from "$RECEIPT_ARG" || exit "$?"

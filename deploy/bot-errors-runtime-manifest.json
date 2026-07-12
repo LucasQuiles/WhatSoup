@@ -190,7 +190,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "36988be27aff1a4dfc167b06b73d226ef6e30298cbbd308697fdb80e508dcd5a",
+      "sha256": "13410627b322c05d3ceac979aa6ab23cd806c0815050614a4e4e616c588ed02a",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -213,7 +213,7 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "0ccf1e2083dc7ea09323a99ce6699f4dda2ef1ece51adcd1888ad453789fe8e6",
+      "sha256": "29604c7ec4e9fc83190078d47e39d8fcb08bcaf0e40f12f139086d20e8a78b37",
       "mustContain": [
         "host gate",
         "RECEIPT",

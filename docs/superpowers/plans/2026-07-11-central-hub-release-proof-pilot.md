@@ -10,6 +10,16 @@
 
 **Tech Stack:** Python 3.12 (detectors, pytest suites), Bash (runner, installer), systemd user units, TypeScript + Vitest (black-box subprocess tests), existing BOT ERRORS outbox/dispatcher pipeline.
 
+> **Post-review supersession (2026-07-12):** The final Gate 0 implementation
+> supersedes the illustrative Task 7/8 installer listings below. In particular,
+> the final installer binds `--bundle-sha` to a clean source `HEAD`, validates
+> staged unit copies before changing `current`, treats versioned bundles as
+> immutable, uses exclusive random replacement files, stores path-confined
+> receipts outside the monitor-writable BOT ERRORS state tree, fails closed on
+> unknown timer-state probes, and verifies timers are both enabled and active.
+> The executable script and its black-box tests are authoritative where an
+> older inline listing differs.
+
 ## Global Constraints
 
 Copied from the spec — every task implicitly includes these:

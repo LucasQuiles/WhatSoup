@@ -1395,7 +1395,11 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
   const TEST_SIGNAL_ENV_KEYS = ['VITEST', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'];
 
   function emitDrill(root: string, extra: string[]): void {
-    const env = { ...process.env, BOT_ERRORS_STATE_DIR: root, BOT_ERRORS_INLINE_LOG_TAIL: '0' };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      BOT_ERRORS_STATE_DIR: root,
+      BOT_ERRORS_INLINE_LOG_TAIL: '0',
+    };
     for (const key of TEST_SIGNAL_ENV_KEYS) delete env[key];
     execFileSync('python3', ['deploy/scripts/bot-errors-emit.py', ...extra], {
       cwd: process.cwd(),
@@ -1478,6 +1482,10 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
       openIncidents: Record<string, unknown>;
     };
     expect(incidentsAfterClear.openIncidents).not.toHaveProperty(incidentKey);
+    const messagesAfterClear = captureMessages(capture);
+    expect(messagesAfterClear).toHaveLength(2);
+    expect(messagesAfterClear[1]).toContain('BOT RECOVERY');
+    expect(messagesAfterClear[1]).toContain(DRILL_SOURCE);
 
     // Orphan clear: the incident is already closed, so this clear has no open
     // incident to recover. should_suppress_send's "clear has no open incident
