@@ -417,6 +417,7 @@ import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPo
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 // View onto the extracted AutoCompactController's bookkeeping (private runtime.autoCompact).
 // Loose value types (unknown) preserve the existing pokes (e.g. silentCompactScopes.set(key, 0)).
@@ -12234,6 +12235,37 @@ describe('AgentRuntime', () => {
       expect(state.chatQueues.has(groupKey)).toBe(false);
       const text = sentMessages.map((m) => m.text).find((t) => t.includes('Session killed:'));
       expect(text).toBe(`_Session killed: ${groupKey} (Group)_`);
+    });
+
+    // Regression: /kill-session dropped the SessionManager and the outbound queue
+    // but left perChatTurnQueues[mapKey] in place. The orphaned TurnQueue keeps
+    // its processor, so the next inbound turn for that chat queues behind a dead
+    // session, never reaches spawnSession, and the chat deadlocks — observed live
+    // in a per-chat group after /kill-session, with health reporting
+    // turnFinalizationDegradedScopes=1 and no replacement session row.
+    it('/kill-session (per_chat scope) removes the per-chat runtime TurnQueue', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await runtime.start();
+
+      const state = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makePerChatSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+        perChatTurnQueues: Map<string, TurnQueue>;
+      };
+      const groupKey = '111111100000000100@g.us';
+      state.chatSessions.set(groupKey, makePerChatSession(true, 11, new Date().toISOString()));
+      state.chatQueues.set(groupKey, makeQueueMock('group@g.us'));
+
+      // An idle runtime TurnQueue for this chat, exactly as sendTurnToSession leaves it.
+      const runtimeQueue = new TurnQueue();
+      state.perChatTurnQueues.set(groupKey, runtimeQueue);
+      expect(state.perChatTurnQueues.has(groupKey)).toBe(true);
+
+      await sendAndDrain(runtime, makeMsg({ content: '/kill-session 1', senderJid: adminSender }));
+
+      expect(state.perChatTurnQueues.has(groupKey)).toBe(false);
     });
 
     it('/kill-session (per_chat scope) kills the targeted DM session and reports it', async () => {
