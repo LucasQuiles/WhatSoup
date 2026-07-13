@@ -12,6 +12,23 @@
  * conversation after the turn's inbound (byte-derived, via bot.db). noop
  * suppression (deliberate silence) and proactive turns (no inbound) keep
  * their evidence-free semantics.
+ *
+ * #1751 investigation: ack_filler looked like the same bug class — its TEXT
+ * can assert the origin chat was served ("confirmed delivery", "landed
+ * clean") even though the classifier only inspects the text's shape, not
+ * which chat it was ultimately sent to. But ACK_FILLER_PATTERNS turned out
+ * to be heterogeneous: most of it ("lane parked", "no user ask", "staying
+ * silent", "no action taken") asserts the OPPOSITE — nothing was sent
+ * anywhere — which is the same evidence-free deliberate-silence contract as
+ * noop (confirmed by a real test: a "do not reply" turn where the agent
+ * obeys and says so via ack-filler-shaped language, with no send to any
+ * chat). Gating all of ack_filler broke that legitimate case. The fix:
+ * the ONE delivery-asserting pattern ("acknowledged … confirmed delivery|
+ * landed clean … lane stays parked") moved out of ACK_FILLER_PATTERNS and
+ * into SEND_VERIFICATION_PATTERNS (outbound-message-safety.ts) instead of
+ * widening this gate's condition — it is classified as send_verification
+ * and evidence-gated by the existing branch below. ack_filler and noop stay
+ * evidence-free.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { tmpdir } from 'node:os';
@@ -90,6 +107,7 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { Database } from '../../../src/core/database.ts';
 import { storeMessageIfNew, type StoreMessageInput } from '../../../src/core/messages.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { classifyAssistantTextEgress } from '../../../src/core/outbound-message-safety.ts';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -147,6 +165,17 @@ function storeMsg(overrides: Partial<StoreMessageInput>): void {
 // suppression was this shape.
 const SEND_VERIFICATION_TEXT =
   'Sent to the tracker group and verified landed (pk 24408, isFromMe, matching content).';
+// Matches ACK_FILLER_PATTERNS (`^parked per\b...directive\b...no user ask\b`)
+// — asserts NOTHING was sent anywhere (deliberate silence), unlike
+// SEND_VERIFICATION_TEXT/SEND_VERIFICATION_ACK_TEXT. Stays evidence-free.
+const ACK_FILLER_TEXT =
+  'Parked per team directive: no user ask pending, holding until auth clears.';
+// Matches the delivery-asserting pattern moved from ACK_FILLER_PATTERNS into
+// SEND_VERIFICATION_PATTERNS (#1751) — "confirmed delivery"/"landed clean"
+// claims a send actually happened, so it is classified as send_verification
+// and evidence-gated like SEND_VERIFICATION_TEXT above.
+const SEND_VERIFICATION_ACK_TEXT =
+  'Acknowledged — confirmed delivery, landed clean. Lane stays parked, nothing further to do.';
 // Matches NOOP_ASSISTANT_TEXT.
 const NOOP_TEXT = '...';
 
@@ -280,6 +309,147 @@ describe('egress gate origin-chat reply evidence', () => {
       undefined,
       ORIGIN_KEY,
     );
+    expect(runtime.perChatTurnSuppressedReplySatisfaction.has(ORIGIN_KEY)).toBe(true);
+  });
+
+  it('ack_filler stays evidence-free even in a cross-chat-send scenario (per-chat) — #1751 over-capture guard', () => {
+    storeMsg({ messageId: 'inbound-f' });
+    // Even with a send to a DIFFERENT conversation on the books, ack_filler's
+    // "no outbound warranted" language never claimed the origin was served —
+    // it asserts nothing was sent anywhere. No evidence should be required.
+    storeMsg({
+      messageId: 'cross-send-f',
+      chatJid: OTHER_JID,
+      conversationKey: OTHER_KEY,
+      isFromMe: true,
+      senderJid: 'me@s.whatsapp.net',
+      timestamp: BASE_TS + 5,
+    });
+
+    const runtime = makeRuntime();
+    runtime.perChatTurnSourceMessageId.set(ORIGIN_KEY, 'inbound-f');
+
+    const result = runtime.gateAssistantTextForOutbound(
+      ACK_FILLER_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+      ORIGIN_KEY,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.perChatTurnSuppressedReplySatisfaction.has(ORIGIN_KEY)).toBe(true);
+  });
+
+  it('ack_filler WITH an origin-chat reply satisfies the reply guarantee (per-chat)', () => {
+    storeMsg({ messageId: 'inbound-g' });
+    storeMsg({
+      messageId: 'origin-reply-g',
+      isFromMe: true,
+      senderJid: 'me@s.whatsapp.net',
+      timestamp: BASE_TS + 5,
+    });
+
+    const runtime = makeRuntime();
+    runtime.perChatTurnSourceMessageId.set(ORIGIN_KEY, 'inbound-g');
+
+    const result = runtime.gateAssistantTextForOutbound(
+      ACK_FILLER_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+      ORIGIN_KEY,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.perChatTurnSuppressedReplySatisfaction.has(ORIGIN_KEY)).toBe(true);
+  });
+
+  it('ack_filler without evidence still satisfies on the single/shared path — #1751 over-capture guard', () => {
+    storeMsg({ messageId: 'inbound-h' });
+
+    const runtime = makeRuntime();
+    runtime.currentTurnSourceMessageId = 'inbound-h';
+
+    const result = runtime.gateAssistantTextForOutbound(
+      ACK_FILLER_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.turnHadSuppressedReplySatisfaction).toBe(true);
+  });
+
+  it('the moved delivery-assertion pattern now classifies as send_verification, not ack_filler', () => {
+    expect(classifyAssistantTextEgress(SEND_VERIFICATION_ACK_TEXT)).toEqual({
+      action: 'suppress',
+      reason: 'send_verification',
+      satisfiesReplyGuarantee: true,
+    });
+  });
+
+  it('moved-pattern send_verification WITHOUT an origin-chat reply does NOT satisfy (per-chat)', () => {
+    storeMsg({ messageId: 'inbound-i' });
+    // The turn's only send went to a DIFFERENT conversation — the #1751
+    // scenario this move exists to close.
+    storeMsg({
+      messageId: 'cross-send-i',
+      chatJid: OTHER_JID,
+      conversationKey: OTHER_KEY,
+      isFromMe: true,
+      senderJid: 'me@s.whatsapp.net',
+      timestamp: BASE_TS + 5,
+    });
+
+    const runtime = makeRuntime();
+    runtime.perChatTurnSourceMessageId.set(ORIGIN_KEY, 'inbound-i');
+
+    const result = runtime.gateAssistantTextForOutbound(
+      SEND_VERIFICATION_ACK_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+      ORIGIN_KEY,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.perChatTurnSuppressedReplySatisfaction.has(ORIGIN_KEY)).toBe(false);
+  });
+
+  it('moved-pattern send_verification without evidence does NOT satisfy on the single/shared path either', () => {
+    storeMsg({ messageId: 'inbound-j' });
+
+    const runtime = makeRuntime();
+    runtime.currentTurnSourceMessageId = 'inbound-j';
+
+    const result = runtime.gateAssistantTextForOutbound(
+      SEND_VERIFICATION_ACK_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+    );
+
+    expect(result).toBeNull();
+    expect(runtime.turnHadSuppressedReplySatisfaction).toBe(false);
+  });
+
+  it('moved-pattern send_verification WITH an origin-chat reply satisfies (per-chat)', () => {
+    storeMsg({ messageId: 'inbound-k' });
+    storeMsg({
+      messageId: 'origin-reply-k',
+      isFromMe: true,
+      senderJid: 'me@s.whatsapp.net',
+      timestamp: BASE_TS + 5,
+    });
+
+    const runtime = makeRuntime();
+    runtime.perChatTurnSourceMessageId.set(ORIGIN_KEY, 'inbound-k');
+
+    const result = runtime.gateAssistantTextForOutbound(
+      SEND_VERIFICATION_ACK_TEXT,
+      makeFakeQueue(ORIGIN_JID),
+      42,
+      ORIGIN_KEY,
+    );
+
+    expect(result).toBeNull();
     expect(runtime.perChatTurnSuppressedReplySatisfaction.has(ORIGIN_KEY)).toBe(true);
   });
 
