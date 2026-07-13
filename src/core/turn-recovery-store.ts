@@ -832,7 +832,7 @@ export class TurnRecoveryStore {
         FROM (
           SELECT j.scope, j.conversation_key
           FROM turn_recovery_jobs j
-          WHERE j.state <> 'completed'
+          WHERE j.state IN ('pending', 'claimed')
           UNION ALL
           SELECT t.scope, t.conversation_key
           FROM turn_terminal_records t

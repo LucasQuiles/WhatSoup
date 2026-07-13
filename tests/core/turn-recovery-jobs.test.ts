@@ -1592,10 +1592,64 @@ describe('atomic linked turn recovery jobs', () => {
       claimToken: 'scope-completion-claim',
       leaseSeconds: 60,
     });
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      '15550100001',
+    )).toBe(true);
     durability.markInboundFailed(perChat.inboundSeq, 'crash_recovery');
     durability.markQuarantined(selectedDeliveryOpId(perChat));
     durability.completeTurnRecoveryJob(perChatJob.jobId, OWNER, claim);
     expect(durability.hasOutstandingTurnRecoveryForScope('per_chat', '15550100001')).toBe(false);
+  });
+
+  it('does not let terminal recovery dispositions block future turns', () => {
+    const blocked = createTransfer(
+      'scope-blocked-terminal',
+      OWNER,
+      { replaySafe: false },
+      { conversationKey: 'blocked-terminal-chat' },
+    );
+    const exhausted = createTransfer(
+      'scope-exhausted-terminal',
+      OWNER,
+      {},
+      { conversationKey: 'exhausted-terminal-chat' },
+    );
+    const blockedJob = durability.finalizeTurnTerminal(blocked.params).recoveryJob!;
+    const exhaustedJob = durability.finalizeTurnTerminal(exhausted.params).recoveryJob!;
+
+    let claim = durability.claimTurnRecoveryJob(exhaustedJob.jobId, OWNER, {
+      claimToken: 'scope-exhausted-token-1',
+      leaseSeconds: 60,
+    });
+    while (claim.attemptCount < TURN_RECOVERY_MAX_ATTEMPTS) {
+      durability.requeueTurnRecoveryJob(exhaustedJob.jobId, OWNER, claim, 0);
+      claim = durability.claimTurnRecoveryJob(exhaustedJob.jobId, OWNER, {
+        claimToken: `scope-exhausted-token-${claim.attemptCount + 1}`,
+        leaseSeconds: 60,
+      });
+    }
+    durability.requeueTurnRecoveryJob(exhaustedJob.jobId, OWNER, claim, 0);
+
+    const blockedBefore = db.raw.prepare(
+      'SELECT * FROM turn_recovery_jobs WHERE id = ?',
+    ).get(blockedJob.jobId);
+
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      'blocked-terminal-chat',
+    )).toBe(false);
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      'exhausted-terminal-chat',
+    )).toBe(false);
+    expect(db.raw.prepare(
+      'SELECT * FROM turn_recovery_jobs WHERE id = ?',
+    ).get(blockedJob.jobId)).toEqual(blockedBefore);
+    expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      blockedUnsafe: 1,
+      exhausted: 1,
+    });
   });
 
   it('keeps a quarantined selected delivery visible in supervisor health', () => {
