@@ -64,9 +64,16 @@ The fastest check before filing a PR:
 ```bash
 # Are any of the files I'm touching referenced from a runbook line that
 # claims the behaviour is "not wired" / "TODO" / "not yet implemented"?
-git diff --name-only origin/main..HEAD | xargs -I{} \
-  grep -l "not yet wired\|not wired\|TODO\|not yet implemented\|runtime gap" docs/runbooks/ 2>/dev/null
+touched=$(git diff --name-only origin/main..HEAD | xargs -n1 basename | sort -u)
+[ -n "$touched" ] && grep -rn "not yet wired\|not wired\|TODO\|not yet implemented\|runtime gap" docs/runbooks/ \
+  | grep -F -f <(printf '%s\n' $touched)
 ```
+
+(The previous form of this command was a silent no-op: its `xargs -I{}` template
+never used `{}`, and `grep` ran non-recursively against the directory with
+stderr discarded, so it matched nothing regardless of the diff. The `[ -n ]`
+guard matters: BSD grep treats an empty `-f` pattern list as match-everything,
+which would flag every marker line on an empty diff.)
 
 If anything turns up, read the matched line in context — if your PR closes the gap it describes, update the runbook in the same diff.
 
