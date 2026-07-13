@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 53
+**Total entries:** 55
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=30, review=3, spec=15, state=1 |
-| Status | active=1, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
-| Status source | body-marker=52, state-md-status=1 |
+| Kind | handoff=4, plan=31, review=3, spec=16, state=1 |
+| Status | active=3, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
+| Status source | body-marker=54, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,11 +34,13 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (1)
+### Active (3)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
+| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 
 ### Unknown-status — triage needed (1)
 
@@ -74,7 +76,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(30 entries)_
+### docs/superpowers/plans  _(31 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -108,6 +110,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -117,7 +120,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | completed | body-marker | bot-errors-tool-call-audit | 2026-06-20 |  |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 
-### docs/superpowers/specs  _(15 entries)_
+### docs/superpowers/specs  _(16 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -135,9 +138,10 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | completed | body-marker | pr-0a-aqs | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | active | body-marker | wall-to-wall-audit-remediation-design | 2026-07-10 |  |
+| `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-11 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-12T03:56:34Z from commit `3542a9dd40b1d9c24992479928293375ffaffb41`
+- Generated at 2026-07-12T08:09:24Z from commit `09da2750dab474b539890c6a5afc05bd1c9f14e3`

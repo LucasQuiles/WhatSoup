@@ -1,11 +1,11 @@
 [Unit]
-Description=BOT ERRORS runtime code-staleness release-proof monitor
+Description=BOT ERRORS tree-provenance release-proof monitor (offline git inspection)
 
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/whatsoup/bot-errors.env
-ExecStart=%h/.local/lib/whatsoup/release-proof/current/deploy/scripts/bot-errors-release-proof-run.sh runtime-staleness
-SyslogIdentifier=bot-errors-runtime-staleness
+ExecStart=%h/.local/lib/whatsoup/release-proof/current/deploy/scripts/bot-errors-release-proof-run.sh tree
+SyslogIdentifier=bot-errors-tree-provenance
 UMask=0077
 TimeoutStartSec=45s
 TimeoutStopSec=15s

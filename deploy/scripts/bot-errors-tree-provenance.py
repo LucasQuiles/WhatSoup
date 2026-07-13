@@ -32,6 +32,18 @@ Design constraints:
     is invoked from the daily health-check via :func:`tree_provenance_inventory`,
     which returns daily-health-style FAIL/WARN lines that the health-check's
     existing failure classifier + per-instance salient emitter pick up for free.
+    ``--reporter`` selects a third, scheduler-oriented mode (combinable with
+    ``--once``/``--print``, rejects ``--fetch``): exit 0 for any successfully
+    observed finding state (clean/warning/critical), 2 for an inspection
+    failure, 1 for an event-write failure -- so a systemd/launchd oneshot never
+    reads a successfully-detected drift finding as a process failure. Without
+    ``--reporter`` the interactive exit contract is unchanged:
+    ``{"info": 0, "warning": 1, "critical": 2}``, GitError -> 1.
+  * Every OFFLINE git invocation (everything routed through ``_git``) runs
+    with ``--no-optional-locks``, so offline inspection never takes the
+    ``.git/index`` lock and can't race a concurrent commit/checkout on the
+    same bot tree.  The opt-in ``--fetch`` network call (``fetch_upstream``)
+    is exempt: it does not go through ``_git`` and does not pass the flag.
   * Thresholds are configurable via environment (see the ``BOT_ERRORS_TREE_*``
     constants below).
   * All emitted text is redacted: branch names and paths are basename/fingerprint
@@ -152,15 +164,15 @@ class GitError(RuntimeError):
     """A git invocation failed in a way that blocks provenance inspection."""
 
 
-def _git(repo: Path, *args: str, check: bool = True) -> str:
+def _git(repo: Path, *args: str) -> str:
     """Run a git plumbing command in ``repo`` and return stripped stdout.
 
-    Never touches the network.  Raises :class:`GitError` on failure when
-    ``check`` is True; otherwise returns "" on failure.
+    Never touches the network. Raises :class:`GitError` on every failed probe;
+    callers use commands that represent expected absence with empty stdout.
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            ["git", "--no-optional-locks", "-C", str(repo), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -172,16 +184,12 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     except subprocess.TimeoutExpired as exc:
         raise GitError(f"git {args[0] if args else ''} timed out") from exc
     if proc.returncode != 0:
-        if check:
-            raise GitError(
-                f"git {' '.join(args)} failed rc={proc.returncode}: {proc.stderr.strip()[:200]}"
-            )
-        return ""
+        raise GitError(f"git {args[0] if args else ''} failed rc={proc.returncode}")
     return proc.stdout.strip()
 
 
 def _git_lines(repo: Path, *args: str) -> list[str]:
-    out = _git(repo, *args, check=False)
+    out = _git(repo, *args)
     return [line for line in out.splitlines() if line.strip()]
 
 
@@ -209,13 +217,18 @@ def fetch_upstream(repo: Path, remote: str) -> str | None:
 # ---------------------------------------------------------------------------
 def _current_branch(repo: Path) -> str | None:
     """Return the current branch name, or None if HEAD is detached."""
-    name = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    name = _git(repo, "branch", "--show-current")
     return name or None
 
 
-def _upstream_ref(repo: Path) -> str | None:
+def _upstream_ref(repo: Path, branch: str) -> str | None:
     """Return the configured upstream tracking ref (e.g. origin/main), or None."""
-    ref = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", check=False)
+    ref = _git(
+        repo,
+        "for-each-ref",
+        "--format=%(upstream:short)",
+        f"refs/heads/{branch}",
+    )
     return ref or None
 
 
@@ -227,22 +240,24 @@ def gather_tree_provenance(repo: Path, *, do_fetch: bool = False) -> dict[str, A
     Raises :class:`GitError` only when the path is not a usable git repo.
     """
     repo = repo.resolve()
-    is_repo = _git(repo, "rev-parse", "--is-inside-work-tree", check=False) == "true"
+    try:
+        is_repo = _git(repo, "rev-parse", "--is-inside-work-tree") == "true"
+    except GitError as exc:
+        raise GitError(f"not a usable git work tree: {redact_path_segment(str(repo))}") from exc
     if not is_repo:
         raise GitError(f"not a git work tree: {redact_path_segment(str(repo))}")
+
+    head = _git(repo, "rev-parse", "HEAD")
+    branch = _current_branch(repo)
+    detached = branch is None
+    upstream = _upstream_ref(repo, branch) if branch else None
 
     fetch_error: str | None = None
     if do_fetch:
         remote = DEFAULT_REMOTE
-        upstream = _upstream_ref(repo)
         if upstream and "/" in upstream:
             remote = upstream.split("/", 1)[0]
         fetch_error = fetch_upstream(repo, remote)
-
-    head = _git(repo, "rev-parse", "HEAD", check=False)
-    branch = _current_branch(repo)
-    detached = branch is None
-    upstream = _upstream_ref(repo) if not detached else None
 
     # -uall so a wholly-untracked new dir (e.g. a fresh src/) is reported as its
     # individual files, not a single "?? src/" entry -- required to catch
@@ -263,7 +278,7 @@ def gather_tree_provenance(repo: Path, *, do_fetch: bool = False) -> dict[str, A
     upstream_resolved = False
     ancestry = "unknown"  # one of: same | ahead | behind | diverged | unknown
     if upstream:
-        counts = _git(repo, "rev-list", "--left-right", "--count", f"{upstream}...HEAD", check=False)
+        counts = _git(repo, "rev-list", "--left-right", "--count", f"{upstream}...HEAD")
         # output: "<behind>\t<ahead>"
         parts = counts.split()
         if len(parts) == 2 and all(p.isdigit() for p in parts):
@@ -546,13 +561,22 @@ def emit_outbox_event(event: dict[str, Any]) -> Path:
     return path
 
 
-def run_once(*, do_fetch: bool, dry: bool) -> int:
+def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     """Inspect the tree and (unless dry) emit one outbox event summarising
-    provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical."""
+    provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical.
+
+    ``reporter=True`` selects scheduler mode instead: 0 for any successfully
+    observed state (clean/warning/critical), 2 for an inspection failure, 1
+    for an event-write failure. The default exit contract above is unchanged
+    when ``reporter`` is False.
+    """
     try:
         snap = gather_tree_provenance(REPO_ROOT, do_fetch=do_fetch)
     except GitError as exc:
         evidence = f"tree_provenance inspection_error {str(exc)[:200]}"
+        if reporter:
+            print(evidence, file=sys.stderr)
+            return 2
         if not dry:
             emit_outbox_event(build_outbox_event(
                 "BOT ERRORS tree-provenance inspection error",
@@ -583,12 +607,18 @@ def run_once(*, do_fetch: bool, dry: bool) -> int:
         # Critical findings are salient: key the alert on the branch and request
         # notify so a direct-to-protected/diverged tree is never buried.
         alert_source = f"tree_provenance:{branch}" if sev == "critical" else None
-        emit_outbox_event(build_outbox_event(
-            summary, evidence, sev,
-            event_type=event_type, alert_source=alert_source, snapshot=snap,
-        ))
+        try:
+            emit_outbox_event(build_outbox_event(
+                summary, evidence, sev,
+                event_type=event_type, alert_source=alert_source, snapshot=snap,
+            ))
+        except OSError as exc:
+            print(f"tree_provenance event_write_error {str(exc)[:200]}", file=sys.stderr)
+            return 1
     print(summary)
     print(evidence)
+    if reporter:
+        return 0
     return {"info": 0, "warning": 1, "critical": 2}[sev]
 
 
@@ -601,6 +631,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--fetch", action="store_true",
         help="refresh origin ref before comparing (NETWORK; default offline)",
+    )
+    parser.add_argument(
+        "--reporter", action="store_true",
+        help="scheduler mode: exit 0 for any successfully observed finding state "
+             "(clean/warning/critical), 2 for inspection failure, 1 for event-write "
+             "failure; rejects --fetch",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -615,7 +651,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--json", action="store_true",
         help="print the raw provenance snapshot as JSON and exit",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.reporter and args.fetch:
+        parser.error("--reporter rejects --fetch: scheduled runs must stay offline")
+    if args.reporter and args.json:
+        parser.error("--reporter does not combine with --json")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -634,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
         safe["head_short"] = snap["head"][:12]
         print(json.dumps(safe, indent=2, sort_keys=True))
         return 0
-    return run_once(do_fetch=args.fetch, dry=bool(args.dry))
+    return run_once(do_fetch=args.fetch, dry=bool(args.dry), reporter=bool(args.reporter))
 
 
 if __name__ == "__main__":

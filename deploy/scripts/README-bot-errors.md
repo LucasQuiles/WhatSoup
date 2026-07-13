@@ -464,3 +464,61 @@ Known residuals after the close-out pass:
   payload and host-local manifest.
 - Stream-sync proves runtime payload currency. It does not imply that every dirty host
   checkout was advanced to the latest `origin/main`.
+
+## Release-proof monitor (central pilot)
+
+Monitor-only detection of tree provenance drift and runtime code staleness on
+the in-place-git central pilot host. Design:
+`docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md`.
+
+### Components
+
+- `bot-errors-release-proof-run.sh tree|runtime-staleness` — scheduler runner.
+  Reads `~/.config/whatsoup/bot-errors-release-proof.env` as data (never
+  sourced), validates `BOT_ERRORS_RELEASE_PROOF_MODE=observe|emit`, takes a
+  shared non-blocking lock, and invokes exactly one detector from the
+  versioned bundle. Exits: 0 valid observation, 1 event-write failure,
+  2 usage/mode/dependency error, 75 lock contention (recorded skip; units
+  treat it as success via `SuccessExitStatus=75`).
+- `install-bot-errors-release-proof.sh` — narrow installer with
+  `dry-run` / `install --mode observe` / `set-mode` / `verify` /
+  `rollback --receipt <dir>`. Manages ONLY the bundle under
+  `~/.local/lib/whatsoup/release-proof/<sha>/`, the `current` symlink, the
+  mode file, isolated receipts under
+  `~/.local/state/whatsoup/release-proof-installer/receipts/`, the four
+  monitor units, and the two monitor timer enablements. The supplied SHA must
+  equal the source checkout's clean `HEAD`; existing same-SHA bundles are
+  immutable and reused only after exact verification. Managed destination
+  roots reject symlink components; rollback accepts only complete receipts
+  bound to the expected host; failed new bundles remain as forensic evidence.
+  `install` accepts only observe mode; emit is a separate `set-mode` after the
+  observe soak. Dry-run performs zero writes.
+- Units: `bot-errors-tree-provenance.{service,timer}`,
+  `bot-errors-runtime-staleness.{service,timer}` — oneshot, 30-minute
+  `OnUnitInactiveSec` cadence with distinct bootstrap offsets, resource-capped
+  (`MemoryMax=128M`, `TasksMax=32`), sandboxed, and forbidden from naming any
+  application/fleet/dispatcher unit.
+
+### Single tree producer (B3)
+
+`bot-errors-tree-provenance.py` has two possible schedulers: the standalone
+timer above (source `tree-provenance`) and the daily-health embedding
+(`tree_provenance_inventory`, daily-health sources). Dispatcher incident
+identity is machine|instance|source, so the two DO NOT deduplicate. During
+the pilot the standalone timer is the ONLY producer: the daily-health profile
+keeps `expectTreeProvenance=false` on the pilot host, and the installer has
+no code path that touches the daily-health integration. Alert and clear state
+for tree findings is owned by the standalone `tree-provenance` source.
+
+### Drift verification scope
+
+The pilot always passes all four monitor unit names explicitly:
+
+    bash scripts/check-unit-drift.sh --unit \
+      bot-errors-tree-provenance.service bot-errors-tree-provenance.timer \
+      bot-errors-runtime-staleness.service bot-errors-runtime-staleness.timer \
+      --wrapper
+
+plus `install-bot-errors-release-proof.sh verify`, which additionally checks
+loaded fragment paths and drop-ins via `systemctl --user show`, and requires
+both monitor timers to be enabled and active.
