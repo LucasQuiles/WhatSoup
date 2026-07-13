@@ -23,6 +23,7 @@ type LoggerModule = typeof import('../src/logger.ts');
 
 const originalLogDir = process.env.LOG_DIR;
 const originalLogLevel = process.env.LOG_LEVEL;
+const originalVitest = process.env.VITEST;
 
 afterEach(() => {
   vi.resetModules();
@@ -32,6 +33,8 @@ afterEach(() => {
   else process.env.LOG_DIR = originalLogDir;
   if (originalLogLevel === undefined) delete process.env.LOG_LEVEL;
   else process.env.LOG_LEVEL = originalLogLevel;
+  if (originalVitest === undefined) delete process.env.VITEST;
+  else process.env.VITEST = originalVitest;
 });
 
 /**
@@ -89,6 +92,7 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
   describe('when pino.transport() succeeds', () => {
     beforeEach(() => {
       process.env.LOG_DIR = '/tmp/ws-logs-test';
+      delete process.env.VITEST;
       delete process.env.LOG_LEVEL;
     });
 
@@ -177,6 +181,7 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
   describe('when pino.transport() throws (pino-roll unavailable)', () => {
     beforeEach(() => {
       process.env.LOG_DIR = '/tmp/ws-logs-test';
+      delete process.env.VITEST;
     });
 
     it('catches the error, sets transport to undefined, and falls back to stdout-only pino', async () => {

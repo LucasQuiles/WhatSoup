@@ -15,7 +15,10 @@ const level = process.env.LOG_LEVEL ?? 'info';
 let transport: any;
 
 const logDir = process.env.LOG_DIR;
-if (logDir) {
+// Vitest removes its per-file HOME after each suite. Starting pino's worker
+// transport there races that teardown, so Vitest stays stdout-only.
+const fileTransportEnabled = !process.env.VITEST;
+if (logDir && fileTransportEnabled) {
   try {
     transport = pino.transport({
       targets: [
