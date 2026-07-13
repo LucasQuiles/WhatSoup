@@ -1811,15 +1811,27 @@ export class AgentRuntime implements Runtime {
     );
 
     if (decision.satisfiesReplyGuarantee) {
-      // A send_verification classification claims "I already replied via a
-      // send tool" — that claim is only honored with byte-derived evidence: a
-      // from-me message stored in the ORIGIN conversation after this turn's
-      // inbound. Without it (observed live: agent sent to a DIFFERENT chat,
-      // then its verification text disarmed the origin chat's guarantee →
-      // permanent silence), suppress the text but leave the reply guarantee
-      // armed so the silence fallback still fires. noop/ack reasons stay
-      // evidence-free: deliberate silence is their contract. Turns with no
-      // inbound (proactive/system) have no armed guarantee to protect.
+      // Invariant: any suppression whose TEXT asserts the origin chat was
+      // served must prove it with byte-derived evidence — a from-me message
+      // stored in the ORIGIN conversation after this turn's inbound. Only
+      // send_verification carries that assertion ("I already replied via a
+      // send tool"). Without evidence (observed live: agent sent to a
+      // DIFFERENT chat, then its verification text disarmed the origin
+      // chat's guarantee → permanent silence), suppress the text but leave
+      // the reply guarantee armed so the silence fallback still fires.
+      // ack_filler and noop are exempt: both assert NOTHING was sent
+      // anywhere (deliberate silence — "lane parked", "no user ask",
+      // "staying silent", bare punctuation) and are the intentional-silence
+      // contract for turns where the agent correctly chose not to reply
+      // (#1751 investigation: gating all of ack_filler broke exactly this —
+      // a "do not reply" turn that never sends anywhere has no evidence to
+      // produce and would wrongly stay armed forever). The one ack_filler
+      // pattern that DOES assert a delivery happened ("confirmed delivery",
+      // "landed clean") lives under send_verification instead (see
+      // outbound-message-safety.ts SEND_VERIFICATION_PATTERNS), so it is
+      // already evidence-gated here without widening this condition. Turns
+      // with no inbound (proactive/system) have no armed guarantee to
+      // protect.
       if (
         decision.reason === 'send_verification' &&
         inboundSeq !== undefined &&
