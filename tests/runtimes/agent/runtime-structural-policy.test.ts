@@ -65,6 +65,7 @@ describe('AgentRuntime structural policy', () => {
       'this.crashes.forget(mapKey);',
       'this.perChatInboundSeqQueue.delete(mapKey);',
       'this.pendingSystemResults.clearScope(mapKey);',
+      'this.perChatTurnSourceMessageId.delete(mapKey);',
       'this.perChatTurnContentType.delete(mapKey);',
       'this.perChatTurnText.delete(mapKey);',
       'this.perChatAssistantItemText.delete(mapKey);',

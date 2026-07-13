@@ -200,6 +200,27 @@ export function getMessagesSince(
 }
 
 /**
+ * True when a live from-me message exists in the SAME conversation as the
+ * given inbound message and was stored after it (pk order — insertion order
+ * beats sender-clock timestamps). Reply-guarantee evidence for the assistant
+ * text egress gate: a send-verification claim may disarm the guarantee only
+ * when the ORIGIN chat actually received a reply; a send to any other chat is
+ * not a reply here. Fails closed: unknown inbound id → false.
+ */
+export function hasFromMeReplyAfter(db: Database, inboundMessageId: string): boolean {
+  const row = db.raw.prepare(`
+    SELECT 1 FROM messages m
+    JOIN messages i ON i.message_id = @inbound_message_id
+    WHERE m.conversation_key = i.conversation_key
+      AND m.is_from_me = 1
+      AND m.deleted_at IS NULL
+      AND m.pk > i.pk
+    LIMIT 1
+  `).get({ inbound_message_id: inboundMessageId });
+  return row !== undefined;
+}
+
+/**
  * Return messages that have not yet been enrichment-processed, ordered ASC
  * so enrichment runs in arrival order.
  */
