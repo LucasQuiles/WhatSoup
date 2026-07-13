@@ -87,7 +87,8 @@ describe('fetchLiveModelIds', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
     runTimersInline();
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline sk-ant-secretvalue')));
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('offline sk-ant-secretvalue'));
+    vi.stubGlobal('fetch', fetchSpy);
     expect(await fetchLiveModelIds()).toEqual([]);
     const result = await fetchLiveModelIdsWithStatus();
     expect(result.ids).toEqual([]);
@@ -97,6 +98,7 @@ describe('fetchLiveModelIds', () => {
       fetchedCount: 0,
       degradedVendors: [{ vendor: 'anthropic', reason: 'offline [redacted-key]' }],
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(2); // one attempt for each explicit point-of-use call
   });
 
   it('keeps ids empty but records degraded status on non-OK responses', async () => {
@@ -121,7 +123,7 @@ describe('fetchLiveModelIds', () => {
       .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
     vi.stubGlobal('fetch', fetchSpy);
-    const result = await fetchLiveModelIdsWithStatus();
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.ids).toEqual(['claude-opus-4-9']);
     expect(result.liveScan).toMatchObject({ mode: 'live', degradedVendors: [] });
@@ -133,7 +135,7 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn().mockRejectedValue(new Error('The operation was aborted due to timeout'));
     vi.stubGlobal('fetch', fetchSpy);
-    const result = await fetchLiveModelIdsWithStatus();
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
     expect(result.liveScan).toMatchObject({ mode: 'degraded' });
   });
@@ -144,7 +146,7 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn().mockResolvedValue({ ok: false, status: 401 });
     vi.stubGlobal('fetch', fetchSpy);
-    const result = await fetchLiveModelIdsWithStatus();
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(1); // 401 is a config fault; retrying cannot fix it
     expect(result.liveScan).toMatchObject({ mode: 'degraded' });
   });
@@ -157,7 +159,7 @@ describe('fetchLiveModelIds', () => {
       .mockResolvedValueOnce({ ok: false, status: 429 })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
     vi.stubGlobal('fetch', fetchSpy);
-    const result = await fetchLiveModelIdsWithStatus();
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.liveScan).toMatchObject({ mode: 'live' });
   });
@@ -467,6 +469,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
       ],
       liveScan: { mode: 'degraded' },
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // monitor policy: initial attempt + two retries
     expect(setIntervalSpy).toHaveBeenCalled();
     setIntervalSpy.mockRestore();
   });

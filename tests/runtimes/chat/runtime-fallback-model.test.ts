@@ -155,19 +155,22 @@ describe('ChatRuntime fallback model resolution', () => {
   it('degrades to the static catalog current when live discovery is down — never the raw symbolic string', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', fetchSpy);
 
-    // A down vendor is a retryable failure, so model-advisor now backs off
-    // (FETCH_RETRY_BACKOFF_MS) before degrading. Collapse just those sleeps —
-    // every other timer runs normally — so the degradation contract is asserted
-    // without spending the backoff on the wall clock.
+    // Point-of-use model resolution is on the interactive turn path. It may make
+    // one bounded vendor-list attempt, but monitor-only retry backoffs must never
+    // add 10 seconds to a user's fallback turn. Collapse and record those delays
+    // so this test fails quickly if the monitor policy leaks back into this path.
     const realSetTimeout = globalThis.setTimeout;
+    const backoffDelays: number[] = [];
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
       cb: (...a: unknown[]) => void,
       ms?: number,
       ...rest: unknown[]
     ) => {
       if (ms === 2_000 || ms === 8_000) {
+        backoffDelays.push(ms);
         cb();
         return { unref: () => {} } as unknown as NodeJS.Timeout;
       }
@@ -183,5 +186,7 @@ describe('ChatRuntime fallback model resolution', () => {
 
     const fallbackRequest = vi.mocked(fallback.generate).mock.calls[0][0];
     expect(fallbackRequest.model).toBe('gpt-5.4'); // catalog `current` for openai/gpt
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(backoffDelays).toEqual([]);
   });
 });

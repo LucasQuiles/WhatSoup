@@ -80,6 +80,11 @@ export interface LiveModelScanStatus {
   fetchedCount: number;
 }
 
+export interface LiveModelFetchOptions {
+  /** Retry transient vendor-list failures. Reserved for the background monitor. */
+  retryTransient?: boolean;
+}
+
 export interface ModelCurrencyCheckResult {
   advisories: ModelAdvisory[];
   liveScan: LiveModelScanStatus;
@@ -160,12 +165,13 @@ async function fetchModelIds(
   url: string,
   headers: Record<string, string>,
   vendor: string,
+  options: LiveModelFetchOptions,
 ): Promise<VendorModelFetchResult> {
   let last: VendorModelFetchResult & { retryable: boolean };
   for (let attempt = 0; ; attempt += 1) {
     last = await fetchModelIdsOnce(url, headers, vendor);
     if (!last.failure) return { ids: last.ids, failure: null };
-    if (!last.retryable || attempt >= FETCH_RETRY_BACKOFF_MS.length) break;
+    if (!options.retryTransient || !last.retryable || attempt >= FETCH_RETRY_BACKOFF_MS.length) break;
     const delayMs = FETCH_RETRY_BACKOFF_MS[attempt];
     log.debug({ vendor, attempt: attempt + 1, delayMs }, 'model list fetch failed; retrying');
     await sleep(delayMs);
@@ -180,7 +186,9 @@ function sanitizeFetchFailureReason(err: unknown): string {
     .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}\b/gi, 'Bearer [redacted]');
 }
 
-export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+export async function fetchLiveModelIdsWithStatus(
+  options: LiveModelFetchOptions = {},
+): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
   const fetches: Promise<VendorModelFetchResult>[] = [];
   const attemptedVendors: string[] = [];
   const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
@@ -190,6 +198,7 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
       'https://api.anthropic.com/v1/models?limit=100',
       { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
       'anthropic',
+      options,
     ));
   }
   const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
@@ -199,6 +208,7 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
       'https://api.openai.com/v1/models',
       { Authorization: `Bearer ${openaiKey}` },
       'openai',
+      options,
     ));
   }
   const results = await Promise.all(fetches);
@@ -221,8 +231,8 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
 }
 
 /** Fetch currently-served model IDs from vendors we have credentials for. */
-export async function fetchLiveModelIds(): Promise<string[]> {
-  return (await fetchLiveModelIdsWithStatus()).ids;
+export async function fetchLiveModelIds(options: LiveModelFetchOptions = {}): Promise<string[]> {
+  return (await fetchLiveModelIdsWithStatus(options)).ids;
 }
 
 /** A vendor Models-API failure classified by HTTP CONCEPT, not render vocabulary
@@ -404,8 +414,10 @@ export async function fetchOpenAIModelIdsWithStatus(): Promise<OpenAIModelsResul
 const LIVE_IDS_CACHE_TTL_MS = CHECK_INTERVAL_MS;
 let liveIdsCache: { fetchedAt: number; ids: string[]; liveScan: LiveModelScanStatus } | null = null;
 
-async function refreshLiveModelIdsCache(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
-  const result = await fetchLiveModelIdsWithStatus();
+async function refreshLiveModelIdsCache(
+  options: LiveModelFetchOptions = {},
+): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+  const result = await fetchLiveModelIdsWithStatus(options);
   liveIdsCache = { fetchedAt: Date.now(), ...result };
   return result;
 }
@@ -493,7 +505,7 @@ export async function checkModelCurrencyStatus(
   // Force-refresh (not read-through) so the startup check and each daily tick
   // re-resolve symbolic values against a fresh vendor list, priming the shared
   // cache that point-of-use resolution reads.
-  const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache();
+  const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache({ retryTransient: true });
   const advisories: ModelAdvisory[] = [];
   for (const [role, modelId] of Object.entries(models)) {
     if (!isNonEmptyString(modelId)) continue;
