@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  globSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -31,6 +32,15 @@ const launchdInstallers = [
 ];
 const guiMonitorInstaller = 'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh';
 const unitTemplates = [...serviceTemplates, ...timerTemplates];
+const releaseProofServices = [
+  'deploy/bot-errors-tree-provenance.service',
+  'deploy/bot-errors-runtime-staleness.service',
+];
+const releaseProofTimers = [
+  'deploy/bot-errors-tree-provenance.timer',
+  'deploy/bot-errors-runtime-staleness.timer',
+];
+const releaseProofUnits = [...releaseProofServices, ...releaseProofTimers];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
 const PRIVATE_DB_SEGMENT = ['instances', 'personal', 'bot.db'].join('/');
 const routingEnvKeys = [
@@ -112,7 +122,7 @@ describe('BOT ERRORS service templates', () => {
   });
 
   it('keep deploy-specific identifiers out of tracked unit files', () => {
-    for (const file of unitTemplates) {
+    for (const file of [...unitTemplates, ...releaseProofUnits]) {
       const text = readFileSync(file, 'utf8');
       expect(text).not.toContain('120363');
       expect(text).not.toMatch(/\/home\/[A-Za-z0-9._-]+\//);
@@ -786,5 +796,76 @@ describe('BOT ERRORS service templates', () => {
     expect(existsSync('/tmp/whatsoup-traversal-poc.plist')).toBe(false);
     expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
     expect(existsSync(path.join(home, 'systemctl.log'))).toBe(false);
+  });
+});
+
+describe('release-proof monitor units', () => {
+  it('services carry the full safety and resource contract', () => {
+    for (const file of releaseProofServices) {
+      const text = readFileSync(file, 'utf8');
+      for (const directive of [
+        'Type=oneshot',
+        'EnvironmentFile=%h/.config/whatsoup/bot-errors.env',
+        'ExecStart=%h/.local/lib/whatsoup/release-proof/current/deploy/scripts/bot-errors-release-proof-run.sh',
+        'UMask=0077',
+        'TimeoutStartSec=45s',
+        'TimeoutStopSec=15s',
+        'KillMode=control-group',
+        'SuccessExitStatus=75',
+        'NoNewPrivileges=yes',
+        'PrivateTmp=yes',
+        'ProtectSystem=strict',
+        'ProtectHome=read-only',
+        'ReadWritePaths=%h/.local/state/bot-errors',
+        'MemoryMax=128M',
+        'TasksMax=32',
+        'Nice=10',
+        'IOSchedulingClass=idle',
+      ]) {
+        expect(text, `${file} missing ${directive}`).toContain(directive);
+      }
+    }
+  });
+
+  it('units never bind to, restart, or command application services', () => {
+    for (const file of releaseProofUnits) {
+      const text = readFileSync(file, 'utf8');
+      for (const forbidden of [
+        'Requires=',
+        'PartOf=',
+        'BindsTo=',
+        'Restart=',
+        'whatsoup@',
+        'whatsoup-fleet',
+        'bot-errors-dispatcher',
+        'bot-errors-collector',
+        'bot-errors-q-loop',
+      ]) {
+        expect(text, `${file} contains forbidden ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('timers bootstrap with distinct offsets and repeat via OnUnitInactiveSec', () => {
+    const tree = readFileSync('deploy/bot-errors-tree-provenance.timer', 'utf8');
+    const stale = readFileSync('deploy/bot-errors-runtime-staleness.timer', 'utf8');
+    for (const text of [tree, stale]) {
+      expect(text).toContain('OnUnitInactiveSec=30m');
+      expect(text).toContain('RandomizedDelaySec=');
+      expect(text).not.toContain('OnUnitActiveSec=');
+      expect(text).not.toContain('Persistent=true');
+    }
+    const offset = (t: string) => t.match(/OnActiveSec=(\S+)/)?.[1];
+    expect(offset(tree)).toBeDefined();
+    expect(offset(stale)).toBeDefined();
+    expect(offset(tree)).not.toBe(offset(stale));
+  });
+
+  it('exactly one tracked unit schedules tree provenance (single producer, B3)', () => {
+    const unitFiles = globSync('deploy/*.service');
+    const producers = unitFiles.filter((f) =>
+      readFileSync(f, 'utf8').includes('bot-errors-release-proof-run.sh tree'),
+    );
+    expect(producers).toEqual(['deploy/bot-errors-tree-provenance.service']);
   });
 });

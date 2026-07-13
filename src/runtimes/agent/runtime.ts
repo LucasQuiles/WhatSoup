@@ -99,7 +99,7 @@ import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
-import { getRecentMessages, getMessagesSince } from '../../core/messages.ts';
+import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -1494,6 +1494,10 @@ export class AgentRuntime implements Runtime {
   private currentTurnInboundContentType: string | null = null;
   private currentTurnAssistantText = '';
   private currentTurnAssistantItemText: Map<string, string> = new Map();
+  // Inbound message id anchoring the current turn — reply-guarantee evidence
+  // (hasFromMeReplyAfter) is scoped to the origin conversation via this id.
+  private currentTurnSourceMessageId: string | null = null;
+  private perChatTurnSourceMessageId: Map<string, string> = new Map();
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
   private perChatTurnSuppressedReplySatisfaction: Set<string> = new Set();
@@ -1592,6 +1596,7 @@ export class AgentRuntime implements Runtime {
     if (options.preserveCrashHistory !== true) this.crashes.forget(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
     this.pendingSystemResults.clearScope(mapKey);
+    this.perChatTurnSourceMessageId.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
@@ -1753,6 +1758,7 @@ export class AgentRuntime implements Runtime {
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
+      this.perChatTurnSourceMessageId.delete(mapKey);
       this.perChatTurnContentType.delete(mapKey);
       this.perChatTurnText.delete(mapKey);
       this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
@@ -1805,10 +1811,49 @@ export class AgentRuntime implements Runtime {
     );
 
     if (decision.satisfiesReplyGuarantee) {
+      // A send_verification classification claims "I already replied via a
+      // send tool" — that claim is only honored with byte-derived evidence: a
+      // from-me message stored in the ORIGIN conversation after this turn's
+      // inbound. Without it (observed live: agent sent to a DIFFERENT chat,
+      // then its verification text disarmed the origin chat's guarantee →
+      // permanent silence), suppress the text but leave the reply guarantee
+      // armed so the silence fallback still fires. noop/ack reasons stay
+      // evidence-free: deliberate silence is their contract. Turns with no
+      // inbound (proactive/system) have no armed guarantee to protect.
+      if (
+        decision.reason === 'send_verification' &&
+        inboundSeq !== undefined &&
+        !this.originChatRepliedThisTurn(mapKey)
+      ) {
+        log.warn(
+          {
+            chatJid: queue.targetChatJid,
+            inboundSeq,
+            textPreview: sanitizeProviderPreviewText(text).slice(0, 200),
+          },
+          'send_verification text without origin-chat outbound — reply guarantee stays armed',
+        );
+        return null;
+      }
       if (mapKey !== undefined) this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
       else this.turnHadSuppressedReplySatisfaction = true;
     }
     return null;
+  }
+
+  /** Evidence check for send_verification suppression: fails closed when the
+   *  turn's inbound message id is untracked or has no stored inbound row. */
+  private originChatRepliedThisTurn(mapKey: string | undefined): boolean {
+    const sourceMessageId = mapKey !== undefined
+      ? this.perChatTurnSourceMessageId.get(mapKey)
+      : this.currentTurnSourceMessageId;
+    if (sourceMessageId === undefined || sourceMessageId === null) return false;
+    try {
+      return hasFromMeReplyAfter(this.db, sourceMessageId);
+    } catch (err) {
+      log.warn({ err, mapKey }, 'origin-chat reply evidence query failed — failing closed');
+      return false;
+    }
   }
 
   /**
@@ -1957,6 +2002,7 @@ export class AgentRuntime implements Runtime {
       perChatExecActorQueue: runtime.perChatExecActorQueue,
       pendingTurnText: runtime.pendingTurnText,
       pendingTurnActorJid: runtime.pendingTurnActorJid,
+      perChatTurnSourceMessageId: runtime.perChatTurnSourceMessageId,
       perChatTurnContentType: runtime.perChatTurnContentType,
       perChatTurnText: runtime.perChatTurnText,
       perChatTurnSuppressedReplySatisfaction: runtime.perChatTurnSuppressedReplySatisfaction,
@@ -2272,6 +2318,11 @@ export class AgentRuntime implements Runtime {
           if (contentType !== undefined) {
             this.perChatTurnContentType.delete(lidKey);
             this.perChatTurnContentType.set(canonical, contentType);
+          }
+          const sourceMessageId = this.perChatTurnSourceMessageId.get(lidKey);
+          if (sourceMessageId !== undefined) {
+            this.perChatTurnSourceMessageId.delete(lidKey);
+            this.perChatTurnSourceMessageId.set(canonical, sourceMessageId);
           }
           const turnText = this.perChatTurnText.get(lidKey);
           if (turnText !== undefined) {
@@ -3619,6 +3670,7 @@ export class AgentRuntime implements Runtime {
       // @check CHK-063 // @traces REQ-012.AC-04
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
+      this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
       const prefixedText = this.sharedRuntimeTurnText({
@@ -3713,6 +3765,7 @@ export class AgentRuntime implements Runtime {
       this.replyGuarantee?.arm({ inboundSeq: msg.inboundSeq, chatJid });
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
+      this.currentTurnSourceMessageId = msg.messageId;
       this.currentTurnAssistantText = '';
       this.turnHadSuppressedReplySatisfaction = false;
       this.currentTurnAssistantItemText.clear();
@@ -5930,8 +5983,10 @@ export class AgentRuntime implements Runtime {
       this.perChatTurnQueues.clear();
       this.runtimeTurnAfterTerminal.clear();
       this.currentTurnInboundContentType = null;
+      this.currentTurnSourceMessageId = null;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
+      this.perChatTurnSourceMessageId.clear();
       this.perChatTurnContentType.clear();
       this.perChatTurnText.clear();
       this.perChatTurnSuppressedReplySatisfaction.clear();
@@ -9447,6 +9502,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnReplayText = null;
     this.currentTurnReplayActorJid = undefined;
     this.currentTurnInboundContentType = null;
+    this.currentTurnSourceMessageId = null;
     this.currentTurnAssistantText = '';
     this.currentTurnAssistantItemText.clear();
     // Shutdown operation tracker on crash (timers must be cleared)
@@ -9475,6 +9531,7 @@ export class AgentRuntime implements Runtime {
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
+    this.perChatTurnSourceMessageId.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);

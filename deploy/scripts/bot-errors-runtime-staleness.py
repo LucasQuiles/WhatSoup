@@ -20,11 +20,27 @@ For a STALE instance   → emit alert: --severity warning --source runtime_stale
 For a FRESH instance   → emit clear: --clear --source runtime_stale
 For a not-running (MainPID=0) instance → emit nothing.
 
+Probe honesty (spec B1)
+------------------------
+A probe command failing, or returning malformed/empty output, is an UNKNOWN
+observation, not a fresh or not-running one. Unknown observations must never
+be converted into a --clear (false fresh) or a not-running skip (false
+negative) — both would hide a real incident. Every probe step (systemctl
+list-units, systemctl show MainPID, ps etimes, find) raises ProbeError on
+failure or unparseable output. An affirmative not-running result — MainPID
+output that is exactly "0" — is the ONLY skip; everything else is either a
+valid observation or a probe error. Successful discovery that finds zero
+whatsoup@ instances is also treated as a probe error, not an empty healthy
+fleet, since a discovery command that silently stops matching real units
+looks identical to zero instances.
+
 Exit codes
 ----------
   0  Successful monitor run (regardless of staleness).
   1  One or more emit() calls failed.
-  2  Probe/configuration error that prevented the run.
+  2  Probe/configuration error that prevented the run. Probe error dominates:
+     if any instance fails to probe, the run exits 2 even if other instances
+     probed and emitted successfully.
 """
 
 from __future__ import annotations
@@ -48,6 +64,12 @@ EMIT_SCRIPT = Path(
     or (SCRIPT_DIR / "bot-errors-emit.py")
 )
 EMIT_SOURCE = "runtime_stale"
+
+
+class ProbeError(Exception):
+    """A probe command failed or returned malformed output; the observation is unknown.
+
+    Unknown observations must never be converted to fresh/stale state (spec B1)."""
 
 # Files whose staleness is behaviourally load-bearing. Ported verbatim from
 # scripts/process-code-staleness.ts (CRITICAL_SUFFIXES).
@@ -211,8 +233,12 @@ def _run(args: list[str], *, timeout: float = 15.0) -> tuple[int, str]:
 
 
 def discover_instances() -> list[str]:
-    """List whatsoup@ instance names via systemctl."""
-    _, out = _run(
+    """List whatsoup@ instance names via systemctl.
+
+    Raises ProbeError when the discovery command itself fails; an empty
+    result is returned to the caller, which treats it as a probe error too.
+    """
+    rc, out = _run(
         [
             "systemctl",
             "--user",
@@ -223,6 +249,8 @@ def discover_instances() -> list[str]:
             "--plain",
         ]
     )
+    if rc != 0:
+        raise ProbeError(f"instance discovery failed: systemctl list-units rc={rc}")
     names: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
@@ -253,7 +281,7 @@ def probe_instance(instance: str) -> dict:
     now_epoch = math.floor(time.time())
 
     # 1. MainPID
-    _, pid_out = _run(
+    rc, pid_out = _run(
         [
             "systemctl",
             "--user",
@@ -264,8 +292,10 @@ def probe_instance(instance: str) -> dict:
             "--value",
         ]
     )
-    pid = parse_main_pid(pid_out)
-    if pid is None:
+    if rc != 0:
+        raise ProbeError(f"whatsoup@{instance}: MainPID probe failed rc={rc}")
+    pid_text = pid_out.strip()
+    if pid_text == "0":
         return {
             "running": False,
             "pid": None,
@@ -278,22 +308,41 @@ def probe_instance(instance: str) -> dict:
             "lag_seconds": None,
             "error": "not running (MainPID=0)",
         }
+    pid = parse_main_pid(pid_out)
+    if pid is None:
+        raise ProbeError(
+            f"whatsoup@{instance}: malformed MainPID output {pid_text[:40]!r}"
+        )
 
     # 2. Boot epoch via elapsed seconds
-    _, ps_out = _run(["ps", "-o", "etimes=", "-p", str(pid)])
+    rc, ps_out = _run(["ps", "-o", "etimes=", "-p", str(pid)])
+    if rc != 0:
+        raise ProbeError(f"whatsoup@{instance}: ps elapsed-time probe failed rc={rc}")
     etimes = parse_etimes(ps_out)
-    boot_epoch = compute_boot_epoch(etimes, now_epoch) if etimes is not None else None
+    if etimes is None:
+        raise ProbeError(
+            f"whatsoup@{instance}: malformed ps etimes output {ps_out.strip()[:40]!r}"
+        )
+    boot_epoch = compute_boot_epoch(etimes, now_epoch)
 
-    # 3. Repo root from /proc/<pid>/cmdline, fall back to env var or script anchor.
+    # 3. Repo root from /proc/<pid>/cmdline, fall back to env var.
     repo_root = _repo_root_from_pid(pid)
+    if repo_root is None:
+        raise ProbeError(
+            f"whatsoup@{instance}: repo root unresolved "
+            "(no bootstrap.ts in /proc cmdline and BOT_ERRORS_STALENESS_REPO_ROOT unset)"
+        )
 
     # 4. Newest src/*.ts mtime via find
-    src_file: str | None = None
-    src_epoch: int | None = None
-    if repo_root:
-        src_dir = os.path.join(repo_root, "src")
-        _, find_out = _run(["find", src_dir, "-name", "*.ts", "-printf", "%T@\t%p\n"])
-        src_file, src_epoch = parse_find_output(find_out)
+    src_dir = os.path.join(repo_root, "src")
+    rc, find_out = _run(["find", src_dir, "-name", "*.ts", "-printf", "%T@\t%p\n"])
+    if rc != 0:
+        raise ProbeError(f"whatsoup@{instance}: source mtime probe failed rc={rc}")
+    src_file, src_epoch = parse_find_output(find_out)
+    if src_epoch is None:
+        raise ProbeError(
+            f"whatsoup@{instance}: no parseable src/*.ts mtimes under source tree"
+        )
 
     stale = is_stale(boot_epoch, src_epoch)
     critical = (
@@ -341,8 +390,10 @@ def _repo_root_from_pid(pid: int) -> str | None:
     if env_root:
         return env_root
 
-    # Last resort: derive from this script's location (deploy/scripts/ -> ../..)
-    return str(SCRIPT_DIR.parent.parent)
+    # No silent last resort: when this script runs from the release-proof
+    # bundle the script anchor points at the bundle, not the app checkout,
+    # and a wrong root silently yields a false-fresh verdict.
+    return None
 
 
 def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
@@ -366,15 +417,28 @@ def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
 def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
     """Run one monitor cycle; return 0 (success), 1 (emit failure), 2 (probe error)."""
     if instances is None:
-        instances = discover_instances()
+        try:
+            instances = discover_instances()
+        except ProbeError as exc:
+            print(f"probe error: {exc}", file=sys.stderr)
+            return 2
+        if not instances:
+            print(
+                "probe error: no whatsoup@ instances discovered; "
+                "refusing to report an empty fleet as healthy",
+                file=sys.stderr,
+            )
+            return 2
 
-    if not instances:
-        print("runtime-staleness-monitor: no whatsoup@ instances found")
-        return 0
-
-    exit_code = 0
+    probe_error = False
+    emit_failed = False
     for inst in instances:
-        result = probe_instance(inst)
+        try:
+            result = probe_instance(inst)
+        except ProbeError as exc:
+            print(f"probe error: {exc}", file=sys.stderr)
+            probe_error = True
+            continue
 
         if not result["running"]:
             print(f"whatsoup@{inst}: not running — skipping (no emit)")
@@ -397,9 +461,13 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
         rc = emit_event(argv, dry_run=dry_run)
         if rc != 0:
             print(f"emit failed for whatsoup@{inst} (rc={rc})", file=sys.stderr)
-            exit_code = 1
+            emit_failed = True
 
-    return exit_code
+    if probe_error:
+        return 2
+    if emit_failed:
+        return 1
+    return 0
 
 
 def config_check() -> int:

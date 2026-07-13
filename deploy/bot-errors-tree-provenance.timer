@@ -1,0 +1,12 @@
+[Unit]
+Description=Run BOT ERRORS tree-provenance release-proof monitor every 30 minutes
+
+[Timer]
+OnActiveSec=7m
+OnUnitInactiveSec=30m
+RandomizedDelaySec=120
+AccuracySec=1m
+Unit=bot-errors-tree-provenance.service
+
+[Install]
+WantedBy=timers.target

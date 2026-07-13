@@ -64,6 +64,21 @@ function run(args: string[]) {
   });
 }
 
+const MONITOR_UNITS = [
+  'bot-errors-tree-provenance.service',
+  'bot-errors-tree-provenance.timer',
+  'bot-errors-runtime-staleness.service',
+  'bot-errors-runtime-staleness.timer',
+];
+
+function writeMonitorUnits(repo: string, systemd: string): void {
+  for (const unit of MONITOR_UNITS) {
+    const body = `[Unit]\nDescription=${unit}\n`;
+    writeFileSync(join(repo, 'deploy', unit), body);
+    writeFileSync(join(systemd, unit), body);
+  }
+}
+
 afterEach(() => {
   for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
   tmpDirs.length = 0;
@@ -167,5 +182,44 @@ describe('check-unit-drift.sh', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('whatsoup-ensure-node');
     expect(result.stderr).toContain('local-Node fast path');
+  });
+});
+
+describe('release-proof explicit unit scope', () => {
+  it('passes when all four monitor units match', () => {
+    const { repo, systemd, bin } = makeFixture();
+    writeMonitorUnits(repo, systemd);
+    const res = run([
+      '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
+      '--unit', ...MONITOR_UNITS,
+      '--wrapper',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain('all managed systemd units match');
+    for (const unit of MONITOR_UNITS) expect(res.stdout).toContain(`ok: ${unit}`);
+  });
+
+  it('fails when one monitor unit drifts', () => {
+    const { repo, systemd, bin } = makeFixture();
+    writeMonitorUnits(repo, systemd);
+    writeFileSync(join(systemd, 'bot-errors-tree-provenance.timer'), '[Unit]\nDescription=tampered\n');
+    const res = run([
+      '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
+      '--unit', ...MONITOR_UNITS,
+      '--wrapper',
+    ]);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('drift: bot-errors-tree-provenance.timer');
+  });
+
+  it('missing systemd dir is inconclusive (exit 3), not a pass', () => {
+    const { repo, bin } = makeFixture();
+    const res = run([
+      '--repo-root', repo, '--systemd-dir', join(repo, 'nonexistent-systemd'), '--bin-dir', bin,
+      '--unit', ...MONITOR_UNITS,
+      '--wrapper',
+    ]);
+    expect(res.status).toBe(3);
+    expect(res.stdout).toContain('SKIP');
   });
 });

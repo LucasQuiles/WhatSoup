@@ -161,3 +161,43 @@ After a separately approved re-cut:
 
 Until this acceptance is complete, do not claim the live instance is protected by
 new source changes.
+
+## In-place-git release-proof pilot (central host)
+
+The snapshot planes above do not apply to the central pilot host, which runs
+an in-place-git checkout. Its release-proof plane is the monitor-only pilot
+specified in
+`docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md`
+(gates, non-regression criteria, abort rules, and promotion packet live
+there; this section is the operator entry point).
+
+Operator sequence (each gate separately owner-gated):
+
+1. **Gate 1 — isolated dry proof:** stage with
+   `install-bot-errors-release-proof.sh dry-run --host <host> --mode observe
+   --bundle-sha <merged-sha>`; run both detectors against temporary
+   `BOT_ERRORS_STATE_DIR`; prove no application path changed. Before any
+   standalone timer install, capture the effective daily-health profile and
+   require
+   `python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("expectTreeProvenance", False) is False' <effective-profile-path>`
+   to exit 0. Missing or unreadable effective-profile evidence is
+   Inconclusive and stops the pilot.
+2. **Gate 2 — controlled alert drill:** one warning + same-key clear through
+   the production dispatcher (`--source release_proof_drill`, unique
+   conservative instance, `BOT_ERRORS_INLINE_LOG_TAIL=0`). Requires
+   execution-time owner confirmation — it is an external communication.
+3. **Gate 3 — observe install + 24 h soak:**
+   `install --mode observe`; verify with `verify` and the explicit
+   four-unit `check-unit-drift.sh` invocation; capture the spec §9
+   non-regression evidence before and after.
+4. **Gate 4 — emit + 48 h soak:** `set-mode --mode emit` after a separate
+   owner gate; one manual cycle per detector before automated coverage.
+5. **Gate 5 — application provenance proof:** separate approval; deploy an
+   approved main SHA, restart the app, stamp `expected_head_sha`, prove
+   `/health.instance.commit`/`branch` and a runtime-staleness clear.
+
+Rollback at any point: `install-bot-errors-release-proof.sh rollback
+--host <host> --receipt <receipt-dir>` (printed by `install`). Rollback
+accepts only owner-private receipts under
+`~/.local/state/whatsoup/release-proof-installer/receipts/`, touches only
+monitor artifacts, and never invokes an application service command.

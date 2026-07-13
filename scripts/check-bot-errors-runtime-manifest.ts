@@ -75,6 +75,8 @@ export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
 export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'src/lib/bot-errors-outbox.ts',
   'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
+  'deploy/scripts/bot-errors-release-proof-run.sh',
+  'deploy/scripts/install-bot-errors-release-proof.sh',
 ] as const;
 
 const PYTHON_RUNTIME_DIRS = ['deploy/scripts', 'deploy/scripts/lib'] as const;

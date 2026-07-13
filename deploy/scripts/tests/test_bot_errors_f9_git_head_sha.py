@@ -242,3 +242,27 @@ class TestGitFailurePaths:
             line = mod.git_head_sha_line(_manifest({"expected_head_sha": "a" * 40}))
         assert line.startswith("WARN "), f"git failure must WARN even with expected set: {line!r}"
         assert not line.startswith("FAIL"), f"Should not FAIL on git error: {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# (f) _run_git_rev_parse uses --no-optional-locks
+# ---------------------------------------------------------------------------
+
+class TestRunGitRevParseNoOptionalLocks:
+    def test_run_git_rev_parse_uses_no_optional_locks(self, tmp_path, monkeypatch):
+        """_run_git_rev_parse must pass --no-optional-locks to git command."""
+        calls: list[list[str]] = []
+
+        class _Proc:
+            stdout = "a" * 40 + "\n"
+            stderr = ""
+            returncode = 0
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return _Proc()
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        _mod._run_git_rev_parse(tmp_path)
+        assert calls, "expected a git invocation"
+        assert calls[0][:2] == ["git", "--no-optional-locks"]

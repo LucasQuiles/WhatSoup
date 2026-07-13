@@ -6540,7 +6540,14 @@ describe('AgentRuntime', () => {
       mockRuntimeLogger.info.mockClear();
 
       await vi.advanceTimersByTimeAsync(59_000);
-      expect(mockRuntimeLogger.info).not.toHaveBeenCalled();
+      // Narrowed to the health-stats message: a respawn/idle timer leaked from
+      // an earlier test can legitimately log info during this window (observed
+      // flake on quality 24.x: "auto-respawn: attempting resume" — failed on
+      // main 2026-07-12 and on PR #1741). The assertion under test is "no
+      // health stats before 60s", mirroring the post-shutdown check below.
+      expect(
+        mockRuntimeLogger.info.mock.calls.some((call) => call[1] === 'agent runtime health stats'),
+      ).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1_000);
 
