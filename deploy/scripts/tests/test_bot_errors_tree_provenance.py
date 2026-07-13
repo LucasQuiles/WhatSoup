@@ -366,3 +366,139 @@ def test_run_once_clean_returns_zero_and_no_emit_when_dry(tmp_path: Path, monkey
     rc = _mod.run_once(do_fetch=False, dry=True)
     assert rc == 0
     assert not (state / "outbox").exists()
+
+
+# ---------------------------------------------------------------------------
+# --reporter scheduler mode + --no-optional-locks (B2)
+# ---------------------------------------------------------------------------
+def test_reporter_print_exits_zero_for_warning_finding(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    (work / "junk.txt").write_text("dirty\n")  # DIRTY finding -> warning severity
+    state = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.main(["--reporter", "--print", "--repo", str(work)])
+    assert rc == 0
+    assert not (state / "outbox").exists()
+
+
+def test_reporter_once_exits_zero_and_emits_for_clean(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    state = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.main(["--reporter", "--once", "--repo", str(work)])
+    assert rc == 0
+    events = list((state / "outbox").glob("*.json"))
+    assert len(events) == 1
+
+
+def test_reporter_inspection_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    not_a_repo = tmp_path / "empty"
+    not_a_repo.mkdir()
+    state = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.main(["--reporter", "--once", "--repo", str(not_a_repo)])
+    assert rc == 2
+    assert not (state / "outbox").exists()
+
+
+def _reporter_git_probe_failure_result(
+    tmp_path: Path, monkeypatch, failed_probe: str
+) -> tuple[int, bool]:
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    state = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    real_run = _mod.subprocess.run
+
+    def fail_selected_probe(argv, **kwargs):
+        is_target = (
+            (failed_probe == "head" and argv[-2:] == ["rev-parse", "HEAD"])
+            or (failed_probe in {"status", "rev-list"} and failed_probe in argv)
+        )
+        if argv and argv[0] == "git" and is_target:
+            return subprocess.CompletedProcess(
+                argv, 128, stdout="", stderr=f"simulated {failed_probe} failure"
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(_mod.subprocess, "run", fail_selected_probe)
+    rc = _mod.main(["--reporter", "--once", "--repo", str(work)])
+    return rc, (state / "outbox").exists()
+
+
+def test_reporter_head_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "head")
+    assert rc == 2
+    assert not outbox_exists
+
+
+def test_reporter_status_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "status")
+    assert rc == 2
+    assert not outbox_exists
+
+
+def test_reporter_ancestry_probe_failure_exits_two_and_emits_nothing(tmp_path: Path, monkeypatch):
+    rc, outbox_exists = _reporter_git_probe_failure_result(tmp_path, monkeypatch, "rev-list")
+    assert rc == 2
+    assert not outbox_exists
+
+
+def test_reporter_event_write_failure_exits_one(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+
+    def boom(event):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_mod, "emit_outbox_event", boom)
+    rc = _mod.main(["--reporter", "--once", "--repo", str(work)])
+    assert rc == 1
+
+
+def test_reporter_rejects_fetch(tmp_path: Path):
+    with pytest.raises(SystemExit) as exc:
+        _mod.main(["--reporter", "--fetch"])
+    assert exc.value.code == 2
+
+
+def test_reporter_rejects_json(tmp_path: Path):
+    # --json ignores reporter semantics (GitError -> 1, not 2), so the
+    # combination is a usage error rather than a silently different contract.
+    with pytest.raises(SystemExit) as exc:
+        _mod.main(["--reporter", "--json"])
+    assert exc.value.code == 2
+
+
+def test_interactive_severity_exits_unchanged(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    (work / "junk.txt").write_text("dirty\n")
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    rc = _mod.main(["--print", "--repo", str(work)])
+    assert rc == 1  # warning severity still maps to exit 1 without --reporter
+
+
+def test_all_offline_git_commands_use_no_optional_locks(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    calls: list[list[str]] = []
+    real_run = _mod.subprocess.run
+
+    def recorder(argv, **kwargs):
+        if argv and argv[0] == "git":
+            calls.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(_mod.subprocess, "run", recorder)
+    _mod.gather_tree_provenance(work.resolve(), do_fetch=False)
+    assert calls, "expected at least one git invocation"
+    for argv in calls:
+        assert argv[1] == "--no-optional-locks", f"missing flag in: {argv}"
+
+
+def test_git_index_bytes_and_mtime_unchanged(tmp_path: Path):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    index = work / ".git" / "index"
+    before_bytes = index.read_bytes()
+    before_mtime = index.stat().st_mtime_ns
+    _mod.gather_tree_provenance(work.resolve(), do_fetch=False)
+    assert index.read_bytes() == before_bytes
+    assert index.stat().st_mtime_ns == before_mtime

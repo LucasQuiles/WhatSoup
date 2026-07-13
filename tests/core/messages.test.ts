@@ -20,6 +20,7 @@ import {
   getUnprocessedCount,
   incrementEnrichmentRetries,
   resetEnrichmentErrors,
+  hasFromMeReplyAfter,
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
@@ -943,5 +944,65 @@ describe('messages — additional edge cases', () => {
       .prepare('SELECT content FROM messages WHERE message_id = ?')
       .get(msg.messageId) as { content: string };
     expect(JSON.parse(row.content)).toEqual({ type: 'audio', duration: 7, transcription: 'preserved' });
+  });
+
+  // --- hasFromMeReplyAfter (origin-chat reply evidence for the egress gate) ---
+
+  describe('hasFromMeReplyAfter', () => {
+    it('returns true when a from-me message follows the inbound in the same conversation', () => {
+      storeMessageIfNew(db, makeMsg({ messageId: 'inbound-1' }));
+      storeMessageIfNew(db, makeMsg({
+        messageId: 'reply-1',
+        isFromMe: true,
+        senderJid: 'me@s.whatsapp.net',
+        timestamp: BASE_TS + 5,
+      }));
+      expect(hasFromMeReplyAfter(db, 'inbound-1')).toBe(true);
+    });
+
+    it('returns false when the only from-me send after the inbound went to a DIFFERENT conversation', () => {
+      storeMessageIfNew(db, makeMsg({ messageId: 'inbound-2' }));
+      storeMessageIfNew(db, makeMsg({
+        messageId: 'cross-chat-send',
+        isFromMe: true,
+        senderJid: 'me@s.whatsapp.net',
+        chatJid: 'othergroup@g.us',
+        conversationKey: 'othergroup_at_g.us',
+        timestamp: BASE_TS + 5,
+      }));
+      expect(hasFromMeReplyAfter(db, 'inbound-2')).toBe(false);
+    });
+
+    it('returns false when the turn produced no from-me message at all', () => {
+      storeMessageIfNew(db, makeMsg({ messageId: 'inbound-3' }));
+      expect(hasFromMeReplyAfter(db, 'inbound-3')).toBe(false);
+    });
+
+    it('returns false when the only from-me message predates the inbound (stale earlier reply)', () => {
+      storeMessageIfNew(db, makeMsg({
+        messageId: 'old-reply',
+        isFromMe: true,
+        senderJid: 'me@s.whatsapp.net',
+        timestamp: BASE_TS - 100,
+      }));
+      storeMessageIfNew(db, makeMsg({ messageId: 'inbound-4', timestamp: BASE_TS }));
+      expect(hasFromMeReplyAfter(db, 'inbound-4')).toBe(false);
+    });
+
+    it('fails closed (false) when the inbound message id is unknown', () => {
+      expect(hasFromMeReplyAfter(db, 'never-stored')).toBe(false);
+    });
+
+    it('ignores soft-deleted from-me messages', () => {
+      storeMessageIfNew(db, makeMsg({ messageId: 'inbound-5' }));
+      storeMessageIfNew(db, makeMsg({
+        messageId: 'deleted-reply',
+        isFromMe: true,
+        senderJid: 'me@s.whatsapp.net',
+        timestamp: BASE_TS + 5,
+      }));
+      db.raw.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE message_id = 'deleted-reply'").run();
+      expect(hasFromMeReplyAfter(db, 'inbound-5')).toBe(false);
+    });
   });
 });

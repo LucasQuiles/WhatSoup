@@ -96,6 +96,7 @@ export interface RuntimeTurnCoordinatorPort {
   readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
   readonly pendingTurnText: Map<string, string>;
   readonly pendingTurnActorJid: Map<string, string | undefined>;
+  readonly perChatTurnSourceMessageId: Map<string, string>;
   readonly perChatTurnContentType: Map<string, string>;
   readonly perChatTurnText: Map<string, string>;
   readonly perChatTurnSuppressedReplySatisfaction: Set<string>;
@@ -1201,6 +1202,7 @@ async processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Pr
   this.host.perChatInboundSeqQueue.set(mapKey, seqQueue);
   this.host.getQueueForChat(turn.chatJid, mapKey)?.setInboundSeq(turn.inboundSeq);
   this.host.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid: turn.chatJid });
+  this.host.perChatTurnSourceMessageId.set(mapKey, turn.sourceMessageId);
   this.host.perChatTurnContentType.set(mapKey, turn.contentType);
   this.host.perChatTurnText.set(mapKey, '');
   this.host.perChatTurnSuppressedReplySatisfaction.delete(mapKey);

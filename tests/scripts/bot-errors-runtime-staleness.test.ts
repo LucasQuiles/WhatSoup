@@ -27,25 +27,40 @@ const SCRIPT = path.resolve(
 
 const FAKE_SYSTEMCTL = [
   '#!/usr/bin/env bash',
+  'if [ -n "${FAKE_SYSTEMCTL_RC:-}" ]; then exit "${FAKE_SYSTEMCTL_RC}"; fi',
   'case "$*" in',
   // printf with %s keeps the literal off the email/private-label shape patterns.
-  '  *list-units*) printf "whatsoup@%s.service  loaded active running WhatSoup %s\\n" demo demo ;;',
-  '  *MainPID*)    echo "${FAKE_MAINPID:-999999}" ;;',
+  '  *list-units*)',
+  '    if [ -n "${FAKE_DISCOVERY_EMPTY:-}" ]; then exit 0; fi',
+  '    printf "whatsoup@%s.service  loaded active running WhatSoup %s\\n" demo demo ;;',
+  // Plain "-" (not ":-") so an explicitly-empty override (FAKE_MAINPID='')
+  // echoes truly empty output instead of falling back to the default —
+  // ":-" treats set-but-null the same as unset and would swallow that case.
+  '  *MainPID*)    echo "${FAKE_MAINPID-999999}" ;;',
   '  *) : ;;',
   'esac',
 ].join('\n');
 
-const FAKE_PS = ['#!/usr/bin/env bash', 'echo "${FAKE_ETIMES:-100}"'].join('\n');
+const FAKE_PS = [
+  '#!/usr/bin/env bash',
+  'if [ -n "${FAKE_PS_RC:-}" ]; then exit "${FAKE_PS_RC}"; fi',
+  'echo "${FAKE_ETIMES:-100}"',
+].join('\n');
 
 const FAKE_FIND = [
   '#!/usr/bin/env bash',
+  'if [ -n "${FAKE_FIND_RC:-}" ]; then exit "${FAKE_FIND_RC}"; fi',
+  'if [ -n "${FAKE_FIND_EMPTY:-}" ]; then exit 0; fi',
   'printf "%s\\t%s\\n" "${FAKE_SRC_EPOCH:-1000000000}" "${FAKE_SRC_FILE:-/repo/src/foo.ts}"',
 ].join('\n');
 
 // Minimal emit stub: prints what it was called with so tests can assert argv.
 const FAKE_EMIT_PY = [
   '#!/usr/bin/env python3',
-  'import sys',
+  'import os, sys',
+  'rc = os.environ.get("FAKE_EMIT_RC", "")',
+  'if rc:',
+  '    sys.exit(int(rc))',
   'args = sys.argv[1:]',
   'def get(flag):',
   '    try:',
@@ -87,6 +102,10 @@ function run(
       // Default every run at the stub emitter so non-dry-run cases NEVER touch
       // the real outbox. A test may still override via fakeEnv.
       BOT_ERRORS_STALENESS_EMIT_SCRIPT: emitScript,
+      // Deterministic repo root so the script never needs its (removed)
+      // script-anchor fallback. Placed before the fakeEnv spread so a test
+      // can override it (including to '' to simulate absence).
+      BOT_ERRORS_STALENESS_REPO_ROOT: process.cwd(),
       ...fakeEnv,
       PATH: `${binDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
     },
@@ -190,17 +209,10 @@ describe('integration: staleness verdict and emit routing', () => {
     expect(r.stdout).not.toContain('fresh');
   });
 
-  it('not-running (non-numeric MainPID output) → no emit', () => {
-    // The fake systemctl echoes FAKE_MAINPID verbatim; "notapid" is non-numeric
-    // so parse_main_pid returns None → instance treated as not running.
-    const r = run(['--instance', 'demo'], {
-      FAKE_MAINPID: 'notapid',
-      FAKE_SRC_EPOCH: '9999999999',
-    });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('not running');
-    expect(r.stdout).not.toContain('STALE');
-  });
+  // NOTE: the former 'malformed MainPID is a probe error, not a not-running
+  // skip' case was deleted as redundant — its assertions are a strict subset
+  // of the probe-honesty (B1) 'malformed MainPID output → exit 2, distinct
+  // from not-running' test below, which also asserts stderr and no emit.
 
   it('exit 0 on successful run even when instance is STALE', () => {
     const nowApprox = Math.floor(Date.now() / 1000);
@@ -271,5 +283,81 @@ describe('--config-check', () => {
     const r = run(['--config-check']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('config ok');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// probe honesty (B1): probe failures must never be converted to a false
+// fresh/stale/not-running verdict. Any probe error → exit 2, no emit.
+// ---------------------------------------------------------------------------
+
+describe('probe honesty (B1)', () => {
+  it('discovery command failure → exit 2, no alert, no clear', () => {
+    const res = run([], { FAKE_SYSTEMCTL_RC: '1' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('probe error');
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stdout).not.toContain('CLEAR');
+  });
+
+  it('successful discovery with zero instances → exit 2, not an empty healthy fleet', () => {
+    const res = run([], { FAKE_DISCOVERY_EMPTY: '1' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('probe error');
+  });
+
+  it('malformed MainPID output → exit 2, distinct from not-running', () => {
+    const res = run(['--instance', 'demo'], { FAKE_MAINPID: 'garbage' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('malformed MainPID');
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stdout).not.toContain('CLEAR');
+  });
+
+  it('empty MainPID output → exit 2, distinct from not-running', () => {
+    const res = run(['--instance', 'demo'], { FAKE_MAINPID: '' });
+    expect(res.status).toBe(2);
+  });
+
+  it('ps command failure → exit 2, no emit', () => {
+    const res = run(['--instance', 'demo'], { FAKE_PS_RC: '1' });
+    expect(res.status).toBe(2);
+    expect(res.stdout).not.toContain('ALERT');
+    expect(res.stdout).not.toContain('CLEAR');
+  });
+
+  it('malformed ps etimes → exit 2, no emit', () => {
+    const res = run(['--instance', 'demo'], { FAKE_ETIMES: 'abc' });
+    expect(res.status).toBe(2);
+  });
+
+  it('find command failure → exit 2, never a false CLEAR', () => {
+    const res = run(['--instance', 'demo'], { FAKE_FIND_RC: '1' });
+    expect(res.status).toBe(2);
+    expect(res.stdout).not.toContain('CLEAR');
+  });
+
+  it('empty find output → exit 2, never a false CLEAR', () => {
+    const res = run(['--instance', 'demo'], { FAKE_FIND_EMPTY: '1' });
+    expect(res.status).toBe(2);
+    expect(res.stdout).not.toContain('CLEAR');
+  });
+
+  it('unresolvable repo root (no /proc match, no env) → exit 2', () => {
+    const res = run(['--instance', 'demo'], {
+      FAKE_MAINPID: '4194000',
+      BOT_ERRORS_STALENESS_REPO_ROOT: '',
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('repo root');
+  });
+
+  it('emit script failure → exit 1', () => {
+    const res = run(['--instance', 'demo'], {
+      FAKE_SRC_EPOCH: String(Math.floor(Date.now() / 1000) + 3600),
+      FAKE_EMIT_RC: '7',
+    });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('emit failed');
   });
 });
