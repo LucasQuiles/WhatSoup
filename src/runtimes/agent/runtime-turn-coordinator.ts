@@ -643,6 +643,60 @@ async finalizeActiveRuntimeTurnsForShutdown(): Promise<void> {
   }
 }
 
+/**
+ * Tear down one chat's runtime TurnQueue on an operator kill (/kill-session).
+ *
+ * /kill-session drops the SessionManager and the outbound queue, but the runtime
+ * TurnQueue is a separate structure and it owns the turn *processor*. Left in
+ * place it keeps accepting: the next inbound turn for that chat queues behind a
+ * processor whose session no longer exists, never reaches sendTurnToSession /
+ * spawnSession, and the chat deadlocks with its journaled row stuck open.
+ *
+ * Scoped mirror of the per-chat arm of finalizeActiveRuntimeTurnsForShutdown().
+ */
+async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<void> {
+  const runtimeQueue = this.host.perChatTurnQueues.get(mapKey);
+  if (!runtimeQueue) return;
+  const scopeRef = this.host.perChatTurnQueueKeys.get(runtimeQueue) ?? { value: mapKey };
+  const pending: Promise<unknown>[] = [];
+
+  // Never-dispatched turns: close admission and account for every journaled row.
+  for (const turn of runtimeQueue.closeAndTakePendingTurns()) {
+    if (!turn.runtimeContext) continue;
+    pending.push(this.finalizeUndispatchedRuntimeTurnAndWait(turn.runtimeContext, scopeRef));
+  }
+
+  // Active turn: terminalize it unless the context was already published — a
+  // published context is finalized by the caller's outbound-queue teardown.
+  const activeTurn = runtimeQueue.activeTurn;
+  const published = this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0];
+  if (
+    activeTurn?.runtimeContext
+    && published?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
+  ) {
+    const activeContext = activeTurn.runtimeContext;
+    pending.push(
+      this.terminalizeUndispatchedRuntimeCrash(activeContext, scopeRef)
+        .then(() => this.waitForUndispatchedRuntimeCrash(activeContext)),
+    );
+  }
+
+  const settled = await Promise.allSettled(pending);
+  const rejected = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
+
+  // Drop the queue even if a finalization failed. A row that fails to finalize is
+  // owned by runtimeTurnSupervisor and retried there; an orphaned TurnQueue is
+  // retried by nobody and is the deadlock itself.
+  this.host.perChatTurnQueues.delete(mapKey);
+
+  if (rejected.length > 0) {
+    throw new AggregateError(
+      rejected.map((item) => item.reason),
+      `kill-session runtime turn finalization failed for ${mapKey}`,
+    );
+  }
+}
+
 async applyRuntimeTurnPostEffects(
   result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }>,
   context: RuntimeTurnContext,

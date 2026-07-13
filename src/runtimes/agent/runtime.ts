@@ -3604,12 +3604,26 @@ export class AgentRuntime implements Runtime {
               }
               const [mapKey, targetSession] = activeSessions[targetIdx - 1];
               this.chatQueues.get(mapKey)?.abortTurn();
+              // The runtime TurnQueue owns the turn processor and is NOT part of
+              // cleanupPerChatState. Left behind, the next inbound turn for this
+              // chat queues behind a processor whose session is gone, never
+              // reaches spawnSession, and the chat deadlocks.
+              let killFinalizationError: unknown = null;
+              try {
+                await this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey);
+              } catch (err) {
+                killFinalizationError = err;
+                log.error({ err, mapKey }, 'kill-session: runtime turn queue teardown failed');
+              }
               this.deleteOwnedPerChatSession(mapKey, targetSession);
               this.chatQueues.delete(mapKey);
               this.cleanupPerChatState(mapKey);
               await targetSession.shutdown(false);
               const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
-              this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
+              const killSuffix = killFinalizationError === null
+                ? ''
+                : '\n_⚠️ some in-flight turns could not be finalized — see logs_';
+              this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_${killSuffix}`, true);
             } else {
               if (!this.session?.getStatus().active) {
                 this.sendDirect(chatJid, '_No active session to kill._', true);
