@@ -157,6 +157,23 @@ describe('ChatRuntime fallback model resolution', () => {
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 
+    // A down vendor is a retryable failure, so model-advisor now backs off
+    // (FETCH_RETRY_BACKOFF_MS) before degrading. Collapse just those sleeps —
+    // every other timer runs normally — so the degradation contract is asserted
+    // without spending the backoff on the wall clock.
+    const realSetTimeout = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      cb: (...a: unknown[]) => void,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms === 2_000 || ms === 8_000) {
+        cb();
+        return { unref: () => {} } as unknown as NodeJS.Timeout;
+      }
+      return realSetTimeout(cb, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
     const fallback = capturingFallback();
     const { runtime } = makeRuntime(badRequestPrimary(), fallback);
     await runtime.start();

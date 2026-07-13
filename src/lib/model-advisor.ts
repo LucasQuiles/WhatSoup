@@ -43,6 +43,17 @@ const ALERT_SOURCE = 'model-currency';
 const LIVE_SCAN_ALERT_SOURCE = 'model-currency-live-scan';
 const CHECK_INTERVAL_MS = MS_PER_DAY;
 const FETCH_TIMEOUT_MS = 5_000;
+// Backoff between retries of a transient model-list fetch failure. One length
+// entry per retry, so a vendor must fail 3 times before it degrades the scan.
+const FETCH_RETRY_BACKOFF_MS = [2_000, 8_000];
+// The scan competes with connection setup for the event loop at boot; a wall-clock
+// abort timer trips on a sub-second endpoint if it fires mid-cold-start. Wait for
+// startup to settle before the first scan.
+const STARTUP_SCAN_DELAY_MS = 60_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
+}
 
 let cachedAdvisories: ModelAdvisory[] = [];
 let cachedLiveScan: LiveModelScanStatus | null = null;
@@ -107,11 +118,16 @@ interface ModelsListResponse {
   data?: Array<{ id?: unknown }>;
 }
 
-async function fetchModelIds(
+/** 4xx (except 429) is a config/auth fault — retrying cannot fix it. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+async function fetchModelIdsOnce(
   url: string,
   headers: Record<string, string>,
   vendor: string,
-): Promise<VendorModelFetchResult> {
+): Promise<VendorModelFetchResult & { retryable: boolean }> {
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
@@ -119,6 +135,7 @@ async function fetchModelIds(
       return {
         ids: [],
         failure: { vendor, status: res.status, reason: `HTTP ${res.status}` },
+        retryable: isRetryableStatus(res.status),
       };
     }
     const body = (await res.json()) as ModelsListResponse;
@@ -126,15 +143,34 @@ async function fetchModelIds(
       .map((m) => m.id)
       .filter((id): id is string => typeof id === 'string');
     log.debug({ vendor, count: ids.length }, 'live model list fetched');
-    return { ids, failure: null };
+    return { ids, failure: null, retryable: false };
   } catch (err) {
+    // Timeouts, aborts and socket errors are transient by nature — worth a retry.
     const reason = sanitizeFetchFailureReason(err);
     log.warn({ vendor, err: reason }, 'models API unreachable; using static catalog');
     return {
       ids: [],
       failure: { vendor, reason },
+      retryable: true,
     };
   }
+}
+
+async function fetchModelIds(
+  url: string,
+  headers: Record<string, string>,
+  vendor: string,
+): Promise<VendorModelFetchResult> {
+  let last: VendorModelFetchResult & { retryable: boolean };
+  for (let attempt = 0; ; attempt += 1) {
+    last = await fetchModelIdsOnce(url, headers, vendor);
+    if (!last.failure) return { ids: last.ids, failure: null };
+    if (!last.retryable || attempt >= FETCH_RETRY_BACKOFF_MS.length) break;
+    const delayMs = FETCH_RETRY_BACKOFF_MS[attempt];
+    log.debug({ vendor, attempt: attempt + 1, delayMs }, 'model list fetch failed; retrying');
+    await sleep(delayMs);
+  }
+  return { ids: last.ids, failure: last.failure };
 }
 
 function sanitizeFetchFailureReason(err: unknown): string {
@@ -651,6 +687,8 @@ export function startModelCurrencyMonitor(
       log.warn({ err: reason }, 'model currency check failed');
     }
   };
-  void run();
-  setInterval(() => { void run(); }, CHECK_INTERVAL_MS).unref();
+  setTimeout(() => {
+    void run();
+    setInterval(() => { void run(); }, CHECK_INTERVAL_MS).unref();
+  }, STARTUP_SCAN_DELAY_MS).unref();
 }
