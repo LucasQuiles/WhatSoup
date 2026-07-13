@@ -4,7 +4,10 @@ import {
   OutboundGovernor,
   wrapWithOutboundGovernor,
   classifyOutbound,
+  isOutboundGovernorShed,
+  OUTBOUND_GOVERNOR_SHED_LOG,
 } from '../../src/transport/outbound-governor.ts';
+import { WhatSoupError } from '../../src/errors.ts';
 
 function fakeSock(sendImpl?: (...a: unknown[]) => unknown) {
   const sendMessage = vi.fn(sendImpl ?? (async () => ({ key: { id: 'wa-1' } })));
@@ -316,3 +319,21 @@ function permissive() {
     globalWindowMs: 1_000,
   };
 }
+
+describe('isOutboundGovernorShed (issue #1746 classification seam)', () => {
+  it('matches the WhatSoupError the governor throws', () => {
+    expect(isOutboundGovernorShed(new WhatSoupError(OUTBOUND_GOVERNOR_SHED_LOG, 'OUTBOUND_GOVERNOR_SHED'))).toBe(true);
+  });
+
+  it('matches a prototype-stripped copy via the stable message', () => {
+    expect(isOutboundGovernorShed(new Error(OUTBOUND_GOVERNOR_SHED_LOG))).toBe(true);
+  });
+
+  it('rejects other WhatSoupError codes, plain errors, and non-errors', () => {
+    expect(isOutboundGovernorShed(new WhatSoupError('nope', 'SEND_FAILED' as never))).toBe(false);
+    expect(isOutboundGovernorShed(new Error('SEND_TIMEOUT'))).toBe(false);
+    expect(isOutboundGovernorShed('outbound governor ceiling exceeded')).toBe(false);
+    expect(isOutboundGovernorShed(undefined)).toBe(false);
+    expect(isOutboundGovernorShed(null)).toBe(false);
+  });
+});

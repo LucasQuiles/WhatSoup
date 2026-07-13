@@ -31,6 +31,18 @@ import { WhatSoupError } from '../errors.ts';
 
 /** Log line consumed by PR-G's flood detector — keep the wording stable. */
 export const OUTBOUND_GOVERNOR_SHED_LOG = 'outbound governor ceiling exceeded';
+
+/**
+ * True when a send-path throw is the governor shed. A shed happens BEFORE the
+ * wrapped socket send executes, so the op is provably not sent — durability
+ * must record it as a deterministic failure, never `maybe_sent` (ambiguous
+ * delivery is reserved for throws where the message may already be on the
+ * wire). Message fallback covers error copies that lose the prototype chain.
+ */
+export function isOutboundGovernorShed(err: unknown): boolean {
+  if (err instanceof WhatSoupError && err.code === 'OUTBOUND_GOVERNOR_SHED') return true;
+  return err instanceof Error && err.message === OUTBOUND_GOVERNOR_SHED_LOG;
+}
 /** Single fixed key for the aggregate per-bot bucket (breadth floods, F2). */
 const GLOBAL_BUCKET_KEY = '__bot_global__';
 
