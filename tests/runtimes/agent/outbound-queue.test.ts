@@ -18,6 +18,8 @@ import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger, SendOptions } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
+import { WhatSoupError } from '../../../src/errors.ts';
+import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
@@ -64,6 +66,7 @@ function makeDurabilityStub(): DurabilityEngine {
     markSending: vi.fn(),
     markSubmitted: vi.fn(),
     markMaybeSent: vi.fn(),
+    markFailedPermanent: vi.fn(),
     markTerminal: vi.fn(),
   } as unknown as DurabilityEngine;
 }
@@ -2018,6 +2021,51 @@ describe('OutboundQueue', () => {
     expect(typeof opIdArg).toBe('number');
     expect(typeof msgArg).toBe('string');
     expect(msgArg).toBe('socket_error');
+  });
+
+  // ─── durability: governor sheds are deterministic non-sends, NOT ambiguous ──
+
+  it('governor shed on all attempts → markFailedPermanent, never markMaybeSent (issue #1746)', async () => {
+    const durability = makeDurabilityStub();
+    const shedMessenger: Messenger = {
+      // The governor sheds by THROWING at the socket seam BEFORE the wrapped
+      // sendMessage executes — a shed op is provably not sent. Recording it
+      // maybe_sent feeds the ambiguity machinery (recovery-owner transfer,
+      // drain/replay) for a send that deterministically never happened.
+      sendMessage: vi.fn(async () => {
+        throw new WhatSoupError(OUTBOUND_GOVERNOR_SHED_LOG, 'OUTBOUND_GOVERNOR_SHED');
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(shedMessenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('governor shed classification test');
+    await vi.runAllTimersAsync();
+
+    expect(durability.markFailedPermanent).toHaveBeenCalledOnce();
+    const [opIdArg, msgArg] = (durability.markFailedPermanent as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(typeof opIdArg).toBe('number');
+    expect(msgArg).toBe(OUTBOUND_GOVERNOR_SHED_LOG);
+    expect(durability.markMaybeSent).not.toHaveBeenCalled();
+  });
+
+  it('genuine transport timeout on all attempts stays maybe_sent (ambiguity preserved)', async () => {
+    const durability = makeDurabilityStub();
+    const hangingMessenger: Messenger = {
+      sendMessage: vi.fn(() => new Promise<never>(() => { /* never settles → SEND_TIMEOUT */ })),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(hangingMessenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('timeout ambiguity test');
+    await vi.runAllTimersAsync();
+
+    expect(durability.markMaybeSent).toHaveBeenCalledOnce();
+    expect(durability.markFailedPermanent).not.toHaveBeenCalled();
   });
 
   // ─── retryAfterMs: boundary conditions ───────────────────────────────────

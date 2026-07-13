@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
+import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
@@ -1577,6 +1578,7 @@ function makeDurability() {
     markSending: vi.fn(),
     markSubmitted: vi.fn(),
     markMaybeSent: vi.fn(),
+    markFailedPermanent: vi.fn(),
     markInboundSkipped: vi.fn(),
     markInboundFailed: vi.fn(),
     completeInbound: vi.fn(),
@@ -1701,6 +1703,26 @@ describe('DurabilityEngine integration', () => {
     expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'permanent send failure');
     // Send exhaustion is a transport send failure.
     expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99, 'transport_send_failed');
+  });
+
+  it('governor shed: markFailedPermanent, never markMaybeSent (issue #1746)', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    // The governor sheds by throwing BEFORE the socket send executes — a shed
+    // op is provably not sent and must not be classified as ambiguous delivery.
+    messenger.sendMessage.mockRejectedValue(
+      new WhatSoupError(OUTBOUND_GOVERNOR_SHED_LOG, 'OUTBOUND_GOVERNOR_SHED'),
+    );
+
+    const msg = makeIncomingMessage({ inboundSeq: 99 });
+    await handler.handleMessage(msg);
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(vi.mocked(durability.markFailedPermanent)).toHaveBeenCalledWith(42, OUTBOUND_GOVERNOR_SHED_LOG);
+    expect(vi.mocked(durability.markMaybeSent)).not.toHaveBeenCalled();
   });
 
   it('send failure without inboundSeq → markInboundFailed NOT called', async () => {

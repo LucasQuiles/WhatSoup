@@ -8,6 +8,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
+import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
@@ -1349,7 +1350,14 @@ export class OutboundQueue implements IOutboundQueue {
     log.error({ chatJid: chunk.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
 
     if (opId !== undefined && this.durability) {
-      this.durability.markMaybeSent(opId, (lastErr as Error)?.message ?? 'send_failed');
+      // A governor shed throws BEFORE the socket send executes — the op is
+      // provably not sent, so it must not enter the maybe_sent ambiguity
+      // machinery (recovery-owner transfer, drain/replay, fleet telemetry).
+      if (isOutboundGovernorShed(lastErr)) {
+        this.durability.markFailedPermanent(opId, (lastErr as Error).message);
+      } else {
+        this.durability.markMaybeSent(opId, (lastErr as Error)?.message ?? 'send_failed');
+      }
     }
 
     // Best-effort: notify the user that part of the response was lost.

@@ -12,6 +12,7 @@ import type { PineconeMemory } from './providers/pinecone.ts';
 import type { Runtime } from '../types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { sendTracked } from '../../core/durability.ts';
+import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
@@ -507,7 +508,14 @@ export class ChatRuntime implements Runtime {
         'all send attempts failed — response text logged for recovery',
       );
       if (mainOpId !== undefined && this.durability) {
-        this.durability.markMaybeSent(mainOpId, (lastSendErr as Error)?.message ?? 'send_retry_failed');
+        // Governor sheds throw before the socket send executes — deterministic
+        // non-send, not ambiguous delivery. Same classification as the agent
+        // outbound queue (issue #1746).
+        if (isOutboundGovernorShed(lastSendErr)) {
+          this.durability.markFailedPermanent(mainOpId, (lastSendErr as Error).message);
+        } else {
+          this.durability.markMaybeSent(mainOpId, (lastSendErr as Error)?.message ?? 'send_retry_failed');
+        }
       }
       if (this.durability && msg.inboundSeq !== undefined) {
         this.durability.markInboundFailed(msg.inboundSeq, 'transport_send_failed');
