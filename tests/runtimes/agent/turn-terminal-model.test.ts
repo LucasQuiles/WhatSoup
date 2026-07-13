@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { normalizeFinalizeTurnTerminalParams } from '../../../src/core/turn-finalization-contract.ts';
 import {
   shouldDisarmReplyGuarantee,
   toTurnFinalizationPersistence,
@@ -124,6 +125,29 @@ describe('turn-finalization persistence mapping', () => {
       identity: { ...IDENTITY, inboundSeq: null },
       deliveryEvidence: { kind: 'echoed', opId: 72 },
     })).inbound).toBeUndefined();
+  });
+
+  it('collapses not_sent delivery evidence to a persisted none so the failed_terminal contract shape is unchanged (#1749)', () => {
+    const persistence = toTurnFinalizationPersistence(terminal({
+      attemptOutcome: { kind: 'failed', class: 'unknown_terminal' },
+      inboundDisposition: 'failed_terminal',
+      deliveryEvidence: { kind: 'not_sent', opId: 72 },
+    }));
+
+    expect(persistence.terminal.deliveryKind).toBe('none');
+    expect(persistence.terminal.deliveryOpId).toBeNull();
+    expect(persistence.inbound).toEqual({
+      kind: 'failed',
+      seq: 41,
+      failureClass: 'unknown',
+    });
+
+    // Round-trip proof: the collapsed shape is exactly what the contract
+    // already accepts for a 'none' failed_terminal row, so it must not throw.
+    expect(() => normalizeFinalizeTurnTerminalParams({
+      terminal: persistence.terminal,
+      inbound: persistence.inbound,
+    })).not.toThrow();
   });
 });
 

@@ -38,7 +38,9 @@ export type DeliveryEvidence =
   | { readonly kind: 'enqueued'; readonly opId: number }
   | { readonly kind: 'flushed'; readonly opId: number }
   | { readonly kind: 'echoed'; readonly opId: number }
-  | { readonly kind: 'delivery_unknown'; readonly opId: number };
+  | { readonly kind: 'delivery_unknown'; readonly opId: number }
+  /** A durably shed answer op (e.g. governor-sheared) — decisive, not ambiguous. */
+  | { readonly kind: 'not_sent'; readonly opId: number };
 
 export interface RecoveryOwnerIdentity {
   readonly logicalTurnId: string;
@@ -159,8 +161,14 @@ export function toTurnTerminalPersistence(
       ? result.attemptOutcome.class
       : null,
     inboundDisposition: result.inboundDisposition,
-    deliveryKind: result.deliveryEvidence.kind,
-    deliveryOpId: result.deliveryEvidence.kind === 'none'
+    // not_sent collapses to the same persisted shape as 'none': the core
+    // contract's failed_terminal invariant requires deliveryKind='none', and
+    // the shed op's own outbound_ops row already carries full provenance
+    // (status='failed_permanent', source_inbound_seq) — nothing is lost.
+    deliveryKind: result.deliveryEvidence.kind === 'not_sent'
+      ? 'none'
+      : result.deliveryEvidence.kind,
+    deliveryOpId: result.deliveryEvidence.kind === 'none' || result.deliveryEvidence.kind === 'not_sent'
       ? null
       : result.deliveryEvidence.opId,
     recoveryOwnerLogicalTurnId: recoveryOwner?.logicalTurnId ?? null,

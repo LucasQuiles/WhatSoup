@@ -98,7 +98,6 @@ function assertSnapshotMatches(
   }
   if (
     snapshot.status === 'sending' ||
-    snapshot.status === 'failed_permanent' ||
     snapshot.status === 'quarantined'
   ) {
     throw new Error('Answer delivery proof is not terminally classifiable');
@@ -128,6 +127,9 @@ function deriveDeliveryEvidence(
   const submitted = snapshots.find((snapshot) => snapshot.status === 'submitted');
   if (submitted) return { kind: 'flushed', opId: submitted.opId };
 
+  const notSent = snapshots.find((snapshot) => snapshot.status === 'failed_permanent');
+  if (notSent) return { kind: 'not_sent', opId: notSent.opId };
+
   const finalAnswer = snapshots.at(-1);
   if (finalAnswer && snapshots.every((snapshot) => snapshot.status === 'echoed')) {
     return { kind: 'echoed', opId: finalAnswer.opId };
@@ -149,6 +151,13 @@ function deriveInboundDisposition(
   }
   if (deliveryEvidence.kind === 'delivery_unknown') {
     return 'transferred_to_recovery_owner';
+  }
+  // A shed answer op is decisive negative evidence, not ambiguity — it always
+  // fails the turn terminally, even where 'none' would otherwise finalize a
+  // no-reply policy (that combination is a contradiction the persistence
+  // mapping below rejects, mirroring the admission_rejected contradiction).
+  if (deliveryEvidence.kind === 'not_sent') {
+    return 'failed_terminal';
   }
   if (attemptOutcome.kind === 'suppressed_by_policy' && deliveryEvidence.kind === 'none') {
     return 'finalized_no_reply_policy';
@@ -250,7 +259,8 @@ export function finalizeRuntimeTurn(
 
   try {
     const attemptOutcome: AttemptOutcome =
-      params.attemptOutcome.kind === 'completed' && deliveryEvidence.kind === 'none'
+      params.attemptOutcome.kind === 'completed' &&
+      (deliveryEvidence.kind === 'none' || deliveryEvidence.kind === 'not_sent')
         ? { kind: 'failed', class: 'unknown_terminal' }
         : params.attemptOutcome;
     const terminal: TurnTerminalResult = {

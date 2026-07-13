@@ -172,6 +172,13 @@ describe('runtime turn delivery proof', () => {
       expected: { kind: 'delivery_unknown', opId: 14 },
       disposition: 'transferred_to_recovery_owner',
     },
+    {
+      label: 'not sent (governor shed)',
+      opIds: [15],
+      statuses: { 15: 'failed_permanent' } as const,
+      expected: { kind: 'not_sent', opId: 15 },
+      disposition: 'failed_terminal',
+    },
   ])('maps $label conservatively', ({ opIds, statuses, expected, disposition }) => {
     const ctx = harness(statuses);
 
@@ -207,6 +214,16 @@ describe('runtime turn delivery proof', () => {
       statuses: { 21: 'echoed', 22: 'echoed', 23: 'echoed', 24: 'echoed' } as const,
       expected: { kind: 'echoed', opId: 24 },
     },
+    {
+      label: 'maybe_sent outranks a mixed not_sent chunk',
+      statuses: { 21: 'failed_permanent', 22: 'maybe_sent', 23: 'echoed', 24: 'echoed' } as const,
+      expected: { kind: 'delivery_unknown', opId: 22 },
+    },
+    {
+      label: 'a single not_sent chunk fails the whole answer even among echoed chunks',
+      statuses: { 21: 'echoed', 22: 'failed_permanent', 23: 'echoed', 24: 'echoed' } as const,
+      expected: { kind: 'not_sent', opId: 22 },
+    },
   ])('$label', ({ statuses, expected }) => {
     const ctx = harness(statuses);
 
@@ -232,7 +249,7 @@ describe('runtime turn delivery proof', () => {
     ]);
   });
 
-  it.each(['sending', 'failed_permanent', 'quarantined'] as const)(
+  it.each(['sending', 'quarantined'] as const)(
     'fails closed for unsupported %s delivery status',
     (status) => {
       const ctx = harness({ 41: status });
@@ -440,6 +457,60 @@ describe('runtime turn terminal mapping', () => {
       deliveryEvidence: { kind: 'none' },
     });
     expect(ctx.finalizeTurnTerminal.mock.calls[0]?.[0]).not.toHaveProperty('recoveryJob');
+  });
+
+  it('finalizes a governor-shed answer op (#1749) as failed_terminal instead of raising a failure incident', () => {
+    const ctx = harness({ 98: 'failed_permanent' });
+
+    const result = terminalResult(run(ctx.durability, { answerOpIds: [98] }));
+
+    expect(result.terminal).toMatchObject({
+      attemptOutcome: { kind: 'failed', class: 'unknown_terminal' },
+      inboundDisposition: 'failed_terminal',
+      deliveryEvidence: { kind: 'not_sent', opId: 98 },
+    });
+    expect(ctx.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      terminal: expect.objectContaining({
+        deliveryKind: 'none',
+        deliveryOpId: null,
+        inboundDisposition: 'failed_terminal',
+      }),
+      inbound: { kind: 'failed', seq: 41, failureClass: 'unknown' },
+    }));
+    expect(ctx.finalizeTurnTerminal.mock.calls[0]?.[0]).not.toHaveProperty('recoveryJob');
+  });
+
+  it('routes an already-failed attempt whose answer op was shed to failed_terminal, not recovery transfer', () => {
+    const ctx = harness({ 99: 'failed_permanent' });
+
+    const result = terminalResult(run(ctx.durability, {
+      answerOpIds: [99],
+      attemptOutcome: { kind: 'failed', class: 'crash' },
+    }));
+
+    expect(result.terminal).toMatchObject({
+      attemptOutcome: { kind: 'failed', class: 'crash' },
+      inboundDisposition: 'failed_terminal',
+      deliveryEvidence: { kind: 'not_sent', opId: 99 },
+    });
+    expect(ctx.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      inbound: { kind: 'failed', seq: 41, failureClass: 'session_crash' },
+    }));
+  });
+
+  it('fails closed when a not_sent answer op contradicts a policy suppression', () => {
+    const ctx = harness({ 100: 'failed_permanent' });
+
+    const result = run(ctx.durability, {
+      answerOpIds: [100],
+      attemptOutcome: { kind: 'suppressed_by_policy' },
+    });
+
+    expect(result).toMatchObject({
+      kind: 'durable_failure_incident',
+      failureStage: 'terminal_finalize',
+    });
+    expect(ctx.finalizeTurnTerminal).not.toHaveBeenCalled();
   });
 
   it('preserves replaySafe=false so core durability can park recovery as blocked', () => {
