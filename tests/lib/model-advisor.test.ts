@@ -5,6 +5,17 @@ const alertFns = vi.hoisted(() => ({
   clearAlertSource: vi.fn(() => true),
 }));
 
+const logger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../src/logger.ts', () => ({
+  createChildLogger: () => logger,
+}));
+
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
   emitAlertChecked: alertFns.emitAlert,
@@ -127,6 +138,7 @@ describe('fetchLiveModelIds', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.ids).toEqual(['claude-opus-4-9']);
     expect(result.liveScan).toMatchObject({ mode: 'live', degradedVendors: [] });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it('degrades only after the retries are exhausted', async () => {
@@ -138,6 +150,11 @@ describe('fetchLiveModelIds', () => {
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
     expect(result.liveScan).toMatchObject({ mode: 'degraded' });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { vendor: 'anthropic', err: 'The operation was aborted due to timeout' },
+      'models API unreachable; retries exhausted or disabled; using static catalog',
+    );
   });
 
   it('does not retry a non-retryable auth failure', async () => {
@@ -157,6 +174,19 @@ describe('fetchLiveModelIds', () => {
     runTimersInline();
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 429 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.liveScan).toMatchObject({ mode: 'live' });
+  });
+
+  it('retries a 408 request-timeout response', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 408 })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
     vi.stubGlobal('fetch', fetchSpy);
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });

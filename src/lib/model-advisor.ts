@@ -123,9 +123,9 @@ interface ModelsListResponse {
   data?: Array<{ id?: unknown }>;
 }
 
-/** 4xx (except 429) is a config/auth fault — retrying cannot fix it. */
+/** 408/429 and 5xx are transient for this idempotent Models API GET. */
 function isRetryableStatus(status: number): boolean {
-  return status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 
 async function fetchModelIdsOnce(
@@ -136,7 +136,6 @@ async function fetchModelIdsOnce(
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
-      log.warn({ vendor, status: res.status }, 'models API returned non-OK; using static catalog');
       return {
         ids: [],
         failure: { vendor, status: res.status, reason: `HTTP ${res.status}` },
@@ -152,7 +151,6 @@ async function fetchModelIdsOnce(
   } catch (err) {
     // Timeouts, aborts and socket errors are transient by nature — worth a retry.
     const reason = sanitizeFetchFailureReason(err);
-    log.warn({ vendor, err: reason }, 'models API unreachable; using static catalog');
     return {
       ids: [],
       failure: { vendor, reason },
@@ -175,6 +173,17 @@ async function fetchModelIds(
     const delayMs = FETCH_RETRY_BACKOFF_MS[attempt];
     log.debug({ vendor, attempt: attempt + 1, delayMs }, 'model list fetch failed; retrying');
     await sleep(delayMs);
+  }
+  if (last.failure.status !== undefined) {
+    log.warn(
+      { vendor, status: last.failure.status },
+      'models API returned non-OK; retries exhausted or disabled; using static catalog',
+    );
+  } else {
+    log.warn(
+      { vendor, err: last.failure.reason },
+      'models API unreachable; retries exhausted or disabled; using static catalog',
+    );
   }
   return { ids: last.ids, failure: last.failure };
 }
