@@ -52,8 +52,16 @@ if [ ! -f "$MAIN_TS" ]; then
 fi
 SESSION_TS="$REPO_ROOT/src/runtimes/agent/session.ts"
 DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
+if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: unsafe entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -e "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: required entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
 if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
-  echo "PREFLIGHT-ERROR: entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  echo "PREFLIGHT-ERROR: unsafe entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
   exit 1
 fi
 

@@ -18,6 +18,8 @@
 import { spawnSync } from 'node:child_process';
 import {
   accessSync,
+  chmodSync,
+  copyFileSync,
   constants as fsConstants,
   mkdtempSync,
   mkdirSync,
@@ -25,6 +27,7 @@ import {
   existsSync,
   readFileSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -41,6 +44,7 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
+const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 
@@ -124,6 +128,137 @@ function runPreflight(
   };
 }
 
+type WrapperFixture = {
+  root: string;
+  wrapper: string;
+  bootstrap: string;
+  fakeNode: string;
+  trace: string;
+  home: string;
+  configHome: string;
+  dataHome: string;
+};
+
+function writeExecutable(path: string, contents: string): void {
+  writeFileSync(path, contents, 'utf8');
+  chmodSync(path, 0o755);
+}
+
+function makeWrapperFixture(): WrapperFixture {
+  const root = makeTmpDir();
+  const deploy = join(root, 'deploy');
+  const lib = join(deploy, 'lib');
+  const src = join(root, 'src');
+  const home = join(root, 'home');
+  const configHome = join(root, 'config');
+  const dataHome = join(root, 'data');
+  const wrapper = join(deploy, 'whatsoup');
+  const bootstrap = join(src, 'database-compatibility-bootstrap.ts');
+  const fakeNode = join(root, 'fake-node');
+  const trace = join(root, 'trace.log');
+
+  for (const path of [lib, src, home, configHome, dataHome]) {
+    mkdirSync(path, { recursive: true });
+  }
+  copyFileSync(WRAPPER, wrapper);
+  chmodSync(wrapper, 0o755);
+  copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
+  writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ name: 'wrapper-fixture', engines: { node: FIXTURE_NODE_RANGE } }),
+    'utf8',
+  );
+  writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
+  writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
+  const instanceConfig = join(configHome, 'whatsoup', 'instances', 'q-bot');
+  mkdirSync(instanceConfig, { recursive: true });
+  writeFileSync(join(instanceConfig, 'config.json'), JSON.stringify({ type: 'passive' }), 'utf8');
+
+  writeExecutable(
+    join(deploy, 'preflight-check.sh'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'preflight\\n' >> "$WHATSOUP_TEST_TRACE"
+exit "\${WHATSOUP_TEST_PREFLIGHT_RC:-0}"
+`,
+  );
+  writeExecutable(
+    fakeNode,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "-e" ]; then
+  if [ "$#" -ge 3 ] && [[ "\${3:-}" == */package.json ]]; then
+    printf '${PINNED_NODE_MAJOR + 1}'
+  else
+    printf 'passive'
+  fi
+  exit 0
+fi
+if [ "\${1:-}" = "-p" ]; then
+  printf '${PINNED_NODE_MAJOR}'
+  exit 0
+fi
+if [ "\${!#}" = "--check" ]; then
+  printf 'db-check\\n' >> "$WHATSOUP_TEST_TRACE"
+  case "\${WHATSOUP_TEST_DB_MODE:-ready}" in
+    ready) printf 'ready\\n' ;;
+    drain) printf 'future_schema\\n' ;;
+    exit78) exit 78 ;;
+    other) exit 7 ;;
+  esac
+  exit 0
+fi
+if [ "\${!#}" = "--hold" ]; then
+  printf 'db-hold\\n' >> "$WHATSOUP_TEST_TRACE"
+  exit 0
+fi
+if [[ "$*" == *src/bootstrap.ts* ]]; then
+  printf 'runtime\\n' >> "$WHATSOUP_TEST_TRACE"
+  exit 0
+fi
+exit 9
+`,
+  );
+
+  return { root, wrapper, bootstrap, fakeNode, trace, home, configHome, dataHome };
+}
+
+function runWrapper(
+  fixture: WrapperFixture,
+  env: Record<string, string> = {},
+): { status: number; stderr: string; stdout: string; trace: string[] } {
+  const result = spawnSync('bash', [fixture.wrapper, 'q-bot'], {
+    encoding: 'utf8',
+    timeout: SPAWN_TIMEOUT_MS,
+    env: {
+      ...cleanGitEnv(),
+      HOME: fixture.home,
+      USER: 'test-user',
+      XDG_CONFIG_HOME: fixture.configHome,
+      XDG_DATA_HOME: fixture.dataHome,
+      WHATSOUP_NODE: fixture.fakeNode,
+      WHATSOUP_TEST_TRACE: fixture.trace,
+      WHATSOUP_TEST_DB_MODE: 'ready',
+      WHATSOUP_TEST_PREFLIGHT_RC: '0',
+      WHATSOUP_SKIP_PREFLIGHT: '',
+      WHATSOUP_HEALTH_TOKEN: 'test-health-token',
+      OPENAI_API_KEY: 'test-openai-key',
+      PINECONE_API_KEY: 'test-pinecone-key',
+      ...env,
+    },
+  });
+  const trace = existsSync(fixture.trace)
+    ? readFileSync(fixture.trace, 'utf8').trim().split('\n').filter(Boolean)
+    : [];
+  return {
+    status: result.status ?? -1,
+    stderr: result.stderr ?? '',
+    stdout: result.stdout ?? '',
+    trace,
+  };
+}
+
 // @skip-env this suite validates the restart-safety preflight under the repo's
 // supported Node pin; out-of-pin Node versions produce false preflight failures.
 describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate', () => {
@@ -196,7 +331,37 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
     const { status, stderr } = runPreflight(root);
 
     expect(status).toBe(1);
-    expect(stderr).toContain('PREFLIGHT-ERROR: entrypoint not found');
+    expect(stderr).toContain('PREFLIGHT-ERROR: required entrypoint not found');
+    expect(stderr).toContain(bootstrap);
+  });
+
+  it('fails closed when the database compatibility entrypoint is a directory', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const bootstrap = join(root, 'src', 'database-compatibility-bootstrap.ts');
+    rmSync(bootstrap);
+    mkdirSync(bootstrap);
+
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('PREFLIGHT-ERROR: unsafe entrypoint');
+    expect(stderr).toContain('regular non-symlink file');
+    expect(stderr).toContain(bootstrap);
+  });
+
+  it('fails closed when the database compatibility entrypoint is a symlink', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const bootstrap = join(root, 'src', 'database-compatibility-bootstrap.ts');
+    const target = join(root, 'src', 'database-compatibility-target.ts');
+    writeFileSync(target, 'export const targetMustNotBeProbed = true;\n', 'utf8');
+    rmSync(bootstrap);
+    symlinkSync(target, bootstrap);
+
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('PREFLIGHT-ERROR: unsafe entrypoint');
+    expect(stderr).toContain('regular non-symlink file');
     expect(stderr).toContain(bootstrap);
   });
 
@@ -338,12 +503,116 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight behavior', () => {
   });
 });
 
+describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', () => {
+  it('runs database check, restart preflight, then runtime on ready', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('still runs database check when restart preflight is skipped', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture, { WHATSOUP_SKIP_PREFLIGHT: '1' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'runtime']);
+    expect(result.stderr).toContain('restart-safety pre-flight gate BYPASSED');
+  });
+
+  it('execs the database hold without running restart preflight or runtime on drain', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture, { WHATSOUP_TEST_DB_MODE: 'drain' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'db-hold']);
+  });
+
+  it('preserves database check exit 78', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture, { WHATSOUP_TEST_DB_MODE: 'exit78' });
+
+    expect(result.status).toBe(78);
+    expect(result.trace).toEqual(['db-check']);
+  });
+
+  it('collapses other database check failures to exit 1', () => {
+    const fixture = makeWrapperFixture();
+
+    const result = runWrapper(fixture, { WHATSOUP_TEST_DB_MODE: 'other' });
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual(['db-check']);
+  });
+
+  it('fails before Node when the database compatibility entrypoint is missing', () => {
+    const fixture = makeWrapperFixture();
+    rmSync(fixture.bootstrap);
+
+    const result = runWrapper(fixture, { WHATSOUP_SKIP_PREFLIGHT: '1' });
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('FATAL: database compatibility entrypoint not found');
+    expect(result.stderr).toContain(fixture.bootstrap);
+  });
+
+  it('fails before Node when the database compatibility entrypoint is a directory', () => {
+    const fixture = makeWrapperFixture();
+    rmSync(fixture.bootstrap);
+    mkdirSync(fixture.bootstrap);
+
+    const result = runWrapper(fixture, { WHATSOUP_SKIP_PREFLIGHT: '1' });
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('FATAL: unsafe database compatibility entrypoint');
+    expect(result.stderr).toContain('regular non-symlink file');
+    expect(result.stderr).toContain(fixture.bootstrap);
+  });
+
+  it('rejects a symlink before its database target can execute', () => {
+    const fixture = makeWrapperFixture();
+    const target = join(fixture.root, 'src', 'database-compatibility-target.ts');
+    const sentinel = join(fixture.root, 'symlink-target-executed');
+    writeFileSync(
+      target,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+process.stdout.write('ready\\n');
+`,
+      'utf8',
+    );
+    rmSync(fixture.bootstrap);
+    symlinkSync(target, fixture.bootstrap);
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: unsafe database compatibility entrypoint');
+    expect(result.stderr).toContain('regular non-symlink file');
+    expect(result.stderr).toContain(fixture.bootstrap);
+  });
+});
+
 describe('deploy/whatsoup — source wiring', () => {
   it('runs the database compatibility verdict before restart preflight', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const nodeResolution = wrapper.indexOf('NODE="$(whatsoup_resolve_node "$REPO_ROOT")"');
     const databaseCheck = wrapper.indexOf(
-      '"$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check',
+      '"$DATABASE_BOOTSTRAP_TS" "$INSTANCE" --check',
     );
     const skipRestartPreflight = wrapper.indexOf(
       'if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then',

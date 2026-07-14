@@ -75,6 +75,20 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   exit 1
 fi
 
+DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
+if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: unsafe database compatibility entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -e "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: database compatibility entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: unsafe database compatibility entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+
 # Database compatibility precedes restart preflight, git metadata, tmp
 # creation, full config parsing, and every provider credential/keyring lookup.
 # A future schema or hot rollback journal enters the dependency-free health
@@ -84,7 +98,7 @@ if DATABASE_COMPATIBILITY_STATUS="$(
   "$NODE" \
     --disable-warning=ExperimentalWarning \
     --experimental-strip-types \
-    "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check
+    "$DATABASE_BOOTSTRAP_TS" "$INSTANCE" --check
 )"; then
   :
 else
@@ -101,7 +115,7 @@ case "$DATABASE_COMPATIBILITY_STATUS" in
     exec "$NODE" \
       --disable-warning=ExperimentalWarning \
       --experimental-strip-types \
-      "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --hold
+      "$DATABASE_BOOTSTRAP_TS" "$INSTANCE" --hold
     ;;
   *)
     echo "FATAL: unrecognized database compatibility status for instance '$INSTANCE'" >&2
