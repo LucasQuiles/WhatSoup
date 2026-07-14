@@ -371,8 +371,9 @@ An op is quarantined when it is `unsafe` to replay — specifically, when its de
 Quarantined ops require read-only inspection and evidence-backed resolution. A standalone
 quarantined op does not globally stop the bot. A quarantined selected delivery in a `pending` or
 `claimed` recovery job blocks its affected scope and degrades health. Terminal `blocked_unsafe`
-and `exhausted` jobs no longer block admission, but remain retained and health-visible for operator
-action.
+and `exhausted` jobs no longer block admission. Both remain retained and health-visible for
+operator action; `blocked_unsafe` is informational by itself, while exhausted retry work degrades
+audit health until operator resolution.
 
 **To inspect quarantined ops:**
 
@@ -601,13 +602,16 @@ uses `RETURNING terminal_record_id`; only those returned records can drive termi
 unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
 Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
 delivery proof. Recent chains and every unresolved/retry/orphan/corrupt obligation remain.
-Runtime health reports the total non-completed count, every job-state bucket (including live claims),
+Runtime health reports an admission-active `outstanding` count (`pending` plus `claimed` jobs and
+orphan transfers), every job-state bucket (including live claims), unmatched operator catch-ups,
 quarantined selected deliveries, orphan transfers, corrupt links, and echo conflicts.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-they continue contributing to the conservative degraded-health signal until separate unanswered-
-obligation accounting can replace it. Corrupt proof or a recorded echo conflict also keeps health
-degraded until operator/retention resolution.
+an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
+an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
+independently keeps health degraded until operator closure or retention resolution. Appending the
+matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
+rewriting either durable disposition.
 
 | Column group | Description |
 |---|---|
