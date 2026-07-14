@@ -157,6 +157,76 @@ describe('migration 43 upgrade from historical schema 42', () => {
     }
   });
 
+  it('rejects an already-hardened schema 42 when a required proof object is missing', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    raw.exec('DROP TRIGGER operator_catchup_closed_group_reject_pending');
+    raw.close();
+
+    expectMigrationFailure(path, 'hardened schema 42 is missing required objects');
+    expectHardenedSchema42Remains(path);
+  });
+
+  it('rejects an already-hardened schema 42 with an unwitnessed closure', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    const fixture = installDirectClosure(db.raw, 'hardened-unwitnessed');
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA foreign_keys = ON');
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    const deleteTrigger = raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'operator_catchup_closure_witness_append_only_delete'
+    `).get() as { sql: string };
+    raw.exec('DROP TRIGGER operator_catchup_closure_witness_append_only_delete');
+    raw.prepare(`
+      DELETE FROM operator_catchup_closure_witnesses
+      WHERE recovery_plan_id = ? AND conversation_key = ?
+    `).run(fixture.planId, fixture.conversationKey);
+    raw.exec(deleteTrigger.sql);
+    raw.close();
+
+    expectMigrationFailure(path, 'hardened schema 42 has an unwitnessed closure');
+    expectHardenedSchema42Remains(path);
+  });
+
+  it('rejects an already-hardened schema 42 with an orphaned closure witness', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    const fixture = installDirectClosure(db.raw, 'hardened-orphan-witness');
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA foreign_keys = ON');
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    const deleteTrigger = raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'inbound_disposition_links_append_only_delete'
+    `).get() as { sql: string };
+    raw.exec('DROP TRIGGER inbound_disposition_links_append_only_delete');
+    raw.prepare(`
+      DELETE FROM inbound_disposition_links
+      WHERE inbound_seq = ?
+        AND recovery_plan_id = ?
+        AND disposition = 'superseded_by_operator_catchup'
+    `).run(fixture.sourceSeq, fixture.planId);
+    raw.exec(deleteTrigger.sql);
+    raw.close();
+
+    expectMigrationFailure(path, 'hardened schema 42 has an orphaned closure witness');
+    expectHardenedSchema42Remains(path);
+  });
+
   it('aborts transactionally when an existing closure no longer has a valid proof', () => {
     const path = schema42Path(true);
     const raw = new DatabaseSync(path);
@@ -545,6 +615,24 @@ describe('migration 43 upgrade from historical schema 42', () => {
         WHERE type = 'index' AND name = 'idx_inbound_disposition_closure_unique'
       `).get() as { sql: string };
       expect(index.sql).toContain('superseded_by_seq');
+    } finally {
+      raw.close();
+    }
+  }
+
+  function expectHardenedSchema42Remains(path: string): void {
+    const raw = new DatabaseSync(path);
+    try {
+      expect(raw.prepare('SELECT version FROM schema_migrations WHERE version = 43').get())
+        .toBeUndefined();
+      expect(raw.prepare('SELECT version FROM schema_migrations WHERE version = 42').get())
+        .toEqual({ version: 42 });
+      expect(raw.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'operator_catchup_closure_witnesses'
+      `).get()).toEqual({ name: 'operator_catchup_closure_witnesses' });
+      expect(raw.prepare('PRAGMA quick_check').get()).toEqual({ quick_check: 'ok' });
+      expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
       raw.close();
     }
