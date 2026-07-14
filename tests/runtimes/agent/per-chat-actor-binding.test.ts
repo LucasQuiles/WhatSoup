@@ -136,6 +136,15 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
   }),
 }));
 
+// #1785 rec-3: exercising the REAL createPerChatActorSocket (not spied away) would
+// otherwise hit the real writeMcpConfigToPath -> writePrivateFileSync fs chain
+// against the real home directory. Stub just the fs-writing export; everything
+// else in this module stays real.
+vi.mock('../../../src/runtimes/agent/providers/mcp-bridge.ts', async (importOriginal) => {
+  const actual = await importOriginal() as typeof import('../../../src/runtimes/agent/providers/mcp-bridge.ts');
+  return { ...actual, writeMcpConfigToPath: vi.fn(() => null) };
+});
+
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {
     register = vi.fn();
@@ -202,6 +211,7 @@ vi.mock('../../../src/core/media-mime.ts', () => ({
 // ── Imports ─────────────────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
@@ -592,5 +602,31 @@ describe('F-STICKY-ACTOR hardening: race-exposure warning covers claude-primary 
     const r = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat', sandboxPerChat: true });
     priv(r).agentFallbacks = [{ provider: 'gemini-cli' }];
     expect(priv(r).perChatActorRaceExposed()).toBe(false);
+  });
+});
+
+// ── #1785 rec-3: the per-chat actor socket binds conversationKey ────────────
+
+describe('#1785 rec-3: createPerChatActorSocket binds conversationKey (closes the per_chat send-confinement gap)', () => {
+  const CHAT = 'group-bound@g.us';
+  type Priv = {
+    wirePerChatActorSocket(chatJid: string, provider: string):
+      | { mcpSocketPath: string; providerConfigOverride: { mcpConfig: string[]; strictMcpConfig: true } }
+      | undefined;
+  };
+  let runtime: AgentRuntime;
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it('claude-cli session -> the actor socket SessionContext carries conversationKey bound to its own chat (RED before the fix: conversationKey was permanently undefined, so the registry/messaging cross-conversation guards failed open for every per_chat send)', () => {
+    const override = priv().wirePerChatActorSocket(CHAT, 'claude-cli');
+    expect(override).toBeDefined();
+    expect(WhatSoupSocketServer).toHaveBeenCalledTimes(1);
+    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(sessionArg).toMatchObject({ tier: 'global', conversationKey: CHAT });
   });
 });

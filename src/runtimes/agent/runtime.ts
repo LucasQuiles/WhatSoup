@@ -4466,7 +4466,6 @@ export class AgentRuntime implements Runtime {
   }
 
   private bindActiveGlobalMcpConversation(chatJid: string): void {
-    if (this.sessionScope === 'per_chat') return;
     const conversationKey = toConversationKey(chatJid);
     if (this.singletonProviderToolSession) {
       this.singletonProviderToolSession.conversationKey = conversationKey;
@@ -4484,11 +4483,23 @@ export class AgentRuntime implements Runtime {
    * (sendTurnToSession): it re-asserts the binding so a future path that forgets
    * to bind cannot silently process an inbound turn under a stale/unbound key,
    * and loudly flags any drift to a *different* conversation (the dangerous case).
-   * It does not touch per_chat sessions (already isolated) or the operator's
-   * passive/global socket clients (which never dispatch agent turns here).
+   *
+   * per_chat non-sandbox ALSO runs through here (#1785 rec-3): its shared global
+   * socket (this.globalSocketServer — used by non-claude fallback subprocesses,
+   * see F-STICKY-ACTOR at wirePerChatActorSocket) previously kept
+   * conversationKey permanently undefined on the false premise that per_chat was
+   * "already isolated". It is not: that socket's SessionContext is tier:'global',
+   * so the registry's cross-conversation guard (registry.ts) needs this per-turn
+   * pin exactly as shared/single do, or it fails open for the whole per_chat
+   * fleet. The per-chat CLAUDE actor socket (createPerChatActorSocket) is bound
+   * once at creation instead, since it serves exactly one chat for its entire
+   * lifetime. sandboxPerChat sessions are unaffected: they use tier:'chat-scoped'
+   * sessions and never construct globalSocketServer. Binding this shared socket
+   * per-turn inherits the same concurrent-fallback race F-STICKY-ACTOR already
+   * documents for actor identity (QR-247) — out of scope here; this closes the
+   * fail-open guard, it does not close that race.
    */
   private enforceGlobalConversationBinding(chatJid: string): void {
-    if (this.sessionScope === 'per_chat') return;
     const expected = toConversationKey(chatJid);
     const bound = this.singletonProviderToolSession?.conversationKey;
     if (bound !== undefined && bound !== expected) {
@@ -6508,6 +6519,15 @@ export class AgentRuntime implements Runtime {
    * bound to resolveExecutingActor) and write its per-session --mcp-config so the
    * subprocess talks to it instead of the shared global socket. Returns the socket
    * + cfg paths for the provider override. Torn down in cleanupPerChatState.
+   *
+   * #1785 rec-3: this socket's SessionContext also carries conversationKey, bound
+   * once here to the chat it will exclusively serve for its entire lifetime (a
+   * fresh socket is derived per chat — see derivePerChatSocketPath — and never
+   * reused across chats, so a static bind is race-free, unlike the shared global
+   * socket's per-turn rebind in bindActiveGlobalMcpConversation). Without it, the
+   * registry's cross-conversation guard and the send-pipeline's beforeAudit check
+   * (both gated on session.conversationKey) silently fail open for every send
+   * this per-chat actor subprocess makes.
    */
   private createPerChatActorSocket(mapKey: string, chatJid: string): { socketPath: string; cfgPath: string } {
     const socketPath = this.derivePerChatSocketPath(chatJid);
@@ -6521,7 +6541,7 @@ export class AgentRuntime implements Runtime {
     const socketServer = new WhatSoupSocketServer(
       socketPath,
       this.registry,
-      { tier: 'global', allowedRoot: this.cwd ?? homedir() },
+      { tier: 'global', allowedRoot: this.cwd ?? homedir(), conversationKey: toConversationKey(chatJid) },
       () => this.resolveExecutingActor(chatJid),
     );
     socketServer.start();
