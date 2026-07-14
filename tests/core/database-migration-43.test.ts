@@ -815,41 +815,55 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
 
   function installSecondEchoTransferProof(fixture: EchoTransferFixture): void {
     const target = db.raw.prepare(`
-      SELECT message_id, conversation_key, chat_jid
+      SELECT message_id, conversation_key, chat_jid, completed_at
       FROM inbound_events WHERE seq = ?
     `).get(fixture.targetSeq) as {
       message_id: string;
       conversation_key: string;
       chat_jid: string;
+      completed_at: string;
     };
+    // This helper models a second, historically valid proof discovered after
+    // closure. Pin its proof timestamps to the target settlement instead of
+    // wall-clock `now`: otherwise crossing a one-second SQLite clock boundary
+    // makes the proof invalid and turns this ambiguity regression flaky.
+    const proofTimestamp = target.completed_at;
     const selectedOpId = Number(db.raw.prepare(`
       INSERT INTO outbound_ops (
         conversation_key, chat_jid, op_type, payload, status,
-        source_inbound_seq, is_terminal, replay_policy, submitted_at, wa_message_id
+        source_inbound_seq, is_terminal, replay_policy, created_at,
+        submitted_at, wa_message_id
       ) VALUES (?, ?, 'text', '{"text":"second ACK"}', 'submitted', ?, 1, 'unsafe',
-                datetime('now'), 'wa-second-migration-42-proof')
-    `).run(target.conversation_key, target.chat_jid, fixture.targetSeq).lastInsertRowid);
+                ?, ?, 'wa-second-migration-42-proof')
+    `).run(
+      target.conversation_key,
+      target.chat_jid,
+      fixture.targetSeq,
+      proofTimestamp,
+      proofTimestamp,
+    ).lastInsertRowid);
     const terminalRecordId = Number(db.raw.prepare(`
       INSERT INTO turn_terminal_records (
         scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
         logical_turn_id, manager_id, generation, attempt_kind,
         inbound_disposition, delivery_kind, delivery_op_id,
         recovery_owner_logical_turn_id, recovery_owner_manager_id,
-        recovery_owner_generation, reply_guarantee_disarmed
+        recovery_owner_generation, reply_guarantee_disarmed, created_at
       ) VALUES ('per_chat', ?, ?, ?, ?, 'second-source-turn',
                 'second-source-manager', 1, 'replied',
                 'transferred_to_recovery_owner', 'flushed', ?,
-                'second-owner-turn', 'second-owner-manager', 1, 0)
+                'second-owner-turn', 'second-owner-manager', 1, 0, ?)
     `).run(
       target.conversation_key,
       target.chat_jid,
       fixture.targetSeq,
       fixture.targetSeq,
       selectedOpId,
+      proofTimestamp,
     ).lastInsertRowid);
     db.raw.prepare(`
-      UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = ?
-    `).run(selectedOpId);
+      UPDATE outbound_ops SET status = 'echoed', echoed_at = ? WHERE id = ?
+    `).run(proofTimestamp, selectedOpId);
     db.raw.prepare(`
       INSERT INTO turn_recovery_jobs (
         terminal_record_id, scope, conversation_key, delivery_jid,
@@ -860,14 +874,13 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
         assigned_owner_generation, replay_safe, sender_jid, replay_text,
         is_group, group_name, state, attempt_count, claim_epoch, claim_token,
         claim_expires_at, claimed_at, completed_at, completion_kind,
-        completion_proof_id
+        completion_proof_id, created_at
       ) VALUES (?, 'per_chat', ?, ?, ?, ?, 'second-source-turn',
                 'second-source-manager', 1, ?, 'second-owner-turn',
                 'second-owner-manager', 1, 'second-owner-turn',
                 'second-owner-manager', 1, 1, 'sender@test', 'second catch-up',
                 1, 'DGX SPARK', 'completed', 1, 1, ?,
-                datetime('now', '+5 minutes'), datetime('now'), datetime('now'),
-                'echo', ?)
+                datetime(?, '+5 minutes'), ?, ?, 'echo', ?, ?)
     `).run(
       terminalRecordId,
       target.conversation_key,
@@ -876,7 +889,11 @@ describe('migration 43 operator catch-up echo-recovery proof', () => {
       fixture.targetSeq,
       target.message_id,
       `echo-delivery:${selectedOpId}`,
+      proofTimestamp,
+      proofTimestamp,
+      proofTimestamp,
       `outbound-op:${selectedOpId}`,
+      proofTimestamp,
     );
   }
 
