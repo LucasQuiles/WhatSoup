@@ -20,6 +20,7 @@ import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
+import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { startHealthServer } from './core/health.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
@@ -349,9 +350,12 @@ if (instanceType === 'agent') {
   });
 } else {
   // chat (default): create chat-specific providers
-  const anthropic = createAnthropicProvider();
-  const openai = createOpenAIProvider(
-    config.chatOpenAIProviderConfig as { baseUrl?: string; apiKeyService?: string } | undefined,
+  const anthropic = withDatabaseCompatibility(db, createAnthropicProvider());
+  const openai = withDatabaseCompatibility(
+    db,
+    createOpenAIProvider(
+      config.chatOpenAIProviderConfig as { baseUrl?: string; apiKeyService?: string } | undefined,
+    ),
   );
   const pinecone = new PineconeMemory();
   // Enrichment is queue-backed: the poller enqueues validated facts into

@@ -120,6 +120,7 @@ export class ChatRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    this.db.assertWritableCompatibility();
     ensureChatSchema(this.db);
     if (this.enrichmentPoller) {
       this.enrichmentPoller.start();

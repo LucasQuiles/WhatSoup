@@ -170,6 +170,7 @@ function makeMessenger(): Messenger & { sendMessage: ReturnType<typeof vi.fn> } 
 
 function makeDb() {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       exec: vi.fn(),
       prepare: vi.fn().mockReturnValue({
@@ -962,6 +963,20 @@ describe('LLM retry jitter (B05)', () => {
 // ===========================================================================
 
 describe('Runtime interface', () => {
+  it('start() rejects before schema initialization when database compatibility is drained', async () => {
+    const { handler, db } = makeHandler();
+    const rejection = new Error('database compatibility drained');
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+
+    await expect(handler.start()).rejects.toBe(rejection);
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(db.raw.exec).not.toHaveBeenCalled();
+    expect(mockEnrichmentPollerStart()).not.toHaveBeenCalled();
+  });
+
   it('start() resolves without error', async () => {
     const { handler } = makeHandler();
     await expect(handler.start()).resolves.toBeUndefined();
