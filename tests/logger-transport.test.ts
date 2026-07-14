@@ -78,12 +78,17 @@ function buildPinoMock(transportOpts: {
     if (transport) return fakeLogger;
     // No-transport path (plain stdout logger)
     return { ...fakeLogger, flush: vi.fn() };
-  }) as unknown as ReturnType<typeof vi.fn> & { transport: ReturnType<typeof vi.fn> };
+  }) as unknown as ReturnType<typeof vi.fn> & {
+    transport: ReturnType<typeof vi.fn>;
+    stdSerializers: { err: ReturnType<typeof vi.fn> };
+  };
 
   pinoFn.transport = vi.fn(() => {
     if (transportOpts.throwOnTransport) throw new Error('pino-roll unavailable');
     return fakeTransport;
   }) as unknown as typeof pinoFn.transport;
+
+  pinoFn.stdSerializers = { err: vi.fn((e) => e) };
 
   return { pinoFn, fakeTransport, fakeLogger, fakeFlush, fakeTransportOn, fakeTransportEnd };
 }
@@ -117,7 +122,10 @@ describe('logger.ts — LOG_DIR (file transport) path', () => {
       });
 
       // pino() was called with the transport
-      expect(pinoFn).toHaveBeenCalledWith({ level: 'info' }, fakeTransport);
+      expect(pinoFn).toHaveBeenCalledWith(
+        { level: 'info', serializers: { err: pinoFn.stdSerializers.err, error: pinoFn.stdSerializers.err } },
+        fakeTransport,
+      );
 
       // default export is a logger
       expect(typeof mod.default.info).toBe('function');
