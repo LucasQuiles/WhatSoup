@@ -100,8 +100,10 @@ describe('arch.file-size warning budget', () => {
 
     expect(fileSizeWarningFiles).toEqual(EXPECTED_FILE_SIZE_WARNING_FILES);
     // Full-repo ESLint run regularly exceeds the default 10s under coverage
-    // instrumentation or CI load.
-  }, 120_000);
+    // instrumentation or CI load. The prior 120s override was itself hit on
+    // quality(24.x) for PR #1782 (GitHub Actions run 29316490688); 300s gives
+    // durable headroom without masking a genuine hang.
+  }, 300_000);
 
   it('the ceiling-bump failure message documents the two-twin bump ceremony', () => {
     // This pins requirement wording so the remediation text stays intact even
