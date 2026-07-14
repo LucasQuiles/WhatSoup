@@ -7411,7 +7411,7 @@ describe('AgentRuntime', () => {
     expect(mockSocketServerInstance.updateConversationKey).toHaveBeenLastCalledWith('chat-c_at_g.us');
   });
 
-  it('per_chat: does not bind the singleton MCP conversation context', async () => {
+  it('per_chat: mcpSessionContext stays chat-scoped (unaffected) but #1785 rec-3 ALSO pins the shared global socket to the turn conversation', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -7421,12 +7421,19 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: 'chat-a@g.us', senderJid: 'sender-a@s.whatsapp.net', content: 'per chat', isGroup: true }));
 
+    // The per-chat session's OWN mcpSessionContext (mcpBridge target) is already
+    // chat-scoped and confined — unaffected by this fix.
     expect(capturedSessionManagerOptsRef.current?.mcpSessionContext).toMatchObject({
       tier: 'chat-scoped',
       conversationKey: 'chat-a_at_g.us',
       deliveryJid: 'chat-a@g.us',
     });
-    expect(mockSocketServerInstance.updateConversationKey).not.toHaveBeenCalled();
+    // But the instance's shared global socket — used by non-claude fallback
+    // subprocesses in per_chat non-sandbox mode (F-STICKY-ACTOR) — is tier:'global'
+    // and previously stayed permanently unbound on the false "already isolated"
+    // premise (#1785). It now gets pinned per turn exactly like shared/single, so
+    // the registry's cross-conversation guard is no longer inert for that socket.
+    expect(mockSocketServerInstance.updateConversationKey).toHaveBeenLastCalledWith('chat-a_at_g.us');
   });
 
   // @check CHK-063
@@ -12530,7 +12537,9 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope });
       const view = runtime as unknown as BindView;
       const socketUpdates: Array<string | undefined> = [];
-      view.singletonProviderToolSession = { tier: 'global' };
+      // singletonProviderToolSession is only ever tracked for single/shared spawns
+      // (trackSingletonMcpSession: true) — per_chat never sets it in production.
+      view.singletonProviderToolSession = sessionScope === 'per_chat' ? null : { tier: 'global' };
       view.globalSocketServer = { updateConversationKey: (k) => { socketUpdates.push(k); } };
       return { view, socketUpdates };
     }
@@ -12557,11 +12566,15 @@ describe('AgentRuntime', () => {
       );
     });
 
-    it('leaves a per_chat session untouched (already isolated by forced deliveryJid)', () => {
+    it('#1785 rec-3: per_chat ALSO pins its shared global socket to the originating chat at turn dispatch — the false "already isolated" premise let this guard stay permanently unbound for the per_chat fleet\'s non-claude fallback sockets (tier:global)', () => {
       const { view, socketUpdates } = makeBindingRuntime('per_chat');
+      expect(view.singletonProviderToolSession).toBeNull(); // per_chat never tracks a singleton MCP session
       view.enforceGlobalConversationBinding(ALICE_JID);
-      expect(view.singletonProviderToolSession?.conversationKey).toBeUndefined();
-      expect(socketUpdates).toEqual([]);
+      // singletonProviderToolSession stays null (nothing to bind) but the shared
+      // global socket — which non-claude fallback subprocesses actually use in
+      // per_chat non-sandbox mode — now gets pinned exactly like shared/single.
+      expect(view.singletonProviderToolSession).toBeNull();
+      expect(socketUpdates).toEqual([toConversationKey(ALICE_JID)]);
       expect(mockRuntimeLogger.error).not.toHaveBeenCalled();
     });
   });
