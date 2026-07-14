@@ -15,6 +15,7 @@ import {
   detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
   MAX_STREAMED_BANNER_LENGTH,
+  type ProviderFailureKind,
 } from './failure-taxonomy.ts';
 import {
   workflowForProviderText,
@@ -75,7 +76,7 @@ import {
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
-import { classifyActiveSessions } from './session-classifier.ts';
+import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
@@ -224,6 +225,14 @@ const envPositiveInt = (key: string, fallback: number): number => {
 };
 const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
 const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+// #1756: the agent_sessions DB classifier used to run startup-only, so an
+// init-failure session landing in the 'ambiguous' bucket was skipped forever.
+// ZOMBIE_SESSION_SWEEP_INTERVAL_MS re-runs the classifier periodically;
+// AMBIGUOUS_SESSION_MAX_AGE_MS is the age (with zero processed messages)
+// past which an ambiguous row is independently re-verified and, if still not
+// alive+owned, marked terminal (see resolveAmbiguousAgeFallback).
+const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * 60 * 1000); // 30m
+const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', 24 * 60 * 60 * 1000); // 24h
 const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
@@ -743,6 +752,7 @@ export class AgentRuntime implements Runtime {
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1350,6 +1360,119 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * #1756: classifyActiveSessions used to run startup-only, so its 'ambiguous'
+   * bucket was a permanent no-op — an init-failure session that never
+   * checkpointed stayed 'active' forever. This interval re-runs the same
+   * sweep start() does, so any row still 'ambiguous' gets a fresh chance at
+   * the age-based fallback disposition in sweepStaleAgentSessions.
+   */
+  private startZombieSessionSweepTimer(): void {
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat) || this.zombieSessionSweepTimer) return;
+    this.zombieSessionSweepTimer = setInterval(() => {
+      this.sweepStaleAgentSessions().catch((err) => {
+        log.warn({ err, instanceName: this.instanceName }, 'interval zombie-session sweep failed');
+      });
+    }, ZOMBIE_SESSION_SWEEP_INTERVAL_MS);
+    this.zombieSessionSweepTimer.unref?.();
+  }
+
+  /**
+   * Sweep stale sessions for all per_chat modes (including Q's non-sandboxed
+   * per_chat). Cross-references agent_sessions with session_checkpoints to
+   * safely identify which processes to keep and which to reap. Only kills
+   * PIDs verified as owned children. Called once at startup and, per #1756,
+   * again on an interval (startZombieSessionSweepTimer) so a session that
+   * lands in 'ambiguous' — the classifier's do-not-touch bucket — is not
+   * skipped forever; resolveAmbiguousAgeFallback gives every pass a chance to
+   * retire a row that has sat idle with zero activity past the age
+   * threshold. Returns the set of conversation keys that must not be
+   * proactively resumed this pass (a live or ambiguous session was already
+   * left running for that key) — only meaningful to the startup caller.
+   */
+  private async sweepStaleAgentSessions(): Promise<Set<string>> {
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
+      return proactiveResumeBlockedConversationKeys;
+    }
+    if (!this.durability) {
+      log.warn('durability engine not set — skipping active session classification');
+      return proactiveResumeBlockedConversationKeys;
+    }
+
+    const classified = classifyActiveSessions(this.db, this.durability);
+    for (const session of classified) {
+      switch (session.classification) {
+        case 'stale_dead':
+          markOrphaned(this.db, session.id);
+          break;
+        case 'stale_live':
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'reaping stale session');
+          try {
+            await killSessionTree(session.claudePid, 'SIGTERM', {
+              generationMarker:
+                `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
+            });
+          } catch (err) {
+            log.error({
+              err,
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+            }, 'stale session tree cleanup inconclusive — blocking proactive resume');
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
+            }
+            throw err;
+          }
+          markOrphaned(this.db, session.id);
+          break;
+        case 'ambiguous': {
+          const fallback = resolveAmbiguousAgeFallback(
+            {
+              id: session.id,
+              claudePid: session.claudePid,
+              startedAt: session.startedAt,
+              messageCount: session.messageCount,
+            },
+            Date.now(),
+            AMBIGUOUS_SESSION_MAX_AGE_MS,
+          );
+          if (fallback === 'orphan') {
+            markOrphaned(this.db, session.id);
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'ambiguous session past age threshold with no activity — marked orphaned (#1756)');
+            break;
+          }
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'ambiguous session — not touching');
+          // Left running — block a duplicate proactive resume for this key.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+        }
+        case 'authoritative_live':
+          // Verified-live child left in place — block a duplicate proactive resume.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+      }
+    }
+    return proactiveResumeBlockedConversationKeys;
+  }
+
+  /**
    * True only if a resident agent session is safe to suspend right now. A session
    * is evictable when it is live, between turns, past the minimum-residency floor,
    * idle beyond the TTL, and not blocking on a pending poll vote. Mirrors the
@@ -1874,35 +1997,68 @@ export class AgentRuntime implements Runtime {
    * silently discarding genuine replies that merely discussed an auth/limit error
    * (observed live: replies about an expired OAuth token dropped to silence). Now
    * only BANNER-confident matches (the text IS the error — short + error-opener /
-   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are
-   * DELIVERED. Fallback is still armed only on the terminal 'result' event, never
-   * here. Shared by both assistant_text handlers so their suppression policy can't
-   * drift. Returns true = suppress (caller must `break`), false = deliver.
+   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are let
+   * through to the egress gate. Fallback is still armed only on the terminal
+   * 'result' event, never here. Shared by both assistant_text handlers so their
+   * suppression policy can't drift.
+   *
+   * Returns `{ suppress: true }` when THIS gate drops the chunk (caller must
+   * `break`). Otherwise returns `{ suppress: false, ambient }`, where `ambient`
+   * is non-null when the text matched a provider-failure token but was let
+   * through as prose about an error, not the error itself — the caller must run
+   * this result through the egress gate and log the ambient tripwire with that
+   * gate's REAL outcome (#1758: logging "delivered" here fired one gate before
+   * `gateAssistantTextForOutbound`, which can still suppress the same chunk for
+   * an unrelated reason — a suppressed chunk logged as "delivered" is worse than
+   * useless in incident forensics).
    */
-  private suppressStreamedProviderFailure(normalizedText: string, chatJid: string | null): boolean {
+  private suppressStreamedProviderFailure(
+    normalizedText: string,
+    chatJid: string | null,
+  ): { suppress: boolean; ambient: { kind: ProviderFailureKind } | null } {
     const classification = classifyStreamedProviderFailure(normalizedText);
-    if (classification === null) return false;
+    if (classification === null) return { suppress: false, ambient: null };
     if (classification.confidence === 'banner') {
       log.warn(
         { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
         'suppressed provider-failure message from assistant_text',
       );
-      return true;
+      return { suppress: true, ambient: null };
     }
     // Ambient: matched a provider-failure token but is prose about an error, not the
-    // error itself. Deliver it — dropping it is the QR-209 silent-reply defect. Log
-    // (structured) so the fleet can spot a novel banner shape that should become a
-    // suppressible opener instead.
+    // error itself. Dropping it is the QR-209 silent-reply defect, so this gate lets
+    // it through — but the egress gate downstream can still suppress it for an
+    // unrelated reason. The tripwire log therefore fires at the call site, after
+    // that gate has run, tagged with its actual outcome.
+    return { suppress: false, ambient: { kind: classification.kind } };
+  }
+
+  /**
+   * Logs the QR-209 ambient-provider-failure tripwire with the REAL post-egress-gate
+   * outcome (#1758). `delivered` when the fleet should see a novel banner shape that
+   * ought to become a suppressible opener instead; `suppressed` when an unrelated
+   * egress-gate reason (ack_filler, internal_narration, ...) already handled it, so
+   * forensics must not read this line as evidence of delivery.
+   */
+  private logAmbientProviderFailureOutcome(
+    ambient: { kind: ProviderFailureKind } | null,
+    normalizedText: string,
+    chatJid: string | null,
+    delivered: boolean,
+  ): void {
+    if (!ambient) return;
     log.warn(
       {
         chatJid,
-        kind: classification.kind,
+        kind: ambient.kind,
         textLength: normalizedText.length,
         textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
+        outcome: delivered ? 'delivered' : 'suppressed',
       },
-      'delivered assistant_text despite provider-failure classification',
+      delivered
+        ? 'delivered assistant_text despite provider-failure classification'
+        : 'suppressed assistant_text despite provider-failure classification (egress gate)',
     );
-    return false;
   }
 
   // ─── Control session (self-healing repair) ────────────────────────────────
@@ -2600,66 +2756,7 @@ export class AgentRuntime implements Runtime {
     // sessions for one chat (duplicate turn processing / replies, contended
     // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
     // instance's own spawns; it cannot see a prior-instance child.
-    const proactiveResumeBlockedConversationKeys = new Set<string>();
-
-    // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
-    // Cross-references agent_sessions with session_checkpoints to safely identify which
-    // processes to keep and which to reap. Only kills PIDs verified as owned children.
-    if (this.sessionScope === 'per_chat' || this.sandboxPerChat) {
-      if (!this.durability) {
-        log.warn('durability engine not set — skipping active session classification');
-      } else {
-        const classified = classifyActiveSessions(this.db, this.durability);
-        for (const session of classified) {
-          switch (session.classification) {
-            case 'stale_dead':
-              markOrphaned(this.db, session.id);
-              break;
-            case 'stale_live':
-              log.warn({
-                id: session.id,
-                pid: session.claudePid,
-                conversationKey: session.conversationKey,
-                reason: session.reason,
-              }, 'reaping stale session');
-              try {
-                await killSessionTree(session.claudePid, 'SIGTERM', {
-                  generationMarker:
-                    `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
-                });
-              } catch (err) {
-                log.error({
-                  err,
-                  id: session.id,
-                  pid: session.claudePid,
-                  conversationKey: session.conversationKey,
-                }, 'stale session tree cleanup inconclusive — blocking proactive resume');
-                if (session.conversationKey) {
-                  proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-                  break;
-                }
-                throw err;
-              }
-              markOrphaned(this.db, session.id);
-              break;
-            case 'ambiguous':
-              log.warn({
-                id: session.id,
-                pid: session.claudePid,
-                conversationKey: session.conversationKey,
-                reason: session.reason,
-              }, 'ambiguous session — not touching');
-              // Left running — block a duplicate proactive resume for this key.
-              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-              break;
-            case 'authoritative_live':
-              // Verified-live child left in place — block a duplicate proactive resume.
-              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-              break;
-          }
-        }
-      }
-    }
+    const proactiveResumeBlockedConversationKeys = await this.sweepStaleAgentSessions();
 
     // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
     // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
@@ -3088,6 +3185,7 @@ export class AgentRuntime implements Runtime {
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
     this.startSessionSweepTimer();
+    this.startZombieSessionSweepTimer();
     this.handoffDistill.start();
 
     // Restore any pending polls from the previous process so votes-in-flight
@@ -5241,8 +5339,11 @@ export class AgentRuntime implements Runtime {
           // (the error itself) is suppressed; AMBIENT prose about an error, and text
           // matching no failure pattern, are delivered — dropping them is the QR-209
           // silent-reply defect. See suppressStreamedProviderFailure.
-          if (this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid)) break;
-          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
+          const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid);
+          if (providerFailureCheck.suppress) break;
+          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
+          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
+          normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
@@ -5795,6 +5896,10 @@ export class AgentRuntime implements Runtime {
     if (this.sessionSweepTimer) {
       clearInterval(this.sessionSweepTimer);
       this.sessionSweepTimer = null;
+    }
+    if (this.zombieSessionSweepTimer) {
+      clearInterval(this.zombieSessionSweepTimer);
+      this.zombieSessionSweepTimer = null;
     }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
@@ -7359,6 +7464,19 @@ export class AgentRuntime implements Runtime {
         model: handoffDistillModel(),
       },
     };
+  }
+
+  /**
+   * #1753 rem-2: delegates to the ToolRegistry every socket server (global and
+   * per-chat) shares — the single choke point every MCP tool call flows
+   * through, so this reflects in-flight calls across the whole instance.
+   */
+  getMcpLivenessSnapshot(): {
+    pendingCount: number;
+    oldestCallAgeMs: number | null;
+    oldestCallTool: string | null;
+  } {
+    return this.registry.getInFlightCallStats();
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
@@ -9863,8 +9981,12 @@ export class AgentRuntime implements Runtime {
           // Only BANNER-confident text (the error itself) is suppressed; AMBIENT
           // prose about an error is delivered, so genuine replies are never silently
           // dropped. See suppressStreamedProviderFailure.
-          if (this.suppressStreamedProviderFailure(normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid)) break;
-          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          const sharedChatJid = this.shared ? this.currentTurnChatJid : this.activeChatJid;
+          const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, sharedChatJid);
+          if (providerFailureCheck.suppress) break;
+          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
+          normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;

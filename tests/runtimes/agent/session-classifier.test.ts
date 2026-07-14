@@ -4,6 +4,7 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
 import {
   classifyActiveSessions,
+  resolveAmbiguousAgeFallback,
   type PidOwnershipChecker,
 } from '../../../src/runtimes/agent/session-classifier.ts';
 
@@ -329,5 +330,99 @@ describe('classifyActiveSessions', () => {
     const stale = results.find(r => r.claudePid === 2880080);
     expect(stale?.classification).toBe('ambiguous');
     expect(stale?.reason).toContain('ownership unverified');
+  });
+});
+
+// #1756: the DB classifier only ran at startup, and its 'ambiguous' bucket was a
+// permanent no-op — an init-failure session that never checkpointed (and so never
+// even ran a PID ownership check) stayed 'active' forever. resolveAmbiguousAgeFallback
+// is the fallback disposition consulted for the interval sweep: it independently
+// re-verifies PID liveness/ownership (defense in depth — some 'ambiguous' sub-cases
+// never ran a pidChecker at all) and requires zero turns processed, so it can only
+// ever act on a session that never did anything, never on live work in progress.
+describe('resolveAmbiguousAgeFallback', () => {
+  const HOUR = 60 * 60 * 1000;
+  const oldEnough = new Date(Date.now() - 25 * HOUR).toISOString();
+  const tooRecent = new Date(Date.now() - 1 * HOUR).toISOString();
+
+  it('orphans a zero-message session past the age threshold whose PID is dead', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 1, claudePid: 99999999, startedAt: oldEnough, messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('orphan');
+  });
+
+  it('orphans a zero-message session past the age threshold whose PID is alive but unowned', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 2, claudePid: 12345, startedAt: oldEnough, messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allAliveNotOwned,
+    );
+    expect(verdict).toBe('orphan');
+  });
+
+  it('DESIGN CARE: never touches a session whose PID is alive AND owned, at any age', () => {
+    const veryOld = new Date(Date.now() - 365 * 24 * HOUR).toISOString();
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 3, claudePid: 4321, startedAt: veryOld, messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allOwned,
+    );
+    expect(verdict).toBe('leave');
+  });
+
+  it('leaves a session alone that has processed messages, regardless of age', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 4, claudePid: 99999999, startedAt: oldEnough, messageCount: 3 },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('leave');
+  });
+
+  it('leaves a session alone that has not yet crossed the age threshold', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 5, claudePid: 99999999, startedAt: tooRecent, messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('leave');
+  });
+
+  it('fails closed when startedAt is missing (mocked/legacy caller with no age evidence)', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 6, claudePid: 99999999, startedAt: null, messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('leave');
+  });
+
+  it('fails closed when messageCount is missing (mocked/legacy caller with no activity evidence)', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 7, claudePid: 99999999, startedAt: oldEnough, messageCount: null },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('leave');
+  });
+
+  it('fails closed when startedAt does not parse as a date', () => {
+    const verdict = resolveAmbiguousAgeFallback(
+      { id: 8, claudePid: 99999999, startedAt: 'not-a-date', messageCount: 0 },
+      Date.now(),
+      24 * HOUR,
+      allDead,
+    );
+    expect(verdict).toBe('leave');
   });
 });

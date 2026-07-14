@@ -187,10 +187,42 @@ function buildListSchema(
 // ToolRegistry
 // ---------------------------------------------------------------------------
 
+export interface McpLivenessSnapshot {
+  pendingCount: number;
+  oldestCallAgeMs: number | null;
+  oldestCallTool: string | null;
+}
+
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDeclaration>();
   private durability: DurabilityEngine | undefined;
   private sensitiveAuthorizer: ((session: SessionContext) => boolean) | null = null;
+  // #1753 rem-2: every call() invocation registers itself here for the
+  // duration of tool.handler() — the one span that can hang indefinitely
+  // (an async-hung send path) without ever pinning the event loop, so
+  // loop-lag sampling alone cannot reveal it.
+  private readonly inFlightCalls = new Map<number, { tool: string; startedAt: number }>();
+  private nextCallId = 0;
+
+  /** Oldest in-flight tool call's age + pending count (#1753 rem-2). */
+  getInFlightCallStats(now: number = Date.now()): McpLivenessSnapshot {
+    if (this.inFlightCalls.size === 0) {
+      return { pendingCount: 0, oldestCallAgeMs: null, oldestCallTool: null };
+    }
+    let oldestStartedAt = Infinity;
+    let oldestTool: string | null = null;
+    for (const call of this.inFlightCalls.values()) {
+      if (call.startedAt < oldestStartedAt) {
+        oldestStartedAt = call.startedAt;
+        oldestTool = call.tool;
+      }
+    }
+    return {
+      pendingCount: this.inFlightCalls.size,
+      oldestCallAgeMs: now - oldestStartedAt,
+      oldestCallTool: oldestTool,
+    };
+  }
 
   /** Attach a DurabilityEngine to record tool calls. */
   setDurability(engine: DurabilityEngine): void {
@@ -468,41 +500,51 @@ export class ToolRegistry {
       }
     }
 
+    // #1753 rem-2: this call is "in flight" for the duration of tool.handler()
+    // specifically — the durability bookkeeping above/below is synchronous and
+    // cannot hang, so the async gap between registering and deregistering here
+    // IS the exact window an async-hung send path would sit in forever.
+    const callId = this.nextCallId++;
+    this.inFlightCalls.set(callId, { tool: name, startedAt: start });
     try {
-      const result = await tool.handler(effectiveParams, session);
-      const isError = isToolErrorPayload(result);
-      const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-      log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
-      if (durabilityId !== undefined) {
-        try {
-          this.durability!.markToolComplete(durabilityId, text);
-        } catch (err) {
-          log.warn({ tool: name, err }, 'durability markToolComplete failed');
+      try {
+        const result = await tool.handler(effectiveParams, session);
+        const isError = isToolErrorPayload(result);
+        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
+        if (durabilityId !== undefined) {
+          try {
+            this.durability!.markToolComplete(durabilityId, text);
+          } catch (err) {
+            log.warn({ tool: name, err }, 'durability markToolComplete failed');
+          }
         }
-      }
-      return {
-        content: [{ type: 'text', text }],
-        ...(isError ? { isError: true } : {}),
-      };
-    } catch (err) {
-      const message = errorMessage(err);
-      log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
-      if (durabilityId !== undefined) {
-        try {
-          this.durability!.markToolComplete(durabilityId, `error: ${message}`);
-        } catch (durabilityErr) {
-          log.warn({ tool: name, err: durabilityErr }, 'durability markToolComplete failed');
+        return {
+          content: [{ type: 'text', text }],
+          ...(isError ? { isError: true } : {}),
+        };
+      } catch (err) {
+        const message = errorMessage(err);
+        log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
+        if (durabilityId !== undefined) {
+          try {
+            this.durability!.markToolComplete(durabilityId, `error: ${message}`);
+          } catch (durabilityErr) {
+            log.warn({ tool: name, err: durabilityErr }, 'durability markToolComplete failed');
+          }
         }
+        // Sanitize transport/protocol errors but keep application-level errors readable.
+        // Raw stack traces, socket internals, and TLS details must never reach the agent.
+        const safeMessage = /ECONNRESET|EPIPE|ENOTCONN|ETIMEDOUT|TLS|certificate|socket hang up/i.test(message)
+          ? `Tool "${name}" failed: connection error — try again`
+          : `Tool "${name}" failed: ${message}`;
+        return {
+          content: [{ type: 'text', text: safeMessage }],
+          isError: true,
+        };
       }
-      // Sanitize transport/protocol errors but keep application-level errors readable.
-      // Raw stack traces, socket internals, and TLS details must never reach the agent.
-      const safeMessage = /ECONNRESET|EPIPE|ENOTCONN|ETIMEDOUT|TLS|certificate|socket hang up/i.test(message)
-        ? `Tool "${name}" failed: connection error — try again`
-        : `Tool "${name}" failed: ${message}`;
-      return {
-        content: [{ type: 'text', text: safeMessage }],
-        isError: true,
-      };
+    } finally {
+      this.inFlightCalls.delete(callId);
     }
   }
 }

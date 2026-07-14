@@ -35,6 +35,7 @@ import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
+import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
 
 const log = createChildLogger('health');
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -70,6 +71,18 @@ export interface HealthDeps {
   scheduleAllowedRoot?: string;
   /** Callback for POST /access — allow triggers queued-message replay. */
   handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<void>;
+  /**
+   * #1753 rem-1: in-process event-loop-lag self-probe. A wedged event loop
+   * makes /health unanswerable, so nothing in the request handler itself can
+   * detect a wedge in progress — but a sampler running on its own timer
+   * accumulates a memory of RECENT lag that survives into the next request
+   * the loop is free enough to answer, closing the "flaps between working
+   * and wedged, reports healthy in between" gap. Reuses the same
+   * LoopLagSampler the fleet poller already runs on the consumer side (only
+   * the fleet poller was self-probing before; the producer side had none).
+   * Injectable for tests; defaults to a real sampler in production.
+   */
+  loopLagSampler?: LoopLagSampler;
 }
 
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
@@ -499,6 +512,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     auditWriter: deps.auditWriter,
     caller: 'health',
   });
+  // #1753 rem-1: started immediately so the sliding window has evidence of any
+  // lag between now and the first /health request, not just lag that happens
+  // to occur while a request is in flight.
+  const loopLagSampler = deps.loopLagSampler ?? new LoopLagSampler();
+  loopLagSampler.start();
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
@@ -1005,6 +1023,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
 
     try {
+      // #1753 rem-1: snapshot BEFORE the rest of the handler's own work runs, so
+      // this reflects lag accumulated up to the moment the request arrived, not
+      // lag this handler's own (synchronous) work might introduce.
+      const loopLag = loopLagSampler.snapshot();
+      if (loopLag.locallyStarved) {
+        log.warn({
+          p95LagMs: loopLag.p95LagMs,
+          sampleCount: loopLag.sampleCount,
+          thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+        }, 'event loop starvation detected during health check');
+      }
+
       const enrichmentStats = deps.getEnrichmentStats();
       const connectionState = getConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
@@ -1030,6 +1060,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
       const turnCapability = deps.instanceType === 'agent'
         ? normalizeAgentTurnCapability(runtimeSnapshot?.details ?? null)
+        : null;
+      // #1753 rem-2: oldest in-flight MCP tool-call age + pending count, so an
+      // async-hung send path (loop itself free, but a call never resolves) is
+      // visible even though nothing about it shows up in loop-lag sampling.
+      // Exposition only — deliberately does not affect `status` (no
+      // corroborated evidence yet for what "too long" means for every tool).
+      const mcpLiveness = deps.instanceType === 'agent'
+        ? deps.runtime?.getMcpLivenessSnapshot?.() ?? null
         : null;
       // `empty-output` is a known-transient/benign turn-error class and must not
       // pin or flap the health body (#1433). It degrades only as a CURRENT,
@@ -1096,7 +1134,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         connectionChurnIsDegraded ||
         outboundFloodIsDegraded ||
         agentRuntimeStatus === 'degraded' ||
-        turnCapabilityIsDegraded
+        turnCapabilityIsDegraded ||
+        loopLag.locallyStarved
       ) {
         status = 'degraded';
       } else {
@@ -1275,6 +1314,19 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         durability: deps.durability?.getHealthStats() ?? null,
         turn_capability: turnCapability,
         runtime: runtimeBlock,
+        event_loop: {
+          lag_p95_ms: loopLag.p95LagMs,
+          sample_count: loopLag.sampleCount,
+          locally_starved: loopLag.locallyStarved,
+          starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
+        },
+        mcp_liveness: mcpLiveness
+          ? {
+              pending_count: mcpLiveness.pendingCount,
+              oldest_call_age_ms: mcpLiveness.oldestCallAgeMs,
+              oldest_call_tool: mcpLiveness.oldestCallTool,
+            }
+          : null,
       });
 
       // 'degraded' returns 200: enrichment staleness and active reconnect/cooldown
@@ -1297,6 +1349,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       log.error({ err, port: config.healthPort }, 'health server error');
     }
   });
+  // #1753 rem-1: tie the sampler's lifecycle to the server's — no separate
+  // shutdown wiring needed in main.ts, which already calls healthServer.close().
+  server.on('close', () => loopLagSampler.stop());
 
   const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
   // R7a: refuse a non-loopback bind without an explicit opt-in — the health server
