@@ -135,7 +135,7 @@ const LINE_1: LineInstance = {
     status: 'ok',
     uptime_seconds: 3600,
     messages_total: 50,
-    connection: { state: 'open' },
+    whatsapp: { connection: { state: 'open' } },
     sqlite: { messages_total: 50, schema_version: 7 },
   },
   heartbeat: ['up', 'up'],

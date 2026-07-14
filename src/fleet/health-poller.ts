@@ -84,6 +84,14 @@ export interface InstanceStatus {
   name: string;
   health: Record<string, unknown> | null;
   lastPollAt: string;
+  /**
+   * Freshness seam (#1762 remediation 1): when `health` was last genuinely
+   * REPLACED by a live payload, as distinct from `lastPollAt`, which advances
+   * on every poll ATTEMPT including failures that carry the prior `health`
+   * forward verbatim. `null` until the first live payload arrives. Optional
+   * so existing fixtures/callers that predate this field keep compiling.
+   */
+  healthObservedAt?: string | null;
   consecutiveFailures: number;
   everReachable: boolean;
   status: 'online' | 'degraded' | 'unreachable' | 'logged_out';
@@ -610,10 +618,12 @@ export class HealthPoller {
             return;
           }
           const existing = this.statuses.get(name);
+          const observedAt = new Date().toISOString();
           this.statuses.set(name, {
             name,
             health,
-            lastPollAt: new Date().toISOString(),
+            lastPollAt: observedAt,
+            healthObservedAt: observedAt,
             consecutiveFailures: 0,
             everReachable: true,
             status: 'online',
@@ -737,10 +747,12 @@ export class HealthPoller {
         this.weakLoggedOutPolls.delete(name);
         this.failureStartedAt.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
+        const observedAt = new Date().toISOString();
         this.statuses.set(name, {
           name,
           health,
-          lastPollAt: new Date().toISOString(),
+          lastPollAt: observedAt,
+          healthObservedAt: observedAt,
           consecutiveFailures: 0,
           everReachable: true,
           status: 'online',
@@ -1173,6 +1185,9 @@ export class HealthPoller {
       name,
       health: existing?.health ?? null,
       lastPollAt: new Date().toISOString(),
+      // No live payload arrived this poll — carry the prior observation
+      // timestamp forward rather than resetting it (#1762 remediation 1).
+      healthObservedAt: existing?.healthObservedAt ?? null,
       consecutiveFailures: failures,
       everReachable,
       status: newStatus,
@@ -1278,6 +1293,9 @@ export class HealthPoller {
       name,
       health: existing?.health ?? null,
       lastPollAt: new Date().toISOString(),
+      // No live payload arrived this poll — carry the prior observation
+      // timestamp forward rather than resetting it (#1762 remediation 1).
+      healthObservedAt: existing?.healthObservedAt ?? null,
       consecutiveFailures: failures,
       everReachable: existing?.everReachable ?? false,
       status: staysUnreachable ? 'unreachable' : 'degraded',
@@ -1318,10 +1336,14 @@ export class HealthPoller {
       this.resetHealthBodyDegradedDebounce(name);
     }
 
+    const observedAt = new Date().toISOString();
     this.statuses.set(name, {
       name,
       health,
-      lastPollAt: new Date().toISOString(),
+      lastPollAt: observedAt,
+      // `health` here is always a live payload just fetched (even when
+      // classified degraded/logged_out) — never the carried-forward branch.
+      healthObservedAt: observedAt,
       consecutiveFailures: existing?.consecutiveFailures ?? 0,
       everReachable: true,
       status: newStatus,

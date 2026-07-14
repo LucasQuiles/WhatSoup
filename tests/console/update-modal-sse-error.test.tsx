@@ -46,7 +46,7 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
       status: 'ok',
       uptime_seconds: 3600,
       messages_total: 0,
-      connection: { state: 'connected' },
+      whatsapp: { connection: { state: 'connected' } },
       sqlite: { messages_total: 0, schema_version: 1 },
     },
     heartbeat: ['up', 'up', 'up'],

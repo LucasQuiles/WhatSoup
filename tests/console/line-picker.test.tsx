@@ -60,7 +60,7 @@ function line(overrides: Partial<LineInstance> = {}): LineInstance {
       status: 'ok',
       uptime_seconds: 60,
       messages_total: 0,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 0, schema_version: 1 },
     },
     ...overrides,

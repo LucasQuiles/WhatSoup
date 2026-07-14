@@ -23,7 +23,10 @@ export interface LineInstance {
     status: string;
     uptime_seconds: number;
     messages_total: number;
-    connection: { state: string };
+    // Matches the ONE /health emitter (src/core/health.ts): connection state
+    // nests under whatsapp.connection, never top-level. See #1763 — the
+    // CONNECTION card read a top-level `connection` no emitter ever produced.
+    whatsapp: { connection: { state: string } };
     sqlite: { messages_total: number; schema_version: number };
     runtime?: {
       passive?: { unreadCount: number; lastActivityAt: string | null };
@@ -42,6 +45,12 @@ export interface LineInstance {
       provider?: string;
     };
   } | null;
+  // Freshness seam (#1762 remediation 1, enrichInstance in src/fleet/routes/lines.ts):
+  // when `health` was last genuinely replaced by a live poll, and whether the
+  // poller is currently failing (in which case `health` may be carried
+  // forward from that observation rather than reflecting the current instant).
+  healthObservedAt?: string | null;
+  stale?: boolean;
   heartbeat: ('up' | 'down' | 'slow')[];
   lastActive: string;
   error: string | null;
