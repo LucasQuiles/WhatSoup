@@ -195,7 +195,13 @@ Queries `inbound_events` with `processing_status = 'processing'`. For each:
 - If no such op exists: mark the inbound event `failed`. The message was being processed when the crash occurred and never produced a reply.
 - If a terminal op exists (e.g., in `maybe_sent`): leave in `processing` — post-connect recovery will resolve the outbound op and may complete the inbound event normally.
 
-**Summary statistics** are returned in a `RecoveryStats` object. No `recovery_runs` record is written for pre-connect recovery (that table is written by post-connect recovery only).
+Before any recovery phase mutates state, pre-connect recovery appends a `recovery_plans` row and an
+open `recovery_runs` row with trigger `pre_connect`. Summary statistics and the current open-recovery
+count are finalized only after every phase succeeds. If any phase, counter, alert-evidence write, or
+receipt finalization fails, the run remains open (`completed_at IS NULL`), its bounded `notes` records
+`status: "incomplete"` and the failed phase names, and the primary error is rethrown. Mutations made by
+earlier successful phases remain durable and are owned by that incomplete receipt for the next
+recovery attempt; partial recovery is never reported as complete.
 
 ### 4.2 Post-Connect Recovery (`postConnectRecovery`)
 
@@ -235,9 +241,14 @@ For each `maybe_sent` op (including those promoted in Step 1):
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
 > counting site for `outbound_reconciled` (one increment per op). (BEAD-060)
 
-**Step 3 — Log recovery run**
+**Step 3 — Finalize the recovery run**
 
-A `recovery_runs` record is inserted with aggregated statistics from both steps.
+Post-connect recovery starts its own plan and open run before corroboration or outbound mutation.
+After reconciliation, it requires the open-recovery count and all BOT ERRORS quarantine evidence to
+be durably queued. A quarantine clear is staged until the proof gate returns successfully. Only then
+is the run finalized with its aggregate statistics. A failed phase, evidence write, gate, clear, count,
+or finalization leaves `completed_at` null and aborts the remaining recovery callback, including the
+pending drainer.
 
 **Step 4 — Drain `pending` (re-send reset ops)**
 
@@ -415,7 +426,11 @@ ORDER BY t.id DESC;
 
 ### 5.3 `recovery_runs` Table — Audit Trail
 
-`recovery_runs` records every invocation of `postConnectRecovery()` (the trigger `'post_connect'`). It is the primary audit trail for understanding what happened across restarts.
+`recovery_runs` records every invocation of both `preConnectRecovery()` and
+`postConnectRecovery()` (triggers `pre_connect` and `post_connect`). Each run is linked to its
+append-only `recovery_plans` owner. A non-null `completed_at` is a success receipt; a null
+`completed_at` with structured incomplete notes is durable recovery debt and must not be interpreted
+as an in-progress process merely because the service is currently running.
 
 **Useful queries:**
 
@@ -706,14 +721,16 @@ termination.
 
 ### `recovery_runs`
 
-Append-only audit log; one row per `postConnectRecovery()` invocation.
+Durable, monotonically finalized audit log; one row per pre-connect or post-connect recovery
+invocation. The row is created open, then updated exactly once with success or incomplete evidence.
 
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PK | Auto-incrementing run ID. |
 | `started_at` | TEXT | Row insertion timestamp (defaults to `now`). |
-| `completed_at` | TEXT | Timestamp when `logRecoveryRun()` was called. |
-| `trigger` | TEXT NOT NULL | `'post_connect'` (only value written today; reserved for other triggers). |
+| `completed_at` | TEXT | Success timestamp. `NULL` means the run is incomplete or was interrupted. |
+| `trigger` | TEXT NOT NULL | `pre_connect` or `post_connect`. |
+| `recovery_plan_id` | TEXT FK | Append-only plan that owns this run and its disposition/corroboration evidence. |
 | `inbound_replayed` | INTEGER | Count of inbound events re-queued for replay. |
 | `outbound_reconciled` | INTEGER | Count of `maybe_sent` and `submitted` ops processed (found + not-found combined). |
 | `outbound_replayed` | INTEGER | Count of ops reset to `pending` for replay. |
@@ -722,4 +739,8 @@ Append-only audit log; one row per `postConnectRecovery()` invocation.
 | `tool_calls_replayed` | INTEGER | Count of tool calls marked `replayed`. |
 | `tool_calls_quarantined` | INTEGER | Count of tool calls quarantined. |
 | `sessions_restored` | INTEGER | Reserved. Currently always 0. |
-| `notes` | TEXT | Free-form notes. Not populated by the engine today. |
+| `notes` | TEXT | Bounded JSON summary. Successful runs record `openRecoveries`; failed runs record `status: "incomplete"`, failed phase names, and the last available open-recovery count. |
+
+Recovery runs and their linked plans, dispositions, corroboration, and closure witnesses are retained
+indefinitely as audit evidence. There is no supported direct-delete or TTL path. Archive/capacity work
+must preserve identities and proof provenance through a dedicated forward migration.
