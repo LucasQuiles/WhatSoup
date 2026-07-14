@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Database } from '../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
-import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import {
+  markRuntimeTurnReplayUnsafe,
+  type RuntimeTurnContext,
+} from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 import {
@@ -270,6 +273,139 @@ describe('runtime terminal coordinator integration', () => {
       expect(state.currentInboundSeq).toBeUndefined();
       expect(queue.clearLastOpId).toHaveBeenCalledOnce();
       expect(guarantee.disarm).toHaveBeenCalledWith(52);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('advances FIFO for an exact replay-unsafe blocked handoff while leaving its reply guarantee armed', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { sessionScope: 'per_chat' });
+      const mapKey = '15550190043';
+      const session = sessionStub();
+      const runtimeContext = markRuntimeTurnReplayUnsafe(
+        context('per_chat', mapKey, 53, 'turn-blocked-handoff'),
+      );
+      const queue = queueStub(runtimeContext.identity.deliveryJid);
+      vi.mocked(queue.flushTurnEvidence).mockResolvedValue({
+        turnId: runtimeContext.identity.logicalTurnId,
+        answerOpIds: [53],
+        lifecycleOpIds: [],
+        statusOpIds: [],
+      });
+      const durability = durabilityMock();
+      durability.getOutboundDeliverySnapshot.mockReturnValue({
+        opId: 53,
+        conversationKey: runtimeContext.identity.conversationKey,
+        deliveryJid: runtimeContext.identity.deliveryJid,
+        sourceInboundSeq: 53,
+        status: 'maybe_sent',
+      });
+      durability.finalizeTurnTerminal.mockReturnValue({
+        applied: false,
+        winnerMatchesRequest: true,
+        recordId: 3,
+        duplicateFinalizeCount: 1,
+        replyGuaranteeDisarmed: false,
+        effectiveReplyGuaranteeDisarmed: false,
+        recoveryJob: {
+          status: 'durably_blocked',
+          applied: false,
+          jobId: 10,
+          state: 'blocked_unsafe',
+          duplicateEnqueueCount: 1,
+        },
+      });
+      const guarantee = replyGuaranteeMock();
+      state.durability = durability;
+      state.replyGuarantee = guarantee;
+      state.chatQueues.set(mapKey, queue);
+      state.sessionOwnership.claim(mapKey, state.managerIdFor(session));
+      const completion = state.beginPerChatRuntimeTurn(
+        session,
+        runtimeContext.identity.deliveryJid,
+        mapKey,
+        runtimeContext,
+      );
+      expect(completion).not.toBeNull();
+      state.perChatInboundSeqQueue.set(mapKey, [53]);
+
+      await state.runtimeTurnCoordinator.finalizeRuntimeTurnContext({
+        context: completion!.context,
+        queue,
+        attemptOutcome: { kind: 'completed' },
+        session,
+        mapKey,
+      });
+      await completion!.promise;
+
+      expect(state.perChatRuntimeTurnContexts.has(mapKey)).toBe(false);
+      expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
+      expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+      expect(guarantee.disarm).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('holds FIFO for an exact replay-safe queued handoff while delivery remains unknown', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState & {
+        runtimeTurnSupervisor: { health(): { degradedScopes: number } };
+      }>(db);
+      const runtimeContext = context('singleton', '15550190044', 54, 'turn-pending-handoff');
+      const queue = queueStub(runtimeContext.identity.deliveryJid);
+      vi.mocked(queue.flushTurnEvidence).mockResolvedValue({
+        turnId: runtimeContext.identity.logicalTurnId,
+        answerOpIds: [54],
+        lifecycleOpIds: [],
+        statusOpIds: [],
+      });
+      const durability = durabilityMock();
+      durability.getOutboundDeliverySnapshot.mockReturnValue({
+        opId: 54,
+        conversationKey: runtimeContext.identity.conversationKey,
+        deliveryJid: runtimeContext.identity.deliveryJid,
+        sourceInboundSeq: 54,
+        status: 'maybe_sent',
+      });
+      durability.finalizeTurnTerminal.mockReturnValue({
+        applied: true,
+        winnerMatchesRequest: true,
+        recordId: 4,
+        duplicateFinalizeCount: 0,
+        replyGuaranteeDisarmed: false,
+        effectiveReplyGuaranteeDisarmed: false,
+        recoveryJob: {
+          status: 'durably_queued',
+          applied: true,
+          jobId: 11,
+          state: 'pending',
+          duplicateEnqueueCount: 0,
+        },
+      });
+      const guarantee = replyGuaranteeMock();
+      state.durability = durability;
+      state.replyGuarantee = guarantee;
+      state.currentRuntimeTurnContext = runtimeContext;
+      state.currentInboundSeq = 54;
+
+      await state.runtimeTurnCoordinator.finalizeRuntimeTurnContext({
+        context: runtimeContext,
+        queue,
+        attemptOutcome: { kind: 'completed' },
+        session: sessionStub(),
+      });
+
+      expect(state.currentRuntimeTurnContext).toBe(runtimeContext);
+      expect(state.currentInboundSeq).toBe(54);
+      expect(queue.clearLastOpId).not.toHaveBeenCalled();
+      expect(guarantee.disarm).not.toHaveBeenCalled();
+      expect(state.runtimeTurnSupervisor.health().degradedScopes).toBe(1);
     } finally {
       db.close();
     }
