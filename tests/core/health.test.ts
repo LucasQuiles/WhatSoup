@@ -32,13 +32,25 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
+// health.ts's own logger ('health') is a stable shared instance (not a fresh
+// object per call) so #1753's "logs a warning on starvation" test can assert
+// against the one logger health.ts's module-level `createChildLogger('health')`
+// actually holds. Every OTHER component (database.ts, chats-resolver.ts, ...)
+// keeps a fresh throwaway logger per call, same as before — otherwise their
+// unrelated warn/info calls (e.g. database.ts's WAL-journal-mode notice) would
+// pollute mockHealthLogger and make its call history meaningless.
+const mockHealthLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: (component: string) =>
+    component === 'health'
+      ? mockHealthLogger
+      : { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 // ---------------------------------------------------------------------------
@@ -3893,5 +3905,162 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
     const json = JSON.parse(body);
     // None of passive/chat/agent matched, so runtime stays an empty object.
     expect(json.runtime).toEqual({});
+  });
+
+  // #1753 rem-1: in-process event-loop-lag self-probe. A wedged loop makes
+  // /health unanswerable, so nothing in THIS handler can detect a wedge in
+  // progress — the sampler's own timer gives it a memory of recent lag that
+  // survives into whichever request the loop is next free enough to answer.
+  // This describe follows the enclosing block's convention: beforeEach only
+  // creates `db`; each test builds its own server explicitly.
+  describe('#1753 rem-1: event-loop-lag self-probe', () => {
+    // This describe's own beforeEach (line ~3674) doesn't clear mockHealthLogger —
+    // it wasn't tracked before #1753. Clear it locally so each test here only
+    // sees warn calls from its OWN request, not ones left over from a sibling.
+    beforeEach(() => {
+      mockHealthLogger.warn.mockClear();
+    });
+
+    function fakeLoopLagSampler(snapshot: { sampleCount: number; p95LagMs: number | null; locallyStarved: boolean }) {
+      return {
+        start: vi.fn(),
+        stop: vi.fn(),
+        snapshot: vi.fn().mockReturnValue(snapshot),
+      };
+    }
+
+    it('exposes a well-shaped event_loop block with the real sampler by default', async () => {
+      ({ server, port } = await buildTestServer(makeDeps(db)));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(200);
+      const json = JSON.parse(body);
+      expect(json.event_loop).toMatchObject({
+        sample_count: expect.any(Number),
+        locally_starved: false,
+        starvation_threshold_ms: 250,
+      });
+      expect(json.event_loop.lag_p95_ms === null || typeof json.event_loop.lag_p95_ms === 'number').toBe(true);
+    });
+
+    it('folds a starved sampler snapshot into the event_loop body and degrades status', async () => {
+      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 412, locallyStarved: true });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      const json = JSON.parse(body);
+      expect(status).toBe(200); // degraded, not unhealthy — the connection itself is fine
+      expect(json.status).toBe('degraded');
+      expect(json.event_loop).toEqual({
+        lag_p95_ms: 412,
+        sample_count: 20,
+        locally_starved: true,
+        starvation_threshold_ms: 250,
+      });
+    });
+
+    it('logs a warning when the sampler reports local starvation', async () => {
+      const sampler = fakeLoopLagSampler({ sampleCount: 20, p95LagMs: 500, locallyStarved: true });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      await httpReq(port, '/health', 'GET');
+      expect(mockHealthLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ p95LagMs: 500, sampleCount: 20, thresholdMs: 250 }),
+        'event loop starvation detected during health check',
+      );
+    });
+
+    it('does not log a starvation warning when the sampler is not starved', async () => {
+      const sampler = fakeLoopLagSampler({ sampleCount: 3, p95LagMs: 10, locallyStarved: false });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      await httpReq(port, '/health', 'GET');
+      expect(mockHealthLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'event loop starvation detected during health check',
+      );
+    });
+
+    it('stops the injected sampler when the server closes', async () => {
+      const sampler = fakeLoopLagSampler({ sampleCount: 0, p95LagMs: null, locallyStarved: false });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+      expect(sampler.start).toHaveBeenCalled();
+
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      expect(sampler.stop).toHaveBeenCalled();
+    });
+  });
+
+  // #1753 rem-2: MCP tool-call liveness. Exposition only — deliberately does
+  // NOT affect `status` (no corroborated evidence yet for what "too long" is
+  // for every tool), unlike the loop-lag block above.
+  describe('#1753 rem-2: MCP liveness in /health', () => {
+    it('exposes mcp_liveness as null for a non-agent instance', async () => {
+      ({ server, port } = await buildTestServer(makeDeps(db)));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      expect(status).toBe(200);
+      expect(JSON.parse(body).mcp_liveness).toBeNull();
+    });
+
+    it('exposes mcp_liveness as null when the agent runtime does not implement getMcpLivenessSnapshot', async () => {
+      const deps = makeDeps(db, {
+        instanceType: 'agent',
+        runtime: {
+          getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: { active: true } }),
+        } as any,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { body } = await httpReq(port, '/health', 'GET');
+      expect(JSON.parse(body).mcp_liveness).toBeNull();
+    });
+
+    it('surfaces pending_count/oldest_call_age_ms/oldest_call_tool from the agent runtime', async () => {
+      const deps = makeDeps(db, {
+        instanceType: 'agent',
+        runtime: {
+          getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: { active: true } }),
+          getMcpLivenessSnapshot: () => ({
+            pendingCount: 2,
+            oldestCallAgeMs: 45_000,
+            oldestCallTool: 'send_message',
+          }),
+        } as any,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.mcp_liveness).toEqual({
+        pending_count: 2,
+        oldest_call_age_ms: 45_000,
+        oldest_call_tool: 'send_message',
+      });
+    });
+
+    it('does not degrade status on its own, however old the oldest in-flight call is (exposition only)', async () => {
+      const deps = makeDeps(db, {
+        instanceType: 'agent',
+        runtime: {
+          getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: { active: true } }),
+          getMcpLivenessSnapshot: () => ({
+            pendingCount: 1,
+            oldestCallAgeMs: 6 * 60 * 60 * 1000, // 6h — pathological, still exposition-only
+            oldestCallTool: 'send_message',
+          }),
+        } as any,
+      });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { body } = await httpReq(port, '/health', 'GET');
+      expect(JSON.parse(body).status).toBe('healthy');
+    });
   });
 });

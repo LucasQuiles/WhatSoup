@@ -866,3 +866,118 @@ describe('registry.ts uncovered-branch coverage', () => {
     expect(result.content[0].text).toBe('Invalid chatJid "not-a-jid": must be a valid JID');
   });
 });
+
+// #1753 rem-2: MCP/send-path liveness. A wedged tool.handler() (async-hung send
+// path) never pins the event loop, so loop-lag sampling structurally cannot see
+// it — getInFlightCallStats is the only signal for that failure mode.
+describe('ToolRegistry.getInFlightCallStats', () => {
+  let registry: ToolRegistry;
+
+  beforeEach(() => {
+    registry = new ToolRegistry();
+  });
+
+  it('reports zero pending calls with no in-flight tool handlers', () => {
+    expect(registry.getInFlightCallStats()).toEqual({
+      pendingCount: 0,
+      oldestCallAgeMs: null,
+      oldestCallTool: null,
+    });
+  });
+
+  it('reports a pending call while its handler is still awaiting', async () => {
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    registry.register(
+      makeTool({
+        name: 'slow_tool',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          await handlerGate;
+          return { ok: true };
+        },
+      }),
+    );
+
+    const callPromise = registry.call('slow_tool', {}, makeSession());
+    // Yield so the async handler actually starts and registers itself before
+    // we inspect in-flight state — call() awaits synchronously up to the
+    // handler invocation.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const midFlight = registry.getInFlightCallStats(Date.now());
+    expect(midFlight.pendingCount).toBe(1);
+    expect(midFlight.oldestCallTool).toBe('slow_tool');
+    expect(midFlight.oldestCallAgeMs).not.toBeNull();
+    expect(midFlight.oldestCallAgeMs!).toBeGreaterThanOrEqual(0);
+
+    releaseHandler();
+    await callPromise;
+
+    expect(registry.getInFlightCallStats()).toEqual({
+      pendingCount: 0,
+      oldestCallAgeMs: null,
+      oldestCallTool: null,
+    });
+  });
+
+  it('deregisters the in-flight call even when the handler throws', async () => {
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((_resolve, reject) => { releaseHandler = () => reject(new Error('boom')); });
+    registry.register(
+      makeTool({
+        name: 'throwing_tool',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => { await handlerGate; },
+      }),
+    );
+
+    const callPromise = registry.call('throwing_tool', {}, makeSession());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.getInFlightCallStats().pendingCount).toBe(1);
+
+    releaseHandler();
+    const result = await callPromise;
+
+    expect(result.isError).toBe(true);
+    expect(registry.getInFlightCallStats()).toEqual({
+      pendingCount: 0,
+      oldestCallAgeMs: null,
+      oldestCallTool: null,
+    });
+  });
+
+  it('reports the OLDEST call and the total pending count with multiple concurrent calls', async () => {
+    const gates: Array<() => void> = [];
+    registry.register(
+      makeTool({
+        name: 'concurrent_tool',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          await new Promise<void>((resolve) => { gates.push(resolve); });
+          return { ok: true };
+        },
+      }),
+    );
+
+    const first = registry.call('concurrent_tool', {}, makeSession());
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = registry.call('concurrent_tool', {}, makeSession());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const stats = registry.getInFlightCallStats();
+    expect(stats.pendingCount).toBe(2);
+    expect(stats.oldestCallTool).toBe('concurrent_tool');
+
+    gates.forEach((release) => release());
+    await Promise.all([first, second]);
+    expect(registry.getInFlightCallStats().pendingCount).toBe(0);
+  });
+});

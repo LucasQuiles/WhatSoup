@@ -6,7 +6,7 @@ import {
   LOOP_LAG_STARVATION_THRESHOLD_MS,
   LOOP_LAG_WINDOW_SAMPLES,
   LoopLagSampler,
-} from '../../src/fleet/loop-lag-sampler.ts';
+} from '../../src/lib/loop-lag-sampler.ts';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(),

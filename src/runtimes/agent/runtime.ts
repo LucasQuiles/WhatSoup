@@ -7466,6 +7466,19 @@ export class AgentRuntime implements Runtime {
     };
   }
 
+  /**
+   * #1753 rem-2: delegates to the ToolRegistry every socket server (global and
+   * per-chat) shares — the single choke point every MCP tool call flows
+   * through, so this reflects in-flight calls across the whole instance.
+   */
+  getMcpLivenessSnapshot(): {
+    pendingCount: number;
+    oldestCallAgeMs: number | null;
+    oldestCallTool: string | null;
+  } {
+    return this.registry.getInFlightCallStats();
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
