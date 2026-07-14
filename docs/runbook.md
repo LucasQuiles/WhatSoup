@@ -356,6 +356,33 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
+### Database Compatibility Startup Classification
+
+A valid database compatibility drain is distinct from an ordinary WhatsApp
+outage or a transient process crash. Its read-only `GET /health` response is
+HTTP 503 with `service_mode: "inspection_only"` and a `startup_block.code` of
+`future_schema` or `engine_recovery_required`. The response also reports
+`operator_action_required: true`. In this state WhatsApp has not started,
+database writes are disabled, and provider and synthetic-turn admission remain
+blocked. The watchdog intentionally does not restart a valid inspection-only
+drain.
+
+Preserve the database artifact and collect only read-only health, service-exit,
+and log evidence. Diagnose whether the artifact requires a compatible newer
+binary or engine recovery; do not infer that the instance is merely
+disconnected. Do not use `reset-failed`, repeated restarts, or a downgrade to a
+pre-guard binary. Any live restart, rollback, repair, replacement, or database
+mutation requires explicit approval before it is attempted.
+
+Some stable startup rejections do not enter the inspection-only health server.
+An invalid schema, unsafe database identity, non-writable canonical database
+artifact, or permanent inspection-health bind failure exits with status 78.
+The systemd unit's `RestartPreventExitStatus=78` prevents a backoff loop; use
+the logs and service exit evidence to identify the specific reason. Exit 78 is
+not a universal database-error classification: `database_identity_changed` and
+other genuinely transient startup failures remain exit 1 and retryable by the
+service manager.
+
 ### Quick Health Check
 
 ```bash
