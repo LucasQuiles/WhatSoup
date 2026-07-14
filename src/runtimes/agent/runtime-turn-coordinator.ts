@@ -545,9 +545,15 @@ private terminalPostEffectsAreProven(
 ): boolean {
   if (!result.receipt.winnerMatchesRequest) return false;
   if (result.terminal.inboundDisposition !== 'transferred_to_recovery_owner') return true;
-  return result.effectiveReplyGuaranteeDisarmed
-    && result.receipt.recoveryJob !== undefined
-    && ['durably_queued', 'durably_blocked'].includes(result.receipt.recoveryJob.status);
+  const recoveryJob = result.receipt.recoveryJob;
+  if (
+    recoveryJob === undefined
+    || !['durably_queued', 'durably_blocked'].includes(recoveryJob.status)
+  ) return false;
+  if (result.effectiveReplyGuaranteeDisarmed) return true;
+  return result.terminal.deliveryEvidence.kind === 'delivery_unknown'
+    && recoveryJob.status === 'durably_blocked'
+    && recoveryJob.state === 'blocked_unsafe';
 }
 
 async awaitActiveFinalizations(): Promise<void> {
