@@ -1,14 +1,21 @@
-import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { pathToFileURL } from 'node:url';
 import {
   acquireProcessLock,
   releaseProcessLock,
   type ProcessLockHandle,
 } from '../lib/process-lock.ts';
-import { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
+import {
+  assertDatabaseIdentity,
+  assertSchemaCeiling,
+  DatabaseCompatibilityError,
+  inspectDatabaseIdentity,
+  isSqliteReadonlyRollback,
+  sqliteFileUri,
+  type DatabaseCompatibilityReason,
+} from './database-compatibility.ts';
 
 export const DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS = 78;
 
@@ -44,6 +51,12 @@ export type DatabaseCompatibilityStatus = {
   requiredMigration: number;
 };
 
+export type DatabaseCompatibilityBootstrapInspection =
+  | { outcome: 'ready' }
+  | { outcome: 'drained'; error: DatabaseCompatibilityStatus }
+  | { outcome: 'permanent'; error: DatabaseCompatibilityError }
+  | { outcome: 'transient'; error: Error };
+
 export type DatabaseCompatibilityHealthOptions = {
   error: DatabaseCompatibilityStatus;
   instanceName: string;
@@ -51,125 +64,81 @@ export type DatabaseCompatibilityHealthOptions = {
   port: number;
 };
 
-function sqliteReadOnlyUri(path: string): string {
-  const url = pathToFileURL(path);
-  url.searchParams.set('mode', 'ro');
-  return url.href;
+function transientBootstrapError(err: unknown): Error {
+  return err instanceof Error
+    ? err
+    : new Error('Database compatibility inspection failed', { cause: err });
 }
 
-function isSqliteReadonlyRollback(err: unknown): boolean {
-  return (err as { errcode?: unknown })?.errcode === 776;
+function classifyBootstrapInspectionError(
+  err: unknown,
+): Exclude<DatabaseCompatibilityBootstrapInspection, { outcome: 'ready' }> {
+  if (!(err instanceof DatabaseCompatibilityError)) {
+    return { outcome: 'transient', error: transientBootstrapError(err) };
+  }
+  const reason: DatabaseCompatibilityReason = err.reason;
+  switch (reason) {
+    case 'future_schema':
+    case 'engine_recovery_required':
+      return {
+        outcome: 'drained',
+        error: {
+          reason,
+          observedMigration: err.observedMigration,
+          requiredMigration: err.requiredMigration,
+        },
+      };
+    case 'invalid_schema':
+    case 'unsafe_database_identity':
+    case 'database_not_writable':
+      return { outcome: 'permanent', error: err };
+    case 'database_identity_changed':
+      return { outcome: 'transient', error: err };
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
+  }
 }
 
 export function inspectExistingDatabaseForBootstrap(
   dbPath: string,
-): DatabaseCompatibilityStatus | null {
-  if (!existsSync(dbPath)) return null;
-  const absolutePath = resolve(dbPath);
-  const info = lstatSync(absolutePath, { bigint: true });
-  if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1n) return null;
-  const canonicalPath = realpathSync(absolutePath);
-  if (canonicalPath !== absolutePath) return null;
+): DatabaseCompatibilityBootstrapInspection {
+  if (!existsSync(dbPath)) return { outcome: 'ready' };
 
-  let db: DatabaseSync;
+  let db: DatabaseSync | null = null;
+  let inspection: DatabaseCompatibilityBootstrapInspection;
   try {
-    db = new DatabaseSync(sqliteReadOnlyUri(canonicalPath), {
+    const expectedIdentity = inspectDatabaseIdentity(dbPath);
+    db = new DatabaseSync(sqliteFileUri(expectedIdentity.canonicalPath, 'ro'), {
       readOnly: true,
       timeout: 5000,
       enableForeignKeyConstraints: false,
     });
+    assertDatabaseIdentity(db, dbPath, expectedIdentity);
+    assertSchemaCeiling(db, dbPath);
+    assertDatabaseIdentity(db, dbPath, expectedIdentity);
+    inspection = { outcome: 'ready' };
   } catch (err) {
     if (isSqliteReadonlyRollback(err)) {
-      return {
-        reason: 'engine_recovery_required',
-        observedMigration: null,
-        requiredMigration: CURRENT_SCHEMA_MIGRATION,
-      };
+      inspection = classifyBootstrapInspectionError(new DatabaseCompatibilityError(
+        'engine_recovery_required',
+        `Database engine recovery is required before schema inspection at ${dbPath}`,
+        err,
+      ));
+    } else {
+      inspection = classifyBootstrapInspectionError(err);
     }
-    throw err;
   }
 
-  try {
-    const migrationObject = db.prepare(`
-      SELECT name, type FROM main.sqlite_master
-      WHERE name = 'schema_migrations' COLLATE NOCASE LIMIT 1
-    `).get() as { name: string; type: string } | undefined;
-    if (migrationObject?.name !== 'schema_migrations' || migrationObject.type !== 'table') {
-      return null;
+  if (db) {
+    try {
+      db.close();
+    } catch (err) {
+      inspection = classifyBootstrapInspectionError(err);
     }
-    const columns = db.prepare("PRAGMA main.table_xinfo('schema_migrations')").all() as Array<{
-      cid: number;
-      name: string;
-      type: string;
-      notnull: number;
-      dflt_value: string | null;
-      pk: number;
-      hidden: number;
-    }>;
-    const tableMetadata = db.prepare("PRAGMA main.table_list('schema_migrations')").get() as {
-      schema: string;
-      name: string;
-      type: string;
-      ncol: number;
-      wr: number;
-      strict: number;
-    } | undefined;
-    const [versionColumn, appliedAtColumn] = columns;
-    const appliedAtDefault = appliedAtColumn?.dflt_value?.replaceAll(/\s/g, '').toLowerCase();
-    const canonicalLedger = columns.length === 2
-      && versionColumn?.cid === 0
-      && versionColumn.name === 'version'
-      && versionColumn.type.toUpperCase() === 'INTEGER'
-      && versionColumn.notnull === 0
-      && versionColumn.dflt_value === null
-      && versionColumn.pk === 1
-      && versionColumn.hidden === 0
-      && appliedAtColumn?.cid === 1
-      && appliedAtColumn.name === 'applied_at'
-      && appliedAtColumn.type.toUpperCase() === 'TEXT'
-      && appliedAtColumn.notnull === 1
-      && (appliedAtDefault === "datetime('now')" || appliedAtDefault === "(datetime('now'))")
-      && appliedAtColumn.pk === 0
-      && appliedAtColumn.hidden === 0
-      && tableMetadata?.schema === 'main'
-      && tableMetadata.name === 'schema_migrations'
-      && tableMetadata.type === 'table'
-      && tableMetadata.ncol === 2
-      && tableMetadata.wr === 0
-      && tableMetadata.strict === 0;
-    if (!canonicalLedger) return null;
-
-    const row = db.prepare(`
-      SELECT MAX(version) AS latest,
-             COALESCE(SUM(CASE WHEN typeof(version) = 'integer' AND version >= 1 THEN 0 ELSE 1 END), 0)
-               AS invalid_versions
-      FROM schema_migrations
-    `).get() as { latest: number | null; invalid_versions: number };
-    if (
-      row.invalid_versions === 0
-      && Number.isSafeInteger(row.latest)
-      && row.latest !== null
-      && row.latest > CURRENT_SCHEMA_MIGRATION
-    ) {
-      return {
-        reason: 'future_schema',
-        observedMigration: row.latest,
-        requiredMigration: CURRENT_SCHEMA_MIGRATION,
-      };
-    }
-    return null;
-  } catch (err) {
-    if (isSqliteReadonlyRollback(err)) {
-      return {
-        reason: 'engine_recovery_required',
-        observedMigration: null,
-        requiredMigration: CURRENT_SCHEMA_MIGRATION,
-      };
-    }
-    throw err;
-  } finally {
-    db.close();
   }
+  return inspection;
 }
 
 function writeJson(
@@ -401,10 +370,17 @@ export async function runEarlyDatabaseCompatibilityGate(
   try {
     // This is the authoritative inspection. The advisory wrapper check is
     // intentionally repeated only after the cooperative writer lock is held.
-    const compatibilityError = inspect(dbPath);
-    if (compatibilityError === null) return false;
+    const inspection = inspect(dbPath);
+    if (inspection.outcome === 'ready') return false;
+    if (inspection.outcome === 'permanent') {
+      throw new DatabaseCompatibilityPermanentStartupError(
+        inspection.error.message,
+        inspection.error,
+      );
+    }
+    if (inspection.outcome === 'transient') throw inspection.error;
     server = await startServer({
-      error: compatibilityError,
+      error: inspection.error,
       instanceName,
       startedAt: Date.now(),
       port: typeof healthPort === 'number' ? healthPort : 9090,

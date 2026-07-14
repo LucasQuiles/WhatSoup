@@ -1,16 +1,20 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
-import { tmpdir } from 'node:os';
+import { tmpdir as systemTmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  Database,
   DatabaseCompatibilityError,
   CURRENT_SCHEMA_MIGRATION,
 } from '../../src/core/database.ts';
@@ -27,6 +31,10 @@ import {
   waitForDatabaseCompatibilityDrain,
 } from '../../src/core/database-compatibility-early.ts';
 import { configureDatabaseCompatibilityBootstrap } from '../../src/database-compatibility-config.ts';
+
+function tmpdir(): string {
+  return realpathSync(systemTmpdir());
+}
 
 async function waitForListening(server: Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -310,6 +318,50 @@ describe('database compatibility health drain', () => {
     })).rejects.toThrow(ordinaryError);
   });
 
+  it('classifies a real non-writable DELETE-mode writer as permanent and latches its fence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-database-not-writable-'));
+    const dbPath = join(dir, 'current.db');
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    const rollbackMode = new DatabaseSync(dbPath);
+    rollbackMode.exec('PRAGMA journal_mode = DELETE');
+    rollbackMode.close();
+
+    const db = new Database(dbPath);
+    const startDrain = vi.fn(async () => ({ close: vi.fn() } as unknown as Server));
+    try {
+      chmodSync(dbPath, 0o400);
+      chmodSync(dir, 0o500);
+
+      const failure = await openDatabaseForStartup({
+        dbPath,
+        instanceName: 'test-agent',
+        startedAt: 1,
+        createDatabase: () => db,
+        startDrainServer: startDrain,
+      }).catch((err: unknown) => err);
+
+      expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
+      expect(failure).toMatchObject({
+        cause: { reason: 'database_not_writable' },
+      });
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startDrain).not.toHaveBeenCalled();
+      expect(() => db.assertWritableCompatibility()).toThrow(
+        (failure as DatabaseCompatibilityPermanentStartupError).cause as Error,
+      );
+      expect(() => db.raw.exec('CREATE TABLE must_stay_blocked(id INTEGER)')).toThrow(
+        /read.?only|closed|not open/i,
+      );
+    } finally {
+      chmodSync(dir, 0o700);
+      chmodSync(dbPath, 0o600);
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not create a missing database during the early import gate', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-gate-'));
     const previousConfig = process.env.INSTANCE_CONFIG;
@@ -353,7 +405,7 @@ describe('database compatibility health drain', () => {
         },
         inspect: () => {
           order.push('inspect');
-          return null;
+          return { outcome: 'ready' };
         },
         releaseLock: () => {
           order.push('release');
@@ -361,6 +413,85 @@ describe('database compatibility health drain', () => {
         },
       })).resolves.toBe(false);
       expect(order).toEqual(['lock', 'inspect', 'release']);
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps a permanent authoritative inspection and releases the process lock', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-permanent-'));
+    const previousConfig = process.env.INSTANCE_CONFIG;
+    const dbPath = join(dir, 'data', 'bot.db');
+    const lockPath = join(dir, 'state', 'whatsoup.lock');
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    const lock = { path: lockPath, pid: process.pid, token: 'test-lock' };
+    const permanentError = new DatabaseCompatibilityError(
+      'invalid_schema',
+      'malformed migration ledger',
+    );
+    const startServer = vi.fn(async () => ({ listening: true }) as Server);
+    const releaseLock = vi.fn(() => true);
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate({
+        databaseExists: () => true,
+        acquireLock: () => lock,
+        inspect: () => ({ outcome: 'permanent', error: permanentError }),
+        startServer,
+        waitForDrain: async () => 'SIGTERM',
+        closeServer: async () => {},
+        releaseLock,
+      }).catch((err: unknown) => err);
+
+      expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
+      expect(failure).toMatchObject({ cause: permanentError });
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startServer).not.toHaveBeenCalled();
+      expect(releaseLock).toHaveBeenCalledOnce();
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws a transient authoritative inspection unchanged and releases the process lock', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-transient-'));
+    const previousConfig = process.env.INSTANCE_CONFIG;
+    const dbPath = join(dir, 'data', 'bot.db');
+    const lockPath = join(dir, 'state', 'whatsoup.lock');
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    const lock = { path: lockPath, pid: process.pid, token: 'test-lock' };
+    const transientError = new DatabaseCompatibilityError(
+      'database_identity_changed',
+      'database identity changed during inspection',
+    );
+    const startServer = vi.fn(async () => ({ listening: true }) as Server);
+    const releaseLock = vi.fn(() => true);
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate({
+        databaseExists: () => true,
+        acquireLock: () => lock,
+        inspect: () => ({ outcome: 'transient', error: transientError }),
+        startServer,
+        waitForDrain: async () => 'SIGTERM',
+        closeServer: async () => {},
+        releaseLock,
+      }).catch((err: unknown) => err);
+
+      expect(failure).toBe(transientError);
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(1);
+      expect(startServer).not.toHaveBeenCalled();
+      expect(releaseLock).toHaveBeenCalledOnce();
     } finally {
       if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
       else process.env.INSTANCE_CONFIG = previousConfig;
@@ -387,9 +518,12 @@ describe('database compatibility health drain', () => {
       await expect(runEarlyDatabaseCompatibilityGate({
         acquireLock: () => lock,
         inspect: () => ({
-          reason: 'future_schema',
-          observedMigration: CURRENT_SCHEMA_MIGRATION + 1,
-          requiredMigration: CURRENT_SCHEMA_MIGRATION,
+          outcome: 'drained',
+          error: {
+            reason: 'future_schema',
+            observedMigration: CURRENT_SCHEMA_MIGRATION + 1,
+            requiredMigration: CURRENT_SCHEMA_MIGRATION,
+          },
         }),
         startServer: async () => server,
         waitForDrain: async () => 'SIGTERM',

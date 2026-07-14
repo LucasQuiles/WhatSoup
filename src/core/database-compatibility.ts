@@ -63,6 +63,79 @@ export function isSqliteReadonlyRollback(err: unknown): boolean {
   return (err as { errcode?: unknown })?.errcode === 776;
 }
 
+const MAX_WRITE_COMPATIBILITY_ERROR_NODES = 32;
+
+export function databaseWriteCompatibilityError(
+  dbPath: string,
+  err: unknown,
+): DatabaseCompatibilityError<
+  'engine_recovery_required' | 'database_identity_changed' | 'database_not_writable'
+> | null {
+  const pending: unknown[] = [err];
+  const seen = new Set<unknown>();
+  let inspected = 0;
+
+  while (pending.length > 0 && inspected < MAX_WRITE_COMPATIBILITY_ERROR_NODES) {
+    const current = pending.shift();
+    if (
+      current === null
+      || (typeof current !== 'object' && typeof current !== 'function')
+      || seen.has(current)
+    ) {
+      continue;
+    }
+    seen.add(current);
+    inspected += 1;
+
+    if (current instanceof DatabaseCompatibilityError) {
+      switch (current.reason) {
+        case 'engine_recovery_required':
+        case 'database_identity_changed':
+        case 'database_not_writable':
+          return current as DatabaseCompatibilityError<
+            'engine_recovery_required' | 'database_identity_changed' | 'database_not_writable'
+          >;
+      }
+    }
+
+    const errcode = (current as { errcode?: unknown }).errcode;
+    let reason:
+      | 'engine_recovery_required'
+      | 'database_identity_changed'
+      | 'database_not_writable'
+      | null = null;
+    if (errcode === 264 || errcode === 776) reason = 'engine_recovery_required';
+    else if (errcode === 1032) reason = 'database_identity_changed';
+    else if (errcode === 8 || errcode === 520 || errcode === 1288 || errcode === 1544) {
+      reason = 'database_not_writable';
+    }
+    const code = (current as { code?: unknown }).code;
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+      reason = 'database_not_writable';
+    }
+    if (reason) {
+      const message = reason === 'engine_recovery_required'
+        ? `Database engine recovery is required before writes at ${dbPath}`
+        : reason === 'database_identity_changed'
+          ? `Database identity changed before or during writes at ${dbPath}`
+          : `Database is not writable at ${dbPath}`;
+      return new DatabaseCompatibilityError(reason, message, current);
+    }
+
+    const cause = (current as { cause?: unknown }).cause;
+    if (cause !== undefined && pending.length + inspected < MAX_WRITE_COMPATIBILITY_ERROR_NODES) {
+      pending.push(cause);
+    }
+    if (current instanceof AggregateError) {
+      for (const nested of current.errors) {
+        if (pending.length + inspected >= MAX_WRITE_COMPATIBILITY_ERROR_NODES) break;
+        pending.push(nested);
+      }
+    }
+  }
+  return null;
+}
+
 export function sameDatabaseIdentity(
   left: DatabaseIdentity,
   right: DatabaseIdentity,

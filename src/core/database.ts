@@ -7,6 +7,7 @@ import {
   DatabaseCompatibilityError,
   assertDatabaseIdentity,
   assertSchemaCeiling,
+  databaseWriteCompatibilityError,
   inspectDatabaseIdentity,
   installReadOnlyRejectionFence,
   isSqliteReadonlyRollback,
@@ -1291,6 +1292,8 @@ export class Database {
       try {
         mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
       } catch (err) {
+        const rejection = databaseWriteCompatibilityError(this.dbPath, err);
+        if (rejection) throw rejection;
         throw new WhatSoupError(
           `Cannot create DB directory: ${dirname(dbPath)}`,
           'DATABASE_ERROR',
@@ -1362,6 +1365,8 @@ export class Database {
       this.db = new DatabaseSync(writerPath, { timeout: 5000 });
       this.connectionClosed = false;
     } catch (err) {
+      const rejection = databaseWriteCompatibilityError(this.dbPath, err);
+      if (rejection) throw rejection;
       const qualifier = this.expectedIdentity ? 'existing database' : 'database';
       throw new WhatSoupError(`Cannot open ${qualifier} at ${dbPath}`, 'DATABASE_ERROR', err);
     }
@@ -1398,6 +1403,11 @@ export class Database {
       this.db.exec('PRAGMA busy_timeout = 5000');
       this.db.exec('PRAGMA foreign_keys = ON');
     } catch (err) {
+      const rejection = databaseWriteCompatibilityError(this.dbPath, err);
+      if (rejection) {
+        this.installReadOnlyRejectionFence(rejection);
+        throw rejection;
+      }
       throw new WhatSoupError(
         'Failed to inspect schema migration ceiling because database connection setup failed',
         'DATABASE_ERROR',
@@ -1436,9 +1446,12 @@ export class Database {
           );
         }
       }
-      if (err instanceof DatabaseCompatibilityError) {
-        this.installReadOnlyRejectionFence(err);
-        throw err;
+      const rejection = err instanceof DatabaseCompatibilityError
+        ? err
+        : databaseWriteCompatibilityError(this.dbPath, err);
+      if (rejection) {
+        this.installReadOnlyRejectionFence(rejection);
+        throw rejection;
       }
       throw err instanceof WhatSoupError
         ? err
@@ -1452,6 +1465,11 @@ export class Database {
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA synchronous = NORMAL');
     } catch (err) {
+      const rejection = databaseWriteCompatibilityError(this.dbPath, err);
+      if (rejection) {
+        this.installReadOnlyRejectionFence(rejection);
+        throw rejection;
+      }
       throw new WhatSoupError(
         'Database schema committed but post-commit WAL configuration failed',
         'DATABASE_ERROR',

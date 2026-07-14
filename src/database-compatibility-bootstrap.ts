@@ -1,5 +1,6 @@
 import {
   databaseCompatibilityStartupExitCode,
+  DatabaseCompatibilityPermanentStartupError,
   inspectExistingDatabaseForBootstrap,
   runEarlyDatabaseCompatibilityGate,
   type DrainableDatabaseCompatibilityReason,
@@ -14,7 +15,16 @@ export function checkLoadedInstanceDatabase(): 'ready' | DrainableDatabaseCompat
   if (typeof parsed.paths?.dbPath !== 'string') {
     throw new Error('INSTANCE_CONFIG is missing the canonical database path');
   }
-  return inspectExistingDatabaseForBootstrap(parsed.paths.dbPath)?.reason ?? 'ready';
+  const inspection = inspectExistingDatabaseForBootstrap(parsed.paths.dbPath);
+  if (inspection.outcome === 'ready') return 'ready';
+  if (inspection.outcome === 'drained') return inspection.error.reason;
+  if (inspection.outcome === 'permanent') {
+    throw new DatabaseCompatibilityPermanentStartupError(
+      inspection.error.message,
+      inspection.error,
+    );
+  }
+  throw inspection.error;
 }
 
 export async function databaseCompatibilityBootstrap(argv = process.argv): Promise<void> {

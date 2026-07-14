@@ -6,10 +6,12 @@ import {
   linkSync,
   readFileSync,
   mkdtempSync,
+  realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir as systemTmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,11 +20,16 @@ import {
   Database,
   DatabaseCompatibilityError,
 } from '../../src/core/database.ts';
+import { databaseWriteCompatibilityError } from '../../src/core/database-compatibility.ts';
 import { inspectExistingDatabaseForBootstrap } from '../../src/core/database-compatibility-early.ts';
 import { WhatSoupError } from '../../src/errors.ts';
 
 function fileSha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function tmpdir(): string {
+  return realpathSync(systemTmpdir());
 }
 
 describe('database schema ceiling', () => {
@@ -35,7 +42,70 @@ describe('database schema ceiling', () => {
     }
   });
 
-  it('classifies a genuine hot rollback journal without rolling it back or changing bytes', () => {
+  it.each([
+    { errcode: 264, reason: 'engine_recovery_required' },
+    { errcode: 776, reason: 'engine_recovery_required' },
+    { errcode: 1032, reason: 'database_identity_changed' },
+    { errcode: 8, reason: 'database_not_writable' },
+    { errcode: 520, reason: 'database_not_writable' },
+    { errcode: 1288, reason: 'database_not_writable' },
+    { errcode: 1544, reason: 'database_not_writable' },
+  ] as const)(
+    'database write compatibility classifier: maps SQLite errcode $errcode to $reason',
+    ({ errcode, reason }) => {
+      const source = Object.assign(new Error(`SQLite write failure ${errcode}`), { errcode });
+      const classified = databaseWriteCompatibilityError('/canonical/bot.db', source);
+
+      expect(classified).toBeInstanceOf(DatabaseCompatibilityError);
+      expect(classified).toMatchObject({ reason, cause: source });
+    },
+  );
+
+  it.each(['EACCES', 'EPERM', 'EROFS'] as const)(
+    'database write compatibility classifier: maps OS code %s to database_not_writable',
+    (code) => {
+      const source = Object.assign(new Error(`OS write failure ${code}`), { code });
+      expect(databaseWriteCompatibilityError('/canonical/bot.db', source)).toMatchObject({
+        reason: 'database_not_writable',
+        cause: source,
+      });
+    },
+  );
+
+  it('database write compatibility classifier: walks cause and AggregateError branches', () => {
+    const source = Object.assign(new Error('read-only database directory'), { errcode: 1544 });
+    const aggregate = new AggregateError([new Error('ordinary sibling'), source]);
+    const outer = new Error('writer setup failed', { cause: aggregate });
+
+    expect(databaseWriteCompatibilityError('/canonical/bot.db', outer)).toMatchObject({
+      reason: 'database_not_writable',
+      cause: source,
+    });
+  });
+
+  it.each([
+    { label: 'BUSY', errcode: 5 },
+    { label: 'FULL', errcode: 13 },
+    { label: 'IOERR', errcode: 10 },
+    { label: 'corruption', errcode: 11 },
+    { label: 'generic CANTOPEN', errcode: 14 },
+    { label: 'unknown SQLite error', errcode: 999_999 },
+  ])(
+    'database write compatibility classifier: leaves $label transient and unclassified',
+    ({ label, errcode }) => {
+      const source = Object.assign(new Error(label), { errcode });
+      expect(databaseWriteCompatibilityError('/canonical/bot.db', source)).toBeNull();
+    },
+  );
+
+  it('database write compatibility classifier: bounds a cyclic unknown cause chain', () => {
+    const cyclic = new Error('cyclic unknown error') as Error & { cause?: unknown };
+    cyclic.cause = cyclic;
+
+    expect(databaseWriteCompatibilityError('/canonical/bot.db', cyclic)).toBeNull();
+  });
+
+  it('early bootstrap outcome: classifies a genuine hot rollback journal as drained without changing bytes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-hot-journal-'));
     cleanup.push(dir);
     const dbPath = join(dir, 'hot.db');
@@ -75,9 +145,12 @@ describe('database schema ceiling', () => {
     const databaseBefore = fileSha256(dbPath);
     const journalBefore = fileSha256(journalPath);
     expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({
-      reason: 'engine_recovery_required',
-      observedMigration: null,
-      requiredMigration: CURRENT_SCHEMA_MIGRATION,
+      outcome: 'drained',
+      error: {
+        reason: 'engine_recovery_required',
+        observedMigration: null,
+        requiredMigration: CURRENT_SCHEMA_MIGRATION,
+      },
     });
     expect(fileSha256(dbPath)).toBe(databaseBefore);
     expect(fileSha256(journalPath)).toBe(journalBefore);
@@ -97,7 +170,7 @@ describe('database schema ceiling', () => {
     expect(fileSha256(journalPath)).toBe(journalBefore);
   });
 
-  it('refuses a newer database before changing journal mode or applying migrations', () => {
+  it('early bootstrap outcome: classifies a newer database as drained before changing bytes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-'));
     cleanup.push(dir);
     const dbPath = join(dir, 'future.db');
@@ -117,9 +190,12 @@ describe('database schema ceiling', () => {
     seed.close();
 
     expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({
-      reason: 'future_schema',
-      observedMigration: futureVersion,
-      requiredMigration: CURRENT_SCHEMA_MIGRATION,
+      outcome: 'drained',
+      error: {
+        reason: 'future_schema',
+        observedMigration: futureVersion,
+        requiredMigration: CURRENT_SCHEMA_MIGRATION,
+      },
     });
     const db = new Database(dbPath);
     try {
@@ -242,6 +318,93 @@ describe('database schema ceiling', () => {
 
     linkSync(dbPath, hardlinkPath);
     expect(() => new Database(hardlinkPath)).toThrow(/hard link|link count|database identity/i);
+  });
+
+  it('early bootstrap outcome: classifies a symlink database path as permanent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-symlink-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'canonical.db');
+    const symlinkPath = join(dir, 'symlink.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.close();
+    symlinkSync(dbPath, symlinkPath);
+
+    const inspection = inspectExistingDatabaseForBootstrap(symlinkPath);
+    expect(inspection).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+  });
+
+  it('early bootstrap outcome: classifies a hardlink database path as permanent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-hardlink-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'canonical.db');
+    const hardlinkPath = join(dir, 'hardlink.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.close();
+    linkSync(dbPath, hardlinkPath);
+
+    const inspection = inspectExistingDatabaseForBootstrap(hardlinkPath);
+    expect(inspection).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+  });
+
+  it('early bootstrap outcome: classifies a current database as ready', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-ready-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'current.db');
+    const db = new Database(dbPath);
+    db.open();
+    db.close();
+
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({ outcome: 'ready' });
+  });
+
+  it('early bootstrap outcome: classifies a missing database as ready without creating it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-missing-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'missing.db');
+
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({ outcome: 'ready' });
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it('early bootstrap outcome: classifies deterministic pathname replacement as transient', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-replaced-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'target.db');
+    const replacementPath = join(dir, 'replacement.db');
+    for (const path of [dbPath, replacementPath]) {
+      const db = new Database(path);
+      db.open();
+      db.close();
+    }
+
+    const originalLocation = DatabaseSync.prototype.location;
+    let swapped = false;
+    vi.spyOn(DatabaseSync.prototype, 'location').mockImplementation(function observeLocation(
+      this: DatabaseSync,
+      name?: string,
+    ) {
+      const location = originalLocation.call(this, name);
+      if (!swapped && name === 'main' && location === dbPath) {
+        renameSync(replacementPath, dbPath);
+        swapped = true;
+      }
+      return location;
+    });
+
+    const inspection = inspectExistingDatabaseForBootstrap(dbPath);
+    expect(swapped).toBe(true);
+    expect(inspection).toMatchObject({
+      outcome: 'transient',
+      error: { reason: 'database_identity_changed' },
+    });
   });
 
   it('detects pathname replacement before beginning the authoritative write transaction', () => {
@@ -443,7 +606,7 @@ describe('database schema ceiling', () => {
     }
   });
 
-  it('fails closed before writes when an existing migration ledger shape is unreadable', () => {
+  it('early bootstrap outcome: classifies a malformed migration ledger as permanent', () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-malformed-'));
     cleanup.push(dir);
     const dbPath = join(dir, 'malformed.db');
@@ -455,6 +618,12 @@ describe('database schema ceiling', () => {
       INSERT INTO schema_migrations (unexpected) VALUES ('future');
     `);
     seed.close();
+
+    const inspection = inspectExistingDatabaseForBootstrap(dbPath);
+    expect(inspection).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'invalid_schema' },
+    });
 
     const db = new Database(dbPath);
     try {
