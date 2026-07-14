@@ -3002,7 +3002,10 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
     expect(canSendToGroup(GROUP_JID, CFG, freshReplacement.getSenderToken())).toBe(false);
 
     // FIX: a replacement that inherits the prior token is NOT suppressed.
-    const inheritingReplacement = new OutboundQueue(messenger, GROUP_JID, oldToken);
+    const inheritingReplacement = new OutboundQueue(messenger, GROUP_JID, {
+      conversationKey: toConversationKey(GROUP_JID),
+      senderToken: oldToken,
+    });
     expect(inheritingReplacement.getSenderToken()).toBe(oldToken);
     expect(canSendToGroup(GROUP_JID, CFG, inheritingReplacement.getSenderToken())).toBe(true);
   });

@@ -6822,7 +6822,37 @@ describe('AgentRuntime', () => {
     runtimeState.ensureOutboundQueue('recreated@s.whatsapp.net');
 
     expect(runtimeState.outboundQueues.has('recreated@s.whatsapp.net')).toBe(true);
-    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'recreated@s.whatsapp.net');
+    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
+      messenger,
+      'recreated@s.whatsapp.net',
+      { conversationKey: 'recreated' },
+    );
+  });
+
+  it('shared queue construction separates mapped-LID delivery from canonical attribution', async () => {
+    const { OutboundQueue: MockOutboundQueueCtor } = await import('../../../src/runtimes/agent/outbound-queue.ts');
+    const canonicalJid = 'mapped-phone@s.whatsapp.net';
+    const lidJid = 'mapped-alias@lid';
+    const db = makeDb();
+    (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+      if (sql.includes('SELECT phone_jid FROM lid_mappings')) {
+        return { get: vi.fn(() => ({ phone_jid: canonicalJid })) };
+      }
+      return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
+    });
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const runtimeState = runtime as unknown as {
+      ensureOutboundQueue: (chatJid: string) => void;
+    };
+
+    runtimeState.ensureOutboundQueue(lidJid);
+
+    expect(MockOutboundQueueCtor).toHaveBeenLastCalledWith(
+      messenger,
+      lidJid,
+      { conversationKey: 'mapped-phone' },
+    );
   });
 
   it('shared createOutboundQueue inherits the prior queue token for the same chat (QR-069)', async () => {
@@ -6846,7 +6876,11 @@ describe('AgentRuntime', () => {
 
     runtimeState.createOutboundQueue('inherit@s.whatsapp.net', 'test replacement');
 
-    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'inherit@s.whatsapp.net', priorToken);
+    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(
+      messenger,
+      'inherit@s.whatsapp.net',
+      { conversationKey: 'inherit', senderToken: priorToken },
+    );
   });
 
   it('shared queue sweep timer is started with the runtime and cleared on shutdown', async () => {
