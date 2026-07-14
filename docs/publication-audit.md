@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 98
+**Total classification rows:** 103
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 98 |
+| PRIVATE-ARCHIVE | 103 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 98 |
+| Total | 103 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -110,6 +110,11 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | PRIVATE-ARCHIVE | Internal audit remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | PRIVATE-ARCHIVE | Internal release-proof pilot design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving fitness remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | PRIVATE-ARCHIVE | Internal protocol design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/provider-event-lifecycle/installation-evidence-ledger.json` | PRIVATE-ARCHIVE | Sanitized pointer and recapture contract only; exact target topology, posture, counts, and fingerprints remain in a private mode-0600 packet outside the repository. |
+| `docs/superpowers/specs/provider-event-lifecycle/provider-contract-claude-code-2.1.207.json` | PRIVATE-ARCHIVE | Sanitized provider schema/correlation evidence; retained for internal conformance review and excluded from public publication by default. |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
 | `docs/work-index-repair-matrix.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.json` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/work-index.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
