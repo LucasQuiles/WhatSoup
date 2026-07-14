@@ -456,6 +456,7 @@ import { tmpdir } from 'node:os';
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) })),
       exec: vi.fn(),
@@ -967,36 +968,6 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
-  });
-
-  it('capDedupeMap evicts oldest-first down to max over an object-valued map (BEAD-050)', () => {
-    // groupMetadataCache holds object values, so capDedupeMap must operate on
-    // Map<string, unknown> (widened from Map<string, number>). Insertion order is
-    // FIFO, so eviction must drop the oldest keys first.
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
-    const cap = (runtime as unknown as {
-      capDedupeMap(map: Map<string, unknown>, max?: number): void;
-    }).capDedupeMap.bind(runtime);
-
-    const map = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
-    for (let i = 0; i < 10; i++) {
-      map.set(`group-${i}@g.us`, { adminJids: new Set([`admin-${i}`]), fetchedAt: i });
-    }
-
-    cap(map, 4);
-
-    expect(map.size).toBe(4);
-    // Oldest six (0..5) evicted; newest four (6..9) retained.
-    expect([...map.keys()]).toEqual([
-      'group-6@g.us',
-      'group-7@g.us',
-      'group-8@g.us',
-      'group-9@g.us',
-    ]);
-
-    // Idempotent when already at/under max.
-    cap(map, 4);
-    expect(map.size).toBe(4);
   });
 
   it('start() records primary model usability and alerts on unusable primary model', async () => {
@@ -4520,6 +4491,7 @@ describe('AgentRuntime', () => {
       return { run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) };
     });
     const db = {
+      assertWritableCompatibility: vi.fn(),
       raw: { prepare, exec: vi.fn() },
     } as unknown as Database;
     const { messenger, sentMessages } = makeMessenger();
@@ -12236,6 +12208,7 @@ describe('AgentRuntime', () => {
       tokenRow: { total_input_tokens: number | null; total_output_tokens: number | null } | undefined,
     ): Database {
       return {
+        assertWritableCompatibility: vi.fn(),
         raw: {
           prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => tokenRow) })),
           exec: vi.fn(),

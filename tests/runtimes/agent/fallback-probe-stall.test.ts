@@ -111,6 +111,7 @@ const STALL_THRESHOLD = 12; // WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD 
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),

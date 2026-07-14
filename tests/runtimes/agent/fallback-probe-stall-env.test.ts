@@ -97,6 +97,7 @@ type FallbackView = {
 
 function makeRuntime(): AgentRuntime {
   const db = {
+    assertWritableCompatibility: vi.fn(),
     raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() },
   } as unknown as Database;
   const messenger = {

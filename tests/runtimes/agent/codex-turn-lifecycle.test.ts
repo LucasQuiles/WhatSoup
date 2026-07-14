@@ -378,6 +378,7 @@ describe('Codex turn lifecycle — runtime level', () => {
   let runtime: AgentRuntime;
 
   const fakeDb = {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) })),
       exec: vi.fn(),

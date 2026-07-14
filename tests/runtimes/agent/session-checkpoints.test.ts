@@ -54,6 +54,7 @@ type BeginFreshSessionCheckpointCall = Parameters<DurabilityEngine['beginFreshSe
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() },
   } as unknown as Database;
 }

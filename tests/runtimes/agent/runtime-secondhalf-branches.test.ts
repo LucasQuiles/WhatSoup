@@ -108,6 +108,10 @@ const { mockGetMessagesSince } = vi.hoisted(() => ({
   mockGetMessagesSince: vi.fn(() => [] as Array<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>),
 }));
 
+const { mockPrepareContentForAgent } = vi.hoisted(() => ({
+  mockPrepareContentForAgent: vi.fn(),
+}));
+
 // ─── Module mocks ───────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -126,6 +130,11 @@ vi.mock('../../../src/core/messages.ts', () => ({
   getMessagesSince: mockGetMessagesSince,
   updateMediaPath: vi.fn(),
   updateTranscription: vi.fn(),
+}));
+
+vi.mock('../../../src/runtimes/agent/media-prep.ts', () => ({
+  prepareContentForAgent: mockPrepareContentForAgent,
+  relocateMediaToWorkspace: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -215,6 +224,7 @@ import {
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),
@@ -232,6 +242,25 @@ function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: str
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
   return { messenger, sentMessages };
+}
+
+function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
+  return {
+    messageId: 'msg-compatibility',
+    chatJid: dmJid,
+    senderJid: dmJid,
+    senderName: 'Test User',
+    content: 'hello',
+    contentText: null,
+    contentType: 'text',
+    isFromMe: false,
+    isGroup: false,
+    mentionedJids: [],
+    timestamp: Date.now(),
+    quotedMessageId: null,
+    isResponseWorthy: true,
+    ...overrides,
+  };
 }
 
 type CrashInfo = {
@@ -324,6 +353,102 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  describe('database compatibility admission', () => {
+    it('rejects startup before schema initialization when the database is drained', async () => {
+      const { ensureAgentSchema } = await import('../../../src/runtimes/agent/session-db.ts');
+      const db = makeDb();
+      const rejection = new Error('database compatibility drain');
+      vi.mocked(db.assertWritableCompatibility).mockImplementation(() => { throw rejection; });
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      await expect(runtime.start()).rejects.toBe(rejection);
+
+      expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+      expect(ensureAgentSchema).not.toHaveBeenCalled();
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    });
+
+    it('rejects a message before media preparation when the database is drained', async () => {
+      const db = makeDb();
+      const rejection = new Error('database compatibility drain');
+      vi.mocked(db.assertWritableCompatibility).mockImplementation(() => { throw rejection; });
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      await expect(runtime.handleMessage(makeMsg({
+        contentType: 'image',
+        content: null,
+      }))).rejects.toBe(rejection);
+
+      expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+      expect(mockPrepareContentForAgent).not.toHaveBeenCalled();
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('rejects a synthetic agent job before constructing or enqueueing a turn', () => {
+      const db = makeDb();
+      vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+        throw new Error('database compatibility drain');
+      });
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      expect(runtime.dispatchAgentJob({
+        beadId: 1,
+        triggerId: 2,
+        prompt: 'do work',
+        title: 'scheduled work',
+        reportChatJid: 'test@g.us',
+      })).toEqual({ dispatched: false, detail: 'database compatibility drain' });
+      expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('rejects a control turn before constructing a repair session', async () => {
+      const db = makeDb();
+      const rejection = new Error('database compatibility drain');
+      vi.mocked(db.assertWritableCompatibility).mockImplementation(() => { throw rejection; });
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      await expect(runtime.handleControlTurn('report-1', '{"type":"repair"}')).rejects.toBe(rejection);
+
+      expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('rejects an agent command before validating or dispatching it', async () => {
+      const db = makeDb();
+      const rejection = new Error('database compatibility drain');
+      vi.mocked(db.assertWritableCompatibility).mockImplementation(() => { throw rejection; });
+      const runtime = new AgentRuntime(db, makeMessenger().messenger);
+
+      await expect(runtime.handleAgentCommand({ command: 'restart' as 'compact' }))
+        .rejects.toBe(rejection);
+
+      expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+  });
+
+  it('capDedupeMap evicts oldest-first over an object-valued map (BEAD-050)', () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const cap = (runtime as unknown as {
+      capDedupeMap(map: Map<string, unknown>, max?: number): void;
+    }).capDedupeMap.bind(runtime);
+    const map = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
+    for (let i = 0; i < 10; i++) {
+      map.set(`group-${i}@g.us`, { adminJids: new Set([`admin-${i}`]), fetchedAt: i });
+    }
+
+    cap(map, 4);
+
+    expect(map.size).toBe(4);
+    expect([...map.keys()]).toEqual([
+      'group-6@g.us', 'group-7@g.us', 'group-8@g.us', 'group-9@g.us',
+    ]);
+    cap(map, 4);
+    expect(map.size).toBe(4);
   });
 
   // ── handlePendingPollSoftExpiry ──────────────────────────────────────────
