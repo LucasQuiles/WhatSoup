@@ -7,10 +7,10 @@ import {
   DatabaseCompatibilityError,
   assertDatabaseIdentity,
   assertSchemaCeiling,
+  databaseRecoveryCompatibilityError,
   databaseWriteCompatibilityError,
   inspectDatabaseIdentity,
   installReadOnlyRejectionFence,
-  isSqliteReadonlyRollback,
   normalizeDatabaseCompatibilityError,
   sameDatabaseIdentity,
   sqliteFileUri,
@@ -1315,13 +1315,8 @@ export class Database {
           },
         );
       } catch (err) {
-        if (isSqliteReadonlyRollback(err)) {
-          throw new DatabaseCompatibilityError(
-            'engine_recovery_required',
-            `Database engine recovery is required before schema inspection at ${dbPath}`,
-            err,
-          );
-        }
+        const rejection = databaseRecoveryCompatibilityError(this.dbPath, err);
+        if (rejection) throw rejection;
         throw new WhatSoupError(
           `Cannot open database at ${dbPath} for read-only schema preflight`,
           'DATABASE_ERROR',
@@ -1334,8 +1329,21 @@ export class Database {
         assertSchemaCeiling(this.db, this.dbPath);
       } catch (err) {
         const rejection = normalizeDatabaseCompatibilityError(this.dbPath, err);
-        this.installReadOnlyRejectionFence(rejection);
-        return;
+        if (rejection) {
+          this.installReadOnlyRejectionFence(rejection);
+          return;
+        }
+        try {
+          inspectionDb.close();
+          this.connectionClosed = true;
+        } catch (closeError) {
+          throw new WhatSoupError(
+            `Failed to close database schema preflight at ${dbPath}`,
+            'DATABASE_ERROR',
+            new AggregateError([err, closeError]),
+          );
+        }
+        throw err;
       }
 
       try {
@@ -1517,8 +1525,11 @@ export class Database {
       assertSchemaCeiling(this.db, this.dbPath);
     } catch (err) {
       const rejection = normalizeDatabaseCompatibilityError(this.dbPath, err);
-      this.installReadOnlyRejectionFence(rejection);
-      throw rejection;
+      if (rejection) {
+        this.installReadOnlyRejectionFence(rejection);
+        throw rejection;
+      }
+      throw err;
     }
   }
 

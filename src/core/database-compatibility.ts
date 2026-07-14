@@ -59,10 +59,6 @@ export function sqliteFileUri(path: string, mode: 'ro' | 'rw'): string {
   return url.href;
 }
 
-export function isSqliteReadonlyRollback(err: unknown): boolean {
-  return (err as { errcode?: unknown })?.errcode === 776;
-}
-
 const MAX_WRITE_COMPATIBILITY_ERROR_NODES = 32;
 
 export function databaseWriteCompatibilityError(
@@ -136,6 +132,16 @@ export function databaseWriteCompatibilityError(
   return null;
 }
 
+export function databaseRecoveryCompatibilityError(
+  dbPath: string,
+  err: unknown,
+): DatabaseCompatibilityError<'engine_recovery_required'> | null {
+  const compatibilityError = databaseWriteCompatibilityError(dbPath, err);
+  return compatibilityError?.reason === 'engine_recovery_required'
+    ? compatibilityError as DatabaseCompatibilityError<'engine_recovery_required'>
+    : null;
+}
+
 export function sameDatabaseIdentity(
   left: DatabaseIdentity,
   right: DatabaseIdentity,
@@ -199,19 +205,15 @@ export function inspectDatabaseIdentity(dbPath: string): DatabaseIdentity {
   };
 }
 
-function compatibilityError(
-  dbPath: string,
+function invalidSchemaError(
   message: string,
   cause?: unknown,
 ): DatabaseCompatibilityError {
-  if (isSqliteReadonlyRollback(cause)) {
-    return new DatabaseCompatibilityError(
-      'engine_recovery_required',
-      `Database engine recovery is required before schema inspection at ${dbPath}`,
-      cause,
-    );
-  }
   return new DatabaseCompatibilityError('invalid_schema', message, cause);
+}
+
+function schemaInspectionFailure(dbPath: string, err: unknown): unknown {
+  return databaseWriteCompatibilityError(dbPath, err) ?? err;
 }
 
 function countUserSchemaObjects(
@@ -228,15 +230,10 @@ function countUserSchemaObjects(
         AND (? IS NULL OR name <> ?)
     `).get(excludedName ?? null, excludedName ?? null) as { count: number };
   } catch (err) {
-    throw compatibilityError(
-      dbPath,
-      'Failed to inspect database objects before schema writes',
-      err,
-    );
+    throw schemaInspectionFailure(dbPath, err);
   }
   if (!Number.isSafeInteger(row.count) || row.count < 0) {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect database objects: object count is invalid',
     );
   }
@@ -253,28 +250,21 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
       LIMIT 1
     `).get() as { name: string; type: string } | undefined;
   } catch (err) {
-    throw compatibilityError(
-      dbPath,
-      'Failed to inspect schema migration ceiling before database writes',
-      err,
-    );
+    throw schemaInspectionFailure(dbPath, err);
   }
   if (!migrationObject) {
     if (countUserSchemaObjects(db, dbPath) === 0) return;
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: nonempty database has no canonical migration ledger',
     );
   }
   if (migrationObject.name !== 'schema_migrations') {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: schema_migrations name is not canonical',
     );
   }
   if (migrationObject.type !== 'table') {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: schema_migrations is not a table',
     );
   }
@@ -303,11 +293,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
       db.prepare("PRAGMA main.table_list('schema_migrations')").get()
     ) as typeof tableMetadata;
   } catch (err) {
-    throw compatibilityError(
-      dbPath,
-      'Failed to inspect schema migration ceiling table shape before database writes',
-      err,
-    );
+    throw schemaInspectionFailure(dbPath, err);
   }
 
   const [versionColumn, appliedAtColumn] = columns;
@@ -334,8 +320,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
     && tableMetadata.wr === 0
     && tableMetadata.strict === 0;
   if (!canonicalShape) {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: schema_migrations table shape is not canonical',
     );
   }
@@ -360,11 +345,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
       FROM schema_migrations
     `).get() as typeof row;
   } catch (err) {
-    throw compatibilityError(
-      dbPath,
-      'Failed to inspect schema migration ceiling before database writes',
-      err,
-    );
+    throw schemaInspectionFailure(dbPath, err);
   }
 
   const countersAreSafe = Number.isSafeInteger(row.row_count)
@@ -375,8 +356,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
     && row.invalid_versions >= 0;
   const latestIsSafe = row.latest === null || Number.isSafeInteger(row.latest);
   if (!countersAreSafe || !latestIsSafe) {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: migration ledger counters are invalid',
     );
   }
@@ -396,8 +376,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
     || (row.row_count === 0 && row.latest !== null)
     || (row.row_count > 0 && row.latest === null)
   ) {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: recorded versions fall outside the supported range',
     );
   }
@@ -406,8 +385,7 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
     row.row_count === 0
     && countUserSchemaObjects(db, dbPath, 'schema_migrations') !== 0
   ) {
-    throw compatibilityError(
-      dbPath,
+    throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: empty migration ledger accompanies unledgered schema objects',
     );
   }
@@ -416,13 +394,9 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
 export function normalizeDatabaseCompatibilityError(
   dbPath: string,
   err: unknown,
-): DatabaseCompatibilityError {
+): DatabaseCompatibilityError | null {
   if (err instanceof DatabaseCompatibilityError) return err;
-  return compatibilityError(
-    dbPath,
-    'Failed to inspect schema migration ceiling before database writes',
-    err,
-  );
+  return databaseWriteCompatibilityError(dbPath, err);
 }
 
 export function assertDatabaseIdentity(

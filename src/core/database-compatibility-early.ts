@@ -10,9 +10,9 @@ import {
 import {
   assertDatabaseIdentity,
   assertSchemaCeiling,
+  databaseRecoveryCompatibilityError,
   DatabaseCompatibilityError,
   inspectDatabaseIdentity,
-  isSqliteReadonlyRollback,
   sqliteFileUri,
   type DatabaseCompatibilityReason,
 } from './database-compatibility.ts';
@@ -120,15 +120,9 @@ export function inspectExistingDatabaseForBootstrap(
     assertDatabaseIdentity(db, dbPath, expectedIdentity);
     inspection = { outcome: 'ready' };
   } catch (err) {
-    if (isSqliteReadonlyRollback(err)) {
-      inspection = classifyBootstrapInspectionError(new DatabaseCompatibilityError(
-        'engine_recovery_required',
-        `Database engine recovery is required before schema inspection at ${dbPath}`,
-        err,
-      ));
-    } else {
-      inspection = classifyBootstrapInspectionError(err);
-    }
+    inspection = classifyBootstrapInspectionError(
+      databaseRecoveryCompatibilityError(dbPath, err) ?? err,
+    );
   }
 
   if (db) {

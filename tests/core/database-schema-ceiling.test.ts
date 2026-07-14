@@ -11,6 +11,7 @@ import {
   rmSync,
   symlinkSync,
 } from 'node:fs';
+import type { Server } from 'node:http';
 import { tmpdir as systemTmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -20,8 +21,16 @@ import {
   Database,
   DatabaseCompatibilityError,
 } from '../../src/core/database.ts';
-import { databaseWriteCompatibilityError } from '../../src/core/database-compatibility.ts';
-import { inspectExistingDatabaseForBootstrap } from '../../src/core/database-compatibility-early.ts';
+import {
+  assertSchemaCeiling,
+  databaseWriteCompatibilityError,
+} from '../../src/core/database-compatibility.ts';
+import {
+  databaseCompatibilityStartupExitCode,
+  inspectExistingDatabaseForBootstrap,
+  runEarlyDatabaseCompatibilityGate,
+} from '../../src/core/database-compatibility-early.ts';
+import { openDatabaseForStartup } from '../../src/core/database-compatibility-health.ts';
 import { WhatSoupError } from '../../src/errors.ts';
 
 function fileSha256(path: string): string {
@@ -30,6 +39,27 @@ function fileSha256(path: string): string {
 
 function tmpdir(): string {
   return realpathSync(systemTmpdir());
+}
+
+function createCurrentDatabase(dbPath: string): void {
+  const db = new Database(dbPath);
+  db.open();
+  db.close();
+}
+
+function injectNextSchemaInspectionFailure(failure: Error): void {
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  let injected = false;
+  vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function prepare(
+    this: DatabaseSync,
+    sql: string,
+  ) {
+    if (!injected && sql.includes('sqlite_master')) {
+      injected = true;
+      throw failure;
+    }
+    return originalPrepare.call(this, sql);
+  });
 }
 
 describe('database schema ceiling', () => {
@@ -103,6 +133,286 @@ describe('database schema ceiling', () => {
     cyclic.cause = cyclic;
 
     expect(databaseWriteCompatibilityError('/canonical/bot.db', cyclic)).toBeNull();
+  });
+
+  it.each([
+    { label: 'BUSY', errcode: 5 },
+    { label: 'FULL', errcode: 13 },
+    { label: 'IOERR', errcode: 10 },
+    { label: 'CORRUPT', errcode: 11 },
+    { label: 'CANTOPEN', errcode: 14 },
+  ])(
+    'review hardening: assertSchemaCeiling preserves transient $label query failures',
+    ({ label, errcode }) => {
+      const db = new DatabaseSync(':memory:');
+      const source = Object.assign(new Error(`${label} during schema inspection`), { errcode });
+      injectNextSchemaInspectionFailure(source);
+
+      let failure: unknown;
+      try {
+        assertSchemaCeiling(db, ':memory:');
+      } catch (err) {
+        failure = err;
+      } finally {
+        db.close();
+      }
+
+      expect(failure).toBe(source);
+      expect(failure).not.toBeInstanceOf(DatabaseCompatibilityError);
+    },
+  );
+
+  it.each([
+    { marker: { errcode: 264 }, reason: 'engine_recovery_required' },
+    { marker: { errcode: 776 }, reason: 'engine_recovery_required' },
+    { marker: { errcode: 1032 }, reason: 'database_identity_changed' },
+    { marker: { errcode: 8 }, reason: 'database_not_writable' },
+    { marker: { errcode: 520 }, reason: 'database_not_writable' },
+    { marker: { errcode: 1288 }, reason: 'database_not_writable' },
+    { marker: { errcode: 1544 }, reason: 'database_not_writable' },
+    { marker: { code: 'EACCES' }, reason: 'database_not_writable' },
+    { marker: { code: 'EPERM' }, reason: 'database_not_writable' },
+    { marker: { code: 'EROFS' }, reason: 'database_not_writable' },
+  ] as const)(
+    'review hardening: assertSchemaCeiling classifies recognized query marker $marker',
+    ({ marker, reason }) => {
+      const db = new DatabaseSync(':memory:');
+      const source = Object.assign(new Error('recognized schema inspection failure'), marker);
+      injectNextSchemaInspectionFailure(source);
+
+      let failure: unknown;
+      try {
+        assertSchemaCeiling(db, ':memory:');
+      } catch (err) {
+        failure = err;
+      } finally {
+        db.close();
+      }
+
+      expect(failure).toBeInstanceOf(DatabaseCompatibilityError);
+      expect(failure).toMatchObject({ reason, cause: source });
+    },
+  );
+
+  it('review hardening: early bootstrap keeps BUSY transient with exit status 1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-early-busy-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'current.db');
+    const lockPath = join(dir, 'whatsoup.lock');
+    const previousConfig = process.env.INSTANCE_CONFIG;
+    createCurrentDatabase(dbPath);
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    const source = Object.assign(new Error('BUSY during early schema inspection'), { errcode: 5 });
+    injectNextSchemaInspectionFailure(source);
+    const startServer = vi.fn(async () => ({ listening: true }) as Server);
+    const releaseLock = vi.fn(() => true);
+
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate({
+        acquireLock: () => ({ path: lockPath, pid: process.pid, token: 'test-lock' }),
+        releaseLock,
+        startServer,
+      }).catch((err: unknown) => err);
+
+      expect(failure).toBe(source);
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(1);
+      expect(startServer).not.toHaveBeenCalled();
+      expect(releaseLock).toHaveBeenCalledOnce();
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+    }
+  });
+
+  it('review hardening: runtime admission leaves IOERR transient without latching a fence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-admission-ioerr-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'current.db');
+    const db = new Database(dbPath);
+    db.open();
+    const source = Object.assign(new Error('IOERR during runtime admission'), { errcode: 10 });
+    vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
+      throw source;
+    });
+
+    try {
+      let failure: unknown;
+      try {
+        db.assertWritableCompatibility();
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toBe(source);
+      expect(failure).not.toBeInstanceOf(DatabaseCompatibilityError);
+      expect(() => db.assertWritableCompatibility()).not.toThrow();
+      expect(() => db.raw.exec('CREATE TABLE admission_still_writable(id INTEGER)')).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([264, 776])(
+    'review hardening: early read-only schema inspection drains raw SQLite errcode %s',
+    async (errcode) => {
+      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-early-${errcode}-`));
+      cleanup.push(dir);
+      const dbPath = join(dir, 'current.db');
+      const lockPath = join(dir, 'whatsoup.lock');
+      const previousConfig = process.env.INSTANCE_CONFIG;
+      createCurrentDatabase(dbPath);
+      process.env.INSTANCE_CONFIG = JSON.stringify({
+        name: 'test-agent',
+        healthPort: 19090,
+        paths: { dbPath, lockPath },
+      });
+      const source = Object.assign(new Error(`SQLite recovery ${errcode}`), { errcode });
+      injectNextSchemaInspectionFailure(source);
+      const server = { listening: true } as Server;
+      const startServer = vi.fn(async () => server);
+      const closeServer = vi.fn(async () => {});
+      const releaseLock = vi.fn(() => true);
+
+      try {
+        await expect(runEarlyDatabaseCompatibilityGate({
+          acquireLock: () => ({ path: lockPath, pid: process.pid, token: 'test-lock' }),
+          releaseLock,
+          startServer,
+          waitForDrain: async () => 'SIGTERM',
+          closeServer,
+        })).resolves.toBe(true);
+        expect(startServer).toHaveBeenCalledWith(expect.objectContaining({
+          error: expect.objectContaining({ reason: 'engine_recovery_required' }),
+        }));
+        expect(closeServer).toHaveBeenCalledWith(server);
+        expect(releaseLock).toHaveBeenCalledOnce();
+      } finally {
+        if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+        else process.env.INSTANCE_CONFIG = previousConfig;
+      }
+    },
+  );
+
+  it.each([264, 776])(
+    'review hardening: Database read-only schema inspection drains raw SQLite errcode %s',
+    async (errcode) => {
+      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-database-${errcode}-`));
+      cleanup.push(dir);
+      const dbPath = join(dir, 'current.db');
+      createCurrentDatabase(dbPath);
+      const source = Object.assign(new Error(`SQLite recovery ${errcode}`), { errcode });
+      injectNextSchemaInspectionFailure(source);
+      const server = { listening: true } as Server;
+      const startServer = vi.fn(async () => server);
+      let created: Database | null = null;
+
+      try {
+        await expect(openDatabaseForStartup({
+          dbPath,
+          instanceName: 'test-agent',
+          startedAt: 1,
+          createDatabase: (path) => {
+            created = new Database(path);
+            return created;
+          },
+          startDrainServer: startServer,
+        })).resolves.toMatchObject({
+          mode: 'drained',
+          error: { reason: 'engine_recovery_required', cause: source },
+          server,
+        });
+        expect(startServer).toHaveBeenCalledOnce();
+      } finally {
+        (created as Database | null)?.close();
+      }
+    },
+  );
+
+  it.each([264, 776])(
+    'review hardening: actual read-only DatabaseSync constructor failure %s drains at both preflight boundaries',
+    async (errcode) => {
+      const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-constructor-${errcode}-`));
+      cleanup.push(dir);
+      const dbPath = join(dir, 'current.db');
+      createCurrentDatabase(dbPath);
+      const earlyFailure = Object.assign(new Error(`early open recovery ${errcode}`), { errcode });
+      const databaseFailure = Object.assign(new Error(`Database open recovery ${errcode}`), {
+        errcode,
+      });
+      const openFailures = [earlyFailure, databaseFailure];
+      const MockDatabaseSync = vi.fn(function DatabaseSync(
+        _path: string,
+        _options?: unknown,
+      ) {
+        const failure = openFailures.shift();
+        if (!failure) throw new Error('unexpected extra DatabaseSync construction');
+        throw failure;
+      });
+
+      vi.resetModules();
+      vi.doMock('node:sqlite', () => ({ DatabaseSync: MockDatabaseSync }));
+      try {
+        const earlyModule = await import('../../src/core/database-compatibility-early.ts');
+        const databaseModule = await import('../../src/core/database.ts');
+
+        expect(earlyModule.inspectExistingDatabaseForBootstrap(dbPath)).toMatchObject({
+          outcome: 'drained',
+          error: { reason: 'engine_recovery_required' },
+        });
+
+        let failure: unknown;
+        try {
+          new databaseModule.Database(dbPath);
+        } catch (err) {
+          failure = err;
+        }
+        expect(failure).toMatchObject({
+          reason: 'engine_recovery_required',
+          cause: databaseFailure,
+        });
+        expect(MockDatabaseSync).toHaveBeenCalledTimes(2);
+        for (const [, options] of MockDatabaseSync.mock.calls) {
+          expect(options).toMatchObject({ readOnly: true });
+        }
+      } finally {
+        vi.doUnmock('node:sqlite');
+        vi.resetModules();
+      }
+    },
+  );
+
+  it('review hardening: Database schema preflight closes after BUSY without latching', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-preflight-busy-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'current.db');
+    createCurrentDatabase(dbPath);
+    const source = Object.assign(new Error('BUSY during Database schema preflight'), { errcode: 5 });
+    const closeSpy = vi.spyOn(DatabaseSync.prototype, 'close');
+    injectNextSchemaInspectionFailure(source);
+
+    let constructed: Database | null = null;
+    let failure: unknown;
+    try {
+      constructed = new Database(dbPath);
+    } catch (err) {
+      failure = err;
+    }
+    constructed?.close();
+
+    expect(failure).toBe(source);
+    expect(failure).not.toBeInstanceOf(DatabaseCompatibilityError);
+    expect(closeSpy).toHaveBeenCalledOnce();
+
+    const retry = new Database(dbPath);
+    try {
+      retry.open();
+      expect(() => retry.assertWritableCompatibility()).not.toThrow();
+    } finally {
+      retry.close();
+    }
   });
 
   it('early bootstrap outcome: classifies a genuine hot rollback journal as drained without changing bytes', () => {
@@ -648,7 +958,7 @@ describe('database schema ceiling', () => {
     }
   });
 
-  it('preserves the cause when schema inspection itself fails', () => {
+  it('preserves a transient schema inspection cause without latching read-only mode', () => {
     const db = new Database(':memory:');
     const inspectionFailure = new Error('schema inspection failed');
     vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
@@ -664,7 +974,9 @@ describe('database schema ceiling', () => {
       }
       expect(failure).toBeInstanceOf(WhatSoupError);
       expect(failure).toMatchObject({ code: 'DATABASE_ERROR', cause: inspectionFailure });
-      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 0 });
+      expect(() => db.open()).not.toThrow();
+      expect(() => db.assertWritableCompatibility()).not.toThrow();
     } finally {
       db.close();
     }
