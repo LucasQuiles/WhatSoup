@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 55
+**Total entries:** 58
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=31, review=3, spec=16, state=1 |
-| Status | active=3, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
-| Status source | body-marker=54, state-md-status=1 |
+| Kind | handoff=4, plan=31, review=3, spec=19, state=1 |
+| Status | active=6, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
+| Status source | body-marker=57, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,13 +34,16 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (3)
+### Active (6)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
 ### Unknown-status — triage needed (1)
 
@@ -141,7 +144,15 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-11 |  |
 
+### docs/superpowers/specs/provider-event-lifecycle  _(3 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-07-14 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-07-14 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-07-14 |  |
+
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-12T08:09:24Z from commit `09da2750dab474b539890c6a5afc05bd1c9f14e3`
+- Generated at 2026-07-14T06:17:28Z from commit `56e232223132d33c347cd2d2521620f911d4f4b6`

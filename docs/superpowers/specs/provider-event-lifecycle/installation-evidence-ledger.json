@@ -1,0 +1,106 @@
+{
+  "ledger_schema_version": 3,
+  "status": "sanitized_tracked_index_of_private_point_in_time_evidence",
+  "evidence_id": "provider-event-lifecycle-canonicalization-20260713",
+  "private_exact_packet": {
+    "tracked": false,
+    "path": "${STATE_HOME}/whatsoup/canonicalization/provider-event-lifecycle-20260713/docs/superpowers/specs/provider-event-lifecycle/installation-evidence-ledger.json",
+    "root_mode": "0700",
+    "mode": "0600",
+    "sha256": "885bf19bdfb92c310145e690d9aa95b8ff094f6894fa8828838d30775a8437fb",
+    "contains_secret_values": false,
+    "contains_private_topology_or_posture": true,
+    "required_use": "Use only for authorized local reconciliation; recapture after coordinated quiescence before activation."
+  },
+  "publication_contract": {
+    "tracked_private_labels": false,
+    "tracked_absolute_home_paths": false,
+    "tracked_local_file_hashes": false,
+    "tracked_secret_bearing_file_hashes": false,
+    "tracked_local_modes_or_security_counts": false,
+    "tracked_local_runtime_or_schema_counts": false,
+    "tracked_local_branch_or_process_identity": false,
+    "tracked_payload_or_message_content": false
+  },
+  "safety": {
+    "capture_was_read_only": true,
+    "services_restarted_or_reloaded": false,
+    "database_mutation_or_replacement": false,
+    "configuration_or_plugin_overwrite": false,
+    "authorization": "Evidence only. This index does not authorize deployment, restart, replay, database replacement, raw installation, settings overwrite, or plugin cache copying."
+  },
+  "placeholder_resolution": {
+    "${HOME}": "Resolve from the selected service account at execution time.",
+    "${STATE_HOME}": "Resolve from the selected account's XDG state root at execution time.",
+    "${SOURCE_TREE}": "Resolve to the canonical verified WhatSoup source checkout selected for reconciliation.",
+    "${INSTANCE}": "Resolve from the authenticated local fleet registry.",
+    "${PRIVATE_PACKET}": "Resolve to private_exact_packet.path after validating root/file modes and SHA-256."
+  },
+  "canonical_repository_provenance": {
+    "governor_no_send_partial_merge": "625b17f0",
+    "migration_41_source_commit": "10535132",
+    "original_deployed_migration_42_source_commit": "5daa9f6a",
+    "migration_43_repair_design_source_commit": "1c8855d6",
+    "terminal_recovery_schema_version": 44,
+    "provider_lifecycle_schema_floor": 45,
+    "note": "These are public repository provenance identifiers, not claims about any installed host. Re-resolve full commits from canonical main before use."
+  },
+  "local_reconciliation_required": {
+    "source_and_managed_artifacts": true,
+    "service_units_dropins_wrappers_and_symlinks": true,
+    "schema_lineage_and_database_fingerprints": true,
+    "settings_permissions_and_private_overrides": true,
+    "plugin_source_cache_and_installation": true,
+    "provider_versions_and_exact_builds": true,
+    "recovery_roots_and_quiescence": true,
+    "backups_and_scratch_restore_proof": true
+  },
+  "required_capture": [
+    {
+      "id": "CAP-001",
+      "class": "source",
+      "command_template": "git -C \"${SOURCE_TREE}\" rev-parse HEAD origin/main; git -C \"${SOURCE_TREE}\" status --short --branch",
+      "private_output": true
+    },
+    {
+      "id": "CAP-002",
+      "class": "artifact",
+      "command_template": "stat and sha256sum each resolved unit, drop-in, wrapper, symlink target, manifest, and accepted local shim",
+      "private_output": true
+    },
+    {
+      "id": "CAP-003",
+      "class": "database",
+      "command_template": "open ${INSTANCE} database read-only; capture integrity, normalized schema, immutable migration history, recovery roots, and application-consistent backup/scratch-restore proof",
+      "private_output": true
+    },
+    {
+      "id": "CAP-004",
+      "class": "configuration",
+      "command_template": "capture ownership/modes and sanitized structural projections for config, settings, permissions, provider registry, and plugin state without values",
+      "private_output": true
+    },
+    {
+      "id": "CAP-005",
+      "class": "runtime",
+      "command_template": "after coordinated drain, prove no active provider request/process and no nonterminal inbound before migration or restore eligibility",
+      "private_output": true
+    }
+  ],
+  "comparison_policy": {
+    "canonical_source": "Compare against the reviewed merge commit and managed manifests.",
+    "preserved_local_state": "Preserve auth, config, settings, XDG data/state, private drop-ins, recovery roots, and backups unless an explicitly owned migration says otherwise.",
+    "legacy_or_decoy_paths": "Record and exclude; never import them as canonical state.",
+    "unknown_or_mismatched_evidence": "Stop activation and resolve through the owning migration/deployment path.",
+    "refresh": "Create a new private packet after coordinated quiescence; never edit this historical packet in place."
+  },
+  "prohibited_actions": [
+    "raw setup or reinstall",
+    "uncoordinated service or fleet restart",
+    "database, auth, settings, or state-directory replacement",
+    "manual plugin cache copying",
+    "automatic replay or stale-output reconstruction",
+    "rewriting applied schema migrations",
+    "publishing the private packet or derived local fingerprints"
+  ]
+}
