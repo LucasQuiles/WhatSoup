@@ -166,6 +166,12 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
       const turn = params['turn'];
       const status = isRecord(turn) ? String(turn['status'] ?? '') : '';
 
+      // Neither branch below carries inputTokens/outputTokens — that is NOT
+      // the #1775 zero-token defect. Codex reports usage on a separate
+      // notification, 'thread/tokenUsage/updated' (handled below, emits a
+      // 'token_usage' event), which the runtime accumulates independently of
+      // turn completion (see the 'token_usage' case in runtime.ts). Adding
+      // usage fields here would double-count against that path.
       if (status === 'failed') {
         const error = isRecord(turn) && isRecord(turn['error'])
           ? String((turn['error'] as JsonObject)['message'] ?? 'Codex turn failed')
@@ -272,7 +278,9 @@ export function parseCodexEvent(line: string): AgentEvent | null {
     return { type: 'unknown', raw: parsed };
   }
 
-  // Error response
+  // Error response — a JSON-RPC transport/protocol error, not a completed
+  // turn. No usage exists to report (see the 'turn/completed' comment above
+  // for why Codex's usage signal is a separate notification anyway).
   if (id !== undefined && parsed['error'] !== undefined) {
     const error = parsed['error'];
     const errorMsg = isRecord(error) ? String(error['message'] ?? 'Unknown error') : String(error);

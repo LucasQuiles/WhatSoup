@@ -31,6 +31,7 @@ import type {
 import type { ReplyGuaranteeManager } from '../../core/reply-guarantee.ts';
 import type { SessionOwnershipRegistry } from './session-ownership.ts';
 import { createChildLogger } from '../../logger.ts';
+import { emitAlertChecked } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -382,19 +383,42 @@ turnFinalizationBookkeeping(
   context: RuntimeTurnContext,
   session: SessionManager | null,
   event?: Extract<AgentEvent, { type: 'result' }>,
+  attemptOutcome?: AttemptOutcome,
 ): TurnFinalizationBookkeepingParams {
   const rowId = session?.getDbRowId() ?? null;
   const status = session?.getStatus();
+  const hasUsage = event !== undefined
+    && (event.inputTokens !== undefined || event.outputTokens !== undefined);
+  // #1775: a turn only reaches here without recorded usage in two cases —
+  // it was never dispatched (admission_rejected: message_count never
+  // incremented, zero really means zero, stay silent) or it WAS dispatched
+  // and finalizes via a no-event path (crash / processor_throw / a provider
+  // that never reports usage on its result). The latter is indistinguishable
+  // from a genuinely-zero-token turn unless it is flagged — otherwise a
+  // served message silently persists total_tokens=0 forever. Alert instead
+  // of only logging so the loss is never silently dropped.
+  if (!hasUsage && rowId !== null && attemptOutcome !== undefined && attemptOutcome.kind !== 'admission_rejected') {
+    const scopeKey = this.runtimeTurnScopeKey(context);
+    log.warn(
+      { rowId, scopeKey, attemptOutcome: attemptOutcome.kind, hadEvent: event !== undefined },
+      'turn finalized without recorded token usage — provider usage for this turn is unrecoverable',
+    );
+    emitAlertChecked(
+      this.host.instanceName,
+      'agent_turn_usage_unavailable',
+      'Turn finalized without recorded token usage',
+      `rowId=${rowId} scope=${scopeKey} attemptOutcome=${attemptOutcome.kind} hadEvent=${event !== undefined}`,
+      'warning',
+    );
+  }
   return {
     ...(
-      event !== undefined &&
-      (event.inputTokens !== undefined || event.outputTokens !== undefined) &&
-      rowId !== null
+      hasUsage && rowId !== null
         ? {
             sessionTokens: {
               dbRowId: rowId,
-              inputTokens: event.inputTokens ?? 0,
-              outputTokens: event.outputTokens ?? 0,
+              inputTokens: event?.inputTokens ?? 0,
+              outputTokens: event?.outputTokens ?? 0,
             },
           }
         : {}
@@ -455,7 +479,7 @@ private async performRuntimeTurnFinalization(args: {
   if (!this.host.durability) {
     throw new Error('Runtime turn finalization requires durability');
   }
-  const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event);
+  const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event, args.attemptOutcome);
   const answerEvidence = await collectRuntimeTurnAnswerEvidence(
     args.queue,
     args.context.identity.logicalTurnId,
@@ -982,7 +1006,11 @@ async finalizeUndispatchedRuntimeTurn(
   }
 
   const answerEvidence: RuntimeAnswerEvidence = { kind: 'ready', opIds: [] };
-  const bookkeeping = this.turnFinalizationBookkeeping(context, null);
+  // session is always null here (no SessionManager reference on this path), so
+  // rowId is always null and the usage-loss alert in turnFinalizationBookkeeping
+  // never fires for this call site regardless of attemptOutcome — passed through
+  // for signature consistency, not because it changes behavior here.
+  const bookkeeping = this.turnFinalizationBookkeeping(context, null, undefined, attemptOutcome);
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: null,
     admissionRejected: true,

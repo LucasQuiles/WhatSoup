@@ -166,8 +166,13 @@ export class AnthropicApiProvider implements ProviderSession {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       const result = await this.callApi(turnModel);
 
-      lastInputTokens = result.inputTokens;
-      lastOutputTokens = result.outputTokens;
+      // A later tool-loop iteration that errors out (connection drop, rate
+      // limit exhausted, no response body) reports no usage at all — that
+      // must not erase the real usage an earlier iteration in this same
+      // turn already recorded (#1775 Mechanism B: this clobber silently
+      // zeroed a served turn's token accounting).
+      lastInputTokens = result.inputTokens ?? lastInputTokens;
+      lastOutputTokens = result.outputTokens ?? lastOutputTokens;
 
       if (result.terminalResultText !== undefined) {
         this.opts.onEvent({

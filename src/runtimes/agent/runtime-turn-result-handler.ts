@@ -613,6 +613,17 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
       host.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
       host.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err, mapKey);
       log.error({ err, mapKey, scopeKey }, 'per-chat runtime turn finalization escaped');
+      // #1775: a log line alone is a silent drop from ops' perspective —
+      // this turn's token/checkpoint bookkeeping may never have run. Route
+      // through the same alert path other finalization failures use so the
+      // loss is never invisible.
+      emitAlertChecked(
+        host.instanceName,
+        'agent_turn_finalization_escaped',
+        'Runtime turn finalization escaped (per-chat)',
+        `mapKey=${mapKey} scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
+        'warning',
+      );
     });
   } else if (isSystemResult || inboundSeq === undefined || host.durability === null) {
     if (!isSystemResult && mapKey !== undefined && clearReplayOnSuccess) {
@@ -1114,6 +1125,15 @@ if (wasSilentCompact) host.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       host.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
       host.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err);
       log.error({ err, scopeKey }, 'shared/singleton runtime turn finalization escaped');
+      // #1775: see the matching per-chat catch — a log line alone is a
+      // silent drop from ops' perspective. Alert so it is not.
+      emitAlertChecked(
+        host.instanceName,
+        'agent_turn_finalization_escaped',
+        'Runtime turn finalization escaped (shared/singleton)',
+        `scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
+        'warning',
+      );
     });
   } else if (isSystemResult || host.currentInboundSeq === undefined || host.durability === null) {
     host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
