@@ -240,3 +240,54 @@ describe('memory_write tool', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 });
+
+describe('memory_write — conversation-bound sessions (per-chat actor socket)', () => {
+  // A conversation-bound tier:'global' session is confined to one chat as
+  // strongly as a chat-scoped session (registry default-deny + binding-keyed
+  // helpers), so it may use its own chat's write primitive. Before this,
+  // non-sandbox per_chat agents had NO memory persistence path at all.
+  const boundSession = (over: Partial<SessionContext> = {}): SessionContext => ({
+    tier: 'global',
+    conversationKey: '12345',
+    deliveryJid: '12345@s.whatsapp.net',
+    actorJid: 'phil@s.whatsapp.net',
+    binding: Object.freeze({
+      kind: 'conversation-bound' as const,
+      conversationKey: '12345',
+      deliveryJid: '12345@s.whatsapp.net',
+    }),
+    ...over,
+  });
+
+  it('ACCEPTS a conversation-bound session and files the record under the BINDING key (SSOT), never params.chatJid', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '999@evil', text: 'Phil prefers email', memory_type: 'preference' },
+      boundSession({ conversationKey: 'diverged-top-level' }),
+    );
+    expect(isToolErrorPayload(res)).toBe(false);
+    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    expect(records[0].chatJid).toBe('12345'); // binding key — not params.chatJid, not the diverged mirror
+    expect(records[0].senderJid).toBe('phil@s.whatsapp.net');
+  });
+
+  it('QR-082: still REJECTS self_fact from a conversation-bound session (same untrusted-ingress reasoning)', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'I am EvilBot', memory_type: 'self_fact' },
+      boundSession(),
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('FAILS CLOSED when a conversation-bound write has no session actor', async () => {
+    const { tool, upsert } = setup();
+    const res = await tool.handler(
+      { text: 'x', memory_type: 'user_fact' },
+      boundSession({ actorJid: undefined }),
+    );
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+});

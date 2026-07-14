@@ -8,14 +8,11 @@ import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
 import { waitForSocket } from '../helpers/wait-for.ts';
+import { makeSocketPath, sendJsonRpc } from '../helpers/socket-rpc.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function makeSocketPath(): string {
-  return join(tmpdir(), `whatsoup-test-${process.pid}-${Date.now()}.sock`);
-}
 
 function makeSession(overrides: Partial<SessionContext> = {}): SessionContext {
   return { tier: 'global', ...overrides };
@@ -31,35 +28,6 @@ function makeTool(overrides: Partial<ToolDeclaration> = {}): ToolDeclaration {
     handler: async (params) => ({ echo: params['message'] }),
     ...overrides,
   };
-}
-
-/**
- * Connect to the socket, send a JSON-RPC message, and return the first
- * complete response line. Rejects after 3 seconds.
- */
-function sendJsonRpc(socketPath: string, msg: unknown): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath, () => {
-      client.write(JSON.stringify(msg) + '\n');
-    });
-    let buf = '';
-    client.on('data', (chunk) => {
-      buf += chunk.toString();
-      const lines = buf.split('\n');
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            resolve(JSON.parse(line));
-            client.end();
-          } catch {
-            // partial line, keep buffering
-          }
-        }
-      }
-    });
-    client.on('error', reject);
-    setTimeout(() => reject(new Error('timeout')), 3000);
-  });
 }
 
 /**

@@ -13,7 +13,7 @@ import {
 import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
-import { isToolErrorPayload, type ToolDeclaration, type ToolCallResult, type SessionContext } from './types.ts';
+import { conversationBoundKey, isToolErrorPayload, type ToolDeclaration, type ToolCallResult, type SessionContext } from './types.ts';
 import { errorMessage } from '../lib/error-message.ts';
 
 const log = createChildLogger('ToolRegistry');
@@ -40,6 +40,34 @@ export const ERASURE_SENSITIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 const REDACTED_TOOL_INPUT_MARKER = '[redacted:erasure-sensitive]';
+
+// ---------------------------------------------------------------------------
+// Conversation-bound eligibility (per-chat actor sockets)
+// ---------------------------------------------------------------------------
+//
+// A conversation-bound session (SessionContext.binding — a tier:'global'
+// socket serving exactly one chat for its lifetime) is confined to:
+//   (a) chat-scoped tools — caller-supplied conversation keys are confined
+//       per-call by resolveConversationKey/assertConversationAccess, and
+//       injected targets are filled from the binding with any caller-supplied
+//       target REJECTED (never silently coerced);
+//   (b) this DEFAULT-DENY allowlist of global tools individually reviewed as
+//       conversation-safe. Every entry must either take no conversation-
+//       addressable target at all or self-enforce the binding in its handler
+//       (assertConversationAccess). Cross-conversation search/list/send/admin
+//       tools must never be added. A future global-scope injected-target tool
+//       is deliberately NOT auto-admitted — it goes through this review too.
+//
+// transcribe_audio: reads one message row by id and enforces
+// assertConversationAccess(row.conversation_key, session) before touching
+// media (src/mcp/tools/media.ts) — conversation-safe, and required for voice
+// notes in per-chat agents.
+export const CONVERSATION_SAFE_GLOBAL_TOOLS: ReadonlySet<string> = new Set(['transcribe_audio']);
+
+/** Eligibility of a tool for a conversation-bound session (list AND call). */
+function conversationBoundMaySee(tool: ToolDeclaration): boolean {
+  return tool.scope === 'chat' || CONVERSATION_SAFE_GLOBAL_TOOLS.has(tool.name);
+}
 
 // ---------------------------------------------------------------------------
 // Zod → JSON Schema (minimal, handles the types we use in tool declarations)
@@ -137,6 +165,7 @@ function hasNonEmptyString(value: unknown): value is string {
 function buildListSchema(
   tool: ToolDeclaration,
   session: SessionContext,
+  sessionIsBound: boolean,
 ): JsonSchema {
   const base = zodToJsonSchema(tool.schema);
 
@@ -149,9 +178,10 @@ function buildListSchema(
   const existingRequired: string[] = (base.required as string[]) ?? [];
   const supportsAliasTarget = Object.prototype.hasOwnProperty.call(props, 'to');
 
-  if (session.tier === 'chat-scoped') {
-    // Strip caller targets — chatJid is auto-filled from session.deliveryJid
-    // at call time, and alias targets must not retarget a chat-scoped session.
+  if (session.tier === 'chat-scoped' || sessionIsBound) {
+    // Strip caller targets — chatJid is auto-filled from the session (delivery
+    // JID / binding) at call time, and alias targets must not retarget a
+    // chat-scoped or conversation-bound session.
     delete props['chatJid'];
     if (supportsAliasTarget) delete props['to'];
     return {
@@ -295,16 +325,22 @@ export class ToolRegistry {
   }> {
     const result: Array<{ name: string; description: string; inputSchema: JsonSchema }> = [];
 
+    const isBound = conversationBoundKey(session) !== undefined;
     for (const tool of this.tools.values()) {
       // Chat-scoped sessions may not use global-scope tools
       if (session.tier === 'chat-scoped' && tool.scope === 'global') {
         continue;
       }
 
+      // Conversation-bound sessions: default-deny outside the eligibility set.
+      if (isBound && !conversationBoundMaySee(tool)) {
+        continue;
+      }
+
       result.push({
         name: tool.name,
         description: tool.description,
-        inputSchema: buildListSchema(tool, session),
+        inputSchema: buildListSchema(tool, session, isBound),
       });
     }
 
@@ -384,13 +420,38 @@ export class ToolRegistry {
       };
     }
 
+    // Conversation-bound sessions: call-time is the authoritative gate —
+    // default-deny everything outside the eligibility set (listTools hiding
+    // is convenience, not a boundary).
+    const boundKey = conversationBoundKey(session);
+    if (boundKey !== undefined && !conversationBoundMaySee(tool)) {
+      log.warn({ tool: name, conversationKey: boundKey }, 'tool denied for conversation-bound session (default-deny)');
+      return {
+        content: [{ type: 'text', text: `Tool "${name}" is not available in a conversation-bound session` }],
+        isError: true,
+      };
+    }
+
     // --- Target injection/validation for injected tools ---
     let effectiveParams = { ...params };
 
     if (tool.targetMode === 'injected') {
       const supportsAliasTarget = schemaHasProperty(tool, 'to');
 
-      if (session.tier === 'chat-scoped') {
+      if (boundKey !== undefined) {
+        // Conversation-bound: the target comes from the binding, full stop.
+        // A caller-supplied target — even one matching the binding — is
+        // rejected rather than coerced, so a retargeting attempt is a loud
+        // error instead of a silently rewritten send.
+        if (hasNonEmptyString(effectiveParams['chatJid']) || (supportsAliasTarget && hasNonEmptyString(effectiveParams['to']))) {
+          return {
+            content: [{ type: 'text', text: `Tool "${name}" fills its target from the conversation binding — do not pass chatJid/to` }],
+            isError: true,
+          };
+        }
+        if (supportsAliasTarget) delete effectiveParams['to'];
+        effectiveParams['chatJid'] = session.binding!.deliveryJid;
+      } else if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {
           return {

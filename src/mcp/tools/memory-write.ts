@@ -19,7 +19,7 @@ import { z } from 'zod';
 import { shortHash } from '../../lib/short-hash.ts';
 import { createChildLogger } from '../../logger.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
-import { errorResult, type ToolDeclaration } from '../types.ts';
+import { conversationBoundKey, errorResult, type ToolDeclaration } from '../types.ts';
 
 const log = createChildLogger('memory-write');
 
@@ -75,14 +75,18 @@ export function registerMemoryWriteTools(
     replayPolicy: 'unsafe',
     handler: async (params, session) => {
       const p = params as z.infer<typeof MemoryWriteSchema>;
-      // Chat-scoped ONLY. In a global session the registry would accept a
-      // caller-supplied chatJid (registry.ts global branch) → a cross-conversation
-      // write. Refuse anything but a chat-scoped session bound to a conversation,
-      // and use ONLY the session's canonical conversationKey (never params.chatJid).
-      if (session.tier !== 'chat-scoped' || !session.conversationKey) {
-        return errorResult('memory_write is only available in a chat-scoped session');
+      // Confined sessions ONLY: chat-scoped, or conversation-bound (the
+      // per-chat actor socket — tier:'global' but binding-confined to one
+      // chat by the registry's default-deny gate and the binding-keyed
+      // helpers). In an UNBOUND global session the registry would accept a
+      // caller-supplied chatJid (registry.ts global branch) → a
+      // cross-conversation write, so those stay refused. File ONLY under the
+      // session's own key — binding first (SSOT), never params.chatJid.
+      const boundKey = conversationBoundKey(session);
+      const rawChat = boundKey ?? (session.tier === 'chat-scoped' ? session.conversationKey : undefined);
+      if (!rawChat) {
+        return errorResult('memory_write is only available in a chat-scoped or conversation-bound session');
       }
-      const rawChat = session.conversationKey;
 
       const memoryType = p.memory_type;
       // QR-082: FORBID self_fact from this chat-scoped tool. self_fact memories are
