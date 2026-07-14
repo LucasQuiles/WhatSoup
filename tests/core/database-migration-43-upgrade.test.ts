@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,6 +104,80 @@ describe('migration 43 upgrade from historical schema 42', () => {
     }
   });
 
+  it('grandfathers a historical corroboration closure without admitting it as new proof', () => {
+    const path = schema42Path(true);
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA foreign_keys = ON');
+    const fixture = installCorroboratedClosure(raw, 'legacy-corroborated');
+    raw.close();
+
+    const db = new Database(path);
+    db.open();
+    try {
+      expect(db.raw.prepare(`
+        SELECT evidence_basis
+        FROM operator_catchup_delivery_proof_candidates
+        WHERE target_seq = ?
+      `).get(fixture.targetSeq)).toEqual({ evidence_basis: 'selected_corroborated' });
+      expect(db.raw.prepare(`
+        SELECT COUNT(*) AS count
+        FROM operator_catchup_delivery_proofs
+        WHERE target_seq = ?
+      `).get(fixture.targetSeq)).toEqual({ count: 0 });
+      expect(db.raw.prepare(`
+        SELECT evidence_basis, terminal_record_id, selected_op_id
+        FROM operator_catchup_closure_witnesses
+        WHERE recovery_plan_id = ? AND conversation_key = ?
+      `).get(fixture.planId, fixture.conversationKey)).toEqual({
+        evidence_basis: 'selected_corroborated',
+        terminal_record_id: fixture.terminalRecordId,
+        selected_op_id: fixture.selectedOpId,
+      });
+      expect(closeOperatorCatchupRecovery(db, {
+        planId: fixture.planId,
+        conversationKey: fixture.conversationKey,
+        expectedSourceSeqs: [fixture.sourceSeq],
+        catchupSeq: fixture.targetSeq,
+        actor: fixture.actor,
+        evidenceRef: fixture.evidenceRef,
+      })).toMatchObject({
+        evidenceBasis: 'selected_corroborated',
+        inserted: 0,
+        idempotent: true,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('converges exact and legacy-hardened schema 42 to identical canonical proof objects', () => {
+    const exactPath = schema42Path(true);
+    const exact = new Database(exactPath);
+    exact.open();
+    exact.close();
+
+    const hardenedPath = currentSchemaPath();
+    const seedHardened = new Database(hardenedPath);
+    seedHardened.open();
+    seedHardened.close();
+    const legacy = new DatabaseSync(hardenedPath);
+    rewindToLegacyHardenedSchema42(legacy);
+    expect(schemaObjectHash(legacy, 'view', 'operator_catchup_delivery_proofs')).toBe(
+      '1a13cae21a186d8f58c65339fb751c43daa8c8a7cb161cda398151791f57c8e2',
+    );
+    legacy.close();
+    const upgradeHardened = new Database(hardenedPath);
+    upgradeHardened.open();
+    upgradeHardened.close();
+
+    const exactObjects = canonicalObjectHashes(exactPath);
+    const hardenedObjects = canonicalObjectHashes(hardenedPath);
+    expect(hardenedObjects).toEqual(exactObjects);
+    expect(exactObjects['view:operator_catchup_delivery_proofs']).toBe(
+      'fc06288e9bdb4515b227ad32c0775b69d4525afa523d008e6345aaf4f3bead99',
+    );
+  });
+
   it('advances an already-hardened schema 42 from its witness after live proof becomes ambiguous', () => {
     const path = currentSchemaPath();
     const db = new Database(path);
@@ -118,7 +193,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA foreign_keys = ON');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    rewindToLegacyHardenedSchema42(raw);
     installSecondDirectProof(raw, fixture);
     expect(raw.prepare(`
       SELECT COUNT(*) AS count FROM operator_catchup_delivery_proofs
@@ -132,6 +207,12 @@ describe('migration 43 upgrade from historical schema 42', () => {
       expect(upgraded.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 43',
       ).get()).toEqual({ version: 43 });
+      expect((upgraded.raw.prepare(`
+        SELECT sql FROM sqlite_master
+        WHERE type = 'view' AND name = 'operator_catchup_delivery_proofs'
+      `).get() as { sql: string }).sql).toContain(
+        "WHERE evidence_basis <> 'selected_corroborated'",
+      );
       expect(upgraded.raw.prepare(`
         SELECT target_seq, evidence_basis, terminal_record_id, selected_op_id,
                recovery_job_id, completion_proof_id
@@ -164,11 +245,91 @@ describe('migration 43 upgrade from historical schema 42', () => {
     db.close();
 
     const raw = new DatabaseSync(path);
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    rewindToLegacyHardenedSchema42(raw);
     raw.exec('DROP TRIGGER operator_catchup_closed_group_reject_pending');
     raw.close();
 
     expectMigrationFailure(path, 'hardened schema 42 is missing required objects');
+    expectHardenedSchema42Remains(path);
+  });
+
+  it('rejects a same-name no-op replacement for a required hardened proof trigger', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    rewindToLegacyHardenedSchema42(raw);
+    raw.exec(`
+      DROP TRIGGER operator_catchup_closed_group_reject_pending;
+      CREATE TRIGGER operator_catchup_closed_group_reject_pending
+      BEFORE INSERT ON inbound_disposition_links
+      BEGIN
+        SELECT 1;
+      END;
+    `);
+    raw.close();
+
+    expectMigrationFailure(
+      path,
+      'hardened schema 42 has drifted required objects: '
+        + 'operator_catchup_closed_group_reject_pending',
+    );
+    expectHardenedSchema42Remains(path);
+  });
+
+  it('rejects an already-hardened schema 42 with a partially closed pending group', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    const planId = 'plan-hardened-partial';
+    const conversationKey = 'conversation-hardened-partial';
+    const chatJid = 'hardened-partial@g.us';
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES (?, 'operator', 'operator:test', 'partial hardened closure')
+    `).run(planId);
+    const insertSource = db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, processing_status,
+        completed_at, terminal_reason, failure_class
+      ) VALUES (?, ?, ?, 'failed', datetime('now'), 'error', 'crash_recovery')
+    `);
+    const sourceOne = Number(insertSource.run(
+      'hardened-partial-source-one', conversationKey, chatJid,
+    ).lastInsertRowid);
+    const sourceTwo = Number(insertSource.run(
+      'hardened-partial-source-two', conversationKey, chatJid,
+    ).lastInsertRowid);
+    const insertPending = db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL,
+                'pending catch-up', 'test://hardened-partial', 'operator:test')
+    `);
+    insertPending.run(sourceOne, planId);
+    insertPending.run(sourceTwo, planId);
+    const target = installDirectTarget(
+      db.raw,
+      { conversationKey, chatJid },
+      'hardened-partial',
+    );
+    db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
+                'partial closure', 'test://hardened-partial', 'operator:test')
+    `).run(sourceOne, planId, target.targetSeq);
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    rewindToLegacyHardenedSchema42(raw);
+    raw.close();
+
+    expectMigrationFailure(path, 'closure does not cover its exact pending set');
     expectHardenedSchema42Remains(path);
   });
 
@@ -181,7 +342,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA foreign_keys = ON');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    rewindToLegacyHardenedSchema42(raw);
     const deleteTrigger = raw.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'trigger'
@@ -208,7 +369,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA foreign_keys = ON');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    rewindToLegacyHardenedSchema42(raw);
     const deleteTrigger = raw.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'trigger' AND name = 'inbound_disposition_links_append_only_delete'
@@ -224,6 +385,43 @@ describe('migration 43 upgrade from historical schema 42', () => {
     raw.close();
 
     expectMigrationFailure(path, 'hardened schema 42 has an orphaned closure witness');
+    expectHardenedSchema42Remains(path);
+  });
+
+  it('rejects an already-hardened witness whose proof anchors belong to another target', () => {
+    const path = currentSchemaPath();
+    const db = new Database(path);
+    db.open();
+    const fixture = installDirectClosure(db.raw, 'hardened-mismatched-anchors');
+    const unrelated = installDirectTarget(db.raw, {
+      conversationKey: fixture.conversationKey,
+      chatJid: fixture.chatJid,
+    }, 'hardened-unrelated-anchors');
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA foreign_keys = ON');
+    rewindToLegacyHardenedSchema42(raw);
+    const updateTrigger = raw.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger'
+        AND name = 'operator_catchup_closure_witness_append_only_update'
+    `).get() as { sql: string };
+    raw.exec('DROP TRIGGER operator_catchup_closure_witness_append_only_update');
+    raw.prepare(`
+      UPDATE operator_catchup_closure_witnesses
+      SET terminal_record_id = ?, selected_op_id = ?
+      WHERE recovery_plan_id = ? AND conversation_key = ?
+    `).run(
+      unrelated.terminalRecordId,
+      unrelated.selectedOpId,
+      fixture.planId,
+      fixture.conversationKey,
+    );
+    raw.exec(updateTrigger.sql);
+    raw.close();
+
+    expectMigrationFailure(path, 'has invalid durable proof anchors');
     expectHardenedSchema42Remains(path);
   });
 
@@ -451,6 +649,67 @@ describe('migration 43 upgrade from historical schema 42', () => {
     return join(dir, 'bot.db');
   }
 
+  function rewindToLegacyHardenedSchema42(raw: DatabaseSync): void {
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
+    raw.exec(`
+      DROP VIEW operator_catchup_delivery_proofs;
+      CREATE VIEW operator_catchup_delivery_proofs AS
+      SELECT
+        target_seq,
+        conversation_key,
+        chat_jid,
+        terminal_record_id,
+        selected_op_id,
+        recovery_job_id,
+        completion_proof_id,
+        evidence_basis
+      FROM operator_catchup_delivery_proof_candidates
+      GROUP BY target_seq, conversation_key, chat_jid
+      HAVING COUNT(*) = 1;
+    `);
+  }
+
+  function canonicalObjectHashes(path: string): Record<string, string> {
+    const raw = new DatabaseSync(path, { readOnly: true });
+    try {
+      return Object.fromEntries([
+        ['table', 'operator_catchup_closure_witnesses'],
+        ['view', 'operator_catchup_delivery_proof_candidates'],
+        ['view', 'operator_catchup_delivery_proofs'],
+        ['index', 'idx_inbound_disposition_closure_unique'],
+        ['index', 'idx_operator_catchup_witness_terminal'],
+        ['index', 'idx_operator_catchup_witness_selected_op'],
+        ['index', 'idx_operator_catchup_witness_recovery_job'],
+        ['trigger', 'inbound_disposition_closure_validate_insert'],
+        ['trigger', 'operator_catchup_closure_materialize_witness'],
+        ['trigger', 'operator_catchup_closed_group_reject_pending'],
+        ['trigger', 'operator_catchup_terminal_proof_immutable'],
+        ['trigger', 'operator_catchup_terminal_proof_retain'],
+        ['trigger', 'operator_catchup_selected_outbound_proof_immutable'],
+        ['trigger', 'operator_catchup_selected_outbound_proof_retain'],
+        ['trigger', 'operator_catchup_recovery_job_proof_immutable'],
+        ['trigger', 'operator_catchup_recovery_job_proof_retain'],
+        ['trigger', 'operator_catchup_closure_witness_append_only_update'],
+        ['trigger', 'operator_catchup_closure_witness_append_only_delete'],
+      ].map(([type, name]) => [
+        `${type}:${name}`,
+        schemaObjectHash(raw, type, name),
+      ]));
+    } finally {
+      raw.close();
+    }
+  }
+
+  function schemaObjectHash(raw: DatabaseSync, type: string, name: string): string {
+    const row = raw.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = ? AND name = ?
+    `).get(type, name) as { sql: string } | undefined;
+    if (!row) throw new Error(`Missing ${type} ${name}`);
+    return createHash('sha256')
+      .update(row.sql.replace(/\s+/g, ' ').trim())
+      .digest('hex');
+  }
+
   function installDirectClosure(
     raw: DatabaseSync,
     suffix: string,
@@ -502,6 +761,93 @@ describe('migration 43 upgrade from historical schema 42', () => {
       actor,
       evidenceRef,
       ...target,
+    };
+  }
+
+  function installCorroboratedClosure(
+    raw: DatabaseSync,
+    suffix: string,
+  ): DirectClosureFixture {
+    const planId = `plan-${suffix}`;
+    const conversationKey = `conversation-${suffix}`;
+    const chatJid = `${suffix}@g.us`;
+    const actor = 'operator:test';
+    const evidenceRef = `test://${suffix}`;
+    raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES (?, 'operator', ?, 'historical corroboration fixture')
+    `).run(planId, actor);
+    const sourceSeq = Number(raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, processing_status,
+        completed_at, terminal_reason, failure_class
+      ) VALUES (?, ?, ?, 'failed', datetime('now'), 'error', 'crash_recovery')
+    `).run(`source-${suffix}`, conversationKey, chatJid).lastInsertRowid);
+    raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL,
+                'pending catch-up', ?, ?)
+    `).run(sourceSeq, planId, evidenceRef, actor);
+    const targetSeq = Number(raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, processing_status,
+        completed_at, terminal_reason
+      ) VALUES (?, ?, ?, 'complete', datetime('now'), 'response_sent')
+    `).run(`target-${suffix}`, conversationKey, chatJid).lastInsertRowid);
+    const selectedOpId = Number(raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status,
+        source_inbound_seq, is_terminal, replay_policy
+      ) VALUES (?, ?, 'text', '{"text":"SELECTED"}', 'maybe_sent', ?, 1, 'unsafe')
+    `).run(conversationKey, chatJid, targetSeq).lastInsertRowid);
+    const terminalRecordId = Number(raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, ?, ?, ?, ?, 1, 'replied',
+                'finalized_replied', 'delivery_unknown', ?, 0)
+    `).run(
+      conversationKey,
+      chatJid,
+      targetSeq,
+      targetSeq,
+      `turn-${suffix}`,
+      `manager-${suffix}`,
+      selectedOpId,
+    ).lastInsertRowid);
+    const corroboratingOpId = Number(raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, echoed_at,
+        source_inbound_seq, is_terminal, replay_policy
+      ) VALUES (?, ?, 'text', '{"text":"DIFFERENT"}', 'echoed', datetime('now'),
+                ?, 0, 'unsafe')
+    `).run(conversationKey, chatJid, targetSeq).lastInsertRowid);
+    raw.prepare(`
+      INSERT INTO turn_delivery_corroboration (
+        terminal_record_id, corroborating_op_id, basis, actor, evidence_ref
+      ) VALUES (?, ?, 'same_source_later_echoed_op', ?, ?)
+    `).run(terminalRecordId, corroboratingOpId, actor, evidenceRef);
+    raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
+                'historical corroborated closure', ?, ?)
+    `).run(sourceSeq, planId, targetSeq, evidenceRef, actor);
+    return {
+      planId,
+      conversationKey,
+      chatJid,
+      sourceSeq,
+      targetSeq,
+      terminalRecordId,
+      selectedOpId,
+      actor,
+      evidenceRef,
     };
   }
 

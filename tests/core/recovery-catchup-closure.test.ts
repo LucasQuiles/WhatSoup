@@ -133,6 +133,42 @@ describe('operator catch-up recovery closure', () => {
     expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
   });
 
+  it('treats a different later echoed payload as replay-blocking corroboration, not closure proof', () => {
+    const fixture = installFixture('complete', false);
+    db.raw.prepare(`
+      UPDATE turn_terminal_records
+      SET delivery_kind = 'delivery_unknown'
+      WHERE id = ?
+    `).run(fixture.terminalRecordId);
+    const laterOpId = Number(db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status,
+        source_inbound_seq, is_terminal, replay_policy, echoed_at
+      ) VALUES (?, 'closure@g.us', 'text', '{"text":"DIFFERENT"}', 'echoed',
+                ?, 0, 'unsafe', datetime('now'))
+    `).run(fixture.conversationKey, fixture.catchupSeq).lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO turn_delivery_corroboration (
+        terminal_record_id, corroborating_op_id, basis, actor
+      ) VALUES (?, ?, 'same_source_later_echoed_op', 'system:test')
+    `).run(fixture.terminalRecordId, laterOpId);
+
+    expect(db.raw.prepare(`
+      SELECT evidence_basis
+      FROM operator_catchup_delivery_proof_candidates
+      WHERE target_seq = ?
+    `).get(fixture.catchupSeq)).toEqual({ evidence_basis: 'selected_corroborated' });
+    expect(() => closeOperatorCatchupRecovery(db, {
+      planId: fixture.planId,
+      conversationKey: fixture.conversationKey,
+      expectedSourceSeqs: fixture.sourceSeqs,
+      catchupSeq: fixture.catchupSeq,
+      actor: 'operator:test',
+      evidenceRef: 'test://corroboration-is-not-delivery-proof',
+    })).toThrow('echoed delivery proof');
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+  });
+
   it.each([
     ['actor', 'operator:other', 'test://echoed-ack'],
     ['evidence', 'operator:test', 'test://different-evidence'],

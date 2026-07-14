@@ -174,7 +174,7 @@ describe('migration 41 recovery evidence', () => {
       .toThrow('invalid operator catch-up closure');
   });
 
-  it('accepts a closure whose selected delivery is proven by valid corroboration', () => {
+  it('retains corroboration as replay-blocking evidence without authorizing a new closure', () => {
     const fixture = installClosureFixture();
     db.raw.prepare(`
       UPDATE turn_terminal_records
@@ -196,7 +196,7 @@ describe('migration 41 recovery evidence', () => {
       ) VALUES (?, ?, 'same_source_later_echoed_op', 'test')
     `).run(fixture.terminalRecordId, corroboratingOpId);
 
-    expect(() => insertClosure(fixture)).not.toThrow();
+    expect(() => insertClosure(fixture)).toThrow('invalid operator catch-up closure');
   });
 
   it.each([

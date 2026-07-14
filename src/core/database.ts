@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createChildLogger } from '../logger.ts';
@@ -937,8 +938,160 @@ function runMigration40(db: DatabaseSync): void {
   runMigration40Impl(db);
 }
 
+const MIGRATION_41_OBJECT_HASHES = [
+  ['index', 'idx_inbound_disposition_closure_unique', ['03fbba479036a6f115e13bcad8d56d26405115051a8e608e566f8f247af6f8a8']],
+  ['index', 'idx_inbound_disposition_open', ['bb3d5efcb27586492f5c9c2d46e6812aa6b19ecd8e80ea5017b7e89c8251dd30']],
+  ['index', 'idx_inbound_disposition_pending_unique', ['34c7357d4eb63960a4fbbaf96261e10b1b3d1db432564234398dd428ef34ab2b']],
+  ['table', 'inbound_disposition_links', ['d4166768063199235aac2789a43cb2cdba2d656b5527c8e491decc6b76369094']],
+  ['table', 'recovery_plans', ['d3d60b9fa5f5e0b4c1a9764fb6e28f40a8d8ad872f5fe0e281987334288c3cba']],
+  ['table', 'turn_delivery_corroboration', ['3dfa476668f875483cfc26fc24bd1376df297d9f39a567c7a4c3d94ab8f8ce08']],
+  ['trigger', 'corroborated_selected_outbound_proof_immutable', ['60e84a8df1709cbdcc3ef824f38d634b1b95702221f5ea6867147ba3bf729373']],
+  ['trigger', 'corroborated_selected_outbound_proof_retain', ['7db5598b2250e9e746949fffcaa064608ac5f2c0764dce760bd332b0115d7d75']],
+  ['trigger', 'corroborated_terminal_proof_immutable', ['9faa85459495b6b550a0567e49a1f21db66570752a53636869e39dc3677b6865']],
+  ['trigger', 'corroborated_terminal_proof_retain', ['844cfab758fcbb146c3e956f977a25b26c00d496d9c868e4d9041090ad653a14']],
+  ['trigger', 'corroborating_outbound_proof_immutable', ['c45d5449721c0c33f84cb640859924366ec0b0a0b10b06bd9140f51bab14e62a']],
+  ['trigger', 'corroborating_outbound_proof_retain', ['b132c15d8712299496c74bde2b17b84b4f3adfe0b59110ae81c081dbea034158']],
+  ['trigger', 'disposition_inbound_proof_immutable', ['59b0bcb67b2995d247f2a8f57eabe50a7bd9059adaee790250e9afc0fcf8d543']],
+  ['trigger', 'disposition_inbound_proof_retain', ['4a95a741a8d0e288b2853cac1dad891b97392cb0f6dc242a196ccc2596177d05']],
+  ['trigger', 'inbound_disposition_closure_validate_insert', [
+    '01857c86bf7cc9fc71d61aaa40e781dfee68988e2dea98f0c7bd1bd56e5ada99',
+    'd68b783a0b75ae5d0306cfc0c24a022d8d08113662cc0d437de0fa1a52e605fe',
+  ]],
+  ['trigger', 'inbound_disposition_links_append_only_delete', ['40e838dd9efc6d95dad89dab256667d68e7b426b67a7b8abf9f5d3ab71230768']],
+  ['trigger', 'inbound_disposition_links_append_only_update', ['debda1f051b336f7987e7f56d1bf79c074431c9d3d311284cf32296ab4350fca']],
+  ['trigger', 'operator_catchup_selected_outbound_proof_immutable', [
+    'd46fb908bf974e7ca4fca52a8bb14573027300cc256912e2fa62d19219945b3f',
+    '846d787797c8ae5741433340aaf662e8bec19e5b95b75ea00f3dac4e16db5690',
+  ]],
+  ['trigger', 'operator_catchup_selected_outbound_proof_retain', [
+    '667dd96693d25b48928649307eda0ba0e01ca633db33e67c3d58dc892c8f2b04',
+    '38ba7bddc5c2a8151deb907d8f545d79fc73f03189b9066a445b8cf8a5fea81b',
+  ]],
+  ['trigger', 'operator_catchup_terminal_proof_immutable', [
+    '646a68559790081f7c07ead40bdf0946ffaf033c2a4fa3206751aac003e9d176',
+    '223c469f70414f1c131ca2361c6ee5e7d0be5c3b47e1598aec92b232cab1b88b',
+  ]],
+  ['trigger', 'operator_catchup_terminal_proof_retain', [
+    '1249873bab3b905ed509a9d6a115340c4a8c725cf7dd17ae7416176465e9fa3e',
+    '4c32a90667b09de0d304bf58ccf871bab37cbc0602ebefa084dd8a7e94172428',
+  ]],
+  ['trigger', 'recovery_plans_append_only_delete', ['4204eb2fc858c2fc8243867af639781da0572a8cfab2489132a3b369726f7a0f']],
+  ['trigger', 'recovery_plans_append_only_update', ['a648f95d8c683d990db345a05ba4636fd8edebdc24903fe669630caa457b99c3']],
+  ['trigger', 'turn_delivery_corroboration_append_only_delete', ['226f4ce4eac2b43da158146a29712c15663dd8d14ec9d55d498f76dd3dc1573f']],
+  ['trigger', 'turn_delivery_corroboration_append_only_update', ['0ee6134e339c73a95fef089bd0c95d85200dad88a0d8798ab39ffcf02c43b19e']],
+  ['trigger', 'turn_delivery_corroboration_validate_insert', ['fd4681e141af215772341620ce60003c4799b66654f21aec0582b20a464ca511']],
+] as const;
+
+function schemaObjectHash(sql: string): string {
+  return createHash('sha256').update(sql.replace(/\s+/g, ' ').trim()).digest('hex');
+}
+
+function assertMigration41Attested(db: DatabaseSync): void {
+  const requiredTables = [
+    'inbound_events',
+    'outbound_ops',
+    'turn_terminal_records',
+    'recovery_runs',
+    'recovery_plans',
+    'inbound_disposition_links',
+    'turn_delivery_corroboration',
+  ];
+  const presentTables = new Set(
+    (db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN (
+          'inbound_events', 'outbound_ops', 'turn_terminal_records', 'recovery_runs',
+          'recovery_plans', 'inbound_disposition_links', 'turn_delivery_corroboration'
+        )
+    `).all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  const missingTables = requiredTables.filter((table) => !presentTables.has(table));
+  if (missingTables.length > 0) {
+    throw new Error(
+      `migration 41 incomplete because required tables are missing: ${missingTables.join(', ')}`,
+    );
+  }
+
+  const requiredParentColumns = new Map<string, readonly string[]>([
+    ['inbound_events', [
+      'seq', 'message_id', 'conversation_key', 'chat_jid',
+      'processing_status', 'completed_at',
+    ]],
+    ['outbound_ops', [
+      'id', 'conversation_key', 'chat_jid', 'op_type', 'payload', 'payload_hash',
+      'status', 'created_at', 'submitted_at', 'echoed_at', 'wa_message_id',
+      'error', 'source_inbound_seq', 'retry_count', 'is_terminal', 'replay_policy',
+    ]],
+    ['turn_terminal_records', [
+      'id', 'scope', 'conversation_key', 'delivery_jid', 'inbound_seq',
+      'inbound_seq_key', 'logical_turn_id', 'manager_id', 'generation',
+      'attempt_kind', 'attempt_failure_class', 'inbound_disposition',
+      'delivery_kind', 'delivery_op_id', 'recovery_owner_logical_turn_id',
+      'recovery_owner_manager_id', 'recovery_owner_generation',
+      'reply_guarantee_disarmed', 'created_at',
+    ]],
+  ]);
+  const malformedParents: string[] = [];
+  for (const [table, requiredColumns] of requiredParentColumns) {
+    const columns = db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{
+      name: string;
+      pk: number;
+    }>;
+    const byName = new Map(columns.map((column) => [column.name, column]));
+    const missingColumns = requiredColumns.filter((column) => !byName.has(column));
+    const identity = table === 'inbound_events' ? 'seq' : 'id';
+    if (missingColumns.length > 0 || (byName.get(identity)?.pk ?? 0) === 0) {
+      malformedParents.push(
+        `${table}${missingColumns.length > 0 ? `(${missingColumns.join(',')})` : '(primary key)'}`,
+      );
+    }
+  }
+  if (malformedParents.length > 0) {
+    throw new Error(
+      `migration 41 required parent tables are malformed: ${malformedParents.join(', ')}`,
+    );
+  }
+
+  const recoveryRunColumns = db.prepare("PRAGMA table_info('recovery_runs')")
+    .all() as Array<{ name: string; type: string }>;
+  const recoveryPlanColumn = recoveryRunColumns.find(
+    (column) => column.name === 'recovery_plan_id',
+  );
+  const recoveryPlanForeignKey = (
+    db.prepare("PRAGMA foreign_key_list('recovery_runs')").all() as Array<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>
+  ).find((foreignKey) => foreignKey.from === 'recovery_plan_id');
+  if (
+    recoveryPlanColumn?.type.toUpperCase() !== 'TEXT'
+    || recoveryPlanForeignKey?.table !== 'recovery_plans'
+    || recoveryPlanForeignKey.to !== 'plan_id'
+    || recoveryPlanForeignKey.on_delete.toUpperCase() !== 'RESTRICT'
+  ) {
+    throw new Error('migration 41 recovery_runs.recovery_plan_id is not canonically bound');
+  }
+
+  const selectObject = db.prepare('SELECT type, sql FROM sqlite_master WHERE name = ?');
+  const invalidObjects = MIGRATION_41_OBJECT_HASHES.filter(([type, name, allowedHashes]) => {
+    const row = selectObject.get(name) as { type: string; sql: string | null } | undefined;
+    return row?.type !== type
+      || row.sql === null
+      || !(allowedHashes as readonly string[]).includes(schemaObjectHash(row.sql));
+  }).map(([, name]) => name);
+  if (invalidObjects.length > 0) {
+    throw new Error(
+      `migration 41 required objects are missing or drifted: ${invalidObjects.join(', ')}`,
+    );
+  }
+}
+
 function runMigration41(db: DatabaseSync): void {
   runMigration41Impl(db);
+  assertMigration41Attested(db);
 }
 
 function runMigration42(db: DatabaseSync): void {
