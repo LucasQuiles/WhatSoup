@@ -22,12 +22,39 @@ export type SessionTier = 'global' | 'chat-scoped';
  */
 export type ExtendedBaileysSocket = WhatsAppSocket;
 
+/**
+ * Explicit conversation-binding discriminator for sessions that serve exactly
+ * ONE conversation for their entire lifetime (the per-chat actor socket,
+ * F-STICKY-ACTOR). Deliberately distinct from a top-level `conversationKey`
+ * on a global session, which shared/operator sockets re-pin per TURN
+ * (bindActiveGlobalMcpConversation) while legitimately reading other
+ * conversations mid-turn. Hard confinement — read-tool key resolution,
+ * global-tool eligibility, handler access checks — keys on this binding only.
+ *
+ * Binding objects are IMMUTABLE (frozen at construction). Rekeying replaces
+ * the object (see WhatSoupSocketServer.updateConversationBinding), so an
+ * in-flight request's session snapshot keeps the pair it was admitted under.
+ */
+export interface ConversationBinding {
+  readonly kind: 'conversation-bound';
+  /** Canonical conversation identity the session is confined to. */
+  readonly conversationKey: string;
+  /** Current raw JID alias for sends — the injected-target fill source. */
+  readonly deliveryJid: string;
+}
+
 export interface SessionContext {
   tier: SessionTier;
   /** Canonical conversation identity — for reads, queries, scope checks */
   conversationKey?: string;
   /** Current raw JID alias — for sends, replies, reactions */
   deliveryJid?: string;
+  /**
+   * Lifetime conversation confinement. When present, `conversationKey` and
+   * `deliveryJid` above are mirrors of the binding (kept coherent by the
+   * socket-server mutators); the binding is the source of truth.
+   */
+  binding?: ConversationBinding;
   /**
    * Caller identity (sender JID) for admin-gated tools. In groups, `deliveryJid`
    * is the group JID — NOT the person who sent the message — so admin checks
@@ -100,14 +127,40 @@ export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
 }
 
 /**
+ * Construct a frozen ConversationBinding — the single enforcement point for
+ * the freeze + discriminator contract every construction site must honor.
+ */
+export function makeConversationBinding(conversationKey: string, deliveryJid: string): ConversationBinding {
+  return Object.freeze({ kind: 'conversation-bound', conversationKey, deliveryJid });
+}
+
+/**
+ * Return the binding's conversation key for a conversation-bound session,
+ * undefined otherwise. The single predicate every confinement site keys on.
+ */
+export function conversationBoundKey(session: SessionContext): string | undefined {
+  return session.tier === 'global' && session.binding?.kind === 'conversation-bound'
+    ? session.binding.conversationKey
+    : undefined;
+}
+
+/**
  * Normalize a caller-supplied key that may be a raw JID (`…@g.us`) into the
  * `_at_` encoded conversation_key used in the DB.  When the session is
- * chat-scoped the already-normalized session key wins.
+ * chat-scoped the already-normalized session key wins. A conversation-bound
+ * session may address its OWN conversation in either form; any other key is
+ * rejected (fail-closed — never silently redirected).
  */
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
   if (session.tier === 'chat-scoped') return session.conversationKey!;
   // Caller may pass a raw JID — normalize it to the DB encoding.
-  try { return toConversationKey(callerKey); } catch { return callerKey; }
+  let resolved: string;
+  try { resolved = toConversationKey(callerKey); } catch { resolved = callerKey; }
+  const boundKey = conversationBoundKey(session);
+  if (boundKey !== undefined && resolved !== boundKey) {
+    throw new Error(`conversation_key "${callerKey}" is not available to this conversation-bound session`);
+  }
+  return resolved;
 }
 
 export function assertConversationAccess(
@@ -115,8 +168,11 @@ export function assertConversationAccess(
   session: SessionContext,
   label = 'Resource',
 ): void {
-  if (!session.conversationKey) return;
-  if (conversationKey !== session.conversationKey) {
+  // The binding is the source of truth for a conversation-bound session —
+  // enforce from it even if the top-level mirror is absent or diverged.
+  const enforcedKey = conversationBoundKey(session) ?? session.conversationKey;
+  if (!enforcedKey) return;
+  if (conversationKey !== enforcedKey) {
     throw new Error(`${label} belongs to a different conversation`);
   }
 }

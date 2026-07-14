@@ -63,6 +63,57 @@ describe('chat-management tools', () => {
     seedConversations(db);
   });
 
+  // --- conversation-bound confinement (real handler, real SQLite) ---
+
+  describe('conversation-bound session confinement', () => {
+    // Full-chain proof for the per-chat actor socket: registry.call with a
+    // REAL list_messages handler against a REAL database. The bound session
+    // reads its own conversation and is denied a cross-conversation read
+    // (resolveConversationKey rejects before any SQL runs).
+    const boundSession = (): SessionContext => ({
+      tier: 'global',
+      conversationKey: '111',
+      deliveryJid: '111@s.whatsapp.net',
+      binding: Object.freeze({
+        kind: 'conversation-bound' as const,
+        conversationKey: '111',
+        deliveryJid: '111@s.whatsapp.net',
+      }),
+    });
+
+    it('list_messages serves the bound conversation', async () => {
+      const result = await registry.call(
+        'list_messages',
+        { conversation_key: '111', limit: 10 },
+        boundSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { messages: Array<{ messageId: string }> };
+      expect(data.messages.map((m) => m.messageId)).toEqual(['msg1', 'msg2', 'msg3', 'msg4', 'msg5']);
+    });
+
+    it('list_messages DENIES a cross-conversation read and leaks no content (the per-chat socket leak regression)', async () => {
+      const result = await registry.call(
+        'list_messages',
+        { conversation_key: '222', limit: 10 },
+        boundSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toContain('Bob chat');
+    });
+
+    it('an unbound global session with a turn-pinned conversationKey keeps cross-conversation reads (operator non-regression)', async () => {
+      const result = await registry.call(
+        'list_messages',
+        { conversation_key: '222', limit: 10 },
+        { tier: 'global', conversationKey: '111' }, // turn-pinned, NOT bound
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { messages: Array<{ messageId: string }> };
+      expect(data.messages.map((m) => m.messageId)).toEqual(['msg6']);
+    });
+  });
+
   // --- list_messages ---
 
   describe('list_messages', () => {

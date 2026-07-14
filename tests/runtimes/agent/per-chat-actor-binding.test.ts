@@ -132,7 +132,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: vi.fn().mockImplementation(function () {
-    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn() };
+    return { start: vi.fn(), stop: vi.fn(), updateDeliveryJid: vi.fn(), updateActorJid: vi.fn(), updateConversationKey: vi.fn(), updateConversationBinding: vi.fn() };
   }),
 }));
 
@@ -628,5 +628,55 @@ describe('#1785 rec-3: createPerChatActorSocket binds conversationKey (closes th
     expect(WhatSoupSocketServer).toHaveBeenCalledTimes(1);
     const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
     expect(sessionArg).toMatchObject({ tier: 'global', conversationKey: CHAT });
+  });
+
+  it('default (perChatConversationBound unset) -> the actor socket session carries NO binding (status quo preserved)', () => {
+    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
+    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    // Exact #1785 rec-3 shape — no binding, no deliveryJid, nothing else.
+    expect(sessionArg).toEqual({ tier: 'global', allowedRoot: expect.any(String), conversationKey: CHAT });
+  });
+});
+
+// ── perChatConversationBound: opt-in conversation-bound actor socket ────────
+
+describe('perChatConversationBound: the actor socket carries a frozen conversation binding and rekeys it on JID alias change', () => {
+  const CHAT = 'group-bound@g.us';
+  const NEW_JID = 'group-bound-new@g.us';
+  type Priv = {
+    wirePerChatActorSocket(chatJid: string, provider: string): unknown;
+    handleJidAliasChanged(conversationKey: string, newJid: string, deferIfActive?: boolean): void;
+  };
+  let runtime: AgentRuntime;
+  const priv = (): Priv => runtime as unknown as Priv;
+
+  beforeEach(() => {
+    runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      sessionScope: 'per_chat',
+      perChatConversationBound: true,
+    });
+    (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it('flag on -> the actor socket SessionContext carries the frozen conversation binding with coherent mirrors', () => {
+    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
+    expect(WhatSoupSocketServer).toHaveBeenCalledTimes(1);
+    const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(sessionArg).toMatchObject({
+      tier: 'global',
+      conversationKey: CHAT, // toConversationKey is identity-mocked in this file
+      deliveryJid: CHAT,
+      binding: { kind: 'conversation-bound', conversationKey: CHAT, deliveryJid: CHAT },
+    });
+    expect(Object.isFrozen(sessionArg.binding)).toBe(true);
+  });
+
+  it('handleJidAliasChanged rekeys the binding atomically on the per-chat actor socket', () => {
+    priv().wirePerChatActorSocket(CHAT, 'claude-cli');
+    const instance = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.results[0]!.value as {
+      updateConversationBinding: ReturnType<typeof vi.fn>;
+    };
+    priv().handleJidAliasChanged(CHAT, NEW_JID, false);
+    expect(instance.updateConversationBinding).toHaveBeenCalledWith(NEW_JID);
   });
 });

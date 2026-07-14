@@ -802,6 +802,56 @@ describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope'
   });
 });
 
+describe('loadInstance — agentOptions: perChatConversationBound constraints', () => {
+  it('rejects perChatConversationBound:true outside sessionScope "per_chat"', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bound-bad-scope', {
+      name: 'bound-bad-scope',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'allowlist',
+      agentOptions: {
+        sessionScope: 'shared',
+        cwd: '/tmp',
+        perChatConversationBound: true,
+      },
+    });
+    expect(() => loadInstance('bound-bad-scope')).toThrow(/perChatConversationBound.*per_chat/);
+  });
+
+  it('rejects perChatConversationBound:true combined with sandboxPerChat:true', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bound-sandbox-clash', {
+      name: 'bound-sandbox-clash',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'allowlist',
+      agentOptions: {
+        sessionScope: 'per_chat',
+        cwd: '/tmp',
+        sandboxPerChat: true,
+        perChatConversationBound: true,
+      },
+    });
+    expect(() => loadInstance('bound-sandbox-clash')).toThrow(/perChatConversationBound.*incompatible with sandboxPerChat/);
+  });
+
+  it('accepts perChatConversationBound:true with sessionScope "per_chat" (non-sandbox)', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bound-ok', {
+      name: 'bound-ok',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'allowlist',
+      agentOptions: {
+        sessionScope: 'per_chat',
+        cwd: '/tmp',
+        perChatConversationBound: true,
+      },
+    });
+    loadInstance('bound-ok');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions.perChatConversationBound).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // passive instance type
 // ---------------------------------------------------------------------------

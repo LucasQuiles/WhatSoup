@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext } from '../types.ts';
+import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
@@ -78,8 +78,13 @@ interface ScheduledMessageRow {
 }
 
 function assertSessionAccess(rowChatJid: string, session: SessionContext): void {
-  if (session.tier !== 'chat-scoped') return;
-  if (!session.conversationKey) {
+  // Confined sessions: chat-scoped, or conversation-bound (per-chat actor
+  // socket — tier:'global' with a binding). Unbound global sessions —
+  // including turn-pinned operator sessions — keep full visibility.
+  const boundKey = conversationBoundKey(session);
+  if (boundKey === undefined && session.tier !== 'chat-scoped') return;
+  const enforcedKey = boundKey ?? session.conversationKey;
+  if (!enforcedKey) {
     throw new Error('Chat-scoped session has no conversation key');
   }
 
@@ -90,7 +95,7 @@ function assertSessionAccess(rowChatJid: string, session: SessionContext): void 
     throw new Error('Scheduled message has invalid chat target');
   }
 
-  if (conversationKey !== session.conversationKey) {
+  if (conversationKey !== enforcedKey) {
     throw new Error('Access denied: scheduled message belongs to a different conversation');
   }
 }
