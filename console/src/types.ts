@@ -45,6 +45,12 @@ export interface LineInstance {
       provider?: string;
     };
   } | null;
+  // Freshness seam (#1762 remediation 1, enrichInstance in src/fleet/routes/lines.ts):
+  // when `health` was last genuinely replaced by a live poll, and whether the
+  // poller is currently failing (in which case `health` may be carried
+  // forward from that observation rather than reflecting the current instant).
+  healthObservedAt?: string | null;
+  stale?: boolean;
   heartbeat: ('up' | 'down' | 'slow')[];
   lastActive: string;
   error: string | null;
