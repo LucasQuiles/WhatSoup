@@ -55,6 +55,42 @@ export interface ReconcileStaleHealReportsResult {
 }
 
 /**
+ * Build the dedup-class hint for a heal report. For 'crash' reports where
+ * classifyProviderCrash could not identify a crashClass, raw stderr/recentLogs
+ * content (addresses, thread-local detail, arbitrary IDs) varies per occurrence
+ * even after normalizeErrorClass's regex stripping, so a repeated signal-less
+ * SIGKILL produces a different class every time and single-flight dedup never
+ * coalesces (see provider-crash-diagnostics.ts:classifyProviderCrash). Mirror the
+ * 'degraded' path's fixed-first-line pattern (see normalizeErrorClass doc): key
+ * on the structural signal/exitCode, which is stable across repeats, and push
+ * the variable stderr/recentLogs detail to a second line where
+ * normalizeErrorClass (which only reads split('\n')[0]) ignores it.
+ */
+function buildErrorClassHint(data: HealReportData): string {
+  if (data.crashClass) return data.crashClass;
+  if (data.type === 'crash' && (data.signal || data.exitCode !== undefined)) {
+    const detail = data.stderr ?? data.recentLogs ?? '';
+    return `signal_${data.signal ?? 'none'}_exit_${data.exitCode ?? 'none'}${detail ? `\n${detail}` : ''}`;
+  }
+  return data.stderr ?? data.recentLogs ?? 'unknown';
+}
+
+/** Shared evidence lines for the two BOT ERRORS fallback paths below (valve trip, no control peer). */
+function buildHealEvidenceLines(data: HealReportData, errorClass: string): string {
+  return [
+    `type=${data.type}`,
+    `error_class=${errorClass}`,
+    data.chatJid ? `chat_jid=${data.chatJid}` : null,
+    data.exitCode !== undefined ? `exit_code=${data.exitCode}` : null,
+    data.signal ? `signal=${data.signal}` : null,
+    data.provider ? `provider=${data.provider}` : null,
+    data.crashClass ? `crash_class=${data.crashClass}` : null,
+    data.stderr ? `stderr=${data.stderr}` : null,
+    data.recentLogs ? `recent_logs=${data.recentLogs}` : null,
+  ].filter(Boolean).join('\n');
+}
+
+/**
  * Emit a heal report for a given error condition.
  *
  * Single-flight: if an active report already exists for the same error_class,
@@ -73,15 +109,19 @@ export function emitHealReport(
   data: HealReportData,
   activeControlReportId?: string | null,
 ): string | null {
-  const errorClass = normalizeErrorClass(data.type, data.crashClass ?? data.stderr ?? data.recentLogs ?? 'unknown');
+  const errorClass = normalizeErrorClass(data.type, buildErrorClassHint(data));
   reconcileStaleHealReports(db);
 
   // Check for active report with same error class (single-flight)
   const active = getActiveReportForClass(db, errorClass);
   if (active) {
+    // #1754: coalesce into the active incident instead of silently no-op'ing the
+    // duplicate occurrence — attempt_count must reflect how many times this error
+    // class has actually recurred.
+    db.raw.prepare(`UPDATE heal_reports SET attempt_count = attempt_count + 1 WHERE report_id = ?`).run(active.report_id);
     log.debug(
-      { errorClass, existingReportId: active.report_id, state: active.state },
-      'heal report suppressed — active report exists',
+      { errorClass, existingReportId: active.report_id, state: active.state, attemptCount: active.attempt_count + 1 },
+      'heal report suppressed — active report exists; attempt count incremented',
     );
     return null;
   }
@@ -94,17 +134,7 @@ export function emitHealReport(
       config.botName,
       'heal_repeated_failures',
       `whatsoup@${config.botName} heal valve triggered after ${valveCount} repair reports this hour`,
-      [
-        `type=${data.type}`,
-        `error_class=${errorClass}`,
-        data.chatJid ? `chat_jid=${data.chatJid}` : null,
-        data.exitCode !== undefined ? `exit_code=${data.exitCode}` : null,
-        data.signal ? `signal=${data.signal}` : null,
-        data.provider ? `provider=${data.provider}` : null,
-        data.crashClass ? `crash_class=${data.crashClass}` : null,
-        data.stderr ? `stderr=${data.stderr}` : null,
-        data.recentLogs ? `recent_logs=${data.recentLogs}` : null,
-      ].filter(Boolean).join('\n'),
+      buildHealEvidenceLines(data, errorClass),
     );
     return null;
   }
@@ -126,9 +156,18 @@ export function emitHealReport(
   }
 
   // Send [LOOPS_HEAL] to Q
-  const qPhone = [...config.controlPeers.entries()].find(([name]) => name === 'q')?.[1];
+  const qPhone = config.controlPeers.get('q');
   if (!qPhone) {
-    log.warn('no Q control peer configured — cannot send heal report');
+    // #1754: missing/partial control-peer config must never silently drop the
+    // report — telemetry delivery is guaranteed-or-alerted. Route through the
+    // same durable-outbox fallback the global valve uses above.
+    log.warn({ reportId }, 'no Q control peer configured — routing heal report through BOT ERRORS fallback');
+    emitAlertChecked(
+      config.botName,
+      'heal_delivery_unavailable',
+      `whatsoup@${config.botName} heal report ${reportId} could not reach Q — no control peer configured`,
+      buildHealEvidenceLines(data, errorClass),
+    );
     return reportId;
   }
   const qJid = toPersonalJid(qPhone);
@@ -246,13 +285,18 @@ export function reconcileStaleHealReports(
     return { expiredReportIds: [], cutoff, staleMs };
   }
 
+  // #1754: do NOT stamp resolved_at here. This is a timer-race safety net for
+  // orphaned rows (restart/lost control session), not a resolution signal — a row
+  // is only ever genuinely resolved by a positive HEAL_COMPLETE/HEAL_ESCALATE
+  // signal (see handleHealComplete). Setting resolved_at here made stale-expired
+  // rows indistinguishable from genuine resolutions to anything reading
+  // resolved_at without also checking state.
   const update = db.raw.prepare(`
     UPDATE heal_reports
-    SET state = 'stale_expired', resolved_at = ?
+    SET state = 'stale_expired'
     WHERE report_id = ?
   `);
-  const resolvedAt = now.toISOString();
-  for (const row of rows) update.run(resolvedAt, row.report_id);
+  for (const row of rows) update.run(row.report_id);
 
   log.warn({
     count: rows.length,
@@ -377,6 +421,10 @@ function formatHealReport(payload: {
   if (payload.crashClass) lines.push(`Crash class: ${payload.crashClass}`);
   if (payload.stderr) lines.push(`Stderr (last lines):\n  ${payload.stderr.split('\n').slice(-5).join('\n  ')}`);
   if (payload.recentLogs) lines.push(`Recent logs:\n  ${payload.recentLogs.split('\n').slice(-5).join('\n  ')}`);
-  lines.push(`\nRepair attempt ${payload.attempt} of ${payload.maxAttempts}. Next attempt available after 5m cooldown if this fails.`);
+  // #1754: no writer ever sets cooldown_until or dispatches a timed retry, so this
+  // must not promise one — it previously always read "attempt 1 of 2 ... 5m cooldown"
+  // regardless of how many times the error actually recurred (see attempt_count
+  // increment in emitHealReport's single-flight suppression path for what really happens).
+  lines.push(`\nRepair attempt ${payload.attempt}. Repeat occurrences of this error before resolution increment the attempt count but do not trigger a further notification or scheduled retry.`);
   return lines.join('\n');
 }
