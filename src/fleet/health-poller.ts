@@ -202,7 +202,7 @@ function classifyDatabaseInspectionHealth(
     : latest === null;
 
   if (
-    httpStatus !== 503
+    (httpStatus !== undefined && httpStatus !== 503)
     || health.status !== 'unhealthy'
     || !Number.isFinite(generatedAtMs)
     || generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS

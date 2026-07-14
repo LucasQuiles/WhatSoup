@@ -1677,6 +1677,45 @@ describe('HealthPoller', () => {
     },
   );
 
+  it('classifies a matching self inspection-only snapshot as a database block', async () => {
+    const body = makeDatabaseInspectionHealth();
+    (body.instance as Record<string, unknown>).name = 'self';
+    const getSelfHealth = vi.fn().mockReturnValue(body);
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('self')).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'confirmed',
+      statusReason: 'database_future_schema',
+      consecutiveFailures: 0,
+      everReachable: true,
+      error: null,
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects another instance name on the self inspection-only path', async () => {
+    const body = makeDatabaseInspectionHealth();
+    (body.instance as Record<string, unknown>).name = 'remote-2';
+    const getSelfHealth = vi.fn().mockReturnValue(body);
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('self')).toMatchObject({
+      status: 'degraded',
+      statusReason: 'health_body_unhealthy',
+      consecutiveFailures: 0,
+      everReachable: true,
+      error: null,
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('does not grant inspection-only classification to another instance name', async () => {
     const body = makeDatabaseInspectionHealth();
     (body.instance as Record<string, unknown>).name = 'remote-2';

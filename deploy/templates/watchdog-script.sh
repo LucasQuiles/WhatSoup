@@ -74,19 +74,22 @@ launchd_reports_permanent_stop() {
   local job_label="$1" launchd_state
   launchd_state="$(launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
   print -r -- "$launchd_state" | awk '
-    /^[[:space:]]*state[[:space:]]*=/ && state == "" {
-      sub(/^[^=]*=[[:space:]]*/, "")
-      sub(/[[:space:]]*$/, "")
-      state = $0
+    /^[[:space:]]*state[[:space:]]*=/ {
+      state_count++
+      state_value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", state_value)
+      sub(/[[:space:]]*$/, "", state_value)
     }
     /^[[:space:]]*last exit (code|status)[[:space:]]*=/ {
-      sub(/^[^=]*=[[:space:]]*/, "")
-      if ($0 ~ /^[0-9]+([[:space:]]|$)/) {
-        sub(/[[:space:]].*$/, "")
-        exit_code = $0
-      }
+      exit_count++
+      exit_value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", exit_value)
+      sub(/[[:space:]]*$/, "", exit_value)
     }
-    END { exit !(state == "stopped" && exit_code == "78") }
+    END {
+      if (state_count == 1 && state_value == "stopped" && exit_count == 1 && exit_value == "78") exit 0
+      exit 1
+    }
   '
 }
 

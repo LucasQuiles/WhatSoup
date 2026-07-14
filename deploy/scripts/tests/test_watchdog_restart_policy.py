@@ -235,11 +235,10 @@ def _run_rendered_unreachable_watchdog(
     tmp_path: Path,
     *,
     bot_name: str,
-    launchd_state: str,
-    last_exit_code: int,
+    launchd_snapshot: str,
 ) -> str:
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(parents=True)
     binroot = home / ".local" / "bin"
     binroot.mkdir(parents=True)
     calls = binroot / "launchctl.calls"
@@ -273,8 +272,7 @@ def _run_rendered_unreachable_watchdog(
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> '{calls}'\n"
         "if [ \"$1\" = print ]; then\n"
-        f"  printf 'gui = {{\\n    state = {launchd_state}\\n"
-        f"    last exit code = {last_exit_code}\\n}}\\n'\n"
+        "  printf '%s\\n' \"$LAUNCHD_SNAPSHOT\"\n"
         "fi\n"
         "exit 0\n",
         encoding="utf-8",
@@ -286,7 +284,7 @@ def _run_rendered_unreachable_watchdog(
         shutil.rmtree(lock, ignore_errors=True)
     proc = subprocess.run(
         ["zsh", str(script)],
-        env=dict(os.environ, HOME=str(home)),
+        env=dict(os.environ, HOME=str(home), LAUNCHD_SNAPSHOT=launchd_snapshot),
         capture_output=True,
         text=True,
         timeout=20,
@@ -301,8 +299,7 @@ class TestRenderedWatchdogLaunchdExitPolicy:
         calls = _run_rendered_unreachable_watchdog(
             tmp_path,
             bot_name="permanent-config-bot",
-            launchd_state="stopped",
-            last_exit_code=78,
+            launchd_snapshot="gui = {\n  state = stopped\n  last exit code = 78\n}",
         )
         bot_prints = [
             call for call in calls.splitlines()
@@ -319,8 +316,7 @@ class TestRenderedWatchdogLaunchdExitPolicy:
         calls = _run_rendered_unreachable_watchdog(
             tmp_path,
             bot_name="transient-exit-bot",
-            launchd_state="stopped",
-            last_exit_code=1,
+            launchd_snapshot="gui = {\n  state = stopped\n  last exit code = 1\n}",
         )
         assert "kickstart -k" in calls, (
             f"transient unreachable bot must still be restarted: {calls!r}"
@@ -331,13 +327,101 @@ class TestRenderedWatchdogLaunchdExitPolicy:
         calls = _run_rendered_unreachable_watchdog(
             tmp_path,
             bot_name="running-stale-exit-bot",
-            launchd_state="running",
-            last_exit_code=78,
+            launchd_snapshot="gui = {\n  state = running\n  last exit code = 78\n}",
         )
         assert "kickstart -k" in calls, (
             f"running state must not inherit a stale permanent-exit fence: {calls!r}"
         )
         assert "com.whatsoup.running-stale-exit-bot" in calls
+
+    def test_clean_last_exit_status_78_is_not_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="permanent-status-bot",
+            launchd_snapshot="gui = {\n  state = stopped\n  last exit status = 78\n}",
+        )
+        assert "kickstart" not in calls, (
+            f"clean stopped/status-78 snapshot must suppress restart: {calls!r}"
+        )
+
+    def test_exit_78_with_junk_suffix_is_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="junk-exit-bot",
+            launchd_snapshot="gui = {\n  state = stopped\n  last exit code = 78 garbage\n}",
+        )
+        assert "kickstart -k" in calls, (
+            f"non-numeric exit value must not suppress restart: {calls!r}"
+        )
+
+    def test_duplicate_state_fields_are_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="duplicate-state-bot",
+            launchd_snapshot=(
+                "gui = {\n  state = stopped\n  state = stopped\n"
+                "  last exit code = 78\n}"
+            ),
+        )
+        assert "kickstart -k" in calls, (
+            f"duplicate state fields must not suppress restart: {calls!r}"
+        )
+
+    def test_conflicting_state_fields_are_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="conflicting-state-bot",
+            launchd_snapshot=(
+                "gui = {\n  state = stopped\n  state = running\n"
+                "  last exit code = 78\n}"
+            ),
+        )
+        assert "kickstart -k" in calls, (
+            f"conflicting state fields must not suppress restart: {calls!r}"
+        )
+
+    def test_duplicate_exit_fields_are_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="duplicate-exit-bot",
+            launchd_snapshot=(
+                "gui = {\n  state = stopped\n  last exit code = 78\n"
+                "  last exit code = 78\n}"
+            ),
+        )
+        assert "kickstart -k" in calls, (
+            f"duplicate exit fields must not suppress restart: {calls!r}"
+        )
+
+    def test_conflicting_exit_fields_are_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="conflicting-exit-bot",
+            launchd_snapshot=(
+                "gui = {\n  state = stopped\n  last exit code = 1\n"
+                "  last exit status = 78\n}"
+            ),
+        )
+        assert "kickstart -k" in calls, (
+            f"conflicting exit fields must not suppress restart: {calls!r}"
+        )
+
+    def test_malformed_or_missing_launchd_fields_are_kickstarted(self, tmp_path):
+        cases = [
+            ("missing-state", "gui = {\n  last exit code = 78\n}"),
+            ("missing-exit", "gui = {\n  state = stopped\n}"),
+            ("malformed-state", "gui = {\n  state =\n  last exit code = 78\n}"),
+            ("malformed-exit", "gui = {\n  state = stopped\n  last exit code = nope\n}"),
+        ]
+        for label, snapshot in cases:
+            calls = _run_rendered_unreachable_watchdog(
+                tmp_path / label,
+                bot_name=f"{label}-bot",
+                launchd_snapshot=snapshot,
+            )
+            assert "kickstart -k" in calls, (
+                f"{label} snapshot must not suppress restart: {calls!r}"
+            )
 
 
 class TestRestartOnLivenessFailure:
