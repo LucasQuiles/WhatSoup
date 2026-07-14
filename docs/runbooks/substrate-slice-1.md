@@ -90,6 +90,22 @@ SELECT b.id, b.title, b.created_at, b.chat_jid
 
 Approve via the `approve_proposal` MCP tool; reject via `reject_proposal`. Both are admin-gated on `SessionContext.actorJid`.
 
+**Finding overdue proposals (#1773):** `review_by_at` is computed at proposal time (`runtime.ts`, default `config.memory.sweep.reviewByDays` = 7 days) but is only consumable through the surfaces below — there is still no automatic terminal-state transition for an overdue proposal (that is a deliberate, separately-tracked owner decision; #1773 remediation 2). To find and act on proposals whose deadline has passed:
+
+- `list_beads` MCP tool with `review_overdue: true` — surfaces `status='proposed'` beads past `review_by_at`, overriding any `status` filter.
+- The trigger poller (`src/core/substrate/poller.ts`) checks the overdue-proposal count on every tick and fires a `bead_proposal_backlog` alert (via the standard `emitAlertChecked`/bot-errors path) once the count exceeds `config.memory.sweep.overdueProposalAlertThreshold` (default 10), clearing it once the backlog drains back at/under the threshold.
+- Dispose of a surfaced proposal via `approve_proposal` or `reject_proposal` as usual.
+
+```sql
+-- Ad-hoc equivalent of list_beads(review_overdue: true)
+SELECT id, title, owner_jid, review_by_at
+  FROM beads
+ WHERE status = 'proposed'
+   AND review_by_at IS NOT NULL
+   AND review_by_at < strftime('%s','now')
+ ORDER BY review_by_at ASC;
+```
+
 ## Admin gating model
 
 Mutating substrate MCP tools gate on `SessionContext.actorJid` — the phone JID of the sender, NOT `deliveryJid` (the target chat). In groups these differ. Runtime callers must populate `actorJid` from the incoming message's `senderJid` before dispatching. Missing `actorJid` = rejected as admin-only, even for the admin's own DM. The runtime wires `actorJid` into socket-backed MCP sessions and updates the provider bridge before forwarding each turn.

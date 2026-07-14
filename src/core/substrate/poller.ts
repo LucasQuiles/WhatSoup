@@ -43,7 +43,7 @@ import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
 import { dueTriggers, validateTriggerSpec, isSafeSqliteSql } from './triggers.ts';
-import { TERMINAL } from './beads.ts';
+import { TERMINAL, countOverdueProposals } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
 import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
@@ -51,6 +51,7 @@ import type { Messenger } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { fetchUrlGuarded, SsrfBlockedError, type GuardedFetchResult } from '../../lib/ssrf-fetch.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('substrate.trigger-poller');
 
@@ -72,6 +73,13 @@ const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 const FAILED_RETRY_COOLDOWN_SEC = 60;
 /** Auto-pause a trigger after this many consecutive failed runs. */
 const MAX_CONSECUTIVE_FAILURES = 5;
+/**
+ * Default backlog-alert threshold for #1773 rem-3 (overridden by
+ * config.memory.sweep.overdueProposalAlertThreshold in production). Alerts
+ * once the count of status='proposed' beads past review_by_at exceeds this
+ * many rows — see checkOverdueProposalBacklog.
+ */
+const DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD = 10;
 /** Minimum seconds between WhatsApp notifications per trigger. */
 const NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300;
 /**
@@ -221,6 +229,21 @@ export interface TriggerPollerOptions {
    * posting a bare "cron tick fired" notification that never runs the prompt.
    */
   agentJobDispatch?: AgentJobDispatchFn;
+  /**
+   * Instance name (config.botName) used to attribute the #1773 rem-3 backlog
+   * alert via emitAlertChecked. When UNSET the backlog check is skipped
+   * entirely (fail-safe no-op) — an alert with no attributable instance
+   * cannot be routed, so it must not attempt to fire at all. This also keeps
+   * tests that construct a TriggerPoller without an instance name from ever
+   * touching the alert channel.
+   */
+  instance?: string;
+  /**
+   * Threshold for the #1773 rem-3 backlog alert: emitted once the count of
+   * status='proposed' beads past review_by_at exceeds this many rows.
+   * Production passes config.memory.sweep.overdueProposalAlertThreshold.
+   */
+  overdueProposalAlertThreshold?: number;
 }
 
 interface SqliteSpec {
@@ -314,6 +337,15 @@ export class TriggerPoller {
   private readonly enableUrlWatch: boolean;
   private readonly urlFetch: UrlFetchFn;
   private readonly agentJobDispatch: AgentJobDispatchFn | null;
+  private readonly instance: string | null;
+  private readonly overdueProposalAlertThreshold: number;
+  /**
+   * State-transition guard for the #1773 rem-3 backlog alert (mirrors
+   * ConnectionManager.loggedOutAlertEmitted): fire once when the backlog
+   * crosses the threshold, clear once it drains back at/under it — never
+   * re-alert every tick while the condition persists.
+   */
+  private overdueProposalAlertEmitted = false;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -336,6 +368,8 @@ export class TriggerPoller {
     this.enableUrlWatch = opts.enableUrlWatch ?? false;
     this.urlFetch = opts.urlFetch ?? fetchUrlGuarded;
     this.agentJobDispatch = opts.agentJobDispatch ?? null;
+    this.instance = opts.instance ?? null;
+    this.overdueProposalAlertThreshold = opts.overdueProposalAlertThreshold ?? DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD;
   }
 
   start(): void {
@@ -396,8 +430,52 @@ export class TriggerPoller {
         );
       }
     }
+    // 3. Backlog-growth alert (#1773 rem-3). Isolated in its own try/catch so
+    //    a count-query failure can never disrupt trigger draining above —
+    //    tickOnce's primary job is dueTriggers/expiry, not this alert.
+    try {
+      this.checkOverdueProposalBacklog(now);
+    } catch (err) {
+      log.error({ err }, 'overdue-proposal backlog check failed unexpectedly');
+    }
     this.lastRunAt = new Date(now * 1000).toISOString();
     return processed;
+  }
+
+  /**
+   * #1773 rem-3: alert when the count of status='proposed' beads past
+   * review_by_at exceeds overdueProposalAlertThreshold. State-transition
+   * guarded (fires once, clears once resolved) via
+   * overdueProposalAlertEmitted, mirroring ConnectionManager's
+   * loggedOutAlertEmitted pattern rather than re-alerting every tick.
+   * No-ops when `instance` is unset — an alert with no attributable instance
+   * name cannot be routed through emitAlertChecked.
+   */
+  private checkOverdueProposalBacklog(now: number): void {
+    if (!this.instance) return;
+    const count = countOverdueProposals(this.db, now);
+    const over = count > this.overdueProposalAlertThreshold;
+    if (over && !this.overdueProposalAlertEmitted) {
+      this.overdueProposalAlertEmitted = emitAlertChecked(
+        this.instance,
+        'bead_proposal_backlog',
+        `whatsoup@${this.instance} has ${count} bead proposals past review_by_at (threshold ${this.overdueProposalAlertThreshold})`,
+        [
+          `overdueCount=${count}`,
+          `threshold=${this.overdueProposalAlertThreshold}`,
+          `checkedAt=${new Date(now * 1000).toISOString()}`,
+          'ref: #1773 — review_by_at was written but never read; use list_beads(review_overdue:true) to inspect, approve_proposal/reject_proposal to dispose.',
+        ].join('\n'),
+        'warning',
+      );
+    } else if (!over && this.overdueProposalAlertEmitted) {
+      clearAlertSourceChecked(
+        this.instance,
+        'bead_proposal_backlog',
+        `overdueCount=${count} <= threshold=${this.overdueProposalAlertThreshold}`,
+      );
+      this.overdueProposalAlertEmitted = false;
+    }
   }
 
   private scheduleNext(): void {

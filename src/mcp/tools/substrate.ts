@@ -391,7 +391,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
 
   registry.register({
     name: 'list_beads',
-    description: 'List beads with optional filters.',
+    description: 'List beads with optional filters. review_overdue surfaces status=proposed beads whose review_by_at deadline has passed (#1773) and overrides any status filter with the hardcoded proposed predicate.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'read_only',
     schema: z.object({
       owner_jid: z.string().optional(),
@@ -401,6 +401,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       due_before: z.number().int().positive().optional(),
       since: z.number().int().positive().optional(),
       limit: z.number().int().positive().max(500).optional(),
+      review_overdue: z.boolean().optional(),
     }),
     handler: async (raw) => {
       const p = raw as {
@@ -408,10 +409,12 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         kind?: 'task' | 'project' | 'observation' | 'agent_job' | 'watch';
         status?: 'active' | 'proposed' | 'paused' | 'completed' | 'cancelled' | 'failed';
         chat_jid?: string; due_before?: number; since?: number; limit?: number;
+        review_overdue?: boolean;
       };
       return { beads: listBeads(deps.db, {
         ownerJid: p.owner_jid, kind: p.kind, status: p.status, chatJid: p.chat_jid,
         dueBefore: p.due_before, since: p.since, limit: p.limit,
+        reviewOverdue: p.review_overdue,
       }) };
     },
   });

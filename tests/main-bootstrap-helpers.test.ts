@@ -267,7 +267,12 @@ async function importMainWithMocks(options: {
     chatAliases: {},
     profiles: null,
     authDir: '/tmp/ws-helpers-auth',
-    memory: { consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false }, pinecone: { allowedIndexes: [] }, fileWatch: { allowedRoots: [] } },
+    memory: {
+    consolidation: { enabled: true, intervalHours: 6, lookbackDays: 7, dryRun: false },
+    sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.80, lookbackHours: 48, reviewByDays: 7, overdueProposalAlertThreshold: 10 },
+    pinecone: { allowedIndexes: [] },
+    fileWatch: { allowedRoots: [] },
+  },
     advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
     controlPeers: new Set<string>(options.controlPeers ?? []),
     configRoot: '/tmp/ws-helpers-config-root',

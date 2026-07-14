@@ -859,6 +859,10 @@ const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   agentJobDispatch: runtime instanceof AgentRuntime
     ? (jobCtx) => runtime.dispatchAgentJob(jobCtx)
     : undefined,
+  // #1773 rem-3: backlog-growth alert for bead proposals stuck past
+  // review_by_at. instance attributes the alert via emitAlertChecked.
+  instance: config.botName,
+  overdueProposalAlertThreshold: config.memory.sweep.overdueProposalAlertThreshold,
 });
 triggerPoller.start();
 

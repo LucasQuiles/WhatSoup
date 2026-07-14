@@ -58,6 +58,7 @@ export interface MemoryConfig {
     beadUpdateMin: number;
     lookbackHours: number;
     reviewByDays: number;
+    overdueProposalAlertThreshold: number;
   };
   watchTtl: {
     defaultHours: number;
@@ -759,6 +760,11 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       beadUpdateMin: numberProp(sweep, 'bead_update_min', 0.80),
       lookbackHours: numberProp(sweep, 'lookback_hours', 48),
       reviewByDays: numberProp(sweep, 'review_by_days', 7),
+      // #1773 rem-3: backlog-growth alert threshold. The trigger poller emits
+      // a single alert (state-transition guarded — see
+      // TriggerPoller.overdueProposalAlertEmitted) once the count of
+      // status='proposed' beads past review_by_at exceeds this many rows.
+      overdueProposalAlertThreshold: numberProp(sweep, 'overdue_proposal_alert_threshold', 10),
     },
     watchTtl: {
       defaultHours: numberProp(watchTtl, 'default_hours', 24),
