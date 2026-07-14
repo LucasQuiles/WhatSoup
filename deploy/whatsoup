@@ -75,6 +75,42 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   exit 1
 fi
 
+# Database compatibility precedes restart preflight, git metadata, tmp
+# creation, full config parsing, and every provider credential/keyring lookup.
+# A future schema or hot rollback journal enters the dependency-free health
+# drain directly, so unrelated startup damage cannot mask the storage verdict.
+DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
+if DATABASE_COMPATIBILITY_STATUS="$(
+  "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check
+)"; then
+  :
+else
+  DATABASE_COMPATIBILITY_RC=$?
+  echo "FATAL: database compatibility preflight failed for instance '$INSTANCE'" >&2
+  if [ "$DATABASE_COMPATIBILITY_RC" -eq "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS" ]; then
+    exit "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS"
+  fi
+  exit 1
+fi
+case "$DATABASE_COMPATIBILITY_STATUS" in
+  ready) ;;
+  future_schema|engine_recovery_required)
+    exec "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --hold
+    ;;
+  *)
+    echo "FATAL: unrecognized database compatibility status for instance '$INSTANCE'" >&2
+    exit 1
+    ;;
+esac
+unset DATABASE_COMPATIBILITY_STATUS DATABASE_COMPATIBILITY_RC \
+  DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS
+
 # Restart-safety pre-flight gate: probe the live import graph (bootstrap.ts ->
 # main.ts -> runtimes/agent/runtime.ts) BEFORE exec'ing node, so a dirty/partial
 # tree with a phantom import cannot crash-loop on restart while the old cached
@@ -110,42 +146,6 @@ fi
 
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
 export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
-
-# Database compatibility precedes tmp creation, full config parsing, and every
-# provider credential/keyring lookup. A future schema or hot rollback journal
-# enters the dependency-free health drain directly, so unrelated environment
-# or config damage cannot mask/restart-loop the storage safety state.
-DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
-if DATABASE_COMPATIBILITY_STATUS="$(
-  "$NODE" \
-    --disable-warning=ExperimentalWarning \
-    --experimental-strip-types \
-    "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check
-)"; then
-  :
-else
-  DATABASE_COMPATIBILITY_RC=$?
-  echo "FATAL: database compatibility preflight failed for instance '$INSTANCE'" >&2
-  if [ "$DATABASE_COMPATIBILITY_RC" -eq "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS" ]; then
-    exit "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS"
-  fi
-  exit 1
-fi
-case "$DATABASE_COMPATIBILITY_STATUS" in
-  ready) ;;
-  future_schema|engine_recovery_required)
-    exec "$NODE" \
-      --disable-warning=ExperimentalWarning \
-      --experimental-strip-types \
-      "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --hold
-    ;;
-  *)
-    echo "FATAL: unrecognized database compatibility status for instance '$INSTANCE'" >&2
-    exit 1
-    ;;
-esac
-unset DATABASE_COMPATIBILITY_STATUS DATABASE_COMPATIBILITY_RC \
-  DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS
 
 # Pin process temp files under a per-instance WhatSoup-owned tmp directory so
 # Baileys encrypted upload blobs are not exposed to macOS /var/folders cleanup.

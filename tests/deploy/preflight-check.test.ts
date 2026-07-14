@@ -41,6 +41,7 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
+const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 
 // The pinned interpreter under test. The fixture repo is generated to match the
@@ -93,6 +94,11 @@ function makeFixtureTree(
     'utf8',
   );
   writeFileSync(join(root, 'src', 'main.ts'), mainTs, 'utf8');
+  writeFileSync(
+    join(root, 'src', 'database-compatibility-bootstrap.ts'),
+    'export const databaseCompatibilityBootstrapFixture = true;\n',
+    'utf8',
+  );
   for (const [rel, contents] of Object.entries(extraFiles)) {
     const abs = join(root, rel);
     mkdirSync(dirname(abs), { recursive: true });
@@ -180,6 +186,18 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — restart-safety gate
 
     expect(status).toBe(0);
     expect(stderr).toContain('PREFLIGHT-OK');
+  });
+
+  it('fails closed when the required database compatibility entrypoint is missing', () => {
+    const root = makeFixtureTree('export const mainOk = true;\n');
+    const bootstrap = join(root, 'src', 'database-compatibility-bootstrap.ts');
+    rmSync(bootstrap);
+
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('PREFLIGHT-ERROR: entrypoint not found');
+    expect(stderr).toContain(bootstrap);
   });
 
   it('(c) treats a credential/env-only init failure as SAFE — exit 0', () => {
@@ -321,10 +339,54 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight behavior', () => {
 });
 
 describe('deploy/whatsoup — source wiring', () => {
+  it('runs the database compatibility verdict before restart preflight', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const nodeResolution = wrapper.indexOf('NODE="$(whatsoup_resolve_node "$REPO_ROOT")"');
+    const databaseCheck = wrapper.indexOf(
+      '"$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check',
+    );
+    const skipRestartPreflight = wrapper.indexOf(
+      'if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then',
+    );
+    const restartPreflight = wrapper.indexOf(
+      'WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"',
+    );
+    expect(nodeResolution).toBeGreaterThan(-1);
+    expect(databaseCheck).toBeGreaterThan(-1);
+    expect(skipRestartPreflight).toBeGreaterThan(-1);
+    expect(restartPreflight).toBeGreaterThan(-1);
+    expect(nodeResolution).toBeLessThan(databaseCheck);
+    expect(databaseCheck).toBeLessThan(skipRestartPreflight);
+    expect(databaseCheck).toBeLessThan(restartPreflight);
+  });
+
+  it('tracks the database compatibility bootstrap as a hashed import graph', () => {
+    const manifest = JSON.parse(readFileSync(SOURCE_RUNTIME_MANIFEST, 'utf8')) as {
+      entrypoints: Array<{
+        path: string;
+        sha256?: string;
+        mustContain?: string[];
+        importGraph?: boolean;
+      }>;
+    };
+    const bootstrap = manifest.entrypoints.find(
+      (entry) => entry.path === 'src/database-compatibility-bootstrap.ts',
+    );
+
+    expect(bootstrap).toBeDefined();
+    expect(bootstrap?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(bootstrap?.importGraph).toBe(true);
+    expect(bootstrap?.mustContain).toEqual(expect.arrayContaining([
+      'databaseCompatibilityBootstrap',
+      'checkLoadedInstanceDatabase',
+    ]));
+  });
+
   it('runs database compatibility before tmp creation and full instance parsing', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     const compatibility = wrapper.indexOf('src/database-compatibility-bootstrap.ts');
     expect(compatibility).toBeGreaterThan(-1);
+    expect(compatibility).toBeLessThan(wrapper.indexOf('git -C "$REPO_ROOT"'));
     expect(compatibility).toBeLessThan(wrapper.indexOf('mkdir -p "$TMPDIR"'));
     expect(compatibility).toBeLessThan(wrapper.indexOf('INSTANCE_TYPE='));
   });

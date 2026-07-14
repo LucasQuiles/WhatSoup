@@ -52,6 +52,10 @@ if [ ! -f "$MAIN_TS" ]; then
 fi
 SESSION_TS="$REPO_ROOT/src/runtimes/agent/session.ts"
 DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
+if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROBE_TS="$SCRIPT_DIR/preflight-probe.ts"
@@ -128,9 +132,7 @@ PROBE_TARGETS=("$MAIN_TS")
 if [ -f "$SESSION_TS" ]; then
   PROBE_TARGETS+=("$SESSION_TS")
 fi
-if [ -f "$DATABASE_BOOTSTRAP_TS" ]; then
-  PROBE_TARGETS+=("$DATABASE_BOOTSTRAP_TS")
-fi
+PROBE_TARGETS+=("$DATABASE_BOOTSTRAP_TS")
 
 set +e
 probe_out="$(

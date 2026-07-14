@@ -908,6 +908,8 @@ describe('database schema ceiling', () => {
       const begin = statements.indexOf('BEGIN IMMEDIATE');
       const commit = statements.indexOf('COMMIT');
       const wal = statements.indexOf('PRAGMA JOURNAL_MODE = WAL');
+      expect(statements.filter((sql) => sql === 'BEGIN IMMEDIATE')).toHaveLength(1);
+      expect(statements.filter((sql) => sql === 'COMMIT')).toHaveLength(1);
       expect(begin).toBeGreaterThanOrEqual(0);
       expect(commit).toBeGreaterThan(begin);
       expect(wal).toBeGreaterThan(commit);
