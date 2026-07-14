@@ -12,6 +12,7 @@ import type { KnowledgeProfileConfig } from '../../config.ts';
 import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
 import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 
 const log = createChildLogger('knowledge-tools');
 
@@ -31,6 +32,7 @@ interface ParsedHit {
 
 function pineconeMemoryConfig(): {
   apiKeyEnv: string;
+  apiKeyService?: string;
   projectId?: string;
   expectedHostSuffix?: string;
   namespaces?: { facts?: string; chunks?: string; summaries?: string; [key: string]: string | undefined };
@@ -40,6 +42,7 @@ function pineconeMemoryConfig(): {
     memory?: {
       pinecone?: {
         apiKeyEnv?: string;
+        apiKeyService?: string;
         projectId?: string;
         expectedHostSuffix?: string;
         namespaces?: { facts?: string; chunks?: string; summaries?: string; [key: string]: string | undefined };
@@ -49,6 +52,9 @@ function pineconeMemoryConfig(): {
   }).memory?.pinecone;
   return {
     apiKeyEnv: pinecone?.apiKeyEnv || 'PINECONE_API_KEY',
+    apiKeyService: typeof pinecone?.apiKeyService === 'string' && pinecone.apiKeyService.trim() !== ''
+      ? pinecone.apiKeyService
+      : undefined,
     projectId: pinecone?.projectId,
     expectedHostSuffix: pinecone?.expectedHostSuffix,
     namespaces: pinecone?.namespaces,
@@ -179,7 +185,7 @@ export function createPineconeWatchSearch(
   if (allowedIndexes.length === 0) return null;
 
   const memoryConfig = pineconeMemoryConfig();
-  const apiKey = process.env[memoryConfig.apiKeyEnv] ?? '';
+  const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: memoryConfig.apiKeyEnv });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — poll.pinecone watches disabled');
     return null;
@@ -257,7 +263,7 @@ export function registerKnowledgeTools(
 
   const memoryConfig = pineconeMemoryConfig();
   const envVarName = memoryConfig.apiKeyEnv;
-  const apiKey = process.env[envVarName] ?? '';
+  const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
     return;
