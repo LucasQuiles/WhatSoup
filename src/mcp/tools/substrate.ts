@@ -185,6 +185,13 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       schedule: z.object({
         kind: z.enum(['schedule.cron', 'schedule.at_time']),
         expr: z.string().optional(),
+        // No upper bound here by design: fire_at is unit-ambiguous
+        // (epoch-seconds vs. epoch-milliseconds) at the shape level, and
+        // that ambiguity is resolved once, centrally, in
+        // triggers.ts:normalizeFireAtSeconds (called from computeNextFireAt)
+        // so every current and future creation path gets the same
+        // enforcement point rather than duplicating a ceiling per caller
+        // (#1757).
         fire_at: z.number().int().positive().optional(),
         tz: z.string().optional(),
       }),
