@@ -3,6 +3,17 @@ import { join } from 'node:path';
 
 const level = process.env.LOG_LEVEL ?? 'info';
 
+// Pino's default serializers only cover the `err` key (WhatSoup's own
+// logging convention). Third-party code we don't own — e.g. Baileys, which
+// logs `logger.error({ error }, ...)` (node_modules/@whiskeysockets/baileys/
+// lib/Utils/auth-utils.js) — uses the `error` key instead. Without a
+// serializer for it, an Error's message/stack (non-enumerable) are dropped
+// by plain JSON.stringify(), producing `error: {}` and erasing the failure
+// cause (#1776). Registering pino's std error serializer under both keys
+// covers our convention and theirs at this single seam, rather than
+// patching call sites we don't own.
+export const errorLikeSerializers = { err: pino.stdSerializers.err, error: pino.stdSerializers.err };
+
 // ─── File transport via pino-roll ─────────────────────────────────────────────
 // Activated when LOG_DIR env var is set (always true in production via config/systemd).
 // pino.transport() creates an async worker thread — writes are buffered and non-blocking.
@@ -43,7 +54,9 @@ if (logDir && fileTransportEnabled) {
   }
 }
 
-const logger = transport ? pino({ level }, transport) : pino({ level });
+const logger = transport
+  ? pino({ level, serializers: errorLikeSerializers }, transport)
+  : pino({ level, serializers: errorLikeSerializers });
 
 export default logger;
 

@@ -90,7 +90,7 @@ async function importLoggerWithMockedPino(options: {
     return options.transport;
   });
   const pinoFactory = vi.fn(() => logger);
-  Object.assign(pinoFactory, { transport: transportFactory });
+  Object.assign(pinoFactory, { transport: transportFactory, stdSerializers: { err: vi.fn((e) => e) } });
   vi.doMock('pino', () => ({ default: pinoFactory }));
 
   return {
@@ -227,14 +227,18 @@ describe('file transport configuration', () => {
       process.env.LOG_DIR = '/tmp/whatsoup-logs';
       const logger = createMockLogger();
       const transportFactory = vi.fn();
+      const stdErrSerializer = vi.fn((e) => e);
       const pinoFactory = vi.fn(() => logger);
-      Object.assign(pinoFactory, { transport: transportFactory });
+      Object.assign(pinoFactory, { transport: transportFactory, stdSerializers: { err: stdErrSerializer } });
       vi.doMock('pino', () => ({ default: pinoFactory }));
 
       await import('../src/logger');
 
       expect(transportFactory).not.toHaveBeenCalled();
-      expect(pinoFactory).toHaveBeenCalledWith({ level: 'info' });
+      expect(pinoFactory).toHaveBeenCalledWith({
+        level: 'info',
+        serializers: { err: stdErrSerializer, error: stdErrSerializer },
+      });
     },
   );
 
@@ -245,14 +249,18 @@ describe('file transport configuration', () => {
     const logger = createMockLogger();
     const transport = { end: vi.fn(), on: vi.fn() };
     const transportFactory = vi.fn(() => transport);
+    const stdErrSerializer = vi.fn((e) => e);
     const pinoFactory = vi.fn(() => logger);
-    Object.assign(pinoFactory, { transport: transportFactory });
+    Object.assign(pinoFactory, { transport: transportFactory, stdSerializers: { err: stdErrSerializer } });
     vi.doMock('pino', () => ({ default: pinoFactory }));
 
     await import('../src/logger');
 
     expect(transportFactory).toHaveBeenCalledOnce();
-    expect(pinoFactory).toHaveBeenCalledWith({ level: 'info' }, transport);
+    expect(pinoFactory).toHaveBeenCalledWith(
+      { level: 'info', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      transport,
+    );
   });
 
   it('creates stdout and rolling-file targets when LOG_DIR is set', async () => {
@@ -279,7 +287,11 @@ describe('file transport configuration', () => {
         },
       ],
     });
-    expect(pinoFactory).toHaveBeenCalledWith({ level: 'debug' }, transport);
+    const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
+    expect(pinoFactory).toHaveBeenCalledWith(
+      { level: 'debug', serializers: { err: stdErrSerializer, error: stdErrSerializer } },
+      transport,
+    );
     expect(loggerModule.default.level).toBe('debug');
   });
 
@@ -292,8 +304,12 @@ describe('file transport configuration', () => {
 
     await loggerModule.flushLogger();
 
+    const stdErrSerializer = (pinoFactory as unknown as { stdSerializers: { err: unknown } }).stdSerializers.err;
     expect(transportFactory).toHaveBeenCalledOnce();
-    expect(pinoFactory).toHaveBeenCalledWith({ level: 'warn' });
+    expect(pinoFactory).toHaveBeenCalledWith({
+      level: 'warn',
+      serializers: { err: stdErrSerializer, error: stdErrSerializer },
+    });
     expect(logger.flush).not.toHaveBeenCalled();
     expect(loggerModule.default.level).toBe('warn');
   });
