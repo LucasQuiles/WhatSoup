@@ -2,7 +2,6 @@ import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
-import { assertCanonicalSchema43 } from '../src/core/database-migration-43.ts';
 import {
   closeOperatorCatchupRecoveryRaw,
   inspectOperatorCatchupRecovery,
@@ -193,7 +192,6 @@ function inspectReadOnly(
   try {
     raw.exec('PRAGMA foreign_keys = ON');
     assertExactSchema43(raw);
-    assertCanonicalSchema43(raw);
     const inspection = inspectOperatorCatchupRecovery(raw, params);
     assertSameDatabaseFile(identity, assertExistingRegularDatabase(dbPath));
     return { inspection, identity };
@@ -249,7 +247,6 @@ export function runCloseRecoveryCatchupCli(argv: string[]): number {
     const receipt = closeOperatorCatchupRecoveryRaw(raw, params, (transactionRaw) => {
       assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
       assertExactSchema43(transactionRaw);
-      assertCanonicalSchema43(transactionRaw);
     });
     process.stdout.write(`${JSON.stringify({
       ok: true,

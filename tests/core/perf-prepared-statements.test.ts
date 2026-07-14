@@ -28,9 +28,10 @@ describe('prepared statement caching', () => {
 
     // Fixed constructor statements, including turn finalization, recovery lifecycle,
     // echo settlement/health diagnostics, duplicate receipts, completed-session lookup,
-    // exact-session lifecycle transitions, and the cached BEGIN/COMMIT/ROLLBACK runner.
+    // exact-session lifecycle transitions, the cached BEGIN/COMMIT/ROLLBACK runner,
+    // and eight recovery plan/run/disposition/corroboration evidence statements.
     // Lifecycle methods must not prepare SQL per call.
-    expect(prepareSpy).toHaveBeenCalledTimes(99);
+    expect(prepareSpy).toHaveBeenCalledTimes(107);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

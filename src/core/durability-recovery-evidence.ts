@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
-import type { RecoveryStats } from './durability.ts';
 
+const log = createChildLogger('durability');
 const RECOVERY_ACTOR = 'durability_engine';
 const DELIVERY_CORROBORATION_BASIS = 'same_source_later_echoed_op';
 
@@ -11,6 +12,20 @@ type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 export interface RecoveryReceipt {
   recoveryPlanId: string;
   recoveryRunId: number;
+}
+
+export interface RecoveryStats {
+  inboundReplayed: number;
+  outboundReconciled: number;
+  outboundReplayed: number;
+  outboundQuarantined: number;
+  toolCallsRecovered: number;
+  toolCallsReplayed: number;
+  toolCallsQuarantined: number;
+  sessionsRestored: number;
+  recoveryPlanId?: string | null;
+  recoveryRunId?: number | null;
+  openRecoveries?: number;
 }
 
 export type RecoveryOrigin =
@@ -27,6 +42,29 @@ interface RecoveryEvidenceStatements {
   countOpenRecoveries: PreparedStatement;
   reconcileTurnDeliveryCorroboration: PreparedStatement;
   hasTurnDeliveryCorroboration: PreparedStatement;
+}
+
+type RecoveryOperation = 'preConnectRecovery' | 'postConnectRecovery';
+
+interface RecoveryPhaseFailure {
+  phase: string;
+  error: unknown;
+}
+
+export function createRecoveryStats(receipt?: RecoveryReceipt): RecoveryStats {
+  return {
+    inboundReplayed: 0,
+    outboundReconciled: 0,
+    outboundReplayed: 0,
+    outboundQuarantined: 0,
+    toolCallsRecovered: 0,
+    toolCallsReplayed: 0,
+    toolCallsQuarantined: 0,
+    sessionsRestored: 0,
+    recoveryPlanId: receipt?.recoveryPlanId ?? null,
+    recoveryRunId: receipt?.recoveryRunId ?? null,
+    openRecoveries: 0,
+  };
 }
 
 export class DurabilityRecoveryEvidence {
@@ -160,6 +198,19 @@ export class DurabilityRecoveryEvidence {
     return withTransaction(this.db, () => this.startWithinTransaction(origin, trigger, summary));
   }
 
+  begin(
+    operation: RecoveryOperation,
+    origin: RecoveryOrigin,
+    trigger: string,
+    summary: string,
+  ): DurabilityRecoveryRun {
+    return new DurabilityRecoveryRun(
+      this,
+      operation,
+      this.start(origin, trigger, summary),
+    );
+  }
+
   finalize(receipt: RecoveryReceipt, stats: RecoveryStats, notes: string | null = null): void {
     const result = this.statements.finalizeStartedRecoveryRun.run(
       stats.inboundReplayed,
@@ -250,5 +301,99 @@ export class DurabilityRecoveryEvidence {
 
   hasDeliveryCorroboration(opId: number): boolean {
     return this.statements.hasTurnDeliveryCorroboration.get(opId) !== undefined;
+  }
+}
+
+/** Owns one durable recovery receipt from admission through finalization. */
+class DurabilityRecoveryRun {
+  readonly receipt: RecoveryReceipt;
+  readonly stats: RecoveryStats;
+  private readonly evidence: DurabilityRecoveryEvidence;
+  private readonly operation: RecoveryOperation;
+  private readonly failures: RecoveryPhaseFailure[] = [];
+
+  constructor(
+    evidence: DurabilityRecoveryEvidence,
+    operation: RecoveryOperation,
+    receipt: RecoveryReceipt,
+  ) {
+    this.evidence = evidence;
+    this.operation = operation;
+    this.receipt = receipt;
+    this.stats = createRecoveryStats(receipt);
+  }
+
+  recordFailure(phase: string, error: unknown): void {
+    this.failures.push({ phase, error });
+  }
+
+  failImmediately(
+    phase: string,
+    error: unknown,
+    openRecoveries: number | null = null,
+  ): never {
+    this.recordFailure(phase, error);
+    return this.failIncomplete(openRecoveries);
+  }
+
+  attestOpenRecoveries(): void {
+    try {
+      this.stats.openRecoveries = this.evidence.countOpen();
+    } catch (err) {
+      this.failImmediately('count_open_recoveries', err);
+    }
+    if (this.failures.length > 0) {
+      this.failIncomplete(this.stats.openRecoveries ?? null);
+    }
+  }
+
+  finalize(notes?: string): void {
+    try {
+      this.evidence.finalize(
+        this.receipt,
+        this.stats,
+        notes ?? JSON.stringify({ openRecoveries: this.stats.openRecoveries }),
+      );
+    } catch (err) {
+      this.failImmediately(
+        'finalize_recovery_run',
+        err,
+        this.stats.openRecoveries ?? null,
+      );
+    }
+  }
+
+  private failIncomplete(openRecoveries: number | null): never {
+    const failedPhases = [...new Set(this.failures.map(({ phase }) => phase))];
+    const primaryFailure = this.failures[0]?.error;
+    const primaryError = primaryFailure instanceof Error
+      ? primaryFailure
+      : new Error(`${this.operation} failed during ${failedPhases[0] ?? 'unknown_phase'}`, {
+        cause: primaryFailure,
+      });
+    try {
+      this.evidence.recordIncomplete(
+        this.receipt,
+        this.stats,
+        JSON.stringify({ status: 'incomplete', failedPhases, openRecoveries }),
+      );
+    } catch (receiptFailure) {
+      const receiptError = receiptFailure instanceof Error
+        ? receiptFailure
+        : new Error('Incomplete recovery receipt persistence failed', {
+          cause: receiptFailure,
+        });
+      log.error(
+        { failedPhases, receiptError },
+        `${this.operation}: incomplete recovery receipt could not be recorded`,
+      );
+      throw new AggregateError(
+        [primaryError, receiptError],
+        `${this.operation}: recovery failed and its incomplete receipt could not be recorded`,
+        { cause: primaryError },
+      );
+    }
+    log.error({ failedPhases }, `${this.operation}: incomplete recovery recorded`);
+    throw primaryError;
   }
 }

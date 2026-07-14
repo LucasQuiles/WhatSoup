@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
+import { assertCanonicalSchema43 } from './database-migration-43.ts';
 import { withTransaction } from './db-tx.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
@@ -99,13 +100,15 @@ function sameNumbers(left: number[], right: number[]): boolean {
 }
 
 /**
- * Validate an operator catch-up closure without mutating the database. This is
- * the canonical proof inspection used by both CLI dry runs and the write path.
+ * Validate canonical schema-43 state and an operator catch-up closure without
+ * mutating the database. This is the proof inspection used by both CLI dry
+ * runs and the write path.
  */
 export function inspectOperatorCatchupRecovery(
   raw: DatabaseSync,
   params: CloseOperatorCatchupRecoveryParams,
 ): OperatorCatchupRecoveryInspection {
+  assertCanonicalSchema43(raw);
   const planId = requiredText(params.planId, 'Recovery plan ID');
   const conversationKey = requiredText(params.conversationKey, 'Conversation key');
   const actor = requiredText(params.actor, 'Recovery actor');

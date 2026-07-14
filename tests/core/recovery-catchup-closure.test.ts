@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
+import {
+  closeOperatorCatchupRecovery,
+  inspectOperatorCatchupRecovery,
+} from '../../src/core/recovery-catchup-closure.ts';
 
 describe('operator catch-up recovery closure', () => {
   let db: Database;
@@ -55,6 +58,28 @@ describe('operator catch-up recovery closure', () => {
       actor: 'operator:test',
       evidenceRef: 'test://echoed-ack',
     })).toMatchObject({ inserted: 0, idempotent: true, openBefore: 0, openAfter: 0 });
+  });
+
+  it('rejects read-only inspection when the canonical schema-43 contract has drifted', () => {
+    const fixture = installFixture('complete', true);
+    db.raw.exec(`
+      DROP TRIGGER operator_catchup_closure_witness_append_only_update;
+      CREATE TRIGGER operator_catchup_closure_witness_append_only_update
+      BEFORE UPDATE ON operator_catchup_closure_witnesses
+      BEGIN
+        SELECT 1;
+      END;
+    `);
+
+    expect(() => inspectOperatorCatchupRecovery(db.raw, {
+      planId: fixture.planId,
+      conversationKey: fixture.conversationKey,
+      expectedSourceSeqs: fixture.sourceSeqs,
+      catchupSeq: fixture.catchupSeq,
+      actor: 'operator:test',
+      evidenceRef: 'test://schema-attestation',
+    })).toThrow(/canonical schema 43 objects.*operator_catchup_closure_witness_append_only_update/i);
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
   });
 
   it.each([
