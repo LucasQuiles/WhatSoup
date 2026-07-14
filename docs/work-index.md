@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 58
+**Total entries:** 61
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=31, review=3, spec=19, state=1 |
-| Status | active=6, closed=4, completed=31, deferred=7, pending=9, unknown=1 |
-| Status source | body-marker=57, state-md-status=1 |
+| Kind | handoff=4, plan=31, review=3, spec=22, state=1 |
+| Status | active=8, closed=4, completed=31, deferred=7, pending=10, unknown=1 |
+| Status source | body-marker=60, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,13 +34,15 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (6)
+### Active (8)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | central-hub-release-proof-pilot | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
+| `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
+| `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
@@ -51,9 +53,16 @@ scoped markdown files currently on disk.
 |------|------|-------|----------|
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
-### Cross-tree topic clusters (1)
+### Cross-tree topic clusters (4)
 
 _Topics with entries in multiple canonical trees — candidates for canonical-home consolidation._
+
+#### `design`  —  2 entries across 2 locations
+
+| Path |
+|------|
+| `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` |
 
 #### `fleet-charts`  —  2 entries across 2 locations
 
@@ -61,6 +70,20 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` |
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` |
+
+#### `requirements`  —  2 entries across 2 locations
+
+| Path |
+|------|
+| `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` |
+
+#### `tasks`  —  2 entries across 2 locations
+
+| Path |
+|------|
+| `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` |
 
 ## Full listing by canonical parent
 
@@ -144,6 +167,14 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | active | body-marker | central-hub-release-proof-pilot-design | 2026-07-12 |  |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | unknown | body-marker | turn-lifecycle-fitness-extraction-design | 2026-07-11 |  |
 
+### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | active | body-marker | design | 2026-07-14 |  |
+| `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | active | body-marker | requirements | 2026-07-14 |  |
+| `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | spec | pending | body-marker | tasks | 2026-07-14 |  |
+
 ### docs/superpowers/specs/provider-event-lifecycle  _(3 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
@@ -155,4 +186,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-14T06:17:28Z from commit `56e232223132d33c347cd2d2521620f911d4f4b6`
+- Generated at 2026-07-14T07:11:11Z from commit `d0376dfe00f91e56637531f94f0b5d6f639fe231`
