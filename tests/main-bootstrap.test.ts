@@ -145,6 +145,7 @@ async function importMainWithMocks(options: {
         lookbackDays: 7,
         dryRun: false,
       },
+      sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.80, lookbackHours: 48, reviewByDays: 7, overdueProposalAlertThreshold: 10 },
       pinecone: { allowedIndexes: [] },
       fileWatch: { allowedRoots: [] },
     },
