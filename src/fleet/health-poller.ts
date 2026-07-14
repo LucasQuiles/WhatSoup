@@ -177,6 +177,7 @@ function evidenceField(name: string, value: unknown): string {
 function classifyDatabaseInspectionHealth(
   health: Record<string, unknown>,
   httpStatus: number | undefined,
+  expectedInstanceName: string,
 ): HealthSnapshotClassification | null {
   if (health.service_mode !== 'inspection_only') return null;
 
@@ -206,7 +207,7 @@ function classifyDatabaseInspectionHealth(
     || !Number.isFinite(generatedAtMs)
     || generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS
     || generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
-    || stringValue(instance?.name) === null
+    || instance?.name !== expectedInstanceName
     || positiveIntegerValue(instance?.pid) === null
     || instance?.mode !== 'inspection_only'
     || instance?.socket_path !== null
@@ -259,9 +260,14 @@ function classifyDatabaseInspectionHealth(
 
 function classifyHealthSnapshot(
   health: Record<string, unknown>,
+  expectedInstanceName: string,
   httpStatus?: number,
 ): HealthSnapshotClassification {
-  const databaseInspection = classifyDatabaseInspectionHealth(health, httpStatus);
+  const databaseInspection = classifyDatabaseInspectionHealth(
+    health,
+    httpStatus,
+    expectedInstanceName,
+  );
   if (databaseInspection !== null) return databaseInspection;
 
   const healthStatus = stringValue(health.status);
@@ -701,7 +707,7 @@ export class HealthPoller {
         // itself.
         try {
           const health = this.getSelfHealth();
-          const classification = classifyHealthSnapshot(health);
+          const classification = classifyHealthSnapshot(health, name);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
             return;
@@ -771,7 +777,7 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
-              const classification = classifyHealthSnapshot(failureHealth, res.status);
+              const classification = classifyHealthSnapshot(failureHealth, name, res.status);
               if (
                 isNonOnlineClassification(classification) &&
                 classification.reason !== 'health_body_unrecognized' &&
@@ -792,7 +798,7 @@ export class HealthPoller {
         }
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
-        const classification = classifyHealthSnapshot(health, responseStatus);
+        const classification = classifyHealthSnapshot(health, name, responseStatus);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
 

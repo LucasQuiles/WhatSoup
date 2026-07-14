@@ -70,11 +70,35 @@ ensure_loaded() {
   fi
 }
 
+launchd_reports_permanent_stop() {
+  local job_label="$1" launchd_state
+  launchd_state="$(launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
+  print -r -- "$launchd_state" | awk '
+    /^[[:space:]]*state[[:space:]]*=/ && state == "" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*$/, "")
+      state = $0
+    }
+    /^[[:space:]]*last exit (code|status)[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      if ($0 ~ /^[0-9]+([[:space:]]|$)/) {
+        sub(/[[:space:]].*$/, "")
+        exit_code = $0
+      }
+    }
+    END { exit !(state == "stopped" && exit_code == "78") }
+  '
+}
+
 # Restart a job with a 5-minute cooldown to avoid restart storms.
 restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local now last
+  if launchd_reports_permanent_stop "$job_label"; then
+    log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
+    return 0
+  fi
   now=$(date +%s)
   last=0
   [ -r "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
@@ -115,6 +139,7 @@ import sys
 
 data = json.loads(os.environ["BOT_JSON"])
 http_code = os.environ.get("BOT_CODE")
+expected_instance_name = "BOT_NAME"
 status = data.get("status")
 service_mode = data.get("service_mode")
 generated_at = data.get("generated_at")
@@ -162,8 +187,7 @@ if service_mode == "inspection_only":
         http_code == "503"
         and status == "unhealthy"
         and generated_is_fresh
-        and isinstance(instance.get("name"), str)
-        and bool(instance.get("name"))
+        and instance.get("name") == expected_instance_name
         and type(instance.get("pid")) is int
         and instance.get("pid") > 0
         and instance.get("mode") == "inspection_only"

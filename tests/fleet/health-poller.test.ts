@@ -1677,6 +1677,30 @@ describe('HealthPoller', () => {
     },
   );
 
+  it('does not grant inspection-only classification to another instance name', async () => {
+    const body = makeDatabaseInspectionHealth();
+    (body.instance as Record<string, unknown>).name = 'remote-2';
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve(body),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      consecutiveFailures: 0,
+      everReachable: true,
+      error: null,
+    });
+    expect(poller.getStatus('remote-1')!.statusReason).not.toMatch(/^database_/);
+  });
+
   it.each([
     [['startup_block', 'code'], 'unknown'],
     [['instance', 'name'], ''],

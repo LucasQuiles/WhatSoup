@@ -15,8 +15,9 @@ outbound_quarantined / primary_model_unusable alerts. These tests pin the
 policy so degraded-but-connected never triggers a restart, while real liveness
 failures still do.
 
-The tests exercise the *shipped* heredoc logic by extracting it from the
-template and running it under python3 — no duplicated decision code.
+The decision tests exercise the *shipped* heredoc by extracting it from the
+template and running it under python3. Launchd exit-policy tests render and run
+the complete shell script with deterministic curl and launchctl stubs.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -48,16 +51,20 @@ _TEMPLATE = (
 _HEREDOC_RE = re.compile(r"python3 - <<'PY'[^\n]*\n(.*?)\nPY$", re.DOTALL | re.MULTILINE)
 
 
-def _extract_decision_block() -> str:
+def _extract_decision_block(expected_name: str = "test-agent") -> str:
     text = _TEMPLATE.read_text(encoding="utf-8")
     match = _HEREDOC_RE.search(text)
     assert match, "watchdog template must contain a `python3 - <<'PY'` block"
-    return match.group(1)
+    return match.group(1).replace("BOT_NAME", expected_name)
 
 
-def _run_decision(health: dict, http_status: int = 200) -> int:
+def _run_decision(
+    health: dict,
+    http_status: int = 200,
+    expected_name: str = "test-agent",
+) -> int:
     """Run the shipped decision block with BOT_JSON=health; return exit code."""
-    block = _extract_decision_block()
+    block = _extract_decision_block(expected_name)
     env = dict(os.environ, BOT_JSON=json.dumps(health), BOT_CODE=str(http_status))
     proc = subprocess.run(
         [sys.executable, "-c", block],
@@ -158,9 +165,13 @@ class TestDatabaseCompatibilityDrainNoRestart:
     def test_matching_body_over_http_200_is_restart_worthy(self):
         assert _run_decision(self._body(), 200) != 0
 
-    @pytest.mark.parametrize(
-        ("path", "value"),
-        [
+    def test_inspection_body_for_another_instance_is_restart_worthy(self):
+        body = self._body()
+        body["instance"]["name"] = "other-agent"
+        assert _run_decision(body, 503) != 0
+
+    def test_malformed_inspection_body_is_restart_worthy(self):
+        cases = [
             (("status",), "degraded"),
             (("generated_at",), "not-a-date"),
             (("instance", "pid"), 0),
@@ -184,19 +195,19 @@ class TestDatabaseCompatibilityDrainNoRestart:
             (("whatsapp", "connected"), True),
             (("whatsapp", "account_jid"), "present"),
             (("whatsapp", "connection", "state"), "connected"),
-        ],
-    )
-    def test_malformed_inspection_body_is_restart_worthy(self, path, value):
-        body = self._body()
-        target = body
-        for key in path[:-1]:
-            target = target[key]
-        target[path[-1]] = value
-        assert _run_decision(body, 503) != 0
+        ]
+        for path, value in cases:
+            body = self._body()
+            target = body
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            assert _run_decision(body, 503) != 0, (
+                f"malformed field must fail closed: path={path!r} value={value!r}"
+            )
 
-    @pytest.mark.parametrize(
-        "path",
-        [
+    def test_partial_inspection_body_is_restart_worthy(self):
+        cases = [
             ("startup_block",),
             ("generated_at",),
             ("instance",),
@@ -208,15 +219,125 @@ class TestDatabaseCompatibilityDrainNoRestart:
             ("runtime", "agent"),
             ("whatsapp", "connection"),
             ("durability",),
-        ],
+        ]
+        for path in cases:
+            body = self._body()
+            target = body
+            for key in path[:-1]:
+                target = target[key]
+            del target[path[-1]]
+            assert _run_decision(body, 503) != 0, (
+                f"missing field must fail closed: path={path!r}"
+            )
+
+
+def _run_rendered_unreachable_watchdog(
+    tmp_path: Path,
+    *,
+    bot_name: str,
+    launchd_state: str,
+    last_exit_code: int,
+) -> str:
+    home = tmp_path / "home"
+    home.mkdir()
+    binroot = home / ".local" / "bin"
+    binroot.mkdir(parents=True)
+    calls = binroot / "launchctl.calls"
+
+    rendered = (
+        _TEMPLATE.read_text(encoding="utf-8")
+        .replace("__HOME__", str(home))
+        .replace("FLEET_PORT", "9998")
+        .replace("BOT_PORT", "9999")
+        .replace("BOT_NAME", bot_name)
+        .replace("USERNAME", os.environ.get("USER", "tester"))
     )
-    def test_partial_inspection_body_is_restart_worthy(self, path):
-        body = self._body()
-        target = body
-        for key in path[:-1]:
-            target = target[key]
-        del target[path[-1]]
-        assert _run_decision(body, 503) != 0
+    script = home / f"{bot_name}-watchdog"
+    script.write_text(rendered, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    curl = binroot / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do case "$arg" in\n'
+        "  *9999/health) exit 7;;\n"
+        "  *9998/*) printf 'ok'; exit 0;;\n"
+        "esac; done\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+    launchctl = binroot / "launchctl"
+    launchctl.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+        "if [ \"$1\" = print ]; then\n"
+        f"  printf 'gui = {{\\n    state = {launchd_state}\\n"
+        f"    last exit code = {last_exit_code}\\n}}\\n'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+
+    lock = Path(f"/tmp/com.whatsoup.{bot_name}-watchdog.lock")
+    if lock.exists():
+        shutil.rmtree(lock, ignore_errors=True)
+    proc = subprocess.run(
+        ["zsh", str(script)],
+        env=dict(os.environ, HOME=str(home)),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return calls.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
+class TestRenderedWatchdogLaunchdExitPolicy:
+    def test_unreachable_bot_with_last_exit_78_is_not_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="permanent-config-bot",
+            launchd_state="stopped",
+            last_exit_code=78,
+        )
+        bot_prints = [
+            call for call in calls.splitlines()
+            if call.startswith("print ") and "com.whatsoup.permanent-config-bot" in call
+        ]
+        assert len(bot_prints) == 2, (
+            f"watchdog must inspect bot launchd state before restart policy: {calls!r}"
+        )
+        assert "kickstart" not in calls, (
+            f"permanent launchd exit 78 must not be restarted: {calls!r}"
+        )
+
+    def test_unreachable_bot_with_non_78_exit_is_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="transient-exit-bot",
+            launchd_state="stopped",
+            last_exit_code=1,
+        )
+        assert "kickstart -k" in calls, (
+            f"transient unreachable bot must still be restarted: {calls!r}"
+        )
+        assert "com.whatsoup.transient-exit-bot" in calls
+
+    def test_running_bot_with_stale_last_exit_78_is_kickstarted(self, tmp_path):
+        calls = _run_rendered_unreachable_watchdog(
+            tmp_path,
+            bot_name="running-stale-exit-bot",
+            launchd_state="running",
+            last_exit_code=78,
+        )
+        assert "kickstart -k" in calls, (
+            f"running state must not inherit a stale permanent-exit fence: {calls!r}"
+        )
+        assert "com.whatsoup.running-stale-exit-bot" in calls
 
 
 class TestRestartOnLivenessFailure:
