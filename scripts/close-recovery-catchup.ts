@@ -163,12 +163,21 @@ function assertExactSchema43(raw: DatabaseSync): void {
     FROM schema_migrations
     ORDER BY version
   `).all() as Array<{ version: number }>).map((row) => Number(row.version));
+  // The attested evidence is the exact, contiguous 1..43 migration prefix —
+  // the schema-43 receipts and recovery tables this CLI validates. Migrations
+  // AFTER 43 are tolerated: an upgraded instance (44+) still carries
+  // byte-identical schema-43 provenance, and refusing any newer version would
+  // brick this operator tool the moment an unrelated migration lands (first
+  // tripped by migration 44's token-accounting columns). Genuine drift in the
+  // 1..43 evidence itself is still rejected by the receipt/DDL attestation
+  // downstream.
   const expected = Array.from({ length: 43 }, (_value, index) => index + 1);
+  const prefix = versions.slice(0, expected.length);
   if (
-    versions.length !== expected.length
-    || versions.some((version, index) => version !== expected[index])
+    prefix.length !== expected.length
+    || prefix.some((version, index) => version !== expected[index])
   ) {
-    throw new Error('Database must have exact schema 43 (migrations 1 through 43, none newer)');
+    throw new Error('Database must contain exact schema 43 as a contiguous migration prefix (1 through 43; newer migrations tolerated)');
   }
 }
 
