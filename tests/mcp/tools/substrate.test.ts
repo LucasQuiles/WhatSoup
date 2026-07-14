@@ -331,6 +331,38 @@ describe('substrate MCP tools', () => {
     expect(triggers.triggers).toEqual([]);
   });
 
+  it('#1757: create_agent_job normalizes an epoch-ms fire_at to epoch-seconds instead of storing it verbatim', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Caller mistakenly supplies milliseconds (e.g. `Date.now() + 3600_000`)
+    // instead of seconds — the ~1000x-too-large value must be normalized so
+    // the poller (which compares against a seconds clock) ever sees it fire,
+    // instead of being stored verbatim and silently never firing.
+    const fireAtMs = (nowSec + 3600) * 1000;
+
+    const res = parseResult(await registry.call('create_agent_job', {
+      prompt: 'ms-input digest',
+      schedule: { kind: 'schedule.at_time', fire_at: fireAtMs },
+      report_chat: 'report-chat@s.whatsapp.net',
+    }, adminSession));
+
+    const triggers = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(triggers.triggers[0].next_fire_at).toBe(nowSec + 3600);
+  });
+
+  it('#1757: create_agent_job rejects a schedule.at_time fire_at implausible in either unit, without leaving a bead', async () => {
+    const res = await registry.call('create_agent_job', {
+      prompt: 'garbage digest',
+      schedule: { kind: 'schedule.at_time', fire_at: 999_999_999_999_999 },
+      report_chat: 'report-chat@s.whatsapp.net',
+    }, adminSession);
+
+    expect(res.isError).toBe(true);
+    const beads = parseResult(await registry.call('list_beads', { owner_jid: adminPhone }, adminSession));
+    const triggers = parseResult(await registry.call('list_triggers', {}, adminSession));
+    expect(beads.beads).toEqual([]);
+    expect(triggers.triggers).toEqual([]);
+  });
+
   it('create_watch clamps TTL to max', async () => {
     const now = Math.floor(Date.now() / 1000);
     const res = parseResult(await registry.call('create_watch', {

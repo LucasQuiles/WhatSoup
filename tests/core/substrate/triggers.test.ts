@@ -8,6 +8,7 @@ import { createBead } from '../../../src/core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger,
   validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
+  normalizeFireAtSeconds, MAX_REASONABLE_FIRE_AT_SEC,
 } from '../../../src/core/substrate/triggers.ts';
 import { nextCronRun } from '../../../src/core/cron.ts';
 
@@ -317,5 +318,75 @@ describe('QR-092: substrate schedule.cron honors the tz field', () => {
       spec: { expr: '0 12 * * *' },
     });
     expect(nextFireAt).toBe(nextCronRun('0 12 * * *', now, 'UTC'));
+  });
+});
+
+describe('#1757: fire_at ms/sec normalization', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('normalizeFireAtSeconds passes a legit epoch-seconds value through unchanged', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    expect(normalizeFireAtSeconds(nowSec + 3600)).toBe(nowSec + 3600);
+  });
+
+  it('normalizeFireAtSeconds passes the exact ceiling through unchanged (boundary)', () => {
+    expect(normalizeFireAtSeconds(MAX_REASONABLE_FIRE_AT_SEC)).toBe(MAX_REASONABLE_FIRE_AT_SEC);
+  });
+
+  it('normalizeFireAtSeconds treats one-past-ceiling as milliseconds and divides down (boundary)', () => {
+    const onePastCeiling = MAX_REASONABLE_FIRE_AT_SEC + 1;
+    expect(normalizeFireAtSeconds(onePastCeiling)).toBe(Math.round(onePastCeiling / 1000));
+  });
+
+  it('normalizeFireAtSeconds normalizes a realistic epoch-ms fire_at to the matching epoch-seconds value', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oneHourFromNowMs = (nowSec + 3600) * 1000;
+    expect(normalizeFireAtSeconds(oneHourFromNowMs)).toBe(nowSec + 3600);
+  });
+
+  it('normalizeFireAtSeconds rejects a value implausible in EITHER unit', () => {
+    // Even divided by 1000 this still clears the epoch-seconds ceiling by 2
+    // orders of magnitude — not a plausible timestamp in either unit.
+    expect(() => normalizeFireAtSeconds(999_999_999_999_999)).toThrow(/not a plausible/i);
+  });
+
+  it('computeNextFireAt (via prepareTrigger) normalizes an epoch-ms fire_at for schedule.at_time', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const fireAtMs = (nowSec + 7200) * 1000;
+    const { nextFireAt } = prepareTrigger({
+      beadId: 1, kind: 'schedule.at_time', spec: { fire_at: fireAtMs },
+      reportChatJid: 'c', actor: 'u',
+    });
+    expect(nextFireAt).toBe(nowSec + 7200);
+  });
+
+  it('prepareTrigger rejects a schedule.at_time fire_at implausible in either unit', () => {
+    expect(() => prepareTrigger({
+      beadId: 1, kind: 'schedule.at_time', spec: { fire_at: 999_999_999_999_999 },
+      reportChatJid: 'c', actor: 'u',
+    })).toThrow(/not a plausible/i);
+  });
+
+  it('createTrigger persists the NORMALIZED seconds value, not the raw ms input, for schedule.at_time', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'ms-input', ownerJid: 'mw', actor: 'user' });
+    const nowSec = Math.floor(Date.now() / 1000);
+    const fireAtMs = (nowSec + 1800) * 1000;
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: fireAtMs },
+      reportChatJid: 'c', actor: 'user',
+    });
+    expect(t.next_fire_at).toBe(nowSec + 1800);
+  });
+
+  it('createTrigger leaves a legit epoch-seconds schedule.at_time fire_at untouched', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'sec-input', ownerJid: 'mw', actor: 'user' });
+    const fireAtSec = Math.floor(Date.now() / 1000) + 900;
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.at_time', spec: { fire_at: fireAtSec },
+      reportChatJid: 'c', actor: 'user',
+    });
+    expect(t.next_fire_at).toBe(fireAtSec);
   });
 });

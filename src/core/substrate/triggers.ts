@@ -5,6 +5,40 @@ import { nowUnixSec, clampTtl } from './time.ts';
 import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('substrate.triggers');
+
+// #1757: a legit epoch-SECONDS fire_at stays under this ceiling — no real
+// schedule needs to reach 75 years out. An epoch-MILLISECONDS value for any
+// present-day date clears it by 3 orders of magnitude, so the two units never
+// overlap near the ceiling: anything above it is unambiguously mis-unit, not
+// a plausible seconds timestamp.
+export const MAX_REASONABLE_FIRE_AT_SEC = 4_102_444_800; // 2100-01-01T00:00:00Z
+
+/**
+ * `fire_at` is caller-supplied and unit-ambiguous (epoch-seconds vs.
+ * epoch-milliseconds). Normalize a ms-range value down rather than reject
+ * outright — rejecting would recreate the exact silent failure this closes
+ * (#1757): the create call would fail with no owner-visible signal instead of
+ * scheduling correctly. Only reject when NEITHER unit interpretation is
+ * plausible (corrupt/garbage input).
+ */
+export function normalizeFireAtSeconds(fireAt: number): number {
+  if (fireAt <= MAX_REASONABLE_FIRE_AT_SEC) return fireAt;
+  const asSeconds = Math.round(fireAt / 1000);
+  if (asSeconds <= MAX_REASONABLE_FIRE_AT_SEC) {
+    log.warn(
+      { fireAtRaw: fireAt, fireAtNormalized: asSeconds },
+      'fire_at exceeded the epoch-seconds ceiling; normalized as epoch-milliseconds (#1757)',
+    );
+    return asSeconds;
+  }
+  throw new Error(
+    `fire_at ${fireAt} is not a plausible epoch-seconds or epoch-milliseconds timestamp ` +
+    `(ceiling ${MAX_REASONABLE_FIRE_AT_SEC}s / year 2100)`,
+  );
+}
 
 /**
  * Guard for `poll.sqlite` specs. `query_only` blocks writes but not cross-database
@@ -125,7 +159,7 @@ function computeNextFireAt(
     return nextCronRun(expr, now, tz ?? 'UTC');
   }
   if (kind === 'schedule.at_time') {
-    return (spec as { fire_at: number }).fire_at;
+    return normalizeFireAtSeconds((spec as { fire_at: number }).fire_at);
   }
   // event.message is a RESERVED SCAFFOLD: validated + persisted, but not yet
   // executed (a future ingest-path integration will own it; the design exists).
