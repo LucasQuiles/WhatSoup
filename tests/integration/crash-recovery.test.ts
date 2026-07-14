@@ -377,7 +377,7 @@ describe('Crash Recovery — Scenario 5: full round-trip happy path', () => {
     engine.markSubmitted(opId, 'WA-HAPPY-2');
 
     // Tool call completes with outbound op linkage
-    engine.markToolComplete(tcId, '{"ok":true}', opId);
+    engine.markToolComplete(tcId, '{"ok":true}', false, opId);
     expect(getToolCall(db, tcId)['status']).toBe('complete');
     expect(getToolCall(db, tcId)['outbound_op_id']).toBe(opId);
 

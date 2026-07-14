@@ -109,7 +109,7 @@ const log = createChildLogger('durability');
 export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
 type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
-type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'replayed' | 'quarantined';
+type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'error' | 'replayed' | 'quarantined';
 
 // ── SQLite row interfaces ──
 
@@ -382,7 +382,7 @@ export class DurabilityEngine {
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
-        `UPDATE tool_calls SET status = 'complete', result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+        `UPDATE tool_calls SET status = ?, result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
       ),
       accumulateSessionTokens: prepare(
         `UPDATE agent_sessions
@@ -1284,8 +1284,13 @@ export class DurabilityEngine {
     this.statements.markToolExecuting.run(id);
   }
 
-  markToolComplete(id: number, result: string, outboundOpId?: number): void {
-    this.statements.markToolComplete.run(result, outboundOpId ?? null, id);
+  // #1787: isError is a required discriminator, not an optional flag — the
+  // three call sites (success, thrown, deny) must each make a conscious
+  // choice rather than silently defaulting to 'complete'. This is the single
+  // chokepoint that labels every terminal tool-call outcome.
+  markToolComplete(id: number, result: string, isError: boolean, outboundOpId?: number): void {
+    const status: ToolCallStatus = isError ? 'error' : 'complete';
+    this.statements.markToolComplete.run(status, result, outboundOpId ?? null, id);
   }
 
   // ── Session checkpoints ──

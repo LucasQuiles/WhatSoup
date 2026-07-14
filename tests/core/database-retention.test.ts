@@ -79,6 +79,29 @@ describe('database retention', () => {
     expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
   });
 
+  // #1787 mandatory coupling: adding the 'error' terminal status to tool_calls
+  // without adding it to this same retention IN-list would leak every failed
+  // tool call past retention forever (under-deletion, the inverse of #1772).
+  it('deletes old error-status tool_calls rows, same schedule as complete (#1787 retention coupling)', () => {
+    db.raw.prepare(`
+      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
+      VALUES ('old-error-tool', 'send_message', '{}', 'error', 'unsafe', datetime('now', '-40 days'))
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
+      VALUES ('young-error-tool', 'send_message', '{}', 'error', 'unsafe', datetime('now', '-5 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, {
+      ...DEFAULT_DATABASE_RETENTION,
+      terminalDurabilityDays: 30,
+    });
+
+    expect(result.toolCalls).toBe(1);
+    expect(rowCount('tool_calls')).toBe(1);
+    expect(columnValues('tool_calls', 'conversation_key')).toEqual(['young-error-tool']);
+  });
+
   it('prunes metrics_hourly buckets older than the retention window, preserving recent ones (#1108)', () => {
     // metrics-collector writes bucket = start.toISOString(); reproduce that format.
     const isoAgo = (mod: string): string =>

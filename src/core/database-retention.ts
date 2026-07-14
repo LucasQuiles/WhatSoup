@@ -194,7 +194,7 @@ export function runDatabaseRetention(
 
     const toolCalls = changes(db.raw.prepare(`
       DELETE FROM tool_calls
-       WHERE status IN ('complete', 'replayed', 'quarantined')
+       WHERE status IN ('complete', 'error', 'replayed', 'quarantined')
          AND COALESCE(completed_at, created_at) < datetime('now', ?)
     `).run(terminalCutoff));
 
