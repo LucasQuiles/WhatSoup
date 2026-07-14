@@ -94,7 +94,7 @@ describe('logger.ts — error-key serialization (#1776)', () => {
       const pinoFactory = vi.fn(() => fakeLogger) as unknown as typeof pino & {
         stdSerializers: { err: ReturnType<typeof vi.fn> };
       };
-      pinoFactory.stdSerializers = { err: vi.fn((e) => e) };
+      pinoFactory.stdSerializers = { err: vi.fn((e) => e) } as unknown as typeof pino.stdSerializers & { err: ReturnType<typeof vi.fn> };
       vi.doMock('pino', () => ({ default: pinoFactory }));
 
       const { errorLikeSerializers } = await import('../src/logger.ts');
@@ -118,7 +118,7 @@ describe('logger.ts — error-key serialization (#1776)', () => {
         stdSerializers: { err: ReturnType<typeof vi.fn> };
       };
       pinoFactory.transport = vi.fn(() => fakeTransport);
-      pinoFactory.stdSerializers = { err: vi.fn((e) => e) };
+      pinoFactory.stdSerializers = { err: vi.fn((e) => e) } as unknown as typeof pino.stdSerializers & { err: ReturnType<typeof vi.fn> };
       vi.doMock('pino', () => ({ default: pinoFactory }));
 
       const { errorLikeSerializers } = await import('../src/logger.ts');
