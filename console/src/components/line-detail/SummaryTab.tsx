@@ -37,7 +37,10 @@ export function SummaryTab({
   const queryClient = useQueryClient()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = getModeColor(line.mode)
-  const connectionState = line.health?.connection?.state ?? 'unknown'
+  // Reads the shape the backend actually emits (whatsapp.connection.state,
+  // src/core/health.ts) — fixes #1763 (a stale top-level `connection` read
+  // left this card permanently "unknown").
+  const connectionState = line.health?.whatsapp?.connection?.state ?? 'unknown'
   const rawConfig = line.config ?? {}
   const agentOptions = rawConfig.agentOptions as Record<string, unknown> | undefined
   const configProvider =

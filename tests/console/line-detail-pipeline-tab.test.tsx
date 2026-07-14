@@ -22,7 +22,7 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
       status: 'ok',
       uptime_seconds: 7200,
       messages_total: 50,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 50, schema_version: 7 },
     },
     heartbeat: [],
@@ -52,7 +52,7 @@ describe('PipelineTab node details', () => {
         status: 'ok',
         uptime_seconds: 3600,
         messages_total: 99,
-        connection: { state: 'open' },
+        whatsapp: { connection: { state: 'open' } },
         sqlite: { messages_total: 88, schema_version: 13 },
       },
     }))

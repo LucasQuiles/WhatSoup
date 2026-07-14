@@ -136,7 +136,7 @@ describe('LineTags provider mismatch', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',
@@ -163,7 +163,7 @@ describe('LineTags provider mismatch', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',
@@ -191,7 +191,7 @@ describe('LineTags provider mismatch', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',
@@ -218,7 +218,7 @@ describe('LineTags provider mismatch', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',
@@ -263,7 +263,7 @@ describe('LineTags combinations and edge cases', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',
@@ -314,7 +314,7 @@ describe('LineTags combinations and edge cases', () => {
             status: 'ok',
             uptime_seconds: 60,
             messages_total: 0,
-            connection: { state: 'open' },
+            whatsapp: { connection: { state: 'open' } },
             sqlite: { messages_total: 0, schema_version: 1 },
             instance: {
               name: 'line-x',

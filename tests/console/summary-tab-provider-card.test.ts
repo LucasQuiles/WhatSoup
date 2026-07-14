@@ -70,7 +70,7 @@ describe('SummaryTab provider card contract', () => {
         status: 'ok',
         uptime_seconds: 300,
         messages_total: 0,
-        connection: { state: 'connected' },
+        whatsapp: { connection: { state: 'connected' } },
         sqlite: { messages_total: 0, schema_version: 1 },
       },
       config: { agentOptions: { provider: 'openai-api' } },

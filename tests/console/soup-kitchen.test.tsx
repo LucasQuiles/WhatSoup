@@ -357,7 +357,7 @@ describe('SoupKitchen KPI cards with data', () => {
   const lines: LineInstance[] = [
     makeLine({ name: 'alpha', status: 'online', mode: 'passive', messageStats: { sent: 100, received: 200, images: 5, audio: 2, documents: 1 } }),
     makeLine({ name: 'bravo', status: 'online', mode: 'agent', messageStats: { sent: 50, received: 80, images: 10, audio: 0, documents: 3 },
-      health: { status: 'ok', uptime_seconds: 3600, messages_total: 130, connection: { state: 'open' }, sqlite: { messages_total: 130, schema_version: 1 },
+      health: { status: 'ok', uptime_seconds: 3600, messages_total: 130, whatsapp: { connection: { state: 'open' } }, sqlite: { messages_total: 130, schema_version: 1 },
         runtime: { agent: { activeSessions: 2, lastSessionStatus: null, lastSessionStartedAt: null } } } }),
     makeLine({ name: 'charlie', status: 'degraded', mode: 'chat', messageStats: { sent: 20, received: 30, images: 0, audio: 0, documents: 0 } }),
     makeLine({ name: 'delta', status: 'unreachable', mode: 'passive', lastSessionStatus: 'auth_expired' }),

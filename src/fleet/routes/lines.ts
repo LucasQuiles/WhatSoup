@@ -406,7 +406,7 @@ interface EnrichOpts {
 }
 
 /** Build the enriched LineInstance object the console expects. */
-function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
+export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
   const h = poll?.health ?? null;
   const isConfigError = inst.configError != null;
   const linkedStatus = getLinkedStatus(inst.configPath, h);
