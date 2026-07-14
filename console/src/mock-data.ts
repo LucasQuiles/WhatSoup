@@ -94,7 +94,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 518400,
       messages_total: 21347,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 21347, schema_version: 5 },
       runtime: {
         passive: { unreadCount: 47, lastActivityAt: ago(120) },
@@ -137,7 +137,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 259200,
       messages_total: 14823,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 14823, schema_version: 5 },
       runtime: {
         chat: { queueDepth: 3, enrichmentUnprocessed: 12 },
@@ -189,7 +189,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 172800,
       messages_total: 8941,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 8941, schema_version: 5 },
       runtime: {
         agent: {
@@ -244,7 +244,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 86400,
       messages_total: 4312,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 4312, schema_version: 5 },
       runtime: {
         agent: {
@@ -299,7 +299,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'degraded',
       uptime_seconds: 43200,
       messages_total: 6109,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 6109, schema_version: 5 },
       runtime: {
         chat: { queueDepth: 7, enrichmentUnprocessed: 31 },
@@ -384,7 +384,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 28800,
       messages_total: 412,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 412, schema_version: 5 },
       runtime: {
         agent: {
@@ -438,7 +438,7 @@ export const MOCK_LINES: LineInstance[] = [
       status: 'ok',
       uptime_seconds: 604800,
       messages_total: 5820,
-      connection: { state: 'open' },
+      whatsapp: { connection: { state: 'open' } },
       sqlite: { messages_total: 5820, schema_version: 5 },
       runtime: {
         passive: { unreadCount: 0, lastActivityAt: null },

@@ -406,10 +406,28 @@ interface EnrichOpts {
 }
 
 /** Build the enriched LineInstance object the console expects. */
-function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
+export function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
   const h = poll?.health ?? null;
   const isConfigError = inst.configError != null;
-  const linkedStatus = getLinkedStatus(inst.configPath, h);
+  // Freshness seam (#1762 remediation 1): `stale` means the poller is not
+  // CURRENTLY confirming liveness — `health` may still be the last-known-good
+  // snapshot carried forward across failing polls. This does NOT gate body
+  // fields (link/pairing state and history stay visible through outages —
+  // that persistence is the point, not the defect); it only tags them so
+  // consumers can render staleness instead of misreading it as live.
+  const stale = (poll?.consecutiveFailures ?? 0) > 0;
+  const rawLinkedStatus = getLinkedStatus(inst.configPath, h);
+  // Never report 'confirmed' linkage confidence while stale — a logout during
+  // an unreachable window must not be masked as a confidently-current 'linked'
+  // read (the sharpest defect #1762 named). The link/pairing STATUS itself is
+  // untouched; only its reported confidence degrades.
+  const linkedStatus = stale && rawLinkedStatus.confidence === 'confirmed'
+    ? {
+        ...rawLinkedStatus,
+        confidence: 'inferred' as const,
+        evidence: [...rawLinkedStatus.evidence, linkedEvidenceField('stale_confidence_degraded', true)],
+      }
+    : rawLinkedStatus;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
   const accountJid = dig(h, 'whatsapp', 'account_jid') as string | undefined;
@@ -447,6 +465,8 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     messagesTotal: messagesTotal ?? 0,
     messagesToday: opts.messagesToday ?? messagesTotal ?? 0,
     health: h,
+    healthObservedAt: poll?.healthObservedAt ?? null,
+    stale,
     heartbeat: buildHeartbeat(poll),
     lastActive: normalizeTimestamp(
       (dig(h, 'runtime', 'passive', 'lastActivityAt') as string | undefined)

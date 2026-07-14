@@ -5754,6 +5754,56 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('singleton crash callback still attempts a heal report when no control peer is configured at all (#1754)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.controlPeers.clear(); // no control peer configured — not a partial map, none at all
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+    const durability = {
+      markInboundFailed: vi.fn(),
+      ...makeTerminalDurabilityMock(),
+    };
+    const replyGuarantee = {
+      disarm: vi.fn(),
+      isArmed: vi.fn(() => false),
+    };
+    const state = runtime as unknown as {
+      currentInboundSeq: number | undefined;
+      currentRuntimeTurnContext: ReturnType<typeof makeRuntimeTurnContext> | null;
+      durability: typeof durability;
+      replyGuarantee: typeof replyGuarantee;
+      ensureSessionAndQueueSync(chatJid: string): void;
+    };
+    state.durability = durability;
+    state.replyGuarantee = replyGuarantee;
+    state.currentInboundSeq = 99;
+    state.currentRuntimeTurnContext = makeRuntimeTurnContext(
+      'singleton', 'crash-no-peer', 'crash-no-peer@s.whatsapp.net', 99, 'turn-no-peer-crash',
+    );
+
+    state.ensureSessionAndQueueSync('crash-no-peer@s.whatsapp.net');
+    mockRuntimeLogger.warn.mockClear();
+    capturedOnCrashRef.current?.({
+      exitCode: 1,
+      signal: null,
+      sessionId: 'session-crash-no-peer',
+      dbRowId: 14,
+      provider: 'claude-cli',
+      crashClass: 'boom',
+      stderrPreview: 'stack trace',
+    });
+
+    await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
+    // A crash must ALWAYS attempt to report — telemetry delivery is guaranteed-or-alerted,
+    // never silently skipped because zero control peers are configured. (The real heal.ts
+    // runs unmocked here and throws against this test's stub DB — that thrown-and-caught
+    // error is how we observe the call was actually attempted rather than gated out.)
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'failed to emit heal report for session crash',
+    );
+  });
+
   it('startup-resumed shared crash callback terminalizes the active turn', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
