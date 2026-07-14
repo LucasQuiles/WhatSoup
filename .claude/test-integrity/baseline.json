@@ -55,6 +55,24 @@
       "signature": "9f2bd75463575d6566427c1db8122c93dfea40e05d82b1746a7bffed54cd0445",
       "owner": "q",
       "reason": "advisory-suggestion: test_device_suffixed_jids_fully_masked_across_consumers enumerates the named JID forms whose verbatim leak BEAD-049 fixes (device-suffix :N, device-dash -N, plain) across each of the 7 consumer redactors; each literal is a distinct security regression contract, while property generation would obscure which JID shape proves the WHATSAPP_JID_RE fix. Keep explicit parametrize."
+    },
+    {
+      "content_signature": "4034264cb801a7e39964adfaa66bc2b7d28faa6bc4713b83e8551141ec7e20d5",
+      "file": "deploy/scripts/tests/test_watchdog_restart_policy.py",
+      "line": 161,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "668650862469e55c840268a1204e5c8588823afdb35ca7203a8890cf4803dfef",
+      "owner": "q",
+      "reason": "advisory-suggestion: test_malformed_inspection_body_is_restart_worthy enumerates the finite one-field corruption matrix for the inspection-only health protocol. Each literal names a distinct fail-closed invariant; generated combinations could mask which single malformed field must independently trigger restart. Keep explicit parametrize."
+    },
+    {
+      "content_signature": "0f293e4b10d197c12914bd2c7f936dbba096487b0464d8ecf24d2bea05c9002c",
+      "file": "deploy/scripts/tests/test_watchdog_restart_policy.py",
+      "line": 197,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1aff8bbf36aeb2d78f71cbd94c38e18acc67ae737ac929d6a65326f7a9380dbf",
+      "owner": "q",
+      "reason": "advisory-suggestion: test_partial_inspection_body_is_restart_worthy enumerates every required nested field whose absence invalidates the inspection-only contract. The named deletion table is the public protocol checklist and is clearer than a generated path domain. Keep explicit parametrize."
     }
   ],
   "schema_version": "1"
