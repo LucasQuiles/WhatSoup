@@ -41,7 +41,7 @@ function cleanup(...paths: string[]): void {
   }
 }
 
-const ALL_MIGRATION_VERSIONS = Array.from({ length: 40 }, (_, i) => i + 1);
+const ALL_MIGRATION_VERSIONS = Array.from({ length: 43 }, (_, i) => i + 1);
 
 /**
  * Raw migration 1 SQL — extracted verbatim from database.ts.
@@ -784,6 +784,11 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         for (let version = 1; version <= 23; version += 1) {
           raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(version);
         }
+        // This isolated historical fixture contains only the messages surface.
+        // It intentionally bypasses fail-closed durability migrations 42 and
+        // 43, covered by the migration 43 upgrade and provenance suites.
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (42)').run();
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (43)').run();
         raw
           .prepare(
             `INSERT INTO messages
@@ -871,6 +876,11 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         for (let version = 1; version <= 28; version += 1) {
           raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(version);
         }
+        // This isolated historical fixture contains only the messages surface.
+        // It intentionally bypasses fail-closed durability migrations 42 and
+        // 43, covered by the migration 43 upgrade and provenance suites.
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (42)').run();
+        raw.prepare('INSERT INTO schema_migrations (version) VALUES (43)').run();
         raw
           .prepare(
             `INSERT INTO messages
@@ -1017,6 +1027,11 @@ describe('scheduled_messages send-start migration contract', () => {
       for (let version = 1; version <= 31; version += 1) {
         insertVersion.run(version);
       }
+      // This isolated historical fixture contains only scheduling state. It
+      // intentionally bypasses fail-closed durability migrations 42 and 43,
+      // covered by the migration 43 upgrade and provenance suites.
+      insertVersion.run(42);
+      insertVersion.run(43);
       raw
         .prepare(
           `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
@@ -1259,10 +1274,13 @@ describe('outbound_sends migration contract', () => {
           version INTEGER PRIMARY KEY,
           applied_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        -- This fixture isolates the historical outbound_sends surface. It
+        -- intentionally bypasses fail-closed durability migrations 42 and 43,
+        -- covered by the migration 43 upgrade and provenance suites.
         INSERT INTO schema_migrations(version)
         VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10),
                (11), (12), (13), (14), (15), (16), (17), (18), (19), (20),
-               (21), (22), (23), (24), (25);
+               (21), (22), (23), (24), (25), (42), (43);
 
         CREATE TABLE outbound_sends (
           id INTEGER PRIMARY KEY AUTOINCREMENT,

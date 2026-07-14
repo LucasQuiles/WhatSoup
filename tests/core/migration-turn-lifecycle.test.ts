@@ -57,7 +57,7 @@ describe('turn terminal migration 37', () => {
         db.raw.prepare("PRAGMA index_list('turn_terminal_records')").all() as Array<{ name: string }>
       ).map((index) => index.name);
 
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(40);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(43);
       expect(version?.version).toBe(37);
       expect(columns).toEqual(expect.arrayContaining([
         'inbound_seq',

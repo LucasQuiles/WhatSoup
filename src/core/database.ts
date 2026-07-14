@@ -11,6 +11,9 @@ import {
   runMigration39 as runMigration39Impl,
   runMigration40 as runMigration40Impl,
 } from './database-migrations-37-40.ts';
+import { runMigration41 as runMigration41Impl } from './database-migration-41.ts';
+import { runMigration42 as runMigration42Impl } from './database-migration-42.ts';
+import { runMigration43 as runMigration43Impl } from './database-migration-43.ts';
 
 const log = createChildLogger('database');
 
@@ -744,6 +747,9 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [38, runMigration38],
   [39, runMigration39],
   [40, runMigration40],
+  [41, runMigration41],
+  [42, runMigration42],
+  [43, runMigration43],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -929,6 +935,18 @@ function runMigration39(db: DatabaseSync): void {
 
 function runMigration40(db: DatabaseSync): void {
   runMigration40Impl(db);
+}
+
+function runMigration41(db: DatabaseSync): void {
+  runMigration41Impl(db);
+}
+
+function runMigration42(db: DatabaseSync): void {
+  runMigration42Impl(db);
+}
+
+function runMigration43(db: DatabaseSync): void {
+  runMigration43Impl(db);
 }
 
 
