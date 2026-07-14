@@ -271,12 +271,23 @@ export function getUnprocessedCount(db: Database): number {
 
 /**
  * Delete messages older than retentionDays. Returns the number of rows deleted.
+ *
+ * Also prunes `receipts` rows left orphaned by this delete (#1772): `receipts`
+ * has no FK/cascade to `messages`, so without this it grows unbounded forever
+ * (observed at 67% of a live instance's DB size). The prune is keyed on
+ * `messages.message_id` (TEXT UNIQUE) existing at all, not on the receipt's
+ * own timestamp — a receipt for a still-live message is never touched
+ * regardless of the receipt's age, and a receipt can only be deleted once its
+ * message is gone, so a live message can never be orphaned by this.
  */
 export function deleteOldMessages(db: Database, retentionDays: number): number {
   const cutoff = nowUnixSec() - retentionDays * 86400;
   const result = db.raw.prepare(
     'DELETE FROM messages WHERE timestamp < ?'
   ).run(cutoff);
+  db.raw.prepare(
+    'DELETE FROM receipts WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = receipts.message_id)'
+  ).run();
   return result.changes as number;
 }
 

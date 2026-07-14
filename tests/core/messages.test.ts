@@ -45,6 +45,7 @@ afterAll(() => {
 describe('messages', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM messages').run();
+    db.raw.prepare('DELETE FROM receipts').run();
   });
 
   // --- helpers ---
@@ -321,6 +322,68 @@ describe('messages', () => {
     const deleted = deleteOldMessages(db, 30);
     expect(deleted).toBe(0);
     expect(getMessageCount(db)).toBe(1);
+  });
+
+  // --- #1772: receipts orphan-key prune (co-located with message retention) ---
+
+  function receiptCountFor(messageId: string): number {
+    const row = db.raw
+      .prepare('SELECT COUNT(*) AS cnt FROM receipts WHERE message_id = ?')
+      .get(messageId) as { cnt: number };
+    return row.cnt;
+  }
+
+  function insertReceipt(messageId: string, recipientJid = 'bob@s.whatsapp.net', type = 'delivery'): void {
+    db.raw
+      .prepare('INSERT INTO receipts (message_id, recipient_jid, type) VALUES (?, ?, ?)')
+      .run(messageId, recipientJid, type);
+  }
+
+  it('deleteOldMessages prunes receipts whose message was aged out by the same run', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oldTs = nowSec - 31 * 86400; // 31 days ago — beyond a 30-day retention window
+    const agedMsg = makeMsg({ timestamp: oldTs, content: 'aged out' });
+    storeMessageIfNew(db, agedMsg);
+    insertReceipt(agedMsg.messageId);
+    expect(receiptCountFor(agedMsg.messageId)).toBe(1);
+
+    deleteOldMessages(db, 30);
+
+    expect(receiptCountFor(agedMsg.messageId)).toBe(0);
+  });
+
+  it('deleteOldMessages preserves receipts of LIVE messages regardless of the receipt row age', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const liveMsg = makeMsg({ timestamp: nowSec, content: 'still live' });
+    storeMessageIfNew(db, liveMsg);
+    insertReceipt(liveMsg.messageId);
+    // Backdate the receipt itself far past the retention window — the prune
+    // is keyed on the *message's* existence, not the receipt's own age, so
+    // this must survive even though its timestamp alone looks ancient.
+    db.raw
+      .prepare("UPDATE receipts SET timestamp = datetime('now', '-400 days') WHERE message_id = ?")
+      .run(liveMsg.messageId);
+
+    deleteOldMessages(db, 30);
+
+    expect(receiptCountFor(liveMsg.messageId)).toBe(1);
+  });
+
+  it('deleteOldMessages receipts prune is idempotent — a second run deletes zero more', () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oldTs = nowSec - 31 * 86400;
+    const agedMsg = makeMsg({ timestamp: oldTs, content: 'aged out again' });
+    storeMessageIfNew(db, agedMsg);
+    insertReceipt(agedMsg.messageId);
+
+    deleteOldMessages(db, 30);
+    expect(receiptCountFor(agedMsg.messageId)).toBe(0);
+
+    const before = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM receipts').get() as { cnt: number }).cnt;
+    deleteOldMessages(db, 30);
+    const after = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM receipts').get() as { cnt: number }).cnt;
+
+    expect(after).toBe(before);
   });
 
   it('markMessagesWithError sets enrichment_error column', () => {
