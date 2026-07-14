@@ -2875,20 +2875,23 @@ export class AgentRuntime implements Runtime {
             const queue = this.getActiveQueue();
             this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
             this.cleanupSharedCrashTurnState();
-            if (config.controlPeers.size > 0) {
-              try {
-                emitHealReport(this.db, this.messenger, this.durability, {
-                  type: 'crash',
-                  chatJid: resumeChatJid,
-                  exitCode: info.exitCode ?? undefined,
-                  signal: info.signal ?? undefined,
-                  provider: info.provider,
-                  crashClass: info.crashClass,
-                  stderr: info.stderrPreview,
-                }, this.activeControlReportId);
-              } catch (err) {
-                log.warn({ err }, 'failed to emit heal report for session crash');
-              }
+            // #1754: a crash must ALWAYS attempt to report — even with zero control
+            // peers configured, emitHealReport's own BOT ERRORS fallback (heal.ts)
+            // is the guaranteed-or-alerted delivery path. Gating this call on
+            // `config.controlPeers.size > 0` silently dropped every crash report
+            // whenever no control peer (or a partial one missing 'q') was configured.
+            try {
+              emitHealReport(this.db, this.messenger, this.durability, {
+                type: 'crash',
+                chatJid: resumeChatJid,
+                exitCode: info.exitCode ?? undefined,
+                signal: info.signal ?? undefined,
+                provider: info.provider,
+                crashClass: info.crashClass,
+                stderr: info.stderrPreview,
+              }, this.activeControlReportId);
+            } catch (err) {
+              log.warn({ err }, 'failed to emit heal report for session crash');
             }
           },
           notifyUser: (msg) => this.handleCrashNotify(msg),
@@ -9152,20 +9155,20 @@ export class AgentRuntime implements Runtime {
           const queue = this.getActiveQueue();
           this.finalizeRuntimeCrash(this.currentRuntimeTurnContext, queue, this.session);
           this.cleanupSharedCrashTurnState();
-          if (config.controlPeers.size > 0) {
-            try {
-              emitHealReport(this.db, this.messenger, this.durability, {
-                type: 'crash',
-                chatJid,
-                exitCode: info.exitCode ?? undefined,
-                signal: info.signal ?? undefined,
-                provider: info.provider,
-                crashClass: info.crashClass,
-                stderr: info.stderrPreview,
-              }, this.activeControlReportId);
-            } catch (err) {
-              log.warn({ err }, 'failed to emit heal report for session crash');
-            }
+          // #1754: see the resume-path onCrash above — never gate the report attempt
+          // on control-peer presence; emitHealReport's own fallback handles absence.
+          try {
+            emitHealReport(this.db, this.messenger, this.durability, {
+              type: 'crash',
+              chatJid,
+              exitCode: info.exitCode ?? undefined,
+              signal: info.signal ?? undefined,
+              provider: info.provider,
+              crashClass: info.crashClass,
+              stderr: info.stderrPreview,
+            }, this.activeControlReportId);
+          } catch (err) {
+            log.warn({ err }, 'failed to emit heal report for session crash');
           }
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
@@ -9299,7 +9302,9 @@ export class AgentRuntime implements Runtime {
     tracker?.shutdown();
     this.operationTrackers.delete(currentMapKey);
     this.cleanupPerChatCrashTurnState(currentMapKey);
-    if (config.controlPeers.size > 0 && chatJid) {
+    // #1754: see the singleton onCrash above — control-peer presence is no longer
+    // a precondition for attempting the report; only chatJid (needed for context) is.
+    if (chatJid) {
       try {
         emitHealReport(this.db, this.messenger, this.durability, {
           type: 'crash',

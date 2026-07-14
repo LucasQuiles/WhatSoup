@@ -147,6 +147,37 @@ describe('emitHealReport', () => {
     // Only one row in DB
     const count = (db.raw.prepare('SELECT COUNT(*) as cnt FROM heal_reports').get() as { cnt: number }).cnt;
     expect(count).toBe(1);
+
+    // #1754 regression: the two identical crashes must coalesce into ONE incident
+    // with attempt_count=2 — not silently no-op the duplicate occurrence.
+    const row = db.raw.prepare('SELECT attempt_count FROM heal_reports WHERE report_id = ?').get(first) as { attempt_count: number };
+    expect(row.attempt_count).toBe(2);
+  });
+
+  // 2b. #1754 dedup key drift: unclassified crash-class fallback must be stable,
+  // mirroring the fixed-first-line pattern already used for type='degraded'.
+  it('coalesces repeated unclassified/signal-less crashes into one incident instead of drifting on raw stderr', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // No crashClass (classifyProviderCrash found nothing — signal-less SIGKILL),
+    // and stderr varies per occurrence (raw noise a real classifier can't tame).
+    const first = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      signal: 'SIGKILL',
+      stderr: `raw noise ${randomUUID()}`,
+    });
+    expect(first).not.toBeNull();
+
+    const second = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      signal: 'SIGKILL',
+      stderr: `raw noise ${randomUUID()}`,
+    });
+    expect(second).toBeNull();
+
+    const count = (db.raw.prepare('SELECT COUNT(*) as cnt FROM heal_reports').get() as { cnt: number }).cnt;
+    expect(count).toBe(1);
   });
 
   // 3. emitHealReport queues when activeControlReportId is set
@@ -395,6 +426,25 @@ describe('reconcileStaleHealReports', () => {
       { report_id: 'stale-report', state: 'stale_expired' },
       { report_id: next, state: 'attempt_1' },
     ]));
+  });
+
+  it('does not stamp resolved_at on stale-expired rows — resolution requires a positive HEAL_COMPLETE signal, not a 30m timer race (#1754)', () => {
+    const db = makeDb();
+
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
+      VALUES ('stale-unresolved', 'crash__unresolved', 'crash', 'attempt_1', 1, '2026-06-13T00:00:00.000Z')
+    `).run();
+
+    reconcileStaleHealReports(db, {
+      now: new Date('2026-06-13T01:00:00.000Z'),
+      staleMs: 30 * 60 * 1000,
+    });
+
+    const row = db.raw.prepare(`
+      SELECT state, resolved_at FROM heal_reports WHERE report_id = 'stale-unresolved'
+    `).get() as { state: string; resolved_at: string | null };
+    expect(row).toEqual({ state: 'stale_expired', resolved_at: null });
   });
 
   it('leaves fresh queued and escalated reports active', () => {
@@ -718,7 +768,7 @@ describe('heal.ts uncovered-branch coverage', () => {
     expect(detailArg).toMatch(/recent_logs=boot loop detected/);
   });
 
-  it('returns the reportId without sending when no Q control peer is configured', () => {
+  it('routes the report through the BOT ERRORS fallback sink when no Q control peer is configured (#1754)', () => {
     const db = makeDb();
     const messenger = makeMessenger();
 
@@ -730,14 +780,43 @@ describe('heal.ts uncovered-branch coverage', () => {
         stderr: 'NoQPeer: boom',
       });
 
-      // Report is still created with state='attempt_1' but no send happens.
+      // Report is still created with state='attempt_1' but no direct send happens.
       expect(reportId).not.toBeNull();
       const row = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get(reportId) as { state: string };
       expect(row.state).toBe('attempt_1');
       expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+
+      // Telemetry delivery must be guaranteed-or-alerted, never warn-and-drop: the
+      // report must still reach BOT ERRORS via the durable-outbox fallback.
+      expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+      const [instance, source, summary] = vi.mocked(emitAlert).mock.calls[0]!;
+      expect(instance).toBe(config.botName);
+      expect(source).not.toBe('heal_repeated_failures'); // distinct from the valve alert
+      expect(summary).toContain(reportId);
     } finally {
       config.controlPeers.set('q', '15559998888');
     }
+  });
+
+  it('does not promise an automatic retry/cooldown that never actually happens (#1754)', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    emitHealReport(db, messenger, null, {
+      type: 'crash',
+      stderr: 'FalsePromiseError: boom',
+    });
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    });
+
+    const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
+    // No writer ever sets cooldown_until or advances state on a timed retry —
+    // the message must not claim a "5m cooldown" / "attempt N of 2" mechanism
+    // that does not exist.
+    expect(message).not.toMatch(/cooldown/i);
+    expect(message).not.toMatch(/\battempt \d+ of \d+\b/i);
   });
 
   it('includes signal and recentLogs lines in the human-readable heal report when present', async () => {
