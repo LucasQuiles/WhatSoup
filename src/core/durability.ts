@@ -198,6 +198,11 @@ export interface RecoveryStats {
   openRecoveries?: number;
 }
 
+interface RecoveryPhaseFailure {
+  phase: string;
+  error: unknown;
+}
+
 /** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
 export interface StuckInboundSweepResult {
   completedEchoed: number;
@@ -632,6 +637,48 @@ export class DurabilityEngine {
     ).now);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
+  }
+
+  private failIncompleteRecovery(
+    operation: 'preConnectRecovery' | 'postConnectRecovery',
+    receipt: RecoveryReceipt,
+    stats: RecoveryStats,
+    failures: readonly RecoveryPhaseFailure[],
+    openRecoveries: number | null,
+  ): never {
+    const failedPhases = [...new Set(failures.map(({ phase }) => phase))];
+    const primaryFailure = failures[0]?.error;
+    const primaryError = primaryFailure instanceof Error
+      ? primaryFailure
+      : new Error(`${operation} failed during ${failedPhases[0] ?? 'unknown_phase'}`, {
+        cause: primaryFailure,
+      });
+    try {
+      this.recoveryEvidence.recordIncomplete(
+        receipt,
+        stats,
+        JSON.stringify({
+          status: 'incomplete',
+          failedPhases,
+          openRecoveries,
+        }),
+      );
+    } catch (receiptFailure) {
+      const receiptError = receiptFailure instanceof Error
+        ? receiptFailure
+        : new Error('Incomplete recovery receipt persistence failed', { cause: receiptFailure });
+      log.error(
+        { failedPhases, receiptError },
+        `${operation}: incomplete recovery receipt could not be recorded`,
+      );
+      throw new AggregateError(
+        [primaryError, receiptError],
+        `${operation}: recovery failed and its incomplete receipt could not be recorded`,
+        { cause: primaryError },
+      );
+    }
+    log.error({ failedPhases }, `${operation}: incomplete recovery recorded`);
+    throw primaryError;
   }
 
   private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
@@ -1385,6 +1432,7 @@ export class DurabilityEngine {
       recoveryRunId: null,
       openRecoveries: 0,
     };
+    const failures: RecoveryPhaseFailure[] = [];
 
     log.info('preConnectRecovery: starting');
     const recovery = this.recoveryEvidence.start(
@@ -1401,6 +1449,7 @@ export class DurabilityEngine {
         this.markEchoed(opId);
       }
     } catch (err) {
+      failures.push({ phase: 'settle_echoed_recovery_deliveries', error: err });
       log.warn({ err }, 'preConnectRecovery: error settling already-echoed recovery deliveries');
     }
 
@@ -1425,6 +1474,7 @@ export class DurabilityEngine {
         }
       }
     } catch (err) {
+      failures.push({ phase: 'detect_orphaned_sessions', error: err });
       log.warn({ err }, 'preConnectRecovery: error during orphan detection');
     }
 
@@ -1437,6 +1487,7 @@ export class DurabilityEngine {
         log.info({ opId: op.id }, 'preConnectRecovery: promoted sending → maybe_sent');
       }
     } catch (err) {
+      failures.push({ phase: 'promote_sending_outbound', error: err });
       log.warn({ err }, 'preConnectRecovery: error promoting sending ops');
     }
 
@@ -1476,6 +1527,7 @@ export class DurabilityEngine {
         }
       }
     } catch (err) {
+      failures.push({ phase: 'recover_tool_calls', error: err });
       log.warn({ err }, 'preConnectRecovery: error recovering tool calls');
     }
 
@@ -1522,7 +1574,8 @@ export class DurabilityEngine {
       }
     } catch (err) {
       log.error({ err }, 'preConnectRecovery: unsafe failure recording pending catch-up');
-      throw err;
+      failures.push({ phase: 'record_pending_operator_catchup', error: err });
+      this.failIncompleteRecovery('preConnectRecovery', recovery, stats, failures, null);
     }
 
     // QR-035: finalize no-reply turns stranded after markTurnDone.
@@ -1547,15 +1600,41 @@ export class DurabilityEngine {
         log.info({ inboundSeq: ev.seq }, 'preConnectRecovery: stranded turn_done inbound (no terminal op) finalized to complete');
       }
     } catch (err) {
+      failures.push({ phase: 'reconcile_turn_done_inbound', error: err });
       log.warn({ err }, 'preConnectRecovery: error reconciling turn_done inbound events');
     }
 
-    stats.openRecoveries = this.recoveryEvidence.countOpen();
-    this.recoveryEvidence.finalize(
-      recovery,
-      stats,
-      JSON.stringify({ openRecoveries: stats.openRecoveries }),
-    );
+    try {
+      stats.openRecoveries = this.recoveryEvidence.countOpen();
+    } catch (err) {
+      failures.push({ phase: 'count_open_recoveries', error: err });
+      this.failIncompleteRecovery('preConnectRecovery', recovery, stats, failures, null);
+    }
+    if (failures.length > 0) {
+      this.failIncompleteRecovery(
+        'preConnectRecovery',
+        recovery,
+        stats,
+        failures,
+        stats.openRecoveries ?? null,
+      );
+    }
+    try {
+      this.recoveryEvidence.finalize(
+        recovery,
+        stats,
+        JSON.stringify({ openRecoveries: stats.openRecoveries }),
+      );
+    } catch (err) {
+      failures.push({ phase: 'finalize_recovery_run', error: err });
+      this.failIncompleteRecovery(
+        'preConnectRecovery',
+        recovery,
+        stats,
+        failures,
+        stats.openRecoveries ?? null,
+      );
+    }
     log.info(stats, 'preConnectRecovery: complete');
     return stats;
   }
@@ -1579,6 +1658,7 @@ export class DurabilityEngine {
       recoveryRunId: null,
       openRecoveries: 0,
     };
+    const failures: RecoveryPhaseFailure[] = [];
 
     log.info('postConnectRecovery: starting');
     const recovery = this.recoveryEvidence.start(
@@ -1588,7 +1668,13 @@ export class DurabilityEngine {
     );
     stats.recoveryPlanId = recovery.recoveryPlanId;
     stats.recoveryRunId = recovery.recoveryRunId;
-    const corroborated = this.reconcileTurnDeliveryCorroboration(recovery);
+    let corroborated: number;
+    try {
+      corroborated = this.reconcileTurnDeliveryCorroboration(recovery);
+    } catch (err) {
+      failures.push({ phase: 'reconcile_turn_delivery_corroboration', error: err });
+      this.failIncompleteRecovery('postConnectRecovery', recovery, stats, failures, null);
+    }
     if (corroborated > 0) {
       log.info({ corroborated }, 'postConnectRecovery: recorded later-echo delivery corroboration');
     }
@@ -1605,6 +1691,7 @@ export class DurabilityEngine {
         );
       }
     } catch (err) {
+      failures.push({ phase: 'promote_stale_submitted_outbound', error: err });
       log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
     }
 
@@ -1649,12 +1736,20 @@ export class DurabilityEngine {
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
             );
-            emitAlertChecked(
+            const alertQueued = emitAlertChecked(
               config.botName,
               'outbound_quarantined',
               `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
               `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=not_confirmed_non_safe`,
             );
+            if (!alertQueued) {
+              failures.push({
+                phase: 'emit_outbound_quarantine_alert',
+                error: new Error(
+                  `outbound quarantine alert could not be durably queued for op ${op.id}`,
+                ),
+              });
+            }
           }
         } else {
           // No wa_message_id: definitely not delivered; apply replay policy
@@ -1672,22 +1767,46 @@ export class DurabilityEngine {
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
             );
-            emitAlertChecked(
+            const alertQueued = emitAlertChecked(
               config.botName,
               'outbound_quarantined',
               `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
               `replay_policy=${op.replay_policy} wa_message_id=none reason=no_wa_id_non_safe`,
             );
+            if (!alertQueued) {
+              failures.push({
+                phase: 'emit_outbound_quarantine_alert',
+                error: new Error(
+                  `outbound quarantine alert could not be durably queued for op ${op.id}`,
+                ),
+              });
+            }
           }
         }
       }
     } catch (err) {
+      failures.push({ phase: 'reconcile_maybe_sent_outbound', error: err });
       log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
     }
 
-    stats.openRecoveries = this.recoveryEvidence.countOpen();
+    try {
+      stats.openRecoveries = this.recoveryEvidence.countOpen();
+    } catch (err) {
+      failures.push({ phase: 'count_open_recoveries', error: err });
+      this.failIncompleteRecovery('postConnectRecovery', recovery, stats, failures, null);
+    }
+    if (failures.length > 0) {
+      this.failIncompleteRecovery(
+        'postConnectRecovery',
+        recovery,
+        stats,
+        failures,
+        stats.openRecoveries ?? null,
+      );
+    }
 
     // Require confirmed outbound proof before clearing quarantine; fail safely.
+    let quarantineClearRequested = false;
     try {
       const stateDir = join(homedir(), '.local', 'state', 'bot-errors', 'breaker');
       const decision = gateQuarantineClear(config.botName, {
@@ -1697,35 +1816,71 @@ export class DurabilityEngine {
         attemptWindowSeconds: 1800,
         tripThreshold: 5,
         confirmedOutboundWithinSeconds: this.confirmedOutboundProbe,
-        emitClear: () => clearAlertSourceChecked(config.botName, 'outbound_quarantined'),
-        emitEscalation: (evidence: string) =>
-          emitAlertChecked(
+        emitClear: () => { quarantineClearRequested = true; },
+        emitEscalation: (evidence: string) => {
+          const queued = emitAlertChecked(
             config.botName,
             'auth_terminal',
             `whatsoup@${config.botName} authentication appears unresolved — repair lane cannot restore it`,
             `HUMAN_REQUIRED ${evidence}`,
             'critical',
-          ),
-        emitGateFailure: (evidence: string) =>
-          emitAlertChecked(
+          );
+          if (!queued) {
+            throw new Error(
+              'postConnectRecovery: quarantine escalation could not be durably queued',
+            );
+          }
+        },
+        emitGateFailure: (evidence: string) => {
+          const queued = emitAlertChecked(
             config.botName,
             'fleet_health_verify_gate_failed',
-            `whatsoup@${config.botName} verify gate failed — legacy clear fallback used`,
-            `FLEET_HEALTH_VERIFY_GATE failure: ${evidence}; legacy_clear_fallback=true`,
+            `whatsoup@${config.botName} verify gate failed — quarantine clear suppressed`,
+            `FLEET_HEALTH_VERIFY_GATE failure: ${evidence}; clear_suppressed=true`,
             'warning',
-          ),
+          );
+          if (!queued) {
+            throw new Error(
+              'postConnectRecovery: quarantine gate-failure evidence could not be durably queued',
+            );
+          }
+        },
       });
       log.info({ decision }, 'postConnectRecovery: quarantine-clear gate decision');
+      if (
+        quarantineClearRequested
+        && !clearAlertSourceChecked(config.botName, 'outbound_quarantined')
+      ) {
+        throw new Error('postConnectRecovery: quarantine clear could not be durably queued');
+      }
     } catch (err) {
-      log.warn({ err }, 'postConnectRecovery: verify gate failed; falling back to legacy clear');
-      clearAlertSourceChecked(config.botName, 'outbound_quarantined');
+      log.error({ err }, 'postConnectRecovery: quarantine-clear verification failed');
+      failures.push({ phase: 'verify_quarantine_clear', error: err });
+      this.failIncompleteRecovery(
+        'postConnectRecovery',
+        recovery,
+        stats,
+        failures,
+        stats.openRecoveries ?? null,
+      );
     }
 
-    this.recoveryEvidence.finalize(
-      recovery,
-      stats,
-      JSON.stringify({ openRecoveries: stats.openRecoveries }),
-    );
+    try {
+      this.recoveryEvidence.finalize(
+        recovery,
+        stats,
+        JSON.stringify({ openRecoveries: stats.openRecoveries }),
+      );
+    } catch (err) {
+      failures.push({ phase: 'finalize_recovery_run', error: err });
+      this.failIncompleteRecovery(
+        'postConnectRecovery',
+        recovery,
+        stats,
+        failures,
+        stats.openRecoveries ?? null,
+      );
+    }
     log.info(stats, 'postConnectRecovery: complete');
     return stats;
   }

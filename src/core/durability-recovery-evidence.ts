@@ -22,6 +22,7 @@ interface RecoveryEvidenceStatements {
   insertRecoveryPlan: PreparedStatement;
   insertStartedRecoveryRun: PreparedStatement;
   finalizeStartedRecoveryRun: PreparedStatement;
+  recordIncompleteRecoveryRun: PreparedStatement;
   insertPendingDisposition: PreparedStatement;
   countOpenRecoveries: PreparedStatement;
   reconcileTurnDeliveryCorroboration: PreparedStatement;
@@ -57,6 +58,19 @@ export class DurabilityRecoveryEvidence {
             sessions_restored = ?,
             notes = ?,
             completed_at = datetime('now')
+        WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
+      `),
+      recordIncompleteRecoveryRun: prepare(`
+        UPDATE recovery_runs
+        SET inbound_replayed = ?,
+            outbound_reconciled = ?,
+            outbound_replayed = ?,
+            outbound_quarantined = ?,
+            tool_calls_recovered = ?,
+            tool_calls_replayed = ?,
+            tool_calls_quarantined = ?,
+            sessions_restored = ?,
+            notes = ?
         WHERE id = ? AND recovery_plan_id = ? AND completed_at IS NULL
       `),
       insertPendingDisposition: prepare(`
@@ -162,6 +176,29 @@ export class DurabilityRecoveryEvidence {
     );
     if (result.changes !== 1) {
       throw new Error('Recovery run receipt could not be finalized exactly once');
+    }
+  }
+
+  recordIncomplete(
+    receipt: RecoveryReceipt,
+    stats: RecoveryStats,
+    notes: string,
+  ): void {
+    const result = this.statements.recordIncompleteRecoveryRun.run(
+      stats.inboundReplayed,
+      stats.outboundReconciled,
+      stats.outboundReplayed,
+      stats.outboundQuarantined,
+      stats.toolCallsRecovered,
+      stats.toolCallsReplayed,
+      stats.toolCallsQuarantined,
+      stats.sessionsRestored,
+      notes,
+      receipt.recoveryRunId,
+      receipt.recoveryPlanId,
+    );
+    if (result.changes !== 1) {
+      throw new Error('Incomplete recovery run receipt could not be recorded exactly once');
     }
   }
 

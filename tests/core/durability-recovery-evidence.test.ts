@@ -144,6 +144,199 @@ describe('durable recovery evidence ordering', () => {
     });
     expect(db.raw.prepare('SELECT COUNT(*) AS count FROM inbound_disposition_links').get())
       .toEqual({ count: 0 });
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'pre_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['record_pending_operator_catchup'],
+      openRecoveries: null,
+    });
+  });
+
+  it('leaves pre-connect recovery incomplete and fails closed after an isolated mutation failure', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'pre-connect-incomplete',
+      chatJid: 'pre-connect-incomplete-jid',
+      opType: 'text',
+      payload: '{"text":"in flight"}',
+      replayPolicy: 'unsafe',
+    });
+    engine.markSending(opId);
+    db.raw.exec(`
+      CREATE TRIGGER deny_pre_connect_promotion
+      BEFORE UPDATE OF status ON outbound_ops
+      WHEN OLD.status = 'sending' AND NEW.status = 'maybe_sent'
+      BEGIN
+        SELECT RAISE(ABORT, 'pre-connect promotion denied');
+      END
+    `);
+
+    expect(() => engine.preConnectRecovery()).toThrow('pre-connect promotion denied');
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId))
+      .toEqual({ status: 'sending' });
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'pre_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['promote_sending_outbound'],
+      openRecoveries: 0,
+    });
+    expect(engine.getHealthStats().lastRecoveryAt).toBeNull();
+  });
+
+  it('preserves the primary phase failure when incomplete-receipt persistence also fails', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'pre-connect-double-failure',
+      chatJid: 'pre-connect-double-failure-jid',
+      opType: 'text',
+      payload: '{"text":"in flight"}',
+      replayPolicy: 'unsafe',
+    });
+    engine.markSending(opId);
+    db.raw.exec(`
+      CREATE TRIGGER deny_primary_recovery_mutation
+      BEFORE UPDATE OF status ON outbound_ops
+      WHEN OLD.status = 'sending' AND NEW.status = 'maybe_sent'
+      BEGIN
+        SELECT RAISE(ABORT, 'primary recovery mutation denied');
+      END;
+      CREATE TRIGGER deny_incomplete_receipt
+      BEFORE UPDATE ON recovery_runs
+      WHEN OLD.completed_at IS NULL AND NEW.completed_at IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'incomplete receipt denied');
+      END;
+    `);
+
+    let thrown: unknown;
+    try {
+      engine.preConnectRecovery();
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    if (!(thrown instanceof AggregateError)) {
+      throw new Error('Expected recovery and receipt failures to retain both causes');
+    }
+    expect(thrown.errors.map((err: unknown) => (
+      err instanceof Error ? err.message : String(err)
+    ))).toEqual([
+      'primary recovery mutation denied',
+      'incomplete receipt denied',
+    ]);
+    expect(db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'pre_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get()).toEqual({ completed_at: null, notes: null });
+  });
+
+  it('leaves post-connect recovery incomplete and never clears quarantine after a mutation failure', () => {
+    const opId = engine.createOutboundOp({
+      conversationKey: 'post-connect-incomplete',
+      chatJid: 'post-connect-incomplete-jid',
+      opType: 'text',
+      payload: '{"text":"maybe sent"}',
+      replayPolicy: 'safe',
+    });
+    engine.markMaybeSent(opId, 'crash-in-flight');
+    db.raw.exec(`
+      CREATE TRIGGER deny_post_connect_reconciliation
+      BEFORE UPDATE OF status ON outbound_ops
+      WHEN OLD.status = 'maybe_sent' AND NEW.status = 'pending'
+      BEGIN
+        SELECT RAISE(ABORT, 'post-connect reconciliation denied');
+      END
+    `);
+
+    expect(() => engine.postConnectRecovery()).toThrow('post-connect reconciliation denied');
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId))
+      .toEqual({ status: 'maybe_sent' });
+    expect(gateQuarantineClear).not.toHaveBeenCalled();
+    expect(clearAlertSource).not.toHaveBeenCalled();
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['reconcile_maybe_sent_outbound'],
+      openRecoveries: 0,
+    });
+    expect(engine.getHealthStats().lastRecoveryAt).toBeNull();
+  });
+
+  it.each([
+    ['pre_connect', () => engine.preConnectRecovery()],
+    ['post_connect', () => engine.postConnectRecovery()],
+  ] as const)('records %s recovery as incomplete when the open-recovery count fails', (
+    trigger,
+    recover,
+  ) => {
+    db.raw.exec('DROP TABLE inbound_disposition_links');
+
+    expect(recover).toThrow('no such table: inbound_disposition_links');
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(trigger) as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['count_open_recoveries'],
+      openRecoveries: null,
+    });
+    expect(gateQuarantineClear).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['pre_connect', () => engine.preConnectRecovery()],
+    ['post_connect', () => engine.postConnectRecovery()],
+  ] as const)('records %s finalization failure as incomplete', (trigger, recover) => {
+    db.raw.exec(`
+      CREATE TRIGGER deny_recovery_finalization
+      BEFORE UPDATE OF completed_at ON recovery_runs
+      WHEN OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'recovery finalization denied');
+      END
+    `);
+
+    expect(recover).toThrow('recovery finalization denied');
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(trigger) as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['finalize_recovery_run'],
+      openRecoveries: 0,
+    });
   });
 
   it('starts the sweep plan/run before terminalization and uses its outer transaction', () => {
@@ -247,6 +440,27 @@ describe('durable recovery evidence ordering', () => {
       recoveryJobId: receipt.recoveryJob!.jobId,
     };
   }
+
+  it('records post-connect corroboration failure as incomplete before outbound recovery', () => {
+    seedIncident();
+    db.raw.exec('DROP TABLE turn_delivery_corroboration');
+
+    expect(() => engine.postConnectRecovery()).toThrow('no such table: turn_delivery_corroboration');
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['reconcile_turn_delivery_corroboration'],
+      openRecoveries: null,
+    });
+    expect(gateQuarantineClear).not.toHaveBeenCalled();
+  });
 
   const reconciliationMismatches: ReadonlyArray<readonly [string, () => string | null]> = [
     ['a different terminal inbound sequence', () => `
