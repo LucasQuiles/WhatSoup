@@ -190,9 +190,15 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   markSessionCompacted: mockMarkSessionCompacted,
 }));
 
-vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
-  classifyActiveSessions: vi.fn(() => []),
-}));
+vi.mock('../../../src/runtimes/agent/session-classifier.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/session-classifier.ts')>();
+  return {
+    ...actual,
+    // resolveAmbiguousAgeFallback stays real (pure function, no I/O) so the
+    // #1756 interval-sweep tests exercise the actual age-fallback logic.
+    classifyActiveSessions: vi.fn(() => []),
+  };
+});
 
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
@@ -4684,6 +4690,55 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('does not overclaim delivery when the egress gate suppresses an ambient provider-failure chunk (#1758)', async () => {
+    // The tripwire must reflect the REAL outcome, not fire before the egress
+    // gate has decided. This text is ambient auth-required (delivers past the
+    // QR-209 two-tier gate) AND an internal-narration opener (suppressed by
+    // gateAssistantTextForOutbound) — the exact double-hit #1758 describes.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'my oauth broke, what do we do?' }));
+
+    const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'delivered assistant_text despite provider-failure classification',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid: 'test@s.whatsapp.net', kind: 'auth-required', outcome: 'suppressed' }),
+      'suppressed assistant_text despite provider-failure classification (egress gate)',
+    );
+  });
+
+  it('does not overclaim delivery on the shared handler either (#1758)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const chatJid = '15550100004@s.whatsapp.net';
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    await runtime.start();
+    await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'my oauth broke, what do we do?' }));
+
+    const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'delivered assistant_text despite provider-failure classification',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'auth-required', outcome: 'suppressed' }),
+      'suppressed assistant_text despite provider-failure classification (egress gate)',
+    );
+  });
+
   it('a suppressed streaming banner followed by a clean result does not arm fallback (QR-209 unknown-b)', async () => {
     // Streaming never arms fallback; the terminal result classifies event.text, and
     // a successful turn carries text:null — so a suppressed streaming banner cannot
@@ -8133,6 +8188,123 @@ describe('AgentRuntime', () => {
       );
     } finally {
       killSpy.mockRestore();
+    }
+  });
+
+  it('#1756: marks a zero-message ambiguous session past the age threshold as orphaned', async () => {
+    // The exact defect: classifyActiveSessions used to run startup-only and its
+    // 'ambiguous' bucket was a permanent no-op, so an init-failure session that
+    // never checkpointed stayed 'active' forever. Zero messages + past the age
+    // threshold + a PID that is verifiably NOT alive+owned must now resolve to
+    // a terminal 'orphaned' row instead of being left running forever.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('ESRCH: no such process');
+    });
+
+    const staleStartedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 46,
+      sessionId: 'ses-init-failed',
+      claudePid: 555555,
+      chatJid: 'zombie@s.whatsapp.net',
+      conversationKey: 'zombie',
+      status: 'active',
+      classification: 'ambiguous',
+      reason: 'no session_checkpoint for this conversation',
+      startedAt: staleStartedAt,
+      messageCount: 0,
+    }]);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    runtime.setDurability({} as any);
+
+    try {
+      await runtime.start();
+      expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 46);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        {
+          id: 46,
+          pid: 555555,
+          conversationKey: 'zombie',
+          reason: 'no session_checkpoint for this conversation',
+        },
+        'ambiguous session past age threshold with no activity — marked orphaned (#1756)',
+      );
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it('#1756: does not orphan an ambiguous session that has processed messages, regardless of age', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+
+    const veryOldStartedAt = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 47,
+      sessionId: 'ses-real-work',
+      claudePid: 666666,
+      chatJid: 'active-conversation@s.whatsapp.net',
+      conversationKey: 'active-conversation',
+      status: 'active',
+      classification: 'ambiguous',
+      reason: 'ownership unverified',
+      startedAt: veryOldStartedAt,
+      messageCount: 12,
+    }]);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    runtime.setDurability({} as any);
+
+    await runtime.start();
+    expect(mockMarkOrphaned).not.toHaveBeenCalledWith(db, 47);
+  });
+
+  it('#1756: runs the zombie-session classifier again on an interval, not just at startup', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+      (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+      const runtime = new AgentRuntime(db, messenger, 'test', {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        sandbox,
+        cwd: tmpdir(),
+      });
+      runtime.setDurability({} as any);
+
+      await runtime.start();
+      const callsAfterStartup = (mockClassify as ReturnType<typeof vi.fn>).mock.calls.length;
+      expect(callsAfterStartup).toBeGreaterThan(0);
+
+      // 30 minutes — the interval sweep's default period.
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1_000);
+
+      expect((mockClassify as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(callsAfterStartup);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

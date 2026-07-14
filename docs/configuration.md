@@ -132,6 +132,13 @@ Bounds resident per-chat agent sessions so a long-running instance does not accu
 | `WHATSOUP_MAX_SESSIONS` | integer | `12` | LRU ceiling on concurrent resident sessions. When exceeded, the longest-idle evictable sessions are suspended down toward the cap even if still within `WHATSOUP_SESSION_IDLE_MS`, bounding memory under a burst of many active chats. |
 | `WHATSOUP_SESSION_MIN_RESIDENCY_MS` | integer (ms) | `300000` (5m) | Anti-thrash floor: a freshly-spawned session is never suspended until it has lived at least this long, preventing evict→respawn churn under a burst. |
 
+`per_chat`/sandboxed-per-chat instances also run a DB-level zombie-session sweep, cross-referencing `agent_sessions` rows against `session_checkpoints` and PID ownership (`classifyActiveSessions`). Sessions the classifier cannot confidently place land in its 'ambiguous' bucket and are left running; the two knobs below give that bucket an escape hatch so an init-failure session that never checkpointed does not stay `active` forever (#1756).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_ZOMBIE_SWEEP_MS` | integer (ms) | `1800000` (30m) | How often the zombie-session classifier re-runs after startup. |
+| `WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS` | integer (ms) | `86400000` (24h) | Age (with zero processed messages) past which an 'ambiguous' row is independently re-verified for PID liveness/ownership and, if still not alive+owned, marked terminal (`orphaned`). A session with any processed messages, or a PID confirmed alive and owned by this service, is left alone regardless of age. |
+
 Persisted resume is supported only by `claude-cli`, `codex-cli`, and `opencode-cli`.
 If a persisted resume is attempted with `gemini-cli`, `openai-api`, or
 `anthropic-api`, the exact agent lifecycle and its checkpoints are atomically retired to

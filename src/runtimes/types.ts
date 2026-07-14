@@ -77,4 +77,15 @@ export interface Runtime {
   forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };
   /** Admin override: end any active fallback window immediately. Idempotent. */
   disableFallback?(): { ok: true };
+  /**
+   * #1753 rem-2: MCP tool-call liveness (agent runtimes only). The oldest
+   * in-flight call's age and the pending count make an async-hung send path
+   * (tool.handler() never resolving) visible in /health even when the event
+   * loop itself is free — a case loop-lag sampling structurally cannot catch.
+   */
+  getMcpLivenessSnapshot?(): {
+    pendingCount: number;
+    oldestCallAgeMs: number | null;
+    oldestCallTool: string | null;
+  } | null;
 }

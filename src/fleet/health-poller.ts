@@ -17,7 +17,7 @@ import {
   LOOP_LAG_STARVATION_THRESHOLD_MS,
   LoopLagSampler,
   type LoopLagSnapshot,
-} from './loop-lag-sampler.ts';
+} from '../lib/loop-lag-sampler.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
