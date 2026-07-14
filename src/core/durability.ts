@@ -10,6 +10,10 @@ import type { Messenger } from './types.ts';
 import type { GuardCaller } from './outbound-identity/types.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { withTransaction } from './db-tx.ts';
+import {
+  DurabilityRecoveryEvidence,
+  type RecoveryReceipt,
+} from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
@@ -189,6 +193,9 @@ export interface RecoveryStats {
   toolCallsReplayed: number;
   toolCallsQuarantined: number;
   sessionsRestored: number;
+  recoveryPlanId?: string | null;
+  recoveryRunId?: number | null;
+  openRecoveries?: number;
 }
 
 /** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
@@ -269,6 +276,7 @@ type DurabilityStatements = {
 export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
+  private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
@@ -618,6 +626,7 @@ export class DurabilityEngine {
       `),
       selectNow: prepare(`SELECT datetime('now') AS now`),
     };
+    this.recoveryEvidence = new DurabilityRecoveryEvidence(db);
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
@@ -1361,18 +1370,7 @@ export class DurabilityEngine {
 
   // ── Recovery engine ──
 
-  /**
-   * Pre-reconnect step: Run before reconnect. All synchronous SQLite operations.
-   *
-   * 1. Detect orphaned sessions via kill -0 on claude_pid.
-   * 2. Promote all `sending` outbound ops → `maybe_sent` (crash-in-flight).
-   * 3. Recover `executing` tool calls:
-   *    - With outbound_op_id: delegate to outbound reconciliation (no-op here, the
-   *      outbound op already handles it via maybe_sent promotion).
-   *    - Without outbound_op_id + replay_policy='safe': mark as 'replayed'.
-   *    - Without outbound_op_id + replay_policy='unsafe'/'read_only': quarantine.
-   * 4. For inbound events in `processing` with no terminal outbound ops: mark failed.
-   */
+  /** Recover interrupted sessions, deliveries, tools, and inbound turns before reconnect. */
   preConnectRecovery(): RecoveryStats {
     const stats: RecoveryStats = {
       inboundReplayed: 0,
@@ -1383,14 +1381,21 @@ export class DurabilityEngine {
       toolCallsReplayed: 0,
       toolCallsQuarantined: 0,
       sessionsRestored: 0,
+      recoveryPlanId: null,
+      recoveryRunId: null,
+      openRecoveries: 0,
     };
 
     log.info('preConnectRecovery: starting');
+    const recovery = this.recoveryEvidence.start(
+      'pre_connect_recovery',
+      'pre_connect',
+      'Pre-connect durability recovery',
+    );
+    stats.recoveryPlanId = recovery.recoveryPlanId;
+    stats.recoveryRunId = recovery.recoveryRunId;
 
-    // Settle exact recovery obligations whose selected delivery was durably
-    // echoed before the prior process could atomically close the source/job.
-    // This precedes generic stuck-inbound handling so the recovery owner keeps
-    // sole authority over the source terminal reason.
+    // Settle recovery deliveries before generic stuck-inbound handling.
     try {
       for (const opId of this.turnRecovery.getUnsettledEchoedTurnRecoveryOpIds()) {
         this.markEchoed(opId);
@@ -1448,9 +1453,7 @@ export class DurabilityEngine {
       for (const tc of executingCalls) {
         stats.toolCallsRecovered += 1;
         if (tc.outbound_op_id != null) {
-          // Delegate to outbound reconciliation — the op was already promoted to
-          // maybe_sent above (or was already in a terminal state). No additional
-          // action needed; just log.
+          // The linked outbound op owns reconciliation.
           log.info(
             { toolCallId: tc.id, outboundOpId: tc.outbound_op_id },
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
@@ -1486,19 +1489,25 @@ export class DurabilityEngine {
           { id: number; status: OutboundStatus } | undefined;
 
         if (!terminalOp) {
-          this.markContinuityCandidate(ev.seq, 'crash_reclaim_no_terminal_outbound', 'pre_connect_recovery');
-          this.markInboundFailed(ev.seq, 'crash_recovery');
+          this.recoveryEvidence.recordPending(
+            ev.seq,
+            recovery,
+            'crash_reclaim_no_terminal_outbound',
+            () => {
+              this.markContinuityCandidate(
+                ev.seq,
+                'crash_reclaim_no_terminal_outbound',
+                'pre_connect_recovery',
+              );
+              this.markInboundFailed(ev.seq, 'crash_recovery');
+            },
+          );
           log.info(
             { inboundSeq: ev.seq },
             'preConnectRecovery: inbound processing with no terminal op marked failed',
           );
         } else if (terminalOp.status === 'echoed') {
-          // QR-102 (recovery site): the reply was echoed (delivery confirmed) but the
-          // inbound completion was interrupted — the echo path finalizes in autocommit
-          // steps (markEchoed.run → completeInbound) and a crash between them leaves the
-          // op 'echoed' while the inbound is still 'processing'. postConnect only
-          // reconciles submitted/maybe_sent ops, so an already-echoed op is NEVER
-          // revisited and the inbound would leak. Finalize it here (idempotent).
+          // QR-102: delivery is proved; finish the interrupted inbound completion.
           this.completeInbound(ev.seq, 'response_sent');
           log.info(
             { inboundSeq: ev.seq, terminalOpId: terminalOp.id },
@@ -1512,30 +1521,19 @@ export class DurabilityEngine {
         }
       }
     } catch (err) {
-      log.warn({ err }, 'preConnectRecovery: error handling processing inbound events');
+      log.error({ err }, 'preConnectRecovery: unsafe failure recording pending catch-up');
+      throw err;
     }
 
-    // Step 4b (QR-035): finalize inbound events stranded at `turn_done`. The turn
-    // completed (markTurnDone ran) but markInboundComplete didn't before the crash,
-    // so the row is terminal-by-intent — mark it `complete` (NOT `failed`). The
-    // reply's outbound op is reconciled independently by the outbound steps. Without
-    // this the row never reaches a terminal status and retention never reclaims it.
+    // QR-035: finalize no-reply turns stranded after markTurnDone.
     try {
       const turnDoneEvents = this.statements.getTurnDoneInboundEvents.all() as Array<{ seq: number }>;
       for (const ev of turnDoneEvents) {
-        // Only the genuine strand: a turn_done with NO terminal outbound op (a
-        // no-reply turn). One WITH a terminal op is deliberately left for
-        // postConnect, which reconciles the op (echo/replay) and marks the inbound
-        // complete only after delivery is confirmed — finalizing it here would
-        // prematurely complete it before its reply is verified.
+        // Non-echoed terminal deliveries remain owned by post-connect recovery.
         const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as
           { id: number; status: OutboundStatus } | undefined;
         if (terminalOp) {
-          // QR-102 (recovery site): a turn_done with an already-echoed terminal op is
-          // the same interrupted-completion strand (crash after markTurnDone, before
-          // markInboundComplete). Delivery is confirmed, and postConnect never revisits
-          // an echoed op — so finalize it now (idempotent). A non-echoed terminal op is
-          // still left for postConnect (delivery not yet confirmed).
+          // QR-102: an echoed terminal op proves this stranded turn completed.
           if (terminalOp.status === 'echoed') {
             this.completeInbound(ev.seq, 'response_sent');
             log.info(
@@ -1552,20 +1550,21 @@ export class DurabilityEngine {
       log.warn({ err }, 'preConnectRecovery: error reconciling turn_done inbound events');
     }
 
+    stats.openRecoveries = this.recoveryEvidence.countOpen();
+    this.recoveryEvidence.finalize(
+      recovery,
+      stats,
+      JSON.stringify({ openRecoveries: stats.openRecoveries }),
+    );
     log.info(stats, 'preConnectRecovery: complete');
     return stats;
   }
 
-  /**
-   * Post-reconnect step: Run after reconnect + echo grace period. All synchronous SQLite operations.
-   *
-   * 1. Reconcile `maybe_sent` ops: check messages table for wa_message_id match.
-   *    - Found: mark echoed.
-   *    - Not found + safe: mark for replay (outbound_replayed).
-   *    - Not found + unsafe/read_only: quarantine.
-   * 2. Reconcile stale `submitted` (no echo after grace): promote to `maybe_sent`.
-   * 3. Log recovery_run with aggregated stats.
-   */
+  /** Record durable corroboration under the started post-connect recovery receipt. */
+  private reconcileTurnDeliveryCorroboration(receipt: RecoveryReceipt): number {
+    return this.recoveryEvidence.reconcileDeliveryCorroboration(receipt);
+  }
+
   postConnectRecovery(): RecoveryStats {
     const stats: RecoveryStats = {
       inboundReplayed: 0,
@@ -1576,22 +1575,30 @@ export class DurabilityEngine {
       toolCallsReplayed: 0,
       toolCallsQuarantined: 0,
       sessionsRestored: 0,
+      recoveryPlanId: null,
+      recoveryRunId: null,
+      openRecoveries: 0,
     };
 
     log.info('postConnectRecovery: starting');
+    const recovery = this.recoveryEvidence.start(
+      'post_connect_recovery',
+      'post_connect',
+      'Post-connect durability recovery',
+    );
+    stats.recoveryPlanId = recovery.recoveryPlanId;
+    stats.recoveryRunId = recovery.recoveryRunId;
+    const corroborated = this.reconcileTurnDeliveryCorroboration(recovery);
+    if (corroborated > 0) {
+      log.info({ corroborated }, 'postConnectRecovery: recorded later-echo delivery corroboration');
+    }
 
-    // Step 1: Promote stale `submitted` ops (no echo after 30s grace period) → maybe_sent
-    // Only promote ops submitted before the current session's startup window to avoid
-    // racing with echoes from messages sent in the current reconnect attempt.
-    // Done first so newly-promoted ops are reconciled in the same pass (Step 2).
+    // Promote only pre-startup submitted ops, then reconcile them in this pass.
     try {
       const staleSubmitted = this.statements.getStaleSubmitted.all() as Array<{ id: number }>;
       for (const op of staleSubmitted) {
         this.markMaybeSent(op.id, 'stale-submitted-no-echo');
-        // NOTE (BEAD-060): do NOT increment outboundReconciled here. These ops are
-        // re-read as maybe_sent in Step 2, which is the single counting site for
-        // outboundReconciled — counting here too would double-count every
-        // stale-submitted op.
+        // BEAD-060: the maybe_sent pass is the sole reconciliation counting site.
         log.info(
           { opId: op.id },
           'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
@@ -1606,6 +1613,14 @@ export class DurabilityEngine {
       const maybeSent = this.getOutboundByStatus('maybe_sent');
       for (const op of maybeSent) {
         stats.outboundReconciled += 1;
+
+        if (this.recoveryEvidence.hasDeliveryCorroboration(op.id)) {
+          log.info(
+            { opId: op.id },
+            'postConnectRecovery: corroborated selected delivery preserved unchanged',
+          );
+          continue;
+        }
 
         if (op.wa_message_id) {
           // Check if message was received via normal ingest (echo confirmation)
@@ -1670,15 +1685,9 @@ export class DurabilityEngine {
       log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
     }
 
-    // Step 3: Log recovery run
-    this.logRecoveryRun('post_connect', stats);
+    stats.openRecoveries = this.recoveryEvidence.countOpen();
 
-    // Gate the quarantine clear behind a genuine-recovery proof. A drained queue
-    // is NOT proof auth recovered (ml-bot 401, 2026-06-21). The gate emits a real
-    // clear only when a confirmed outbound proves auth works; otherwise it
-    // suppresses the cosmetic clear and raises one durable HUMAN_REQUIRED escalation.
-    // Fail-safe: a gate failure must never break recovery — fall back to the legacy
-    // clear so a healthy instance is not left with a stale quarantine alert.
+    // Require confirmed outbound proof before clearing quarantine; fail safely.
     try {
       const stateDir = join(homedir(), '.local', 'state', 'bot-errors', 'breaker');
       const decision = gateQuarantineClear(config.botName, {
@@ -1712,17 +1721,16 @@ export class DurabilityEngine {
       clearAlertSourceChecked(config.botName, 'outbound_quarantined');
     }
 
+    this.recoveryEvidence.finalize(
+      recovery,
+      stats,
+      JSON.stringify({ openRecoveries: stats.openRecoveries }),
+    );
     log.info(stats, 'postConnectRecovery: complete');
     return stats;
   }
 
-  /**
-   * Periodic sweep: promote outbound ops stuck in 'submitted' for > 30 s to
-   * 'maybe_sent'. Runs on a short interval while the process is live so that
-   * ops whose echo never arrives are not silently stranded.
-   *
-   * Returns the number of ops promoted.
-   */
+  /** Promote live outbound ops whose echo window expired. */
   sweepStaleSubmitted(): number {
     const result = this.statements.sweepStaleSubmitted.run();
     const count = Number(result.changes);
@@ -1732,25 +1740,7 @@ export class DurabilityEngine {
     return count;
   }
 
-  /**
-   * Periodic reconciler for inbound rows stranded in a non-terminal
-   * processing_status WHILE the process is live (preConnectRecovery only runs at
-   * startup). Without this a stranded row never reaches complete/failed and
-   * retention never reclaims it → unbounded growth. Three buckets:
-   *
-   *   1. open (pending/processing/turn_done) with an echoed terminal op, older
-   *      than 5 min → complete, 'recovered_response_sent' (delivery confirmed but
-   *      the completion step was missed — the QR-102 strand, seen live not just
-   *      across crashes).
-   *   2. turn_done older than 24h with no echoed terminal op → complete,
-   *      'recovered_turn_done' (a no-reply turn that finished but never finalized).
-   *   3. pending/processing older than 24h with no echoed terminal op → failed
-   *      (terminal_reason='error') — the turn silently died with no delivered reply.
-   *
-   * The whole sweep runs in one transaction. It uses completeInbound /
-   * markInboundComplete / markInboundFailed (never completeTurn, which opens its
-   * own BEGIN IMMEDIATE). continuity_candidate_* columns are left untouched.
-   */
+  /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
@@ -1758,24 +1748,57 @@ export class DurabilityEngine {
       let failedStale = 0;
 
       const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
+      const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
+      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
+      if (echoed.length === 0 && turnDone.length === 0 && staleOpen.length === 0) {
+        return { completedEchoed, completedTurnDone, failedStale };
+      }
+
+      const recovery = this.recoveryEvidence.startWithinTransaction(
+        'stuck_inbound_sweep',
+        'stuck_inbound_sweep',
+        'Stuck inbound durability sweep',
+      );
+
       for (const row of echoed) {
         this.completeInbound(row.seq, 'recovered_response_sent');
         completedEchoed += 1;
       }
 
-      const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
       for (const row of turnDone) {
         this.markInboundComplete(row.seq, 'recovered_turn_done');
         completedTurnDone += 1;
       }
 
-      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
       for (const row of staleOpen) {
-        this.markInboundFailed(row.seq, 'stale_reclaim');
+        this.recoveryEvidence.recordPendingWithinTransaction(
+          row.seq,
+          recovery,
+          'stale_reclaim',
+          () => this.markInboundFailed(row.seq, 'stale_reclaim'),
+        );
         failedStale += 1;
       }
 
       const result: StuckInboundSweepResult = { completedEchoed, completedTurnDone, failedStale };
+      const recoveryStats: RecoveryStats = {
+        inboundReplayed: 0,
+        outboundReconciled: 0,
+        outboundReplayed: 0,
+        outboundQuarantined: 0,
+        toolCallsRecovered: 0,
+        toolCallsReplayed: 0,
+        toolCallsQuarantined: 0,
+        sessionsRestored: 0,
+        recoveryPlanId: recovery.recoveryPlanId,
+        recoveryRunId: recovery.recoveryRunId,
+        openRecoveries: this.recoveryEvidence.countOpen(),
+      };
+      this.recoveryEvidence.finalize(
+        recovery,
+        recoveryStats,
+        JSON.stringify({ ...result, openRecoveries: recoveryStats.openRecoveries }),
+      );
       if (completedEchoed > 0 || completedTurnDone > 0 || failedStale > 0) {
         log.info(result, 'sweepStuckInbound: finalized stuck inbound rows');
       }
@@ -1783,7 +1806,12 @@ export class DurabilityEngine {
     });
   }
 
-  getHealthStats(): { pendingOutbound: number; quarantinedOutbound: number; lastRecoveryAt: string | null } {
+  getHealthStats(): {
+    pendingOutbound: number;
+    quarantinedOutbound: number;
+    lastRecoveryAt: string | null;
+    openRecoveries: number;
+  } {
     const pending = this.statements.getPendingOutboundCount.get() as { count: number };
     const quarantined = this.statements.getQuarantinedOutboundCount.get() as { count: number };
     const lastRecovery = this.statements.getLastRecoveryRunCompletedAt.get() as
@@ -1793,6 +1821,7 @@ export class DurabilityEngine {
       pendingOutbound: pending.count,
       quarantinedOutbound: quarantined.count,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,
+      openRecoveries: this.recoveryEvidence.countOpen(),
     };
   }
 
@@ -1862,39 +1891,7 @@ export async function sendTracked(
   }
 }
 
-/**
- * Drain outbound ops in `status='pending'` by actually re-sending them.
- *
- * `postConnectRecovery` resets unconfirmed `safe`/`read_only` `maybe_sent` ops to
- * `pending` (the "reset for replay" step), but nothing else re-sends them — so
- * before this drainer existed, genuinely-undelivered safe/read_only ops were
- * silently dropped (BEAD-057). This function closes that gap. It is invoked both
- * from the post-connect recover callback (after `postConnectRecovery`) and from
- * the live echo-timeout interval, so any op that lands in `pending` between
- * reconnects is re-sent without waiting for a future restart.
- *
- * Per-op handling:
- *  - Reconstructable text op (`op_type === 'text'` and payload parses to
- *    `{ text: string }`, the exact shape `sendTracked` writes): `markSending`,
- *    re-send via `messenger.sendMessage`, then `markSubmitted` with the receipt.
- *    On send failure → `markMaybeSent` so the op re-enters the reconnect-paced
- *    recovery loop (no inline retry / tight-loop).
- *  - Non-reconstructable op (unknown `op_type`, or a `text` op whose payload does
- *    not parse to `{ text }`): `markQuarantined` + an `outbound_quarantined`
- *    alert. We must NOT leave these `pending` forever — that would reintroduce the
- *    original silent-drop bug for non-text ops.
- *
- * Idempotency / double-send: only `safe`/`read_only` ops ever reach `pending`
- * (postConnectRecovery quarantines `unsafe`, and terminal USER replies are
- * `unsafe`). A replay that duplicates an already-delivered message is therefore
- * the ACCEPTED tradeoff for safe/read_only ops (admin notices, heal notices, MCP
- * read ops) — never for user-terminal replies. This is the same risk profile
- * `sendTracked`-created ops already carry on a maybe_sent → reset cycle; the
- * drainer does not widen it.
- *
- * One failing op never aborts the rest of the drain. Returns the count of ops
- * successfully re-sent (transitioned out of `pending` via `markSubmitted`).
- */
+/** Drain replay-safe pending text ops; quarantine malformed ops and isolate failures. */
 export async function drainPendingOutbound(
   messenger: Messenger,
   durability: DurabilityEngine,
