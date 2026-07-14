@@ -338,7 +338,7 @@ Create an agent job bead and schedule trigger. Admin only.
 |------|------|----------|-------------|
 | prompt | string | required | Agent job prompt/body. |
 | title | string | optional | Bead title; defaults to the first 80 prompt characters. |
-| schedule | object | required | Schedule spec with `kind`, plus `expr`/`tz` for cron or `fire_at` for one-shot time. |
+| schedule | object | required | Schedule spec with `kind`, plus `expr`/`tz` for cron or `fire_at` (unix epoch seconds) for one-shot time. A ms-range `fire_at` is auto-normalized to seconds; a value implausible in either unit is rejected (#1757). |
 | report_chat | string | required | JID that receives the trigger report. |
 | terminal_at | number | optional | Requested terminal timestamp. |
 | metadata | object | optional | Additional bead metadata. |
