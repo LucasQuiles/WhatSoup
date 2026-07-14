@@ -605,6 +605,58 @@ describe('chat-management tools', () => {
       expect(result.content[0].text).toContain('different conversation');
       expect(mockSock.sendMessage).not.toHaveBeenCalled();
     });
+
+    // #1785 rec-4: forward_message calls sock.sendMessage directly, bypassing
+    // both the registry's injected-tool guard (targetMode is 'caller-supplied',
+    // not 'injected') and the send-pipeline beforeAudit check — its ONLY
+    // confinement is the assertConversationAccess pair above (QR-109/#1618),
+    // which is itself gated on session.conversationKey being bound. Before
+    // #1785 rec-3, per_chat's actor and fallback sockets were tier:'global'
+    // with conversationKey permanently undefined, so these two checks were
+    // unreachable dead code for the entire per_chat fleet — forward_message
+    // forwarded any stored message to any target with zero enforcement. This
+    // pins the exact SessionContext shape createPerChatActorSocket now
+    // constructs (tier:'global' + allowedRoot + a bound conversationKey) end
+    // to end, in both directions, so a future change to either side of the
+    // seam (the socket construction or this handler) cannot silently
+    // reopen it.
+    describe('#1785 rec-3+rec-4: the real per-chat actor-socket SessionContext shape', () => {
+      function perChatActorSocketSession(conversationKey: string): SessionContext {
+        return { tier: 'global', allowedRoot: '/tmp/agent-cwd', conversationKey };
+      }
+
+      it('same-chat forward succeeds (per_chat actor socket, source AND target both within its own conversation)', async () => {
+        const result = await registry.call(
+          'forward_message',
+          { message_id: 'msg1', to_jid: '111@s.whatsapp.net' },
+          perChatActorSocketSession('111'),
+        );
+        expect(result.isError).toBeUndefined();
+        expect(mockSock.sendMessage).toHaveBeenCalledWith('111@s.whatsapp.net', { text: 'First message' });
+      });
+
+      it('cross-chat forward of a foreign source message is REJECTED (the live #1785 bug, once activated end to end)', async () => {
+        const result = await registry.call(
+          'forward_message',
+          { message_id: 'msg6', to_jid: '111@s.whatsapp.net' }, // msg6 belongs to conversation "222"
+          perChatActorSocketSession('111'),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('different conversation');
+        expect(mockSock.sendMessage).not.toHaveBeenCalled();
+      });
+
+      it('cross-chat forward to a foreign target is REJECTED (the live #1785 bug, once activated end to end)', async () => {
+        const result = await registry.call(
+          'forward_message',
+          { message_id: 'msg1', to_jid: '222@s.whatsapp.net' },
+          perChatActorSocketSession('111'),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('different conversation');
+        expect(mockSock.sendMessage).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // --- forward_message: outbound identity guard ---
