@@ -4,6 +4,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../src/instance-loader.ts', () => ({
   loadInstance: vi.fn(),
 }));
+vi.mock('../src/core/database-compatibility-early.ts', () => ({
+  databaseCompatibilityStartupExitCode: vi.fn(() => 1),
+  runEarlyDatabaseCompatibilityGate: vi.fn(async () => false),
+}));
+vi.mock('../src/database-compatibility-config.ts', () => ({
+  configureDatabaseCompatibilityBootstrap: vi.fn(),
+}));
 
 // Mock main.ts to prevent side effects from config.ts / logger.ts
 vi.mock('../src/main.ts', () => ({}));

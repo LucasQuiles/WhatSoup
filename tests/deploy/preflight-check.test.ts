@@ -321,6 +321,42 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight behavior', () => {
 });
 
 describe('deploy/whatsoup — source wiring', () => {
+  it('runs database compatibility before tmp creation and full instance parsing', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const compatibility = wrapper.indexOf('src/database-compatibility-bootstrap.ts');
+    expect(compatibility).toBeGreaterThan(-1);
+    expect(compatibility).toBeLessThan(wrapper.indexOf('mkdir -p "$TMPDIR"'));
+    expect(compatibility).toBeLessThan(wrapper.indexOf('INSTANCE_TYPE='));
+  });
+
+  it('propagates the terminal database bootstrap exit status instead of collapsing it to restartable failure', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    expect(wrapper).toContain('DATABASE_COMPATIBILITY_RC=$?');
+    expect(wrapper).toContain('DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78');
+    expect(wrapper).toContain('exit "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS"');
+  });
+
+  it('links main in import-only mode without executing production startup effects', () => {
+    const preflight = readFileSync(PREFLIGHT, 'utf8');
+    const main = readFileSync(join(REPO_ROOT, 'src/main.ts'), 'utf8');
+    expect(preflight).toContain('WHATSOUP_PREFLIGHT_IMPORT_ONLY=1');
+    expect(preflight).toContain(
+      'WHATSOUP_PREFLIGHT_IMPORT_SENTINEL=restart-safety-link-probe-v1',
+    );
+    const guard = main.indexOf('if (!preflightImportOnlyAuthorized) {');
+    expect(guard).toBeGreaterThan(-1);
+    for (const effect of [
+      'openDatabaseForStartup({',
+      'getPineconeReadiness(',
+      'createConnection(',
+      'startHealthServer(',
+      'setInterval(',
+      'start().catch(',
+    ]) {
+      expect(main.indexOf(effect), effect).toBeGreaterThan(guard);
+    }
+  });
+
   it('declares skip-preflight as an explicit =1 emergency override with a warning', () => {
     const wrapper = readFileSync(WRAPPER, 'utf8');
     expect(wrapper).toContain('if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then');
@@ -347,6 +383,27 @@ describe('deploy/whatsoup — source wiring', () => {
     expect(preflightIndex).toBeGreaterThan(-1);
     expect(bootstrapIndex).toBeGreaterThan(-1);
     expect(preflightIndex).toBeLessThan(bootstrapIndex);
+  });
+
+  it('scrubs import-only probe identity before the production node exec', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const scrub = wrapper.indexOf(
+      'unset WHATSOUP_PREFLIGHT_IMPORT_ONLY WHATSOUP_PREFLIGHT_IMPORT_SENTINEL',
+    );
+    const bootstrapIndex = wrapper.lastIndexOf('bootstrap.ts');
+    expect(scrub).toBeGreaterThan(-1);
+    expect(scrub).toBeLessThan(bootstrapIndex);
+  });
+
+  it('runs database compatibility before provider credential resolution', () => {
+    const wrapper = readFileSync(WRAPPER, 'utf8');
+    const databaseGate = wrapper.indexOf('database-compatibility-bootstrap.ts');
+    const providerCredentials = wrapper.indexOf('ANTHROPIC_API_KEY="$(keyring_lookup');
+    expect(databaseGate).toBeGreaterThan(-1);
+    expect(providerCredentials).toBeGreaterThan(databaseGate);
+    const between = wrapper.slice(databaseGate, providerCredentials);
+    expect(between).toContain('future_schema|engine_recovery_required');
+    expect(between).toContain('--hold');
   });
 
   it('shares node-pin logic via deploy/lib/resolve-node.sh (DRY with wrapper)', () => {

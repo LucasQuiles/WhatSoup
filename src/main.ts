@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
-import { Database, storeDecryptionFailure } from './core/database.ts';
+import { storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
@@ -22,6 +22,11 @@ import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts'
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { startHealthServer } from './core/health.ts';
+import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
+import {
+  closeDatabaseCompatibilityHealthServer,
+  waitForDatabaseCompatibilityDrain,
+} from './core/database-compatibility-early.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
@@ -60,6 +65,19 @@ import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
+
+// The restart-safety probe must link the complete static import graph without
+// executing this module's database, network, transport, health, or timer body.
+// Production bootstrap never sets this flag; deploy/preflight-check.sh sets it
+// only inside its throwaway import-closure subprocess.
+const preflightImportOnlyRequested = process.env.WHATSOUP_PREFLIGHT_IMPORT_ONLY === '1';
+const preflightImportOnlyAuthorized = preflightImportOnlyRequested
+  && process.env.WHATSOUP_PREFLIGHT_IMPORT_SENTINEL === 'restart-safety-link-probe-v1'
+  && process.argv[1]?.endsWith('preflight-probe.ts') === true;
+if (preflightImportOnlyRequested && !preflightImportOnlyAuthorized) {
+  throw new Error('WHATSOUP_PREFLIGHT_IMPORT_ONLY is reserved for the canonical import probe');
+}
+if (!preflightImportOnlyAuthorized) {
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -120,12 +138,6 @@ if (config.adminPhones.size === 0) {
   log.warn('No admin phones configured — approval requests will not be delivered');
 }
 
-const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
-log.info({
-  pineconeIndex: pineconeReadiness.index,
-  pineconeReadiness: pineconeReadiness.state,
-}, 'pinecone readiness');
-
 // 1. Lock
 acquireLock();
 // Safety net: release lock even if shutdown() throws or is bypassed
@@ -141,8 +153,37 @@ process.on('exit', () => releaseLock());
 // reads instance DBs read-only (see src/fleet/db-reader.ts) — it does not
 // run migrations. Operator runbook: docs/runbooks/mwlab-transcription-pinecone.md
 // (operator-gated migration trigger for the enrichment exporter rollout).
-const db = new Database(config.dbPath);
-db.open();
+const databaseStartup = await openDatabaseForStartup({
+  dbPath: config.dbPath,
+  instanceName: config.botName,
+  startedAt,
+  healthPort: config.healthPort,
+});
+if (databaseStartup.mode === 'drained') {
+  let drainSignal: 'SIGINT' | 'SIGTERM';
+  try {
+    drainSignal = await waitForDatabaseCompatibilityDrain(databaseStartup.server);
+  } finally {
+    try {
+      try {
+        databaseStartup.db?.close();
+      } catch (err) {
+        log.warn({ err }, 'failed to close inspection database while leaving compatibility drain');
+      }
+      await closeDatabaseCompatibilityHealthServer(databaseStartup.server);
+    } finally {
+      releaseLock();
+    }
+  }
+  process.exit(shutdownExitCode(drainSignal));
+}
+const db = databaseStartup.db;
+
+const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
+log.info({
+  pineconeIndex: pineconeReadiness.index,
+  pineconeReadiness: pineconeReadiness.state,
+}, 'pinecone readiness');
 
 const seededChatAliases = seedChatAliases(db.raw, config.chatAliases);
 if (seededChatAliases > 0) {
@@ -1058,3 +1099,5 @@ start().catch((err) => {
   log.fatal({ err }, 'failed to start');
   shutdown('startupError').catch(() => process.exit(1));
 });
+
+}

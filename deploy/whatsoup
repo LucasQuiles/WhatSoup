@@ -111,6 +111,42 @@ fi
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
 export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
 
+# Database compatibility precedes tmp creation, full config parsing, and every
+# provider credential/keyring lookup. A future schema or hot rollback journal
+# enters the dependency-free health drain directly, so unrelated environment
+# or config damage cannot mask/restart-loop the storage safety state.
+DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
+if DATABASE_COMPATIBILITY_STATUS="$(
+  "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --check
+)"; then
+  :
+else
+  DATABASE_COMPATIBILITY_RC=$?
+  echo "FATAL: database compatibility preflight failed for instance '$INSTANCE'" >&2
+  if [ "$DATABASE_COMPATIBILITY_RC" -eq "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS" ]; then
+    exit "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS"
+  fi
+  exit 1
+fi
+case "$DATABASE_COMPATIBILITY_STATUS" in
+  ready) ;;
+  future_schema|engine_recovery_required)
+    exec "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$REPO_ROOT/src/database-compatibility-bootstrap.ts" "$INSTANCE" --hold
+    ;;
+  *)
+    echo "FATAL: unrecognized database compatibility status for instance '$INSTANCE'" >&2
+    exit 1
+    ;;
+esac
+unset DATABASE_COMPATIBILITY_STATUS DATABASE_COMPATIBILITY_RC \
+  DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS
+
 # Pin process temp files under a per-instance WhatSoup-owned tmp directory so
 # Baileys encrypted upload blobs are not exposed to macOS /var/folders cleanup.
 XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -190,6 +226,11 @@ fi
 if [ -n "$WHATSOUP_HEALTH_TOKEN" ]; then
   export WHATSOUP_HEALTH_TOKEN
 fi
+
+# Import-only mode is reserved for deploy/preflight-probe.ts. Never inherit it
+# into the real service process: an ambient/systemd value must not turn a valid
+# startup into a clean no-op exit under Restart=on-failure.
+unset WHATSOUP_PREFLIGHT_IMPORT_ONLY WHATSOUP_PREFLIGHT_IMPORT_SENTINEL
 
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \

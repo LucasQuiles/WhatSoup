@@ -31,6 +31,9 @@ Type=simple
 ExecStartPre=%h/.local/bin/whatsoup-ensure-node
 ExecStart=%h/.local/bin/whatsoup %i
 Restart=on-failure
+# Exit 78 is a deliberate terminal startup block (for example, an inspection
+# health-port collision). Keep the unit failed and alert once; never backoff-loop.
+RestartPreventExitStatus=78
 # Base restart delay — matches Baileys reconnect cooldown.
 RestartSec=15
 # Exponential backoff: delays increase from RestartSec (15s) toward
