@@ -1,4 +1,4 @@
-import type { AgentEvent } from './stream-parser.ts';
+import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import type { SessionManager } from './session.ts';
 import type { OperationTracker } from './operation-tracker.ts';
@@ -497,7 +497,10 @@ if (mapKey !== undefined) {
 host.workspaceSweeper.touch(mapKey);
 const rowId = session?.getDbRowId() ?? null;
 if (!runtimeContext && (event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
-  accumulateTokensWithEvent(host.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+  {
+    const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+    accumulateTokensWithEvent(host.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
+  }
 }
 // Only advance the compact baseline when the SDK actually emitted a
 // compact_boundary on this turn. wasSilentCompact alone means "we
@@ -1067,7 +1070,10 @@ if (!host.turnHadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentC
 }
 host.turnHadVisibleOutput = false;
 if (!runtimeContext && (event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
-  accumulateTokensWithEvent(host.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+  {
+    const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+    accumulateTokensWithEvent(host.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
+  }
 }
 // Only advance the compact baseline when the SDK actually emitted a
 // compact_boundary. wasSilentCompact alone means "we suppressed

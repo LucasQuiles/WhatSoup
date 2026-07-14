@@ -77,7 +77,7 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       { kind: 'completed' },
     );
 
-    expect(params.sessionTokens).toEqual({ dbRowId: 7, inputTokens: 500, outputTokens: 40 });
+    expect(params.sessionTokens).toEqual({ dbRowId: 7, inputTokens: 500, outputTokens: 40, cacheReadTokens: 0 });
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 

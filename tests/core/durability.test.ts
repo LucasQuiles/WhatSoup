@@ -310,6 +310,7 @@ describe('DurabilityEngine', () => {
           dbRowId: sessionRowId,
           inputTokens: 11,
           outputTokens: 7,
+          cacheReadTokens: 0,
         },
         checkpoint: {
           conversationKey: 'key-1',
@@ -374,6 +375,7 @@ describe('DurabilityEngine', () => {
           dbRowId: sessionRowId,
           inputTokens: 11,
           outputTokens: 7,
+          cacheReadTokens: 0,
         },
       })).toThrow(/token event denied/);
 
@@ -498,7 +500,7 @@ describe('durability.ts uncovered-branch coverage', () => {
     });
 
     engine.completeTurn({
-      sessionTokens: { dbRowId, inputTokens: 123, outputTokens: 456 },
+      sessionTokens: { dbRowId, inputTokens: 123, outputTokens: 456, cacheReadTokens: 0 },
       checkpoint: {
         conversationKey: 'key-ct',
         fields: { sessionId: 'sess-1', claudePid: 4242, sessionStatus: 'active' },
@@ -547,7 +549,7 @@ describe('durability.ts uncovered-branch coverage', () => {
     db.raw.exec('DROP TABLE session_checkpoints');
 
     expect(() => engine.completeTurn({
-      sessionTokens: { dbRowId, inputTokens: 1, outputTokens: 2 },
+      sessionTokens: { dbRowId, inputTokens: 1, outputTokens: 2, cacheReadTokens: 0 },
       checkpoint: { conversationKey: 'key-rb', fields: { sessionStatus: 'active' } },
     })).toThrow();
 

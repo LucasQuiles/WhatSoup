@@ -112,6 +112,14 @@ export class HandoffDistillCoordinator {
     // Per-conversation token baseline: total input+output since the row's last
     // compact. The runner compares this against the growth threshold; the gate
     // bills spend separately, so this only decides eligibility.
+    //
+    // #1774: totalInputTokens/lastCompactInputTokens now mean genuinely-new
+    // input only (cache_read excluded) — deliberately NOT compensated back
+    // to the old combined value here (contrast with maybeStartAutoCompact in
+    // runtime.ts, which does compensate). For handoff-distill eligibility,
+    // genuinely-new input is the semantically better growth signal than
+    // repeated re-reads of the same prior context, so this is an intentional
+    // improvement: growth now tracks real new content, not context size.
     const tokenGrowth = (conversationKey: string): number => {
       const rowId = this.rowIdFor(conversationKey);
       if (rowId === null) return 0;

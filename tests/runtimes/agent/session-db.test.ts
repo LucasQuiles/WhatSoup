@@ -364,11 +364,11 @@ describe('agent session-db', () => {
     const id = createSession(db, 80002, '/tmp/token-dual');
 
     insertTokenEvent(db, id, 100, 50);
-    accumulateSessionTokens(db, id, 100, 50);
+    accumulateSessionTokens(db, id, 100, 50, 0);
     insertTokenEvent(db, id, 200, 75);
-    accumulateSessionTokens(db, id, 200, 75);
+    accumulateSessionTokens(db, id, 200, 75, 0);
     insertTokenEvent(db, id, 50, 25);
-    accumulateSessionTokens(db, id, 50, 25);
+    accumulateSessionTokens(db, id, 50, 25, 0);
 
     const eventSum = db.raw.prepare(
       'SELECT SUM(input_tokens) AS total_in, SUM(output_tokens) AS total_out FROM agent_token_events WHERE agent_session_id = ?'
@@ -386,14 +386,16 @@ describe('agent session-db', () => {
 
   it('tracks the token baseline from the last successful compact', () => {
     const id = createSession(db, 80003, '/tmp/token-compact');
-    accumulateSessionTokens(db, id, 600, 25);
+    accumulateSessionTokens(db, id, 600, 25, 0);
 
     const before = getSessionTokenSnapshot(db, id);
     expect(before).toEqual({
       totalInputTokens: 600,
       totalOutputTokens: 25,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
 
     markSessionCompacted(db, id);
@@ -411,13 +413,46 @@ describe('agent session-db', () => {
     expect(afterCompact.last_compact_input_tokens).toBe(600);
     expect(afterCompact.last_compact_output_tokens).toBe(25);
 
-    accumulateSessionTokens(db, id, 40, 5);
+    accumulateSessionTokens(db, id, 40, 5, 0);
     expect(getSessionTokenSnapshot(db, id)).toEqual({
       totalInputTokens: 640,
       totalOutputTokens: 30,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 600,
       lastCompactOutputTokens: 25,
+      lastCompactCacheReadTokens: 0,
     });
+  });
+
+  it('#1774: total_input_tokens grows linearly (not with the repeated cache_read term) across many turns of a fixed-context conversation', () => {
+    // A stable, large conversation context re-read every turn — cache_read
+    // stays CONSTANT per turn (unlike a growing conversation, this isolates
+    // the conflation bug: even a non-growing re-read must never accumulate
+    // into total_input_tokens). Before the split, this same call shape
+    // would have summed inputTokens = newTokensPerTurn + cacheReadPerTurn
+    // into total_input_tokens every turn — i.e. dominated by the huge
+    // constant, not by genuine consumption.
+    const id = createSession(db, 90500, '/tmp/token-linear-growth');
+    const TURNS = 25;
+    const NEW_TOKENS_PER_TURN = 8;
+    const CACHE_READ_PER_TURN = 250_000; // one order of magnitude bigger than any real "new" turn content
+
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      accumulateSessionTokens(db, id, NEW_TOKENS_PER_TURN, 1, CACHE_READ_PER_TURN);
+    }
+
+    const snapshot = getSessionTokenSnapshot(db, id);
+    expect(snapshot).not.toBeNull();
+    // Linear in turn count, proportional ONLY to genuinely-new tokens —
+    // not the O(turns) (let alone O(turns^2) for a growing context) blowup
+    // that including cache_read every turn would produce.
+    expect(snapshot!.totalInputTokens).toBe(TURNS * NEW_TOKENS_PER_TURN);
+    // Sanity ceiling: total_input_tokens must stay far below even a single
+    // turn's cache_read value — proving cache_read never leaked in.
+    expect(snapshot!.totalInputTokens).toBeLessThan(CACHE_READ_PER_TURN);
+    // total_cache_read_tokens is EXPECTED to scale with turn count — that
+    // growth is honest (labeled as cumulative re-reads), not a defect.
+    expect(snapshot!.totalCacheReadTokens).toBe(TURNS * CACHE_READ_PER_TURN);
   });
 
   it('updateSessionStatus sets ended_at for terminal statuses', () => {
@@ -477,7 +512,7 @@ describe('agent session-db', () => {
     const id = createSession(db, 90001, '/tmp/atomic-test');
 
     // Successful call — both session total and event row should be written
-    accumulateTokensWithEvent(db, id, 100, 50);
+    accumulateTokensWithEvent(db, id, 100, 50, 0);
     const eventCount = (db.raw.prepare(
       'SELECT COUNT(*) AS cnt FROM agent_token_events WHERE agent_session_id = ?'
     ).get(id) as { cnt: number }).cnt;
@@ -489,7 +524,7 @@ describe('agent session-db', () => {
     expect(session.total_output_tokens).toBe(50);
 
     // Force failure: use an invalid session ID that violates the FK constraint
-    expect(() => accumulateTokensWithEvent(db, 999999, 200, 75)).toThrow();
+    expect(() => accumulateTokensWithEvent(db, 999999, 200, 75, 0)).toThrow();
 
     // Original session totals unchanged — the failed call targeted a different ID
     // and rolled back, so no side effects
@@ -575,8 +610,10 @@ describe('session-db.ts uncovered-branch coverage', () => {
     expect(realSnapshot).toEqual({
       totalInputTokens: 0,
       totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
   });
 
@@ -587,9 +624,10 @@ describe('session-db.ts uncovered-branch coverage', () => {
     db.raw.prepare(
       `INSERT INTO agent_sessions
          (claude_pid, started_in_directory, started_at, status,
-          total_input_tokens, total_output_tokens,
-          last_compact_input_tokens, last_compact_output_tokens)
-       VALUES (?, ?, datetime('now'), 'active', NULL, NULL, NULL, NULL)`,
+          total_input_tokens, total_output_tokens, total_cache_read_tokens,
+          last_compact_input_tokens, last_compact_output_tokens,
+          last_compact_cache_read_tokens)
+       VALUES (?, ?, datetime('now'), 'active', NULL, NULL, NULL, NULL, NULL, NULL)`,
     ).run(100200, '/tmp/null-tokens');
 
     const id = (db.raw
@@ -600,8 +638,10 @@ describe('session-db.ts uncovered-branch coverage', () => {
     expect(snapshot).toEqual({
       totalInputTokens: 0,
       totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
   });
 
@@ -727,7 +767,7 @@ describe('session-db.ts uncovered-branch coverage', () => {
     });
 
     try {
-      expect(() => accumulateTokensWithEvent(db, 999999, 1, 1)).toThrow(
+      expect(() => accumulateTokensWithEvent(db, 999999, 1, 1, 0)).toThrow(
         /FOREIGN KEY constraint failed|simulated rollback failure/,
       );
     } finally {

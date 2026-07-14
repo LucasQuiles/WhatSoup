@@ -4,7 +4,7 @@ import type {
   DurabilityEngine,
   TurnFinalizationBookkeepingParams,
 } from '../../core/durability.ts';
-import type { AgentEvent } from './stream-parser.ts';
+import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
@@ -415,11 +415,18 @@ turnFinalizationBookkeeping(
     ...(
       hasUsage && rowId !== null
         ? {
-            sessionTokens: {
-              dbRowId: rowId,
-              inputTokens: event?.inputTokens ?? 0,
-              outputTokens: event?.outputTokens ?? 0,
-            },
+            sessionTokens: (() => {
+              // #1774: inputTokens here is new-only (cache_read split out) —
+              // the DB accumulator must not sum the same re-read context
+              // every turn. See splitInputTokenUsage in stream-parser.ts.
+              const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event ?? {});
+              return {
+                dbRowId: rowId,
+                inputTokens: newInputTokens,
+                outputTokens: event?.outputTokens ?? 0,
+                cacheReadTokens,
+              };
+            })(),
           }
         : {}
     ),

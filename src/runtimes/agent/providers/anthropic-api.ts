@@ -83,6 +83,8 @@ interface CallApiResult {
   toolUses?: ToolUseAccum[];
   inputTokens?: number;
   outputTokens?: number;
+  /** See stream-parser.ts's 'result' event field of the same name (#1774). */
+  cacheReadTokens?: number;
   terminalResultText?: string;
 }
 
@@ -162,6 +164,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
     let lastInputTokens: number | undefined;
     let lastOutputTokens: number | undefined;
+    let lastCacheReadTokens: number | undefined;
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       const result = await this.callApi(turnModel);
@@ -173,6 +176,7 @@ export class AnthropicApiProvider implements ProviderSession {
       // zeroed a served turn's token accounting).
       lastInputTokens = result.inputTokens ?? lastInputTokens;
       lastOutputTokens = result.outputTokens ?? lastOutputTokens;
+      lastCacheReadTokens = result.cacheReadTokens ?? lastCacheReadTokens;
 
       if (result.terminalResultText !== undefined) {
         this.opts.onEvent({
@@ -180,6 +184,7 @@ export class AnthropicApiProvider implements ProviderSession {
           text: result.terminalResultText,
           inputTokens: lastInputTokens,
           outputTokens: lastOutputTokens,
+          cacheReadTokens: lastCacheReadTokens,
         });
         return;
       }
@@ -243,6 +248,7 @@ export class AnthropicApiProvider implements ProviderSession {
           text: '_Tool loop limit reached - please try again or send /new._',
           inputTokens: lastInputTokens,
           outputTokens: lastOutputTokens,
+          cacheReadTokens: lastCacheReadTokens,
         });
         return;
       }
@@ -253,6 +259,7 @@ export class AnthropicApiProvider implements ProviderSession {
       text: null,
       inputTokens: lastInputTokens,
       outputTokens: lastOutputTokens,
+      cacheReadTokens: lastCacheReadTokens,
     });
   }
 
@@ -383,6 +390,7 @@ export class AnthropicApiProvider implements ProviderSession {
     const toolUseAccum: Map<number, ToolUseAccum> = new Map();
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
+    let cacheReadTokens: number | undefined;
 
     for await (const data of readSseDataLines(body)) {
       if (data === '[DONE]') continue;
@@ -463,6 +471,7 @@ export class AnthropicApiProvider implements ProviderSession {
             const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0;
             const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0;
             inputTokens = usage.input_tokens + cacheCreation + cacheRead;
+            cacheReadTokens = cacheRead;
           }
           if (typeof usage?.output_tokens === 'number') {
             outputTokens = usage.output_tokens;
@@ -511,6 +520,7 @@ export class AnthropicApiProvider implements ProviderSession {
       toolUses: completedToolUses.length > 0 ? completedToolUses : undefined,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
     };
   }
 

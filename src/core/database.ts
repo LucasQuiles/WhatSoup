@@ -751,6 +751,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [41, runMigration41],
   [42, runMigration42],
   [43, runMigration43],
+  [44, runMigration44],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -1100,6 +1101,40 @@ function runMigration42(db: DatabaseSync): void {
 
 function runMigration43(db: DatabaseSync): void {
   runMigration43Impl(db);
+}
+
+// #1774: total_input_tokens historically accumulated a turn's FULL
+// provider-reported input (base + cache_creation + cache_read_input_tokens).
+// cache_read is essentially the entire prior context re-read every turn, so
+// summing it every turn made the column grow ~O(turns²) and inflated it far
+// beyond genuine consumption (a single agent_token_events row was observed
+// at 140M+ tokens on live fleet data). From this migration forward,
+// total_input_tokens accumulates ONLY the genuinely-new portion (base +
+// cache_creation); total_cache_read_tokens accumulates the cache-read
+// portion separately and is EXPECTED to grow with turn count — unlike the
+// old conflated column, that growth is now honestly labeled as cumulative
+// re-read volume, not "input consumed". last_compact_cache_read_tokens is
+// the compaction-baseline twin of last_compact_input_tokens (see
+// session-db.ts's markSessionCompacted and runtime.ts's
+// maybeStartAutoCompact, which deliberately reads total_input_tokens +
+// total_cache_read_tokens combined so its trigger threshold is unaffected by
+// this split). Deliberately NO backfill: historical rows keep their old
+// (inflated) total_input_tokens with total_cache_read_tokens = 0 for that
+// history — see the fuller schema note above ensureAgentSchema in
+// session-db.ts.
+function runMigration44(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  const cols = db.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'total_cache_read_tokens')) {
+    db.exec('ALTER TABLE agent_sessions ADD COLUMN total_cache_read_tokens INTEGER DEFAULT 0');
+  }
+  if (!cols.some((c) => c.name === 'last_compact_cache_read_tokens')) {
+    db.exec('ALTER TABLE agent_sessions ADD COLUMN last_compact_cache_read_tokens INTEGER DEFAULT 0');
+  }
 }
 
 

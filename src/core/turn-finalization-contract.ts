@@ -94,8 +94,11 @@ export function validateCompletedCheckpointIdentity(
 export interface TurnBookkeepingParams {
   sessionTokens?: {
     dbRowId: number;
+    /** Genuinely-new input only — cache_read already subtracted (#1774). */
     inputTokens: number;
     outputTokens: number;
+    /** Accumulates into total_cache_read_tokens, never total_input_tokens. */
+    cacheReadTokens: number;
   };
   checkpoint?: {
     conversationKey: string;
