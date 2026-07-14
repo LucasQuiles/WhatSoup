@@ -166,8 +166,10 @@ const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat, mockGetSessio
   mockGetSessionTokenSnapshot: vi.fn(() => null as {
     totalInputTokens: number;
     totalOutputTokens: number;
+    totalCacheReadTokens: number;
     lastCompactInputTokens: number;
     lastCompactOutputTokens: number;
+    lastCompactCacheReadTokens: number;
   } | null),
   mockMarkSessionCompacted: vi.fn(),
   mockAccumulateTokensWithEvent: vi.fn(),
@@ -658,8 +660,10 @@ function mockTokenSnapshot(totalInputTokens: number, lastCompactInputTokens: num
   mockGetSessionTokenSnapshot.mockReturnValue({
     totalInputTokens,
     totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
     lastCompactInputTokens,
     lastCompactOutputTokens: 0,
+    lastCompactCacheReadTokens: 0,
   });
 }
 
@@ -1145,14 +1149,18 @@ describe('AgentRuntime', () => {
       .mockReturnValueOnce({
         totalInputTokens: 250,
         totalOutputTokens: 5,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 100,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       })
       .mockReturnValue({
         totalInputTokens: 260,
         totalOutputTokens: 6,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 260,
         lastCompactOutputTokens: 6,
+        lastCompactCacheReadTokens: 0,
       });
 
     await runtime.start();
@@ -1187,8 +1195,10 @@ describe('AgentRuntime', () => {
     mockGetSessionTokenSnapshot.mockReturnValue({
       totalInputTokens: 250,
       totalOutputTokens: 5,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 100,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
 
     await runtime.start();
@@ -1225,8 +1235,10 @@ describe('AgentRuntime', () => {
     mockGetSessionTokenSnapshot.mockReturnValue({
       totalInputTokens: 5_000_000,
       totalOutputTokens: 1000,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
 
     await runtime.start();
@@ -1327,8 +1339,10 @@ describe('AgentRuntime', () => {
     mockGetSessionTokenSnapshot.mockReturnValue({
       totalInputTokens: 100,
       totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
 
     await runtime.start();
@@ -1355,8 +1369,8 @@ describe('AgentRuntime', () => {
     // Well over threshold, lastCompactInputTokens > 0 (not the bootstrap path) — a
     // claude-cli session here WOULD fire /compact.
     mockGetSessionTokenSnapshot.mockReturnValue({
-      totalInputTokens: 5_000, totalOutputTokens: 10,
-      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+      totalInputTokens: 5_000, totalOutputTokens: 10, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
 
     (runtime as unknown as {
@@ -1379,14 +1393,46 @@ describe('AgentRuntime', () => {
     });
     mockSession.getDbRowId.mockReturnValue(42);
     mockGetSessionTokenSnapshot.mockReturnValue({
-      totalInputTokens: 5_000, totalOutputTokens: 10,
-      lastCompactInputTokens: 100, lastCompactOutputTokens: 0,
+      totalInputTokens: 5_000, totalOutputTokens: 10, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 100, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
 
     (runtime as unknown as {
       maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
     }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
 
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+  });
+
+  it('#1774: fires /compact at the same combined-total trigger point the pre-split single column held (regression pin)', () => {
+    // Before the total_input_tokens/total_cache_read_tokens split, a single
+    // combined column drove this trigger. Model a session where genuinely-new
+    // input is small but the re-read context is huge (the realistic case that
+    // motivated #1774) — the combined read below must reproduce the exact
+    // same trigger arithmetic the old undivided column used to, so rollout
+    // does not silently defang auto-compact fleet-wide. If maybeStartAutoCompact
+    // read total_input_tokens alone (the naive, regressed form), (55 - 5) = 50
+    // would NOT clear the threshold and /compact would never fire despite a
+    // 10,000-token context.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 9_990 });
+    mockSession.getProviderId.mockReturnValue('claude-cli');
+    mockSession.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 55, totalOutputTokens: 10, totalCacheReadTokens: 9_950,
+      lastCompactInputTokens: 5, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+    });
+
+    (runtime as unknown as {
+      maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
+    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+
+    // Combined delta: (55 + 9_950) - (5 + 0) = 9_995 >= 9_990 → fires.
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
 
@@ -1407,14 +1453,18 @@ describe('AgentRuntime', () => {
       .mockReturnValueOnce({
         totalInputTokens: 250,
         totalOutputTokens: 5,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 100,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       })
       .mockReturnValue({
         totalInputTokens: 260,
         totalOutputTokens: 6,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 260,
         lastCompactOutputTokens: 6,
+        lastCompactCacheReadTokens: 0,
       });
 
     await runtime.start();
@@ -1500,8 +1550,10 @@ describe('AgentRuntime', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 250,
         totalOutputTokens: 5,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 100,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
 
       await runtime.start();

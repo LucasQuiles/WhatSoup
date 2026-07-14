@@ -171,7 +171,7 @@ describe('DurabilityEngine edge coverage', () => {
 
     try {
       expect(() => engine.completeTurn({
-        sessionTokens: { dbRowId: session.id, inputTokens: 1, outputTokens: 2 },
+        sessionTokens: { dbRowId: session.id, inputTokens: 1, outputTokens: 2, cacheReadTokens: 0 },
       })).toThrow(/token event denied/);
       expect(execSpy).toHaveBeenCalledWith('ROLLBACK');
     } finally {

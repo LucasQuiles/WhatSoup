@@ -36,8 +36,10 @@ const {
     (db: unknown, rowId: number) => {
       totalInputTokens: number;
       totalOutputTokens: number;
+      totalCacheReadTokens: number;
       lastCompactInputTokens: number;
       lastCompactOutputTokens: number;
+      lastCompactCacheReadTokens: number;
     } | null
   >(() => null),
   mockGetRecentMessages: vi.fn(() => []),
@@ -350,8 +352,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 9_999,
         totalOutputTokens: 9_999,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       const runner = view(coord).runner;
       expect(runner).not.toBeNull();
@@ -381,8 +385,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 10_000,
         totalOutputTokens: 10_000,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 1 }));
       mockBuildHandoffDistill.mockReturnValue(distillRun);
@@ -409,11 +415,40 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 50,
         totalOutputTokens: 50,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 100,
         lastCompactOutputTokens: 100,
+        lastCompactCacheReadTokens: 0,
       });
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');
+      expect(mockBuildHandoffDistill).not.toHaveBeenCalled();
+      expect(mockUpsertHandoffArtifact).not.toHaveBeenCalled();
+      coord.shutdown();
+    });
+
+    it('#1774: tokenGrowth eligibility ignores total_cache_read_tokens — a huge cache re-read does not falsely admit a distill', async () => {
+      // Deliberately NOT compensated (contrast with maybeStartAutoCompact in
+      // runtime.ts, which does combine total_input_tokens with
+      // total_cache_read_tokens): genuinely-new input is the better
+      // handoff-distill eligibility signal than repeated re-reads of the same
+      // prior context. If tokenGrowth ever regressed to reading
+      // total_cache_read_tokens too, this session's growth would balloon past
+      // the (default 4000) threshold and wrongly trigger a distill.
+      const coord = armWithMockRunner();
+      mockListActiveSessionRows.mockReturnValue([{ conversationKey: 'c1', rowId: 1 }]);
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 100,
+        totalOutputTokens: 100,
+        totalCacheReadTokens: 1_000_000,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
+      });
+      const runner = view(coord).runner;
+      await runner!.tickConversation('c1');
+      // sinceCompact = (100 - 0) + (100 - 0) = 200, well under the threshold —
+      // the 1,000,000 cache-read figure must play no part in this decision.
       expect(mockBuildHandoffDistill).not.toHaveBeenCalled();
       expect(mockUpsertHandoffArtifact).not.toHaveBeenCalled();
       coord.shutdown();
@@ -429,8 +464,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 10_000,
         totalOutputTokens: 10_000,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => ({
         summary: 's',
@@ -453,8 +490,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 10_000,
         totalOutputTokens: 10_000,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       // Note: seededArtifacts is intentionally omitted from the return.
       const distillRun = vi.fn(async () => ({ summary: 's', tokensUsed: 5 }));
@@ -474,8 +513,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 10_000,
         totalOutputTokens: 10_000,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 5 }));
       mockBuildHandoffDistill.mockReturnValue(distillRun);
@@ -517,8 +558,10 @@ describe('handoff-distill-coordinator', () => {
       mockGetSessionTokenSnapshot.mockReturnValue({
         totalInputTokens: 10_000,
         totalOutputTokens: 10_000,
+        totalCacheReadTokens: 0,
         lastCompactInputTokens: 0,
         lastCompactOutputTokens: 0,
+        lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => {
         throw new Error('upstream model exploded');

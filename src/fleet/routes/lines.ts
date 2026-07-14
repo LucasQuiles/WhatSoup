@@ -332,7 +332,13 @@ function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Token
         msgOutput = row?.o ?? 0;
       } catch { /* column may not exist yet */ }
 
-      // Sum tokens from agent_sessions (agent runtime)
+      // Sum tokens from agent_sessions (agent runtime). #1774: as of the
+      // total_input_tokens/total_cache_read_tokens split, this dashboard
+      // figure is deliberately NOT compensated back to the old (inflated,
+      // cache-read-inclusive) combined value — it now reports the honest,
+      // genuinely-new-input figure. No consumer of this endpoint enforces a
+      // budget/quota against it, so becoming smaller and accurate is a
+      // straight improvement, not a behavior change requiring recalibration.
       let sesInput = 0, sesOutput = 0;
       try {
         const row = db.prepare(

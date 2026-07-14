@@ -108,6 +108,7 @@ describe('prepared statement caching', () => {
         dbRowId: 999,
         inputTokens: 1,
         outputTokens: 2,
+        cacheReadTokens: 3,
       },
       checkpoint: {
         conversationKey: 'conv-1',

@@ -387,7 +387,8 @@ export class DurabilityEngine {
       accumulateSessionTokens: prepare(
         `UPDATE agent_sessions
          SET total_input_tokens = total_input_tokens + ?,
-             total_output_tokens = total_output_tokens + ?
+             total_output_tokens = total_output_tokens + ?,
+             total_cache_read_tokens = total_cache_read_tokens + ?
          WHERE id = ?`,
       ),
       insertTokenEvent: prepare(
@@ -650,9 +651,14 @@ export class DurabilityEngine {
 
   private runTurnBookkeeping(params: TurnBookkeepingParams): void {
     if (params.sessionTokens) {
+      // inputTokens here is the genuinely-new-only portion (#1774) — the
+      // caller (turnFinalizationBookkeeping) has already split cache_read
+      // out via splitInputTokenUsage(). agent_token_events carries no
+      // separate cache-read column, so it logs the same corrected value.
       this.statements.accumulateSessionTokens.run(
         params.sessionTokens.inputTokens,
         params.sessionTokens.outputTokens,
+        params.sessionTokens.cacheReadTokens,
         params.sessionTokens.dbRowId,
       );
       this.statements.insertTokenEvent.run(

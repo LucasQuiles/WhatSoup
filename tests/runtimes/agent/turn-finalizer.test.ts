@@ -53,7 +53,7 @@ const REPLAY: TurnRecoveryReplayEnvelope = {
 };
 
 const BOOKKEEPING: TurnFinalizationBookkeepingParams = {
-  sessionTokens: { dbRowId: 18, inputTokens: 13, outputTokens: 5 },
+  sessionTokens: { dbRowId: 18, inputTokens: 13, outputTokens: 5, cacheReadTokens: 0 },
   checkpoint: {
     conversationKey: IDENTITY.conversationKey,
     fields: { lastInboundSeq: 41, lastFlushedOutboundId: 72 },

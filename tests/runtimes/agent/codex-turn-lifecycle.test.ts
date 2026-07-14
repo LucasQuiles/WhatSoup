@@ -453,7 +453,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'token_usage', inputTokens: 500, outputTokens: 100 });
 
     // Token accumulation should have been called (transactional helper)
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 500, 100);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 500, 100, 0);
 
     // Turn-completion side effects must NOT have fired
     expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
@@ -483,7 +483,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'result', text: null });
 
     // token_usage should have recorded tokens (transactional helper)
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 1000, 200);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 1000, 200, 0);
 
     // Turn completion should have fired exactly once (from result, not token_usage)
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
@@ -523,7 +523,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'token_usage', inputTokens: 800, outputTokens: 150 });
 
     // Tokens should still be recorded (transactional helper)
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 800, 150);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 800, 150, 0);
 
     // No additional turn-completion side effects
     expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
@@ -555,9 +555,9 @@ describe('Codex turn lifecycle — runtime level', () => {
     // Token accumulation: 3 from token_usage events (transactional helper)
     // (result events here have no token fields, so they don't accumulate)
     expect(mockAccumulateTokensWithEvent).toHaveBeenCalledTimes(3);
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 100, 20);
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 200, 40);
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 300, 60);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 100, 20, 0);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 200, 40, 0);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 300, 60, 0);
   });
 
   it('does not double-enqueue a completed agent message after streaming deltas', async () => {
