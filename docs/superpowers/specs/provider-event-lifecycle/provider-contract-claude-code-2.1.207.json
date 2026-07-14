@@ -1,0 +1,112 @@
+{
+  "fixtureSchemaVersion": 1,
+  "provider": "claude-cli",
+  "providerVersion": "2.1.207",
+  "transport": "stream-json",
+  "capturedAt": "2026-07-13",
+  "evidenceStatus": "non-gating-design-specimen",
+  "provenance": {
+    "captureSource": "schema projection assembled during read-only investigation; raw source was not retained",
+    "captureMode": "in-memory/manual projection",
+    "commandTemplate": null,
+    "binarySha256": null,
+    "providerVersionBasis": "observed version label; not cryptographically tied to retained raw evidence",
+    "rawTopLevelEventCount": null,
+    "projectedTopLevelEventCount": 9,
+    "projectionMethod": "manual schema projection with reviewed synthetic equality-token substitution",
+    "projectionMethodVersion": 1,
+    "reproducible": false,
+    "rawCapturePersisted": false
+  },
+  "sanitization": {
+    "nativeIdentifiers": "replaced by stable synthetic equality tokens",
+    "content": "raw values removed; only event/block type, field names, equality relations, and boolean field presence remain",
+    "promptsAndToolPayloads": "removed",
+    "persistence": "no raw capture was written"
+  },
+  "candidateProjectedBindings": [
+    "assistant Agent tool_use.id == system task_started.tool_use_id",
+    "system task_started.task_id == system task_notification.task_id",
+    "system task_started.tool_use_id == system task_notification.tool_use_id",
+    "child assistant.parent_tool_use_id == assistant Agent tool_use.id",
+    "user tool_result.tool_use_id == assistant Agent tool_use.id",
+    "all projected events share the same native session"
+  ],
+  "events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "SYN_SESSION_1",
+      "top_keys": ["session_id", "subtype", "type", "uuid"]
+    },
+    {
+      "type": "assistant",
+      "session_id": "SYN_SESSION_1",
+      "parent_tool_use_id": null,
+      "content": [{
+        "type": "tool_use",
+        "name": "Agent",
+        "id": "SYN_TOOL_1",
+        "keys": ["caller", "id", "input", "name", "type"]
+      }]
+    },
+    {
+      "type": "system",
+      "subtype": "task_started",
+      "session_id": "SYN_SESSION_1",
+      "task_id": "SYN_TASK_1",
+      "tool_use_id": "SYN_TOOL_1",
+      "top_keys": ["description", "prompt", "session_id", "subagent_type", "subtype", "task_id", "task_type", "tool_use_id", "type", "uuid"]
+    },
+    {
+      "type": "user",
+      "session_id": "SYN_SESSION_1",
+      "content": [{
+        "type": "tool_result",
+        "tool_use_id": "SYN_TOOL_1",
+        "keys": ["content", "tool_use_id", "type"]
+      }]
+    },
+    {
+      "type": "assistant",
+      "session_id": "SYN_SESSION_1",
+      "parent_tool_use_id": "SYN_TOOL_1",
+      "top_keys": ["message", "parent_tool_use_id", "request_id", "session_id", "subagent_type", "task_description", "type", "uuid"],
+      "content": [{"type": "text", "text_present": true, "task_tag_present": false}]
+    },
+    {
+      "type": "system",
+      "subtype": "task_updated",
+      "session_id": "SYN_SESSION_1",
+      "task_id": "SYN_TASK_1",
+      "top_keys": ["patch", "session_id", "subtype", "task_id", "type", "uuid"]
+    },
+    {
+      "type": "system",
+      "subtype": "task_notification",
+      "session_id": "SYN_SESSION_1",
+      "task_id": "SYN_TASK_1",
+      "tool_use_id": "SYN_TOOL_1",
+      "top_keys": ["output_file", "session_id", "status", "subtype", "summary", "task_id", "tool_use_id", "type", "usage", "uuid"]
+    },
+    {
+      "type": "assistant",
+      "session_id": "SYN_SESSION_1",
+      "parent_tool_use_id": null,
+      "content": [{"type": "text", "text_present": true, "task_tag_present": false}]
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "session_id": "SYN_SESSION_1",
+      "terminal_reason": "completed"
+    }
+  ],
+  "limitations": [
+    "This design specimen records a candidate native non-content task/tool/parent correlation shape for target CLI 2.1.207; it is not capability-gating evidence.",
+    "The exact successful capture command, raw top-level event count, and cryptographically tied binary hash are unavailable because raw source was not retained.",
+    "An earlier bounded Agent probe using max-turns 6 and max-budget-usd 0.25 terminated for budget exhaustion and is not the source of these nine events.",
+    "The one-shot probe did not independently force an intermediate result before task completion.",
+    "TSK-002 must replace this specimen with a reproducibly captured, checked, content-free golden plus sanitized DGX persistent-session ordering and one-field perturbation negatives before continuation admission can be enabled."
+  ]
+}
