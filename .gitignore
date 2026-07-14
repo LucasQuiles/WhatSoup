@@ -22,6 +22,7 @@ auth_info*/
 .env.*
 !.env.example
 deploy/fleet.env
+instances/*/tokens.env
 
 # Instance config (contains phone numbers, API keys in JSON)
 instances/*/instance.json
