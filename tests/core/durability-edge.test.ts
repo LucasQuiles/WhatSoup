@@ -184,28 +184,28 @@ describe('DurabilityEngine edge coverage', () => {
     }
   });
 
-  it('preConnectRecovery swallows isolated recovery phase failures', () => {
+  it('preConnectRecovery fails closed after an isolated recovery phase failure', () => {
     db.raw.exec('DROP TABLE session_checkpoints');
-    expect(() => engine.preConnectRecovery()).not.toThrow();
+    expect(() => engine.preConnectRecovery()).toThrow('no such table: session_checkpoints');
   });
 
-  it('preConnectRecovery catches sending and processing-inbound failures independently', () => {
+  it('preConnectRecovery fails closed when outbound recovery state is unavailable', () => {
     engine.journalInbound('msg-processing-catch', 'key-processing-catch', 'jid-catch', 'agent');
     db.raw.exec('DROP TABLE outbound_ops');
 
-    expect(() => engine.preConnectRecovery()).not.toThrow();
+    expect(() => engine.preConnectRecovery()).toThrow('no such table: outbound_ops');
   });
 
-  it('preConnectRecovery catches tool-call recovery failures', () => {
+  it('preConnectRecovery fails closed after tool-call recovery failures', () => {
     db.raw.exec('DROP TABLE tool_calls');
-    expect(() => engine.preConnectRecovery()).not.toThrow();
+    expect(() => engine.preConnectRecovery()).toThrow('no such table: tool_calls');
   });
 
-  it('postConnectRecovery catches outbound reconciliation failures and still reaches the gate', () => {
+  it('postConnectRecovery fails closed before the clear gate when outbound state is unavailable', () => {
     db.raw.exec('DROP TABLE outbound_ops');
 
-    expect(() => engine.postConnectRecovery()).not.toThrow();
-    expect(gateQuarantineClear).toHaveBeenCalledTimes(1);
+    expect(() => engine.postConnectRecovery()).toThrow('no such table: outbound_ops');
+    expect(gateQuarantineClear).not.toHaveBeenCalled();
   });
 
   it('postConnectRecovery wires gate callbacks to alert and clear emitters', () => {
@@ -238,19 +238,198 @@ describe('DurabilityEngine edge coverage', () => {
       'Loops',
       'fleet_health_verify_gate_failed',
       expect.any(String),
-      expect.stringContaining('gate evidence'),
+      expect.stringContaining('gate evidence; clear_suppressed=true'),
       'warning',
     );
     expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
   });
 
-  it('postConnectRecovery falls back to legacy alert clear when the gate throws', () => {
-    gateQuarantineClear.mockImplementationOnce(() => {
+  it('postConnectRecovery records gate failure without committing a staged clear', () => {
+    gateQuarantineClear.mockImplementationOnce((
+      _botName: string,
+      opts: { emitClear: () => void },
+    ) => {
+      opts.emitClear();
       throw new Error('gate failed');
     });
 
-    expect(() => engine.postConnectRecovery()).not.toThrow();
-    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
+    expect(() => engine.postConnectRecovery()).toThrow('gate failed');
+    expect(clearAlertSource).not.toHaveBeenCalled();
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['verify_quarantine_clear'],
+      openRecoveries: 0,
+    });
+  });
+
+  it('postConnectRecovery remains incomplete when the approved clear cannot be queued', () => {
+    gateQuarantineClear.mockImplementationOnce((
+      _botName: string,
+      opts: { emitClear: () => void },
+    ) => {
+      opts.emitClear();
+      return { action: 'clear' };
+    });
+    clearAlertSource.mockReturnValueOnce(false);
+
+    expect(() => engine.postConnectRecovery()).toThrow(
+      'quarantine clear could not be durably queued',
+    );
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['verify_quarantine_clear'],
+      openRecoveries: 0,
+    });
+  });
+
+  it('postConnectRecovery remains incomplete when a required escalation cannot be queued', () => {
+    gateQuarantineClear.mockImplementationOnce((
+      _botName: string,
+      opts: { emitEscalation: (evidence: string) => void },
+    ) => {
+      opts.emitEscalation('required escalation');
+      return { action: 'suppress_and_escalate' };
+    });
+    emitAlert.mockReturnValueOnce(false);
+
+    expect(() => engine.postConnectRecovery()).toThrow(
+      'quarantine escalation could not be durably queued',
+    );
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['verify_quarantine_clear'],
+      openRecoveries: 0,
+    });
+  });
+
+  it('postConnectRecovery remains incomplete when gate-failure evidence cannot be queued', () => {
+    gateQuarantineClear.mockImplementationOnce((
+      _botName: string,
+      opts: { emitGateFailure: (evidence: string) => void },
+    ) => {
+      opts.emitGateFailure('required gate failure');
+      return { action: 'suppress_and_escalate' };
+    });
+    emitAlert.mockReturnValueOnce(false);
+
+    expect(() => engine.postConnectRecovery()).toThrow(
+      'quarantine gate-failure evidence could not be durably queued',
+    );
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['verify_quarantine_clear'],
+      openRecoveries: 0,
+    });
+  });
+
+  it.each([
+    ['with a WhatsApp message id', true],
+    ['without a WhatsApp message id', false],
+  ] as const)(
+    'postConnectRecovery remains incomplete when an outbound quarantine alert %s cannot be queued',
+    (_case, hasWaMessageId) => {
+      const id = engine.createOutboundOp({
+        conversationKey: `quarantine-alert-${hasWaMessageId ? 'wa' : 'no-wa'}`,
+        chatJid: 'quarantine-alert@g.us',
+        opType: 'text',
+        payload: '{"text":"delivery uncertain"}',
+        replayPolicy: 'unsafe',
+      });
+      if (hasWaMessageId) {
+        engine.markSending(id);
+        engine.markSubmitted(id, 'WA_UNCONFIRMED');
+      }
+      engine.markMaybeSent(id, 'crash-in-flight');
+      emitAlert.mockReturnValueOnce(false);
+
+      expect(() => engine.postConnectRecovery()).toThrow(
+        `outbound quarantine alert could not be durably queued for op ${id}`,
+      );
+      expect(getOutbound(db, id)['status']).toBe('quarantined');
+      expect(gateQuarantineClear).not.toHaveBeenCalled();
+      expect(clearAlertSource).not.toHaveBeenCalled();
+      const run = db.raw.prepare(`
+        SELECT completed_at, notes
+        FROM recovery_runs
+        WHERE trigger = 'post_connect'
+        ORDER BY id DESC
+        LIMIT 1
+      `).get() as { completed_at: string | null; notes: string | null };
+      expect(run.completed_at).toBeNull();
+      expect(JSON.parse(run.notes ?? 'null')).toEqual({
+        status: 'incomplete',
+        failedPhases: ['emit_outbound_quarantine_alert'],
+        openRecoveries: 0,
+      });
+    },
+  );
+
+  it('deduplicates repeated per-op alert failures in incomplete recovery notes', () => {
+    const ids = ['first', 'second'].map((suffix) => {
+      const id = engine.createOutboundOp({
+        conversationKey: `quarantine-alert-dedup-${suffix}`,
+        chatJid: 'quarantine-alert-dedup@g.us',
+        opType: 'text',
+        payload: '{"text":"delivery uncertain"}',
+        replayPolicy: 'unsafe',
+      });
+      engine.markMaybeSent(id, 'crash-in-flight');
+      return id;
+    });
+    emitAlert.mockReturnValueOnce(false).mockReturnValueOnce(false);
+
+    expect(() => engine.postConnectRecovery()).toThrow(
+      `outbound quarantine alert could not be durably queued for op ${ids[0]}`,
+    );
+    expect(ids.map((id) => getOutbound(db, id)['status'])).toEqual([
+      'quarantined',
+      'quarantined',
+    ]);
+    const run = db.raw.prepare(`
+      SELECT completed_at, notes
+      FROM recovery_runs
+      WHERE trigger = 'post_connect'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { completed_at: string | null; notes: string | null };
+    expect(run.completed_at).toBeNull();
+    expect(JSON.parse(run.notes ?? 'null')).toEqual({
+      status: 'incomplete',
+      failedPhases: ['emit_outbound_quarantine_alert'],
+      openRecoveries: 0,
+    });
   });
 
   it('logRecoveryRun swallows insertion failures', () => {

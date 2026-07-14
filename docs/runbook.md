@@ -946,6 +946,11 @@ sqlite3 $DB \
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
 
+# Incomplete recovery runs are unresolved durable evidence, not successful runs
+sqlite3 $DB \
+  "SELECT id, trigger, recovery_plan_id, started_at, notes
+   FROM recovery_runs WHERE completed_at IS NULL ORDER BY id DESC;"
+
 # Inbound events — messages currently being processed
 sqlite3 $DB \
   "SELECT seq, message_id, processing_status, routed_to, received_at, completed_at
@@ -971,6 +976,48 @@ sqlite3 $DB \
   "SELECT conversation_key, session_id, session_status, claude_pid, updated_at
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
+
+#### Close a proven operator catch-up recovery (exact schema 43 only)
+
+This command records that a newer, independently delivered operator catch-up supersedes an exact set
+of pending source inbounds. It never sends or replays a message. The database must already be an
+existing canonical schema-43 file; the command neither creates a database nor runs migrations.
+
+Run the read-only proof inspection first:
+
+From the WhatSoup repository root:
+
+```bash
+npm run close-recovery-catchup -- \
+  --db "$DB" \
+  --plan-id RECOVERY_PLAN_ID \
+  --conversation-key CONVERSATION_KEY \
+  --source-seqs 101,102 \
+  --catchup-seq 110 \
+  --actor operator:IDENTITY \
+  --evidence-ref evidence:REFERENCE
+```
+
+A successful dry run emits a redacted `ready: true` inspection and changes no rows. Confirm only after
+the exact source set, target sequence, actor, and evidence reference have been independently reviewed:
+
+```bash
+npm run close-recovery-catchup -- \
+  --db "$DB" \
+  --plan-id RECOVERY_PLAN_ID \
+  --conversation-key CONVERSATION_KEY \
+  --source-seqs 101,102 \
+  --catchup-seq 110 \
+  --actor operator:IDENTITY \
+  --evidence-ref evidence:REFERENCE \
+  --confirm
+```
+
+The confirmed path obtains an immediate SQLite writer reservation, re-attests schema and proof on
+that same transaction, and either appends the full closure plus immutable witness or appends nothing.
+It fails on a busy writer, a changed database file, schema drift, a partial source set, ambiguous proof,
+or a later-only corroborated delivery. Coordinate against a live writer rather than retrying blindly.
+An exact repeated invocation is idempotent; changed evidence is rejected.
 
 ### 7.5 Useful SQL Queries
 

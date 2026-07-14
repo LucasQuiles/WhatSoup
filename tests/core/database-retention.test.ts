@@ -5,6 +5,7 @@ import {
   DatabaseRetentionTimer,
   runDatabaseRetention,
 } from '../../src/core/database-retention.ts';
+import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
 
 describe('database retention', () => {
   let db: Database;
@@ -424,6 +425,161 @@ describe('database retention', () => {
       'rollback-message',
       'rollback-unrelated-in',
     ]);
+  });
+
+  it('preserves catch-up and corroboration proof while pruning unrelated eligible rows', () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES ('retention-plan', 'pre_connect_recovery', 'system:test',
+              'retention fixture', 'test://retention')
+    `).run();
+    const pendingSeq = Number(db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, received_at,
+        processing_status, completed_at, terminal_reason, failure_class
+      ) VALUES ('retention-pending-link', 'retention-proof', 'proof@g.us',
+                datetime('now', '-40 days'), 'failed', datetime('now', '-40 days'),
+                'error', 'crash_recovery')
+    `).run().lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, 'retention-plan', 'recovery_pending_operator_catchup', NULL,
+                'crash recovery', 'test://retention', 'system:test')
+    `).run(pendingSeq);
+
+    const answeredSeq = Number(db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, received_at,
+        processing_status, completed_at, terminal_reason
+      ) VALUES ('retention-corroborated', 'retention-proof', 'proof@g.us',
+                datetime('now', '-40 days'), 'complete', datetime('now', '-40 days'),
+                'response_sent')
+    `).run().lastInsertRowid);
+    const selectedOp = Number(db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        source_inbound_seq, is_terminal, replay_policy
+      ) VALUES ('retention-proof', 'proof@g.us', 'text', '{"text":"selected"}',
+                'maybe_sent', datetime('now', '-40 days'), ?, 1, 'unsafe')
+    `).run(answeredSeq).lastInsertRowid);
+    const corroboratingOp = Number(db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        echoed_at, source_inbound_seq, replay_policy
+      ) VALUES ('retention-proof', 'proof@g.us', 'text', '{"text":"later"}',
+                'echoed', datetime('now', '-40 days'), datetime('now', '-40 days'),
+                ?, 'unsafe')
+    `).run(answeredSeq).lastInsertRowid);
+    const terminalRecord = Number(db.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed, created_at
+      ) VALUES ('per_chat', 'retention-proof', 'proof@g.us', ?, ?,
+                'retention-turn', 'retention-manager', 1, 'replied',
+                'finalized_replied', 'delivery_unknown', ?, 0,
+                datetime('now', '-40 days'))
+    `).run(answeredSeq, answeredSeq, selectedOp).lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO turn_delivery_corroboration (
+        terminal_record_id, corroborating_op_id, basis, actor, evidence_ref
+      ) VALUES (?, ?, 'same_source_later_echoed_op', 'reconciler:test',
+                'test://retention')
+    `).run(terminalRecord, corroboratingOp);
+
+    insertOldCompleteInbound('retention-unrelated-in');
+    db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at
+      ) VALUES ('retention-unrelated-out', 'proof@g.us', 'text', '{}',
+                'echoed', datetime('now', '-40 days'))
+    `).run();
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result).toMatchObject({ inboundEvents: 1, outboundOps: 1, turnTerminalRecords: 0 });
+    expect(rowExists('inbound_events', pendingSeq, 'seq')).toBe(true);
+    expect(rowExists('inbound_events', answeredSeq, 'seq')).toBe(true);
+    expect(rowExists('turn_terminal_records', terminalRecord)).toBe(true);
+    expect(rowExists('outbound_ops', selectedOp)).toBe(true);
+    expect(rowExists('outbound_ops', corroboratingOp)).toBe(true);
+  });
+
+  it('retains a witnessed recovery job without blocking unrelated completed-chain pruning', () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('retention-witness-plan', 'operator', 'operator:test', 'witness retention')
+    `).run();
+    const sourceSeq = Number(db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, received_at,
+        processing_status, completed_at, terminal_reason, failure_class
+      ) VALUES ('retention-witness-source', 'witnessed-completed-conversation',
+                'witnessed-completed@g.us', datetime('now', '-41 days'),
+                'failed', datetime('now', '-41 days'), 'error', 'crash_recovery')
+    `).run().lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, 'retention-witness-plan', 'recovery_pending_operator_catchup', NULL,
+                'pending catch-up', 'test://retention-witness', 'operator:test')
+    `).run(sourceSeq);
+    const witnessed = insertRecoveryChain('witnessed-completed', 'completed', 40);
+    db.raw.prepare(`
+      UPDATE inbound_events SET terminal_reason = 'response_echoed' WHERE seq = ?
+    `).run(witnessed.inboundSeq);
+    db.raw.prepare(`
+      UPDATE outbound_ops
+      SET submitted_at = created_at, wa_message_id = 'wa-retention-witness'
+      WHERE id = ?
+    `).run(witnessed.outboundOpId);
+    db.raw.prepare(`
+      UPDATE turn_recovery_jobs
+      SET claim_token = ?, completion_kind = 'echo', completion_proof_id = ?
+      WHERE id = ?
+    `).run(
+      `echo-delivery:${witnessed.outboundOpId}`,
+      `outbound-op:${witnessed.outboundOpId}`,
+      witnessed.jobId,
+    );
+    closeOperatorCatchupRecovery(db, {
+      planId: 'retention-witness-plan',
+      conversationKey: 'witnessed-completed-conversation',
+      expectedSourceSeqs: [sourceSeq],
+      catchupSeq: witnessed.inboundSeq,
+      actor: 'operator:test',
+      evidenceRef: 'test://retention-witness',
+    });
+    const unrelated = insertRecoveryChain('unrelated-completed', 'completed', 40);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result).toMatchObject({
+      turnRecoveryJobs: 1,
+      turnTerminalRecords: 1,
+      inboundEvents: 1,
+      outboundOps: 1,
+    });
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', witnessed.jobId, 'id'],
+      ['turn_terminal_records', witnessed.terminalRecordId, 'id'],
+      ['inbound_events', witnessed.inboundSeq, 'seq'],
+      ['outbound_ops', witnessed.outboundOpId, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(true);
+    }
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', unrelated.jobId, 'id'],
+      ['turn_terminal_records', unrelated.terminalRecordId, 'id'],
+      ['inbound_events', unrelated.inboundSeq, 'seq'],
+      ['outbound_ops', unrelated.outboundOpId, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(false);
+    }
   });
 
   it('timer runs immediate and periodic cleanup, then stops idempotently', async () => {

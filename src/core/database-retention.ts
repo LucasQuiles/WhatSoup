@@ -65,6 +65,11 @@ export function runDatabaseRetention(
       DELETE FROM turn_recovery_jobs
        WHERE state = 'completed'
          AND completed_at < datetime('now', ?)
+         AND NOT EXISTS (
+           SELECT 1
+           FROM operator_catchup_closure_witnesses witness
+           WHERE witness.recovery_job_id = turn_recovery_jobs.id
+         )
          AND EXISTS (
            SELECT 1
            FROM inbound_events i
@@ -100,6 +105,14 @@ export function runDatabaseRetention(
           SELECT 1 FROM turn_recovery_jobs
           WHERE terminal_record_id = turn_terminal_records.id
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM turn_delivery_corroboration
+          WHERE terminal_record_id = turn_terminal_records.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_disposition_links
+          WHERE superseded_by_seq = turn_terminal_records.inbound_seq
+        )
     `);
     let turnTerminalRecords = 0;
     for (const { terminal_record_id: terminalRecordId } of completedRecoveryTerminals) {
@@ -116,6 +129,16 @@ export function runDatabaseRetention(
            SELECT 1
              FROM turn_recovery_jobs
             WHERE terminal_record_id = turn_terminal_records.id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_delivery_corroboration
+            WHERE terminal_record_id = turn_terminal_records.id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM inbound_disposition_links
+            WHERE superseded_by_seq = turn_terminal_records.inbound_seq
          )
          AND (
            (
@@ -145,6 +168,12 @@ export function runDatabaseRetention(
              FROM turn_terminal_records
             WHERE inbound_seq = inbound_events.seq
          )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM inbound_disposition_links
+            WHERE inbound_seq = inbound_events.seq
+               OR superseded_by_seq = inbound_events.seq
+         )
     `).run(terminalCutoff));
 
     const outboundOps = changes(db.raw.prepare(`
@@ -155,6 +184,11 @@ export function runDatabaseRetention(
            SELECT 1
              FROM turn_terminal_records
             WHERE delivery_op_id = outbound_ops.id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM turn_delivery_corroboration
+            WHERE corroborating_op_id = outbound_ops.id
          )
     `).run(terminalCutoff));
 
