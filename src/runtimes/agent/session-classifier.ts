@@ -36,6 +36,10 @@ export interface ClassifiedSession {
   status: string;
   classification: SessionClassification;
   reason: string;
+  /** ISO timestamp the row was created, or null if unavailable (e.g. mocked callers). */
+  startedAt: string | null;
+  /** Turns processed by this session, or null if unavailable (e.g. mocked callers). */
+  messageCount: number | null;
 }
 
 interface ActiveSessionRow {
@@ -44,6 +48,8 @@ interface ActiveSessionRow {
   claude_pid: number;
   chat_jid: string | null;
   status: string;
+  started_at: string | null;
+  message_count: number | null;
 }
 
 interface CheckpointInfo {
@@ -135,7 +141,9 @@ export function classifyActiveSessions(
   pidChecker: PidOwnershipChecker = defaultPidOwnershipChecker,
 ): ClassifiedSession[] {
   const activeSessions = db.raw
-    .prepare(`SELECT id, session_id, claude_pid, chat_jid, status FROM agent_sessions WHERE status = 'active'`)
+    .prepare(
+      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count FROM agent_sessions WHERE status = 'active'`,
+    )
     .all() as unknown as ActiveSessionRow[];
 
   if (activeSessions.length === 0) return [];
@@ -315,7 +323,55 @@ function sessionFields(session: ActiveSessionRow, convKey: string | null) {
     chatJid: session.chat_jid,
     conversationKey: convKey,
     status: session.status,
+    startedAt: session.started_at ?? null,
+    messageCount: session.message_count ?? null,
   };
+}
+
+export type AmbiguousAgeFallbackVerdict = 'orphan' | 'leave';
+
+export interface AmbiguousAgeFallbackInput {
+  id: number;
+  claudePid: number;
+  startedAt: string | null;
+  messageCount: number | null;
+}
+
+/**
+ * Age-based fallback disposition for the 'ambiguous' classification bucket
+ * (#1756). classifyActiveSessions runs at startup only; an init-failure
+ * session that never checkpointed lands in 'ambiguous' and — before this —
+ * was permanently skipped, so its agent_sessions row never reached a
+ * terminal state (10 opencode-cli zombies observed stuck 'active' up to 31
+ * days). The interval sweep now re-classifies every pass, and for rows still
+ * 'ambiguous' consults this function to decide whether enough time has
+ * passed with zero activity to call it terminal.
+ *
+ * Deliberately conservative — every check fails CLOSED (returns 'leave') on
+ * missing or unparseable evidence, and this independently re-verifies PID
+ * liveness/ownership rather than trusting the classifier's verdict alone:
+ * two of the 'ambiguous' sub-cases (no chat_jid, no checkpoint) never ran a
+ * pidChecker at all, so this is the only liveness check some rows ever get.
+ * A session with ANY processed messages, or a PID that is alive AND owned by
+ * this service, is left alone regardless of age — orphaning here only
+ * updates the DB row status, it never sends a signal, so a false 'orphan'
+ * verdict cannot kill a running process, but it can wrongly let a resumed
+ * conversation spawn a duplicate session, hence the caution.
+ */
+export function resolveAmbiguousAgeFallback(
+  session: AmbiguousAgeFallbackInput,
+  now: number,
+  maxAgeMs: number,
+  pidChecker: PidOwnershipChecker = defaultPidOwnershipChecker,
+): AmbiguousAgeFallbackVerdict {
+  if (session.messageCount !== 0) return 'leave';
+  if (!session.startedAt) return 'leave';
+  const startedAtMs = Date.parse(session.startedAt);
+  if (!Number.isFinite(startedAtMs)) return 'leave';
+  if (now - startedAtMs < maxAgeMs) return 'leave';
+  const pidCheck = pidChecker(session.claudePid);
+  if (pidCheck.alive && pidCheck.owned) return 'leave';
+  return 'orphan';
 }
 
 function getCheckpointForConversation(

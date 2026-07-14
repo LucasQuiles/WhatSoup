@@ -76,7 +76,7 @@ import {
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
-import { classifyActiveSessions } from './session-classifier.ts';
+import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
@@ -225,6 +225,14 @@ const envPositiveInt = (key: string, fallback: number): number => {
 };
 const SESSION_IDLE_MS = envPositiveInt('WHATSOUP_SESSION_IDLE_MS', 60 * 60 * 1000); // 1h
 const SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_SESSION_SWEEP_MS', 10 * 60 * 1000); // 10m
+// #1756: the agent_sessions DB classifier used to run startup-only, so an
+// init-failure session landing in the 'ambiguous' bucket was skipped forever.
+// ZOMBIE_SESSION_SWEEP_INTERVAL_MS re-runs the classifier periodically;
+// AMBIGUOUS_SESSION_MAX_AGE_MS is the age (with zero processed messages)
+// past which an ambiguous row is independently re-verified and, if still not
+// alive+owned, marked terminal (see resolveAmbiguousAgeFallback).
+const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_SWEEP_MS', 30 * 60 * 1000); // 30m
+const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', 24 * 60 * 60 * 1000); // 24h
 const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * 60 * 1000); // 5m
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
@@ -744,6 +752,7 @@ export class AgentRuntime implements Runtime {
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1348,6 +1357,119 @@ export class AgentRuntime implements Runtime {
     if (this.sessionSweepTimer) return;
     this.sessionSweepTimer = setInterval(() => this.sweepIdleSessions(), SESSION_SWEEP_INTERVAL_MS);
     this.sessionSweepTimer.unref?.();
+  }
+
+  /**
+   * #1756: classifyActiveSessions used to run startup-only, so its 'ambiguous'
+   * bucket was a permanent no-op — an init-failure session that never
+   * checkpointed stayed 'active' forever. This interval re-runs the same
+   * sweep start() does, so any row still 'ambiguous' gets a fresh chance at
+   * the age-based fallback disposition in sweepStaleAgentSessions.
+   */
+  private startZombieSessionSweepTimer(): void {
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat) || this.zombieSessionSweepTimer) return;
+    this.zombieSessionSweepTimer = setInterval(() => {
+      this.sweepStaleAgentSessions().catch((err) => {
+        log.warn({ err, instanceName: this.instanceName }, 'interval zombie-session sweep failed');
+      });
+    }, ZOMBIE_SESSION_SWEEP_INTERVAL_MS);
+    this.zombieSessionSweepTimer.unref?.();
+  }
+
+  /**
+   * Sweep stale sessions for all per_chat modes (including Q's non-sandboxed
+   * per_chat). Cross-references agent_sessions with session_checkpoints to
+   * safely identify which processes to keep and which to reap. Only kills
+   * PIDs verified as owned children. Called once at startup and, per #1756,
+   * again on an interval (startZombieSessionSweepTimer) so a session that
+   * lands in 'ambiguous' — the classifier's do-not-touch bucket — is not
+   * skipped forever; resolveAmbiguousAgeFallback gives every pass a chance to
+   * retire a row that has sat idle with zero activity past the age
+   * threshold. Returns the set of conversation keys that must not be
+   * proactively resumed this pass (a live or ambiguous session was already
+   * left running for that key) — only meaningful to the startup caller.
+   */
+  private async sweepStaleAgentSessions(): Promise<Set<string>> {
+    const proactiveResumeBlockedConversationKeys = new Set<string>();
+    if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat)) {
+      return proactiveResumeBlockedConversationKeys;
+    }
+    if (!this.durability) {
+      log.warn('durability engine not set — skipping active session classification');
+      return proactiveResumeBlockedConversationKeys;
+    }
+
+    const classified = classifyActiveSessions(this.db, this.durability);
+    for (const session of classified) {
+      switch (session.classification) {
+        case 'stale_dead':
+          markOrphaned(this.db, session.id);
+          break;
+        case 'stale_live':
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'reaping stale session');
+          try {
+            await killSessionTree(session.claudePid, 'SIGTERM', {
+              generationMarker:
+                `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
+            });
+          } catch (err) {
+            log.error({
+              err,
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+            }, 'stale session tree cleanup inconclusive — blocking proactive resume');
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+              break;
+            }
+            throw err;
+          }
+          markOrphaned(this.db, session.id);
+          break;
+        case 'ambiguous': {
+          const fallback = resolveAmbiguousAgeFallback(
+            {
+              id: session.id,
+              claudePid: session.claudePid,
+              startedAt: session.startedAt,
+              messageCount: session.messageCount,
+            },
+            Date.now(),
+            AMBIGUOUS_SESSION_MAX_AGE_MS,
+          );
+          if (fallback === 'orphan') {
+            markOrphaned(this.db, session.id);
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'ambiguous session past age threshold with no activity — marked orphaned (#1756)');
+            break;
+          }
+          log.warn({
+            id: session.id,
+            pid: session.claudePid,
+            conversationKey: session.conversationKey,
+            reason: session.reason,
+          }, 'ambiguous session — not touching');
+          // Left running — block a duplicate proactive resume for this key.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+        }
+        case 'authoritative_live':
+          // Verified-live child left in place — block a duplicate proactive resume.
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          break;
+      }
+    }
+    return proactiveResumeBlockedConversationKeys;
   }
 
   /**
@@ -2634,66 +2756,7 @@ export class AgentRuntime implements Runtime {
     // sessions for one chat (duplicate turn processing / replies, contended
     // per-chat state). The in-loop `chatSessions.has()` guard only dedupes THIS
     // instance's own spawns; it cannot see a prior-instance child.
-    const proactiveResumeBlockedConversationKeys = new Set<string>();
-
-    // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
-    // Cross-references agent_sessions with session_checkpoints to safely identify which
-    // processes to keep and which to reap. Only kills PIDs verified as owned children.
-    if (this.sessionScope === 'per_chat' || this.sandboxPerChat) {
-      if (!this.durability) {
-        log.warn('durability engine not set — skipping active session classification');
-      } else {
-        const classified = classifyActiveSessions(this.db, this.durability);
-        for (const session of classified) {
-          switch (session.classification) {
-            case 'stale_dead':
-              markOrphaned(this.db, session.id);
-              break;
-            case 'stale_live':
-              log.warn({
-                id: session.id,
-                pid: session.claudePid,
-                conversationKey: session.conversationKey,
-                reason: session.reason,
-              }, 'reaping stale session');
-              try {
-                await killSessionTree(session.claudePid, 'SIGTERM', {
-                  generationMarker:
-                    `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
-                });
-              } catch (err) {
-                log.error({
-                  err,
-                  id: session.id,
-                  pid: session.claudePid,
-                  conversationKey: session.conversationKey,
-                }, 'stale session tree cleanup inconclusive — blocking proactive resume');
-                if (session.conversationKey) {
-                  proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-                  break;
-                }
-                throw err;
-              }
-              markOrphaned(this.db, session.id);
-              break;
-            case 'ambiguous':
-              log.warn({
-                id: session.id,
-                pid: session.claudePid,
-                conversationKey: session.conversationKey,
-                reason: session.reason,
-              }, 'ambiguous session — not touching');
-              // Left running — block a duplicate proactive resume for this key.
-              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-              break;
-            case 'authoritative_live':
-              // Verified-live child left in place — block a duplicate proactive resume.
-              if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-              break;
-          }
-        }
-      }
-    }
+    const proactiveResumeBlockedConversationKeys = await this.sweepStaleAgentSessions();
 
     // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
     // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
@@ -3122,6 +3185,7 @@ export class AgentRuntime implements Runtime {
     this.workspaceSweeper.start();
     this.startQueueSweepTimer();
     this.startSessionSweepTimer();
+    this.startZombieSessionSweepTimer();
     this.handoffDistill.start();
 
     // Restore any pending polls from the previous process so votes-in-flight
@@ -5832,6 +5896,10 @@ export class AgentRuntime implements Runtime {
     if (this.sessionSweepTimer) {
       clearInterval(this.sessionSweepTimer);
       this.sessionSweepTimer = null;
+    }
+    if (this.zombieSessionSweepTimer) {
+      clearInterval(this.zombieSessionSweepTimer);
+      this.zombieSessionSweepTimer = null;
     }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {

@@ -89,8 +89,8 @@ Current baseline measurements:
 
 | rule | path | lines | ceiling |
 |------|------|-------|---------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 10049 | 10049 |
-| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 13145 | 13145 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 10117 | 10117 |
+| `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 13268 | 13268 |
 
 The `ceiling` column (the `maxLines` field on each measurement in `baseline.json`) is a **blocking
 growth ceiling**. `tests/scripts/fitness-file-size-warning-budget.test.ts` measures each file's
