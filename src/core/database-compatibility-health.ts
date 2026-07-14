@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { createChildLogger } from '../logger.ts';
 import {
   Database,
-  type DatabaseCompatibilityError,
+  DatabaseCompatibilityError,
   isDrainableDatabaseCompatibilityError,
 } from './database.ts';
 import {
@@ -20,6 +20,17 @@ export {
 const log = createChildLogger('database-compatibility-health');
 
 type StartupDatabase = Pick<Database, 'open' | 'close'>;
+
+function isPermanentDatabaseCompatibilityStartupError(
+  err: unknown,
+): err is DatabaseCompatibilityError {
+  return err instanceof DatabaseCompatibilityError
+    && (
+      err.reason === 'invalid_schema'
+      || err.reason === 'unsafe_database_identity'
+      || err.reason === 'database_not_writable'
+    );
+}
 
 export type DatabaseStartupResult =
   | { mode: 'ready'; db: Database }
@@ -46,6 +57,9 @@ export async function openDatabaseForStartup(options: {
     db.open();
     return { mode: 'ready', db: db as Database };
   } catch (err) {
+    if (isPermanentDatabaseCompatibilityStartupError(err)) {
+      throw new DatabaseCompatibilityPermanentStartupError(err.message, err);
+    }
     if (!isDrainableDatabaseCompatibilityError(err)) throw err;
     let server: Server;
     try {

@@ -201,6 +201,45 @@ describe('database compatibility health drain', () => {
     );
   });
 
+  it.each([
+    { reason: 'invalid_schema', permanent: true, exitCode: 78 },
+    { reason: 'unsafe_database_identity', permanent: true, exitCode: 78 },
+    { reason: 'database_not_writable', permanent: true, exitCode: 78 },
+    { reason: 'database_identity_changed', permanent: false, exitCode: 1 },
+  ] as const)(
+    'classifies $reason startup failures with exit status $exitCode',
+    async ({ reason, permanent, exitCode }) => {
+      const compatibilityError = new DatabaseCompatibilityError(
+        reason,
+        `${reason} startup failure`,
+      );
+      const rejectedDb = {
+        open: vi.fn(() => { throw compatibilityError; }),
+        close: vi.fn(),
+      };
+      const startDrain = vi.fn(async () => ({ close: vi.fn() } as unknown as Server));
+
+      const failure = await openDatabaseForStartup({
+        dbPath: '/tmp/rejected.db',
+        instanceName: 'test-agent',
+        startedAt: 1,
+        createDatabase: () => rejectedDb as never,
+        startDrainServer: startDrain,
+      }).catch((err: unknown) => err);
+
+      if (permanent) {
+        expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
+        expect((failure as DatabaseCompatibilityPermanentStartupError).cause).toBe(
+          compatibilityError,
+        );
+      } else {
+        expect(failure).toBe(compatibilityError);
+      }
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(exitCode);
+      expect(startDrain).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects the drain wait if the health listener disappears unexpectedly', async () => {
     const server = await startDatabaseCompatibilityHealthServer({
       error: new DatabaseCompatibilityError('future_schema', 'future schema'),
@@ -232,17 +271,20 @@ describe('database compatibility health drain', () => {
     client.destroy();
   });
 
-  it('returns a drained startup result for compatible typed failures and rethrows other failures', async () => {
+  it.each([
+    'future_schema',
+    'engine_recovery_required',
+  ] as const)('returns a drained startup result for %s', async (reason) => {
     const drainServer = { close: vi.fn() } as unknown as Server;
     const startDrain = vi.fn(async () => drainServer);
-    const futureError = new DatabaseCompatibilityError('future_schema', 'future schema');
+    const compatibilityError = new DatabaseCompatibilityError(reason, `${reason} failure`);
     const drainedDb = {
-      open: vi.fn(() => { throw futureError; }),
+      open: vi.fn(() => { throw compatibilityError; }),
       close: vi.fn(),
     };
 
     await expect(openDatabaseForStartup({
-      dbPath: '/tmp/future.db',
+      dbPath: '/tmp/drained.db',
       instanceName: 'test-agent',
       startedAt: 1,
       createDatabase: () => drainedDb as never,
@@ -250,11 +292,14 @@ describe('database compatibility health drain', () => {
     })).resolves.toEqual({
       mode: 'drained',
       db: drainedDb,
-      error: futureError,
+      error: compatibilityError,
       server: drainServer,
     });
     expect(startDrain).toHaveBeenCalledTimes(1);
+  });
 
+  it('rethrows ordinary database open failures', async () => {
+    const startDrain = vi.fn(async () => ({ close: vi.fn() } as unknown as Server));
     const ordinaryError = new Error('ordinary open failure');
     await expect(openDatabaseForStartup({
       dbPath: '/tmp/broken.db',
