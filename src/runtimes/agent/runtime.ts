@@ -8,7 +8,7 @@ import type {
   DurabilityEngine,
   SessionCheckpointRow,
 } from '../../core/durability.ts';
-import type { AgentEvent } from './stream-parser.ts';
+import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
   classifyStreamedProviderFailure,
@@ -1124,7 +1124,17 @@ export class AgentRuntime implements Runtime {
     const snapshot = getSessionTokenSnapshot(this.db, rowId);
     if (!snapshot) return;
 
-    const inputSinceCompact = Math.max(0, snapshot.totalInputTokens - snapshot.lastCompactInputTokens);
+    // #1774: total_input_tokens no longer includes cache_read (it is
+    // genuinely-new input only — see the schema note above ensureAgentSchema
+    // in session-db.ts). This heuristic's job is unchanged: approximate how
+    // much of the model's context window this session has consumed since
+    // its last compact. cache_read IS that consumed context being re-read,
+    // so the combined value below is deliberately the SAME quantity the
+    // pre-split single column used to hold — this preserves today's
+    // trigger point exactly, with zero recalibration of autoCompactInputTokens.
+    const totalCombined = snapshot.totalInputTokens + snapshot.totalCacheReadTokens;
+    const lastCompactCombined = snapshot.lastCompactInputTokens + snapshot.lastCompactCacheReadTokens;
+    const inputSinceCompact = Math.max(0, totalCombined - lastCompactCombined);
     if (inputSinceCompact < this.autoCompactInputTokens) return;
 
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
@@ -1140,12 +1150,13 @@ export class AgentRuntime implements Runtime {
     // happens to cross the threshold (large file ingestion, very low
     // threshold) will also take this path and silently skip its first real
     // compact. Same anti-storm behaviour; documented in docs/runbook.md.
-    if (snapshot.lastCompactInputTokens === 0 && snapshot.totalInputTokens >= this.autoCompactInputTokens) {
+    if (snapshot.lastCompactInputTokens === 0 && totalCombined >= this.autoCompactInputTokens) {
       markSessionCompacted(this.db, rowId);
       log.info({
         scopeKey,
         rowId,
         totalInputTokens: snapshot.totalInputTokens,
+        totalCacheReadTokens: snapshot.totalCacheReadTokens,
         lastCompactInputTokens: snapshot.lastCompactInputTokens,
         threshold: this.autoCompactInputTokens,
       }, 'auto compact baseline initialised for existing session');
@@ -3652,6 +3663,11 @@ export class AgentRuntime implements Runtime {
             if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
               return;
             }
+            // #1774: the per-session token figures below read total_input_tokens
+            // uncompensated — they now show genuinely-new input, not the old
+            // inflated (cache-read-inclusive) total. This display has no
+            // budget/quota semantics, so the smaller, honest number is a
+            // straight improvement.
             const entries: string[] = [];
             let idx = 1;
             if (this.sessionScope === 'per_chat') {
@@ -5492,7 +5508,8 @@ export class AgentRuntime implements Runtime {
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = session?.getDbRowId() ?? null;
           if (rowId !== null) {
-            accumulateTokensWithEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+            accumulateTokensWithEvent(this.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
           }
         }
         break;
@@ -10132,7 +10149,8 @@ export class AgentRuntime implements Runtime {
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = this.session?.getDbRowId() ?? null;
           if (rowId !== null) {
-            accumulateTokensWithEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+            accumulateTokensWithEvent(this.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
           }
         }
         break;

@@ -19,6 +19,38 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 `;
 
+/**
+ * #1774 schema note — token column semantics, and a documented discontinuity:
+ *
+ * `total_input_tokens` used to accumulate each turn's FULL provider-reported
+ * input (base + cache_creation + cache_read) — since cache_read_input_tokens
+ * is essentially the entire prior context re-read every turn, that made the
+ * column grow roughly O(turns²) and inflated it far beyond genuine
+ * consumption (a single event was observed at 140M+ tokens on live fleet
+ * data). As of migration to this column pair, `total_input_tokens`
+ * accumulates ONLY the genuinely-new portion of each turn (base +
+ * cache_creation); `total_cache_read_tokens` accumulates the cache-read
+ * portion separately. Unlike the old conflated column, letting
+ * total_cache_read_tokens grow with turn count is expected and correct — it
+ * is honestly labeled as cumulative re-read volume, not "input consumed".
+ *
+ * Discontinuity: this is NOT backfilled. Rows written before this pair
+ * existed keep their old (inflated, cache-read-inclusive) total_input_tokens
+ * value with total_cache_read_tokens = 0 for that history — rewriting
+ * historical totals from the coarser `agent_token_events` log is out of
+ * scope for a live-fix migration. Any consumer comparing pre/post totals
+ * must account for this before treating them as the same series.
+ *
+ * `last_compact_cache_read_tokens` is the compaction-baseline twin of
+ * `last_compact_input_tokens` — both are snapshotted together in
+ * markSessionCompacted() so a delta computed as
+ * (total_input_tokens + total_cache_read_tokens) - (last_compact_input_tokens
+ * + last_compact_cache_read_tokens) reproduces exactly what the old
+ * undivided total_input_tokens delta would have been (see
+ * maybeStartAutoCompact in runtime.ts, which deliberately reads the combined
+ * value for this reason).
+ */
+
 /** Ensure agent-specific tables exist in the given database. Idempotent. */
 export function ensureAgentSchema(db: Database): void {
   db.raw.exec(AGENT_SESSION_DDL);
@@ -33,6 +65,8 @@ export function ensureAgentSchema(db: Database): void {
     ['last_compact_input_tokens', 'INTEGER DEFAULT 0'],
     ['last_compact_output_tokens', 'INTEGER DEFAULT 0'],
     ['provider', 'TEXT'],
+    ['total_cache_read_tokens', 'INTEGER DEFAULT 0'],
+    ['last_compact_cache_read_tokens', 'INTEGER DEFAULT 0'],
   ] as [string, string][]) {
     try {
       db.raw.exec(`ALTER TABLE agent_sessions ADD COLUMN ${col} ${def}`);
@@ -163,24 +197,39 @@ export function incrementMessageCount(db: Database, rowId: number): void {
     .run(rowId);
 }
 
-/** Accumulate token usage for a session row (adds to existing totals). */
+/**
+ * Accumulate token usage for a session row (adds to existing totals).
+ * `inputTokens` is the genuinely-new portion only (base + cache_creation) —
+ * callers must have already subtracted cache_read via
+ * stream-parser.ts's splitInputTokenUsage(). `cacheReadTokens` accumulates
+ * separately; see the #1774 schema note above ensureAgentSchema.
+ */
 export function accumulateSessionTokens(
   db: Database,
   rowId: number,
   inputTokens: number,
   outputTokens: number,
+  cacheReadTokens: number,
 ): void {
   db.raw
     .prepare(
       `UPDATE agent_sessions
        SET total_input_tokens = total_input_tokens + ?,
-           total_output_tokens = total_output_tokens + ?
+           total_output_tokens = total_output_tokens + ?,
+           total_cache_read_tokens = total_cache_read_tokens + ?
        WHERE id = ?`,
     )
-    .run(inputTokens, outputTokens, rowId);
+    .run(inputTokens, outputTokens, cacheReadTokens, rowId);
 }
 
-/** Record a timestamped token usage event for granular metrics. */
+/**
+ * Record a timestamped token usage event for granular metrics.
+ * `inputTokens` here is the same genuinely-new-only value written to
+ * total_input_tokens — this table does not carry a separate cache-read
+ * column, so a consumer reading `agent_token_events.input_tokens` (e.g.
+ * metrics-collector's agent_tokens_in baseline) now gets the corrected,
+ * non-inflated figure as a natural consequence of the split.
+ */
 export function insertTokenEvent(
   db: Database,
   agentSessionId: number,
@@ -201,15 +250,16 @@ export function accumulateTokensWithEvent(
   rowId: number,
   inputTokens: number,
   outputTokens: number,
+  cacheReadTokens: number,
 ): void {
   db.raw.exec('BEGIN IMMEDIATE');
   try {
-    accumulateSessionTokens(db, rowId, inputTokens, outputTokens);
+    accumulateSessionTokens(db, rowId, inputTokens, outputTokens, cacheReadTokens);
     insertTokenEvent(db, rowId, inputTokens, outputTokens);
     db.raw.exec('COMMIT');
   } catch (err) {
     try { db.raw.exec('ROLLBACK'); } catch { /* best-effort rollback */ }
-    log.error({ agentSessionId: rowId, inputTokens, outputTokens, err }, 'token_event.write_fail');
+    log.error({ agentSessionId: rowId, inputTokens, outputTokens, cacheReadTokens, err }, 'token_event.write_fail');
     throw err;
   }
 }
@@ -217,16 +267,19 @@ export function accumulateTokensWithEvent(
 export interface SessionTokenSnapshot {
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
   lastCompactInputTokens: number;
   lastCompactOutputTokens: number;
+  lastCompactCacheReadTokens: number;
 }
 
 /** Return token totals for compaction budgeting, or null when the row is gone. */
 export function getSessionTokenSnapshot(db: Database, rowId: number): SessionTokenSnapshot | null {
   const row = db.raw
     .prepare(
-      `SELECT total_input_tokens, total_output_tokens,
-              last_compact_input_tokens, last_compact_output_tokens
+      `SELECT total_input_tokens, total_output_tokens, total_cache_read_tokens,
+              last_compact_input_tokens, last_compact_output_tokens,
+              last_compact_cache_read_tokens
        FROM agent_sessions
        WHERE id = ?`,
     )
@@ -234,8 +287,10 @@ export function getSessionTokenSnapshot(db: Database, rowId: number): SessionTok
     | {
         total_input_tokens: number | null;
         total_output_tokens: number | null;
+        total_cache_read_tokens: number | null;
         last_compact_input_tokens: number | null;
         last_compact_output_tokens: number | null;
+        last_compact_cache_read_tokens: number | null;
       }
     | undefined;
 
@@ -243,19 +298,28 @@ export function getSessionTokenSnapshot(db: Database, rowId: number): SessionTok
   return {
     totalInputTokens: row.total_input_tokens ?? 0,
     totalOutputTokens: row.total_output_tokens ?? 0,
+    totalCacheReadTokens: row.total_cache_read_tokens ?? 0,
     lastCompactInputTokens: row.last_compact_input_tokens ?? 0,
     lastCompactOutputTokens: row.last_compact_output_tokens ?? 0,
+    lastCompactCacheReadTokens: row.last_compact_cache_read_tokens ?? 0,
   };
 }
 
-/** Mark the current token totals as the baseline for future compaction checks. */
+/**
+ * Mark the current token totals as the baseline for future compaction
+ * checks. Snapshots total_cache_read_tokens alongside total_input_tokens so
+ * the combined (total_input_tokens + total_cache_read_tokens) delta
+ * maybeStartAutoCompact reads reproduces the pre-split arithmetic exactly —
+ * see the #1774 schema note above ensureAgentSchema.
+ */
 export function markSessionCompacted(db: Database, rowId: number): void {
   db.raw
     .prepare(
       `UPDATE agent_sessions
        SET last_compact_at = datetime('now'),
            last_compact_input_tokens = total_input_tokens,
-           last_compact_output_tokens = total_output_tokens
+           last_compact_output_tokens = total_output_tokens,
+           last_compact_cache_read_tokens = total_cache_read_tokens
        WHERE id = ?`,
     )
     .run(rowId);

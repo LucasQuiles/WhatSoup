@@ -151,24 +151,25 @@ export function openExistingWritableDatabase(
   }
 }
 
-function assertExactSchema43(raw: DatabaseSync): void {
+function assertSchema43Foundation(raw: DatabaseSync): void {
   const table = raw.prepare(`
     SELECT name
     FROM sqlite_master
     WHERE type = 'table' AND name = 'schema_migrations'
   `).get();
-  if (!table) throw new Error('Database must have exact schema 43');
+  if (!table) throw new Error('Database must include canonical schema 43 receipts');
   const versions = (raw.prepare(`
     SELECT version
     FROM schema_migrations
     ORDER BY version
   `).all() as Array<{ version: number }>).map((row) => Number(row.version));
-  const expected = Array.from({ length: 43 }, (_value, index) => index + 1);
   if (
-    versions.length !== expected.length
-    || versions.some((version, index) => version !== expected[index])
+    versions.length < 43
+    || versions.some((version, index) => version !== index + 1)
   ) {
-    throw new Error('Database must have exact schema 43 (migrations 1 through 43, none newer)');
+    throw new Error(
+      'Database must include contiguous schema 43+ receipts (migrations 1 through current)',
+    );
   }
 }
 
@@ -191,7 +192,7 @@ function inspectReadOnly(
   const raw = new DatabaseSync(dbPath, { readOnly: true });
   try {
     raw.exec('PRAGMA foreign_keys = ON');
-    assertExactSchema43(raw);
+    assertSchema43Foundation(raw);
     const inspection = inspectOperatorCatchupRecovery(raw, params);
     assertSameDatabaseFile(identity, assertExistingRegularDatabase(dbPath));
     return { inspection, identity };
@@ -246,7 +247,7 @@ export function runCloseRecoveryCatchupCli(argv: string[]): number {
     raw.exec('PRAGMA foreign_keys = ON');
     const receipt = closeOperatorCatchupRecoveryRaw(raw, params, (transactionRaw) => {
       assertSameDatabaseFile(identity, assertExistingRegularDatabase(args.dbPath));
-      assertExactSchema43(transactionRaw);
+      assertSchema43Foundation(transactionRaw);
     });
     process.stdout.write(`${JSON.stringify({
       ok: true,

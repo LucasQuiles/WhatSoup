@@ -1595,8 +1595,10 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
       totalInputTokens: 140,
       totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
       lastCompactInputTokens: 70,
       lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
     });
     state.autoCompact.lastSuccessAt.set('compact-scope', Date.now() - 1_000);
 

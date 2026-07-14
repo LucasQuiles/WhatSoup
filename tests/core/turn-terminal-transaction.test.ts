@@ -75,7 +75,7 @@ describe('atomic terminal finalization', () => {
     const result = durability.finalizeTurnTerminal({
       ...toTurnFinalizationPersistence(replied(inboundSeq, outboundId)),
       bookkeeping: {
-        sessionTokens: { dbRowId: sessionId, inputTokens: 13, outputTokens: 5 },
+        sessionTokens: { dbRowId: sessionId, inputTokens: 13, outputTokens: 5, cacheReadTokens: 0 },
         checkpoint: {
           conversationKey: IDENTITY.conversationKey,
           fields: { lastInboundSeq: inboundSeq, lastFlushedOutboundId: outboundId },
@@ -137,7 +137,7 @@ describe('atomic terminal finalization', () => {
     durability.finalizeTurnTerminal({
       ...persistence,
       bookkeeping: {
-        sessionTokens: { dbRowId: sessionId, inputTokens: 3, outputTokens: 2 },
+        sessionTokens: { dbRowId: sessionId, inputTokens: 3, outputTokens: 2, cacheReadTokens: 0 },
         checkpoint: {
           conversationKey: IDENTITY.conversationKey,
           fields: { lastInboundSeq: inboundSeq },
@@ -147,7 +147,7 @@ describe('atomic terminal finalization', () => {
     const duplicate = durability.finalizeTurnTerminal({
       ...persistence,
       bookkeeping: {
-        sessionTokens: { dbRowId: sessionId, inputTokens: 99, outputTokens: 88 },
+        sessionTokens: { dbRowId: sessionId, inputTokens: 99, outputTokens: 88, cacheReadTokens: 0 },
         checkpoint: {
           conversationKey: IDENTITY.conversationKey,
           fields: { lastInboundSeq: inboundSeq },
@@ -191,7 +191,7 @@ describe('atomic terminal finalization', () => {
     expect(() => durability.finalizeTurnTerminal({
       ...toTurnFinalizationPersistence(noReply(inboundSeq)),
       bookkeeping: {
-        sessionTokens: { dbRowId: sessionId, inputTokens: 3, outputTokens: 2 },
+        sessionTokens: { dbRowId: sessionId, inputTokens: 3, outputTokens: 2, cacheReadTokens: 0 },
       },
     })).toThrow('atomic token event denied');
 

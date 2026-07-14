@@ -219,8 +219,15 @@ describe('close-recovery-catchup CLI', () => {
     expect(closureCount(original.dbPath)).toBe(0);
   });
 
-  it('validates a schema-43 proof read-only and emits a non-secret success preview', () => {
+  it('validates a schema-43+ proof read-only and emits a non-secret success preview', () => {
     const fixture = installFixture();
+
+    const schema = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    const latest = schema.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as {
+      version: number;
+    };
+    schema.close();
+    expect(latest.version).toBeGreaterThan(43);
 
     const result = captureRun(argsFor(fixture));
 
@@ -348,12 +355,28 @@ describe('close-recovery-catchup CLI', () => {
     raw.close();
 
     expect(() => runCloseRecoveryCatchupCli(argsFor(fixture, [...extra])))
-      .toThrow('exact schema 43');
+      .toThrow('schema 43+ receipts');
 
     const check = new DatabaseSync(fixture.dbPath, { readOnly: true });
     expect(check.prepare('SELECT version FROM schema_migrations WHERE version = 43').get())
       .toBeUndefined();
     check.close();
+    expect(closureCount(fixture.dbPath)).toBe(0);
+  });
+
+  it('rejects a gap in post-43 migration receipts without closing recovery', () => {
+    const fixture = installFixture();
+    const raw = new DatabaseSync(fixture.dbPath);
+    const latest = Number((raw.prepare(`
+      SELECT MAX(version) AS version FROM schema_migrations
+    `).get() as { version: number }).version);
+    expect(latest).toBeGreaterThan(43);
+    raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(latest);
+    raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(latest + 1);
+    raw.close();
+
+    expect(() => runCloseRecoveryCatchupCli(argsFor(fixture)))
+      .toThrow('schema 43+ receipts');
     expect(closureCount(fixture.dbPath)).toBe(0);
   });
 

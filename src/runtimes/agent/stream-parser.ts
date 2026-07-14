@@ -18,13 +18,48 @@ export type AgentEvent =
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
-  | { type: 'result'; text: string | null; isError?: boolean; inputTokens?: number; outputTokens?: number; costUsd?: number }
-  | { type: 'token_usage'; inputTokens?: number; outputTokens?: number }
+  | {
+      type: 'result';
+      text: string | null;
+      isError?: boolean;
+      inputTokens?: number;
+      outputTokens?: number;
+      /**
+       * The portion of inputTokens that is a cache re-read of prior context
+       * (Anthropic's cache_read_input_tokens), not new consumption. Always a
+       * subset of inputTokens — inputTokens itself is unchanged (still the
+       * full billable total) so cost/budget consumers keep the accurate
+       * figure. See #1774: this field exists so DB accumulators can stop
+       * summing repeated context re-reads into a "total input" column.
+       */
+      cacheReadTokens?: number;
+      costUsd?: number;
+    }
+  | { type: 'token_usage'; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
   | { type: 'ignored' }
   | { type: 'ignored'; blockType: string; reason: IgnoredBlockReason }
   | { type: 'unknown_block'; blockType: string; raw: unknown }
   | { type: 'unknown'; raw: unknown }
   | { type: 'parse_error'; line: string };
+
+/**
+ * Split a provider event's combined inputTokens into the genuinely-new
+ * portion and the cache-read portion. inputTokens/cacheReadTokens on the
+ * event are both left at their original (combined) meaning — this is the
+ * one place that derives "new tokens" for accumulators that must not sum
+ * the same re-read context on every turn (#1774).
+ */
+export function splitInputTokenUsage(event: {
+  inputTokens?: number;
+  cacheReadTokens?: number;
+}): { newInputTokens: number; cacheReadTokens: number } {
+  const cacheReadTokens = event.cacheReadTokens ?? 0;
+  const totalInputTokens = event.inputTokens ?? 0;
+  return {
+    newInputTokens: Math.max(0, totalInputTokens - cacheReadTokens),
+    cacheReadTokens,
+  };
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -182,9 +217,12 @@ function resultEvent(event: JsonRecord): AgentEvent {
   const outputTokens = typeof rawUsage?.['output_tokens'] === 'number'
     ? rawUsage['output_tokens']
     : undefined;
+  // Only meaningful alongside inputTokens — undefined whenever usage itself
+  // is undefined, so a DB accumulator's `?? 0` fallback stays correct.
+  const cacheReadTokens = baseInput !== undefined ? cacheRead : undefined;
 
   if (!isError) {
-    return { type: 'result', text: null, inputTokens, outputTokens };
+    return { type: 'result', text: null, inputTokens, outputTokens, cacheReadTokens };
   }
 
   const content = event['content'];
@@ -195,6 +233,7 @@ function resultEvent(event: JsonRecord): AgentEvent {
       isError: true,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
     };
   }
   if (Array.isArray(content)) {
@@ -207,6 +246,7 @@ function resultEvent(event: JsonRecord): AgentEvent {
           isError: true,
           inputTokens,
           outputTokens,
+          cacheReadTokens,
         };
       }
     }
@@ -219,9 +259,10 @@ function resultEvent(event: JsonRecord): AgentEvent {
       isError: true,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
     };
   }
-  return { type: 'result', text: null, isError: true, inputTokens, outputTokens };
+  return { type: 'result', text: null, isError: true, inputTokens, outputTokens, cacheReadTokens };
 }
 
 /**

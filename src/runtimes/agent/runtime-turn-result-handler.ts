@@ -1,4 +1,4 @@
-import type { AgentEvent } from './stream-parser.ts';
+import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import type { SessionManager } from './session.ts';
 import type { OperationTracker } from './operation-tracker.ts';
@@ -497,7 +497,10 @@ if (mapKey !== undefined) {
 host.workspaceSweeper.touch(mapKey);
 const rowId = session?.getDbRowId() ?? null;
 if (!runtimeContext && (event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
-  accumulateTokensWithEvent(host.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+  {
+    const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+    accumulateTokensWithEvent(host.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
+  }
 }
 // Only advance the compact baseline when the SDK actually emitted a
 // compact_boundary on this turn. wasSilentCompact alone means "we
@@ -613,6 +616,17 @@ if (wasSilentCompact) host.clearSilentCompact(mapKey);
       host.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
       host.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err, mapKey);
       log.error({ err, mapKey, scopeKey }, 'per-chat runtime turn finalization escaped');
+      // #1775: a log line alone is a silent drop from ops' perspective —
+      // this turn's token/checkpoint bookkeeping may never have run. Route
+      // through the same alert path other finalization failures use so the
+      // loss is never invisible.
+      emitAlertChecked(
+        host.instanceName,
+        'agent_turn_finalization_escaped',
+        'Runtime turn finalization escaped (per-chat)',
+        `mapKey=${mapKey} scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
+        'warning',
+      );
     });
   } else if (isSystemResult || inboundSeq === undefined || host.durability === null) {
     if (!isSystemResult && mapKey !== undefined && clearReplayOnSuccess) {
@@ -1056,7 +1070,10 @@ if (!host.turnHadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentC
 }
 host.turnHadVisibleOutput = false;
 if (!runtimeContext && (event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
-  accumulateTokensWithEvent(host.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+  {
+    const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+    accumulateTokensWithEvent(host.db, rowId, newInputTokens, event.outputTokens ?? 0, cacheReadTokens);
+  }
 }
 // Only advance the compact baseline when the SDK actually emitted a
 // compact_boundary. wasSilentCompact alone means "we suppressed
@@ -1114,6 +1131,15 @@ if (wasSilentCompact) host.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       host.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
       host.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err);
       log.error({ err, scopeKey }, 'shared/singleton runtime turn finalization escaped');
+      // #1775: see the matching per-chat catch — a log line alone is a
+      // silent drop from ops' perspective. Alert so it is not.
+      emitAlertChecked(
+        host.instanceName,
+        'agent_turn_finalization_escaped',
+        'Runtime turn finalization escaped (shared/singleton)',
+        `scope=${scopeKey} err=${err instanceof Error ? err.message : String(err)}`,
+        'warning',
+      );
     });
   } else if (isSystemResult || host.currentInboundSeq === undefined || host.durability === null) {
     host.runtimeTurnCoordinator.flushUnownedRuntimeResult(queue, voice);
