@@ -179,6 +179,7 @@ export interface TurnRecoveryEnumerationPage {
 }
 
 export interface TurnRecoverySupervisorCounts {
+  /** Admission-blocking active jobs plus orphan transfers. */
   outstanding: number;
   blockedUnsafe: number;
   pending: number;
@@ -189,6 +190,8 @@ export interface TurnRecoverySupervisorCounts {
   corruptLinks: number;
   orphanTransfers: number;
   echoConflicts: number;
+  /** Pending operator catch-ups that lack an append-only closure link. */
+  openRecoveries: number;
 }
 
 export function validatePositiveSafeInteger(value: number, label: string): void {
@@ -770,9 +773,21 @@ export class TurnRecoveryStore {
             ON linked.terminal_record_id = terminal.id
           WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
             AND linked.id IS NULL
+        ),
+        open_recoveries AS (
+          SELECT COUNT(*) AS count
+          FROM inbound_disposition_links pending
+          WHERE pending.disposition = 'recovery_pending_operator_catchup'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM inbound_disposition_links closure
+              WHERE closure.inbound_seq = pending.inbound_seq
+                AND closure.recovery_plan_id = pending.recovery_plan_id
+                AND closure.disposition = 'superseded_by_operator_catchup'
+            )
         )
         SELECT
-          COALESCE(SUM(CASE WHEN j.state <> 'completed' THEN 1 ELSE 0 END), 0)
+          COALESCE(SUM(CASE WHEN j.state IN ('pending', 'claimed') THEN 1 ELSE 0 END), 0)
             + (SELECT count FROM orphan_transfers)
             AS outstanding,
           COALESCE(SUM(CASE WHEN j.state = 'blocked_unsafe' THEN 1 ELSE 0 END), 0)
@@ -821,7 +836,8 @@ export class TurnRecoveryStore {
           END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
           COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-            AS echo_conflicts
+            AS echo_conflicts,
+          (SELECT count FROM open_recoveries) AS open_recoveries
         FROM turn_recovery_jobs j
         LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
@@ -1620,6 +1636,7 @@ export class TurnRecoveryStore {
       corrupt_links: number;
       orphan_transfers: number;
       echo_conflicts: number;
+      open_recoveries: number;
     };
     return {
       outstanding: row.outstanding,
@@ -1632,6 +1649,7 @@ export class TurnRecoveryStore {
       corruptLinks: row.corrupt_links,
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
+      openRecoveries: row.open_recoveries,
     };
   }
 

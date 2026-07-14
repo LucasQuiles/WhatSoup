@@ -49,6 +49,25 @@ interface RuntimeState {
   retryRuntimeTurnFinalizations(): Promise<RetryResult>;
 }
 
+function recoveryCounts(
+  overrides: Partial<ReturnType<DurabilityEngine['getTurnRecoverySupervisorCounts']>> = {},
+): ReturnType<DurabilityEngine['getTurnRecoverySupervisorCounts']> {
+  return {
+    outstanding: 0,
+    blockedUnsafe: 0,
+    pending: 0,
+    liveClaimed: 0,
+    expiredClaimed: 0,
+    exhausted: 0,
+    quarantinedDelivery: 0,
+    corruptLinks: 0,
+    orphanTransfers: 0,
+    echoConflicts: 0,
+    openRecoveries: 0,
+    ...overrides,
+  };
+}
+
 function context(inboundSeq: number, logicalTurnId: string): RuntimeTurnContext {
   return createRuntimeTurnContext({
     identity: {
@@ -132,6 +151,173 @@ describe('runtime turn finalization recovery health', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps a lone blocked-unsafe receipt informational and healthy', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ blockedUnsafe: 1 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'blocked-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryOutstanding: 0,
+          turnRecoveryBlockedUnsafe: 1,
+          turnRecoveryOpenRecoveries: 0,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps blocked-unsafe informational while open catch-up independently degrades health', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ blockedUnsafe: 3, openRecoveries: 11 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'blocked-open-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          turnRecoveryOutstanding: 0,
+          turnRecoveryBlockedUnsafe: 3,
+          turnRecoveryOpenRecoveries: 11,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('degrades for exhausted work without treating it as admission-blocking', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ exhausted: 1 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'exhausted-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: {
+          turnRecoveryOutstanding: 0,
+          turnRecoveryExhausted: 1,
+          turnRecoveryOpenRecoveries: 0,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('degrades while operator catch-up is open and returns healthy after closure', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      const recoveryStats = vi.spyOn(durability, 'getTurnRecoverySupervisorCounts');
+      recoveryStats.mockReturnValueOnce(recoveryCounts({ openRecoveries: 1 }));
+      recoveryStats.mockReturnValue(recoveryCounts());
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'catch-up-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'degraded',
+        details: { turnRecoveryOpenRecoveries: 1 },
+      });
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: { turnRecoveryOpenRecoveries: 0 },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([
+    {
+      label: 'live claim',
+      counts: recoveryCounts({ outstanding: 1, liveClaimed: 1 }),
+      details: {
+        turnRecoveryOutstanding: 1,
+        turnRecoveryLiveClaimed: 1,
+        turnRecoveryExpiredClaimed: 0,
+      },
+    },
+    {
+      label: 'expired claim',
+      counts: recoveryCounts({ outstanding: 1, expiredClaimed: 1 }),
+      details: {
+        turnRecoveryOutstanding: 1,
+        turnRecoveryLiveClaimed: 0,
+        turnRecoveryExpiredClaimed: 1,
+      },
+    },
+    {
+      label: 'orphan transfer',
+      counts: recoveryCounts({ outstanding: 1, corruptLinks: 1, orphanTransfers: 1 }),
+      details: {
+        turnRecoveryOutstanding: 1,
+        turnRecoveryCorruptLinks: 1,
+        turnRecoveryOrphanTransfers: 1,
+      },
+    },
+    {
+      label: 'corrupt link',
+      counts: recoveryCounts({ corruptLinks: 1 }),
+      details: { turnRecoveryOutstanding: 0, turnRecoveryCorruptLinks: 1 },
+    },
+    {
+      label: 'quarantined active delivery',
+      counts: recoveryCounts({
+        outstanding: 1,
+        pending: 1,
+        quarantinedDelivery: 1,
+      }),
+      details: {
+        turnRecoveryOutstanding: 1,
+        turnRecoveryPending: 1,
+        turnRecoveryQuarantinedDelivery: 1,
+      },
+    },
+  ])('degrades for independent $label recovery evidence', ({ counts, details }) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(counts);
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'independent-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({ status: 'degraded', details });
+    } finally {
+      db.close();
+    }
+  });
+
   it('reports a completed recovery echo conflict as degraded audit health', () => {
     const db = new Database(':memory:');
     db.open();
@@ -148,6 +334,7 @@ describe('runtime turn finalization recovery health', () => {
         corruptLinks: 0,
         orphanTransfers: 0,
         echoConflicts: 1,
+        openRecoveries: 0,
       });
       const runtime = new AgentRuntime(db, makeMessenger().messenger, 'echo-conflict-health', {
         sessionScope: 'per_chat',

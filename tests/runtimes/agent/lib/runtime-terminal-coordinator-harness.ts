@@ -240,6 +240,7 @@ export function durabilityMock() {
       corruptLinks: 0,
       orphanTransfers: 0,
       echoConflicts: 0,
+      openRecoveries: 0,
     })),
     getOutboundDeliverySnapshot: vi.fn<(opId: number, expected: {
       conversationKey: string;

@@ -7,6 +7,7 @@ import {
   type TurnRecoveryJobPersistenceParams,
   type TurnRecoveryOwnerIdentity,
 } from '../../src/core/durability.ts';
+import { closeOperatorCatchupRecovery } from '../../src/core/recovery-catchup-closure.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -215,6 +216,66 @@ describe('atomic linked turn recovery jobs', () => {
     return evidence.opId;
   }
 
+  function insertRecoveryPlan(planId: string): void {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
+      VALUES (?, 'operator', 'test-suite', 'Admission and health counter proof', NULL)
+    `).run(planId);
+  }
+
+  function insertOpenCatchup(sourceSeq: number, planId: string): void {
+    db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL, ?, NULL, ?)
+    `).run(sourceSeq, planId, 'test-open', 'test-suite');
+  }
+
+  function installEchoedCatchup(
+    suffix: string,
+    conversationKey: string,
+    deliveryJid: string,
+  ): number {
+    const catchupSeq = durability.journalInbound(
+      `wamid-${suffix}`,
+      conversationKey,
+      deliveryJid,
+      'agent',
+    );
+    durability.completeInbound(catchupSeq, 'response_echoed');
+    const catchupOpId = durability.createOutboundOp({
+      conversationKey,
+      chatJid: deliveryJid,
+      opType: 'text',
+      payload: '{"text":"recovery acknowledged"}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: catchupSeq,
+    });
+    durability.markSending(catchupOpId);
+    durability.markSubmitted(catchupOpId, `wa-${suffix}`);
+    durability.markEchoed(catchupOpId);
+    db.raw.prepare('UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?').run(catchupOpId);
+    db.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, ?, ?, ?, ?, 1, 'replied',
+                'finalized_replied', 'echoed', ?, 1)
+    `).run(
+      conversationKey,
+      deliveryJid,
+      catchupSeq,
+      catchupSeq,
+      `${suffix}-turn`,
+      `${suffix}-manager`,
+      catchupOpId,
+    );
+    return catchupSeq;
+  }
+
   it('commits the APPLIED transfer winner and linked exact replay job together', () => {
     const transfer = createTransfer('atomic');
 
@@ -283,12 +344,23 @@ describe('atomic linked turn recovery jobs', () => {
       OWNER,
       { limit: 10, afterId: 0 },
     ).jobs).toEqual([]);
-    expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+    expect.soft(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 0,
       blockedUnsafe: 1,
       pending: 0,
       expiredClaimed: 0,
       exhausted: 0,
     });
+    expect(durability.getOutstandingTurnRecoveryJobsForSupervisor({
+      limit: 10,
+      afterId: 0,
+    }).jobs).toEqual([
+      expect.objectContaining({ id: job!.id, state: 'blocked_unsafe' }),
+    ]);
+    expect.soft(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      job!.conversation_key,
+    )).toBe(false);
 
     const duplicate = durability.finalizeTurnTerminal(transfer.params);
     expect(duplicate).toMatchObject({
@@ -1336,11 +1408,16 @@ describe('atomic linked turn recovery jobs', () => {
       expect.objectContaining({ id: queued.jobId, state: 'exhausted' }),
     ]);
     expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 0,
       blockedUnsafe: 0,
       pending: 0,
       expiredClaimed: 0,
       exhausted: 1,
     });
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      transfer.terminal.result.identity.conversationKey,
+    )).toBe(false);
     expect(() => durability.reassignPendingTurnRecoveryJob(
       queued.jobId,
       OWNER,
@@ -1650,6 +1727,157 @@ describe('atomic linked turn recovery jobs', () => {
       blockedUnsafe: 1,
       exhausted: 1,
     });
+  });
+
+  it('keeps admission closed while one recovery moves from pending to live and expired claim', () => {
+    const transfer = createTransfer('scope-claimed-only', OWNER, {}, {
+      conversationKey: '15550100999',
+      deliveryJid: '15550100999:7@s.whatsapp.net',
+    });
+    const job = durability.finalizeTurnTerminal(transfer.params).recoveryJob!;
+
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      transfer.terminal.result.identity.conversationKey,
+    )).toBe(true);
+    expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 1,
+      pending: 1,
+      liveClaimed: 0,
+      expiredClaimed: 0,
+    });
+
+    durability.claimTurnRecoveryJob(job.jobId, OWNER, {
+      claimToken: 'scope-claimed-only-token',
+      leaseSeconds: 60,
+    });
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      transfer.terminal.result.identity.conversationKey,
+    )).toBe(true);
+    expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 1,
+      pending: 0,
+      liveClaimed: 1,
+      expiredClaimed: 0,
+    });
+
+    db.raw.prepare(
+      "UPDATE turn_recovery_jobs SET claim_expires_at = datetime('now', '-1 second') WHERE id = ?",
+    ).run(job.jobId);
+    expect(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      transfer.terminal.result.identity.conversationKey,
+    )).toBe(true);
+    expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 1,
+      pending: 0,
+      liveClaimed: 0,
+      expiredClaimed: 1,
+    });
+  });
+
+  it('keeps blocked work informational while an unmatched catch-up degrades until closure', () => {
+    const conversationKey = '15550100888';
+    const deliveryJid = '15550100888:7@s.whatsapp.net';
+    const blocked = createTransfer(
+      'open-recovery-blocked',
+      OWNER,
+      { replaySafe: false },
+      { conversationKey, deliveryJid },
+    );
+    const blockedJob = durability.finalizeTurnTerminal(blocked.params).recoveryJob!;
+    const blockedBefore = db.raw.prepare(
+      'SELECT * FROM turn_recovery_jobs WHERE id = ?',
+    ).get(blockedJob.jobId);
+    const sourceSeq = durability.journalInbound(
+      'wamid-open-recovery-source',
+      conversationKey,
+      deliveryJid,
+      'agent',
+    );
+    insertRecoveryPlan('recovery-plan-open-counter');
+    insertOpenCatchup(sourceSeq, 'recovery-plan-open-counter');
+    const catchupSeq = installEchoedCatchup(
+      'open-recovery-catchup',
+      conversationKey,
+      deliveryJid,
+    );
+
+    expect.soft(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 0,
+      blockedUnsafe: 1,
+      exhausted: 0,
+      openRecoveries: 1,
+    });
+    expect.soft(durability.getHealthStats().openRecoveries).toBe(1);
+    expect.soft(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      conversationKey,
+    )).toBe(false);
+
+    expect(closeOperatorCatchupRecovery(db, {
+      planId: 'recovery-plan-open-counter',
+      conversationKey,
+      expectedSourceSeqs: [sourceSeq],
+      catchupSeq,
+      actor: 'test-suite',
+      evidenceRef: 'test://open-recovery-closure',
+    })).toMatchObject({ openBefore: 1, openAfter: 0, inserted: 1 });
+
+    expect.soft(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
+      outstanding: 0,
+      blockedUnsafe: 1,
+      exhausted: 0,
+      openRecoveries: 0,
+    });
+    expect.soft(durability.getHealthStats().openRecoveries).toBe(0);
+    expect(db.raw.prepare(
+      'SELECT * FROM turn_recovery_jobs WHERE id = ?',
+    ).get(blockedJob.jobId)).toEqual(blockedBefore);
+    expect.soft(durability.hasOutstandingTurnRecoveryForScope(
+      'per_chat',
+      conversationKey,
+    )).toBe(false);
+  });
+
+  it('correlates catch-up closures by both source inbound and recovery plan', () => {
+    const conversationA = '15550100777';
+    const deliveryA = '15550100777:7@s.whatsapp.net';
+    const conversationB = '15550100666';
+    const deliveryB = '15550100666:7@s.whatsapp.net';
+    const sourceA = durability.journalInbound(
+      'wamid-open-correlation-a',
+      conversationA,
+      deliveryA,
+      'agent',
+    );
+    const sourceB = durability.journalInbound(
+      'wamid-open-correlation-b',
+      conversationB,
+      deliveryB,
+      'agent',
+    );
+    insertRecoveryPlan('recovery-plan-correlation-a');
+    insertRecoveryPlan('recovery-plan-correlation-b');
+    insertOpenCatchup(sourceA, 'recovery-plan-correlation-a');
+    insertOpenCatchup(sourceA, 'recovery-plan-correlation-b');
+    insertOpenCatchup(sourceB, 'recovery-plan-correlation-a');
+    const catchupA = installEchoedCatchup('open-correlation-catchup', conversationA, deliveryA);
+
+    expect.soft(durability.getTurnRecoverySupervisorCounts().openRecoveries).toBe(3);
+    expect.soft(durability.getHealthStats().openRecoveries).toBe(3);
+    expect(closeOperatorCatchupRecovery(db, {
+      planId: 'recovery-plan-correlation-a',
+      conversationKey: conversationA,
+      expectedSourceSeqs: [sourceA],
+      catchupSeq: catchupA,
+      actor: 'test-suite',
+      evidenceRef: 'test://correlated-recovery-closure',
+    })).toMatchObject({ openBefore: 1, openAfter: 0, inserted: 1 });
+
+    expect.soft(durability.getTurnRecoverySupervisorCounts().openRecoveries).toBe(2);
+    expect.soft(durability.getHealthStats().openRecoveries).toBe(2);
   });
 
   it('keeps a quarantined selected delivery visible in supervisor health', () => {

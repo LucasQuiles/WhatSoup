@@ -1266,7 +1266,7 @@ export class AgentRuntime implements Runtime {
       : {
       outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
       blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
-      orphanTransfers: 0, echoConflicts: 0,
+      orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
       };
     return {
       turnRecoveryOutstanding: counts.outstanding,
@@ -1275,6 +1275,7 @@ export class AgentRuntime implements Runtime {
       turnRecoveryExpiredClaimed: counts.expiredClaimed,
       turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
       turnRecoveryExhausted: counts.exhausted,
+      turnRecoveryOpenRecoveries: counts.openRecoveries,
       turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
       turnRecoveryCorruptLinks: counts.corruptLinks,
       turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
@@ -5509,6 +5510,8 @@ export class AgentRuntime implements Runtime {
       finalizationHealth.retainedRetries > 0
       || finalizationHealth.degradedScopes > 0
       || recoveryHealth.turnRecoveryOutstanding > 0
+      || recoveryHealth.turnRecoveryExhausted > 0
+      || recoveryHealth.turnRecoveryOpenRecoveries > 0
       || recoveryHealth.turnRecoveryCorruptLinks > 0
       || recoveryHealth.turnRecoveryEchoConflicts > 0;
     if (this.sessionScope === 'per_chat') {
@@ -5531,11 +5534,7 @@ export class AgentRuntime implements Runtime {
         }
       }
       let healthStatus: RuntimeHealth['status'] = 'healthy';
-      // For per_chat: idle sessions (all inactive) are normal — not degraded.
-      // Only degrade if we have sessions that SHOULD be active but aren't
-      // (indicated by recent crashes, not by inactivity).
-      // Crash counter survives session map deletions — if sessions have been crashing
-      // recently but were cleaned up before this health check, recentCrashCount captures it.
+      // Idle per-chat sessions are normal; recent crashes degrade even after map cleanup.
       const recentCrashCount = this.getRecentCrashCount();
       if (recentCrashCount > 0 && healthStatus === 'healthy') {
         healthStatus = 'degraded';
