@@ -365,7 +365,7 @@ export class ToolRegistry {
             tool.replayPolicy ?? 'unsafe',
           );
           this.durability.markToolExecuting(denyId);
-          this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)');
+          this.durability.markToolComplete(denyId, 'error: sensitive tool denied (unauthorized or actor-less)', true);
         } catch (err) {
           log.warn({ tool: name, err }, 'durability deny-path record failed; proceeding without forensic telemetry');
         }
@@ -514,7 +514,7 @@ export class ToolRegistry {
         log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
           try {
-            this.durability!.markToolComplete(durabilityId, text);
+            this.durability!.markToolComplete(durabilityId, text, isError);
           } catch (err) {
             log.warn({ tool: name, err }, 'durability markToolComplete failed');
           }
@@ -528,7 +528,7 @@ export class ToolRegistry {
         log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
         if (durabilityId !== undefined) {
           try {
-            this.durability!.markToolComplete(durabilityId, `error: ${message}`);
+            this.durability!.markToolComplete(durabilityId, `error: ${message}`, true);
           } catch (durabilityErr) {
             log.warn({ tool: name, err: durabilityErr }, 'durability markToolComplete failed');
           }
