@@ -55,10 +55,10 @@ def _extract_decision_block() -> str:
     return match.group(1)
 
 
-def _run_decision(health: dict) -> int:
+def _run_decision(health: dict, http_status: int = 200) -> int:
     """Run the shipped decision block with BOT_JSON=health; return exit code."""
     block = _extract_decision_block()
-    env = dict(os.environ, BOT_JSON=json.dumps(health))
+    env = dict(os.environ, BOT_JSON=json.dumps(health), BOT_CODE=str(http_status))
     proc = subprocess.run(
         [sys.executable, "-c", block],
         env=env,
@@ -89,6 +89,134 @@ class TestNoRestartWhenConnected:
     def test_degraded_but_connected_no_restart(self):
         # The headline regression: model-probe degraded must not restart.
         assert _run_decision(_health("degraded")) == 0
+
+
+class TestDatabaseCompatibilityDrainNoRestart:
+    """A schema/recovery drain is intentionally alive for inspection. Restarting
+    cannot change the binary/schema relationship and can destroy the very hot
+    journal evidence that requires operator recovery, so the watchdog must
+    recognize the explicit mode before applying generic liveness predicates."""
+
+    @staticmethod
+    def _body(reason: str = "future_schema") -> dict:
+        return {
+            "status": "unhealthy",
+            "service_mode": "inspection_only",
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "instance": {
+                "name": "test-agent",
+                "pid": 123,
+                "mode": "inspection_only",
+                "socket_path": None,
+            },
+            "startup_block": {
+                "code": reason,
+                "retryable": False,
+                "operator_action_required": True,
+            },
+            "whatsapp": {
+                "connected": False,
+                "account_jid": "not connected",
+                "connection": {
+                    "state": "not_started",
+                    "reconnect_phase": None,
+                    "reconnect_attempts": 0,
+                    "last_disconnect_reason": "startup_schema_gate",
+                    "last_status_code": None,
+                    "auth_failure_class": "none",
+                },
+            },
+            "sqlite": {
+                "compatibility": reason,
+                "schema_ready": False,
+                "database_writes_allowed": False,
+                "sql_inspection_available": reason == "future_schema",
+                "artifact_inspection_available": True,
+                "schema_migration_latest": 45 if reason == "future_schema" else None,
+                "schema_migration_required": 44,
+            },
+            "admission": {
+                "provider_turns": "blocked",
+                "synthetic_turns": "blocked",
+            },
+            "runtime": {
+                "agent": {
+                    "started": False,
+                    "admission": "blocked",
+                    "reason": reason,
+                },
+            },
+            "durability": None,
+        }
+
+    def test_future_schema_drain_no_restart(self):
+        assert _run_decision(self._body(), 503) == 0
+
+    def test_engine_recovery_drain_no_restart(self):
+        assert _run_decision(self._body("engine_recovery_required"), 503) == 0
+
+    def test_matching_body_over_http_200_is_restart_worthy(self):
+        assert _run_decision(self._body(), 200) != 0
+
+    @pytest.mark.parametrize(
+        ("path", "value"),
+        [
+            (("status",), "degraded"),
+            (("generated_at",), "not-a-date"),
+            (("instance", "pid"), 0),
+            (("instance", "mode"), "runtime"),
+            (("service_mode",), "database_compatibility_drain"),
+            (("startup_block", "code"), "unknown"),
+            (("startup_block", "retryable"), True),
+            (("startup_block", "operator_action_required"), False),
+            (("sqlite", "compatibility"), "engine_recovery_required"),
+            (("sqlite", "schema_ready"), True),
+            (("sqlite", "database_writes_allowed"), True),
+            (("sqlite", "schema_migration_latest"), 44),
+            (("sqlite", "schema_migration_required"), 46),
+            (("sqlite", "sql_inspection_available"), False),
+            (("sqlite", "artifact_inspection_available"), False),
+            (("admission", "provider_turns"), "open"),
+            (("admission", "synthetic_turns"), "open"),
+            (("runtime", "agent", "started"), True),
+            (("runtime", "agent", "admission"), "open"),
+            (("runtime", "agent", "reason"), "engine_recovery_required"),
+            (("whatsapp", "connected"), True),
+            (("whatsapp", "account_jid"), "present"),
+            (("whatsapp", "connection", "state"), "connected"),
+        ],
+    )
+    def test_malformed_inspection_body_is_restart_worthy(self, path, value):
+        body = self._body()
+        target = body
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        assert _run_decision(body, 503) != 0
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ("startup_block",),
+            ("generated_at",),
+            ("instance",),
+            ("sqlite", "database_writes_allowed"),
+            ("sqlite", "schema_migration_latest"),
+            ("sqlite", "schema_migration_required"),
+            ("admission", "provider_turns"),
+            ("admission", "synthetic_turns"),
+            ("runtime", "agent"),
+            ("whatsapp", "connection"),
+            ("durability",),
+        ],
+    )
+    def test_partial_inspection_body_is_restart_worthy(self, path):
+        body = self._body()
+        target = body
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        assert _run_decision(body, 503) != 0
 
 
 class TestRestartOnLivenessFailure:

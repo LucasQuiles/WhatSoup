@@ -101,6 +101,56 @@ function makeOnlineHealth(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function makeDatabaseInspectionHealth(
+  code: 'future_schema' | 'engine_recovery_required' = 'future_schema',
+): Record<string, unknown> {
+  return {
+    status: 'unhealthy',
+    service_mode: 'inspection_only',
+    generated_at: new Date().toISOString(),
+    startup_block: {
+      code,
+      retryable: false,
+      operator_action_required: true,
+    },
+    instance: {
+      name: 'remote-1',
+      pid: 123,
+      mode: 'inspection_only',
+      socket_path: null,
+    },
+    whatsapp: {
+      connected: false,
+      account_jid: 'not connected',
+      connection: {
+        state: 'not_started',
+        reconnect_phase: null,
+        reconnect_attempts: 0,
+        last_disconnect_reason: 'startup_schema_gate',
+        last_status_code: null,
+        auth_failure_class: 'none',
+      },
+    },
+    sqlite: {
+      compatibility: code,
+      schema_ready: false,
+      database_writes_allowed: false,
+      sql_inspection_available: code === 'future_schema',
+      artifact_inspection_available: true,
+      schema_migration_latest: code === 'future_schema' ? 45 : null,
+      schema_migration_required: 44,
+    },
+    admission: {
+      provider_turns: 'blocked',
+      synthetic_turns: 'blocked',
+    },
+    durability: null,
+    runtime: {
+      agent: { started: false, admission: 'blocked', reason: code },
+    },
+  };
+}
+
 function makeVerifiedRelinkHealth(overrides: {
   authBond?: Record<string, unknown>;
   creds?: Record<string, unknown>;
@@ -1578,6 +1628,123 @@ describe('HealthPoller', () => {
     expectEmitAlertSourceNotCalled('remote-1', 'instance_unreachable');
 
     poller.stop();
+  });
+
+  it.each([
+    ['future_schema', 'database_future_schema'],
+    ['engine_recovery_required', 'database_engine_recovery_required'],
+  ] as const)(
+    'keeps repeated %s inspection-only responses reachable without counting probe failures',
+    async (code, expectedReason) => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve(makeDatabaseInspectionHealth(code)),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(
+        () => instances,
+        'self',
+        vi.fn().mockReturnValue({}),
+        1_000,
+      );
+
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'degraded',
+        statusConfidence: 'confirmed',
+        statusReason: expectedReason,
+        consecutiveFailures: 0,
+        everReachable: true,
+        error: null,
+      });
+      expect(poller.getStatus('remote-1')!.statusEvidence).toEqual(expect.arrayContaining([
+        'service_mode=inspection_only',
+        `startup_block_code=${code}`,
+        'schema_migration_required=44',
+        'database_writes_allowed=false',
+        'provider_turns=blocked',
+        'synthetic_turns=blocked',
+      ]));
+      expectEmitAlertSourceNotCalled('remote-1', 'instance_unreachable');
+      poller.stop();
+    },
+  );
+
+  it.each([
+    [['startup_block', 'code'], 'unknown'],
+    [['instance', 'name'], ''],
+    [['instance', 'pid'], 0],
+    [['instance', 'mode'], 'runtime'],
+    [['instance', 'socket_path'], '/tmp/whatsoup.sock'],
+    [['sqlite', 'compatibility'], 'engine_recovery_required'],
+    [['sqlite', 'database_writes_allowed'], true],
+    [['sqlite', 'sql_inspection_available'], false],
+    [['sqlite', 'artifact_inspection_available'], false],
+    [['sqlite', 'schema_migration_latest'], 0],
+    [['sqlite', 'schema_migration_required'], 46],
+    [['admission', 'provider_turns'], 'open'],
+    [['admission', 'synthetic_turns'], 'open'],
+    [['runtime', 'agent', 'started'], 'false'],
+    [['runtime', 'agent', 'reason'], 'engine_recovery_required'],
+    [['durability'], 'not-null'],
+    [['whatsapp', 'account_jid'], 'present'],
+  ] as const)(
+    'does not grant the database inspection classification to malformed field %j',
+    async (path, value) => {
+      const body = makeDatabaseInspectionHealth();
+      let target = body;
+      for (const key of path.slice(0, -1)) {
+        target = target[key] as Record<string, unknown>;
+      }
+      target[path.at(-1)!] = value;
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve(body),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+      await (poller as any).poll();
+
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'degraded',
+        consecutiveFailures: 0,
+        everReachable: true,
+        error: null,
+      });
+      expect(poller.getStatus('remote-1')!.statusReason).not.toMatch(/^database_/);
+    },
+  );
+
+  it('does not grant inspection-only classification over HTTP 200', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(makeDatabaseInspectionHealth()),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      statusReason: 'health_body_unhealthy',
+      consecutiveFailures: 0,
+      everReachable: true,
+    });
   });
 
   it('emits a debug log when readHealthBody JSON parse fails on a non-ok response', async () => {
