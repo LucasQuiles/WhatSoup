@@ -15,6 +15,7 @@ import {
   detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
   MAX_STREAMED_BANNER_LENGTH,
+  type ProviderFailureKind,
 } from './failure-taxonomy.ts';
 import {
   workflowForProviderText,
@@ -1874,35 +1875,68 @@ export class AgentRuntime implements Runtime {
    * silently discarding genuine replies that merely discussed an auth/limit error
    * (observed live: replies about an expired OAuth token dropped to silence). Now
    * only BANNER-confident matches (the text IS the error — short + error-opener /
-   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are
-   * DELIVERED. Fallback is still armed only on the terminal 'result' event, never
-   * here. Shared by both assistant_text handlers so their suppression policy can't
-   * drift. Returns true = suppress (caller must `break`), false = deliver.
+   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are let
+   * through to the egress gate. Fallback is still armed only on the terminal
+   * 'result' event, never here. Shared by both assistant_text handlers so their
+   * suppression policy can't drift.
+   *
+   * Returns `{ suppress: true }` when THIS gate drops the chunk (caller must
+   * `break`). Otherwise returns `{ suppress: false, ambient }`, where `ambient`
+   * is non-null when the text matched a provider-failure token but was let
+   * through as prose about an error, not the error itself — the caller must run
+   * this result through the egress gate and log the ambient tripwire with that
+   * gate's REAL outcome (#1758: logging "delivered" here fired one gate before
+   * `gateAssistantTextForOutbound`, which can still suppress the same chunk for
+   * an unrelated reason — a suppressed chunk logged as "delivered" is worse than
+   * useless in incident forensics).
    */
-  private suppressStreamedProviderFailure(normalizedText: string, chatJid: string | null): boolean {
+  private suppressStreamedProviderFailure(
+    normalizedText: string,
+    chatJid: string | null,
+  ): { suppress: boolean; ambient: { kind: ProviderFailureKind } | null } {
     const classification = classifyStreamedProviderFailure(normalizedText);
-    if (classification === null) return false;
+    if (classification === null) return { suppress: false, ambient: null };
     if (classification.confidence === 'banner') {
       log.warn(
         { chatJid, kind: classification.kind, textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH) },
         'suppressed provider-failure message from assistant_text',
       );
-      return true;
+      return { suppress: true, ambient: null };
     }
     // Ambient: matched a provider-failure token but is prose about an error, not the
-    // error itself. Deliver it — dropping it is the QR-209 silent-reply defect. Log
-    // (structured) so the fleet can spot a novel banner shape that should become a
-    // suppressible opener instead.
+    // error itself. Dropping it is the QR-209 silent-reply defect, so this gate lets
+    // it through — but the egress gate downstream can still suppress it for an
+    // unrelated reason. The tripwire log therefore fires at the call site, after
+    // that gate has run, tagged with its actual outcome.
+    return { suppress: false, ambient: { kind: classification.kind } };
+  }
+
+  /**
+   * Logs the QR-209 ambient-provider-failure tripwire with the REAL post-egress-gate
+   * outcome (#1758). `delivered` when the fleet should see a novel banner shape that
+   * ought to become a suppressible opener instead; `suppressed` when an unrelated
+   * egress-gate reason (ack_filler, internal_narration, ...) already handled it, so
+   * forensics must not read this line as evidence of delivery.
+   */
+  private logAmbientProviderFailureOutcome(
+    ambient: { kind: ProviderFailureKind } | null,
+    normalizedText: string,
+    chatJid: string | null,
+    delivered: boolean,
+  ): void {
+    if (!ambient) return;
     log.warn(
       {
         chatJid,
-        kind: classification.kind,
+        kind: ambient.kind,
         textLength: normalizedText.length,
         textPreview: normalizedText.slice(0, MAX_STREAMED_BANNER_LENGTH),
+        outcome: delivered ? 'delivered' : 'suppressed',
       },
-      'delivered assistant_text despite provider-failure classification',
+      delivered
+        ? 'delivered assistant_text despite provider-failure classification'
+        : 'suppressed assistant_text despite provider-failure classification (egress gate)',
     );
-    return false;
   }
 
   // ─── Control session (self-healing repair) ────────────────────────────────
@@ -5241,8 +5275,11 @@ export class AgentRuntime implements Runtime {
           // (the error itself) is suppressed; AMBIENT prose about an error, and text
           // matching no failure pattern, are delivered — dropping them is the QR-209
           // silent-reply defect. See suppressStreamedProviderFailure.
-          if (this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid)) break;
-          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
+          const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid);
+          if (providerFailureCheck.suppress) break;
+          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
+          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
+          normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
@@ -9863,8 +9900,12 @@ export class AgentRuntime implements Runtime {
           // Only BANNER-confident text (the error itself) is suppressed; AMBIENT
           // prose about an error is delivered, so genuine replies are never silently
           // dropped. See suppressStreamedProviderFailure.
-          if (this.suppressStreamedProviderFailure(normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid)) break;
-          normalizedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          const sharedChatJid = this.shared ? this.currentTurnChatJid : this.activeChatJid;
+          const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, sharedChatJid);
+          if (providerFailureCheck.suppress) break;
+          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
+          normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;

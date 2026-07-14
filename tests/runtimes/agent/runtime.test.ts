@@ -4684,6 +4684,55 @@ describe('AgentRuntime', () => {
     );
   });
 
+  it('does not overclaim delivery when the egress gate suppresses an ambient provider-failure chunk (#1758)', async () => {
+    // The tripwire must reflect the REAL outcome, not fire before the egress
+    // gate has decided. This text is ambient auth-required (delivers past the
+    // QR-209 two-tier gate) AND an internal-narration opener (suppressed by
+    // gateAssistantTextForOutbound) — the exact double-hit #1758 describes.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'my oauth broke, what do we do?' }));
+
+    const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'delivered assistant_text despite provider-failure classification',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid: 'test@s.whatsapp.net', kind: 'auth-required', outcome: 'suppressed' }),
+      'suppressed assistant_text despite provider-failure classification (egress gate)',
+    );
+  });
+
+  it('does not overclaim delivery on the shared handler either (#1758)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const chatJid = '15550100004@s.whatsapp.net';
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    await runtime.start();
+    await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'my oauth broke, what do we do?' }));
+
+    const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
+    capturedOnEventRef.current!({ type: 'assistant_text', text });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'delivered assistant_text despite provider-failure classification',
+    );
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'auth-required', outcome: 'suppressed' }),
+      'suppressed assistant_text despite provider-failure classification (egress gate)',
+    );
+  });
+
   it('a suppressed streaming banner followed by a clean result does not arm fallback (QR-209 unknown-b)', async () => {
     // Streaming never arms fallback; the terminal result classifies event.text, and
     // a successful turn carries text:null — so a suppressed streaming banner cannot
