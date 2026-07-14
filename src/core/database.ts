@@ -1,7 +1,20 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
+import {
+  DatabaseCompatibilityError,
+  assertDatabaseIdentity,
+  assertSchemaCeiling,
+  inspectDatabaseIdentity,
+  installReadOnlyRejectionFence,
+  isSqliteReadonlyRollback,
+  normalizeDatabaseCompatibilityError,
+  sameDatabaseIdentity,
+  sqliteFileUri,
+  type DatabaseIdentity,
+} from './database-compatibility.ts';
 import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -15,6 +28,13 @@ import {
 import { runMigration41 as runMigration41Impl } from './database-migration-41.ts';
 import { runMigration42 as runMigration42Impl } from './database-migration-42.ts';
 import { runMigration43 as runMigration43Impl } from './database-migration-43.ts';
+
+export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
+export {
+  DatabaseCompatibilityError,
+  isDrainableDatabaseCompatibilityError,
+  type DatabaseCompatibilityReason,
+} from './database-compatibility.ts';
 
 const log = createChildLogger('database');
 
@@ -754,6 +774,10 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [44, runMigration44],
 ]);
 
+if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
+  throw new Error('database migration registry is out of sync with CURRENT_SCHEMA_MIGRATION');
+}
+
 function runMigration25(db: DatabaseSync): void {
   db.exec(MIGRATION_25);
 }
@@ -1252,12 +1276,17 @@ function runMigration24(db: DatabaseSync): void {
 
 // ─── Database class ──────────────────────────────────────────────────────────
 
-export const CURRENT_SCHEMA_MIGRATION = Math.max(...MIGRATIONS.keys());
-
 export class Database {
-  private db: DatabaseSync;
+  private db!: DatabaseSync;
+  private readonly dbPath: string;
+  private expectedIdentity: DatabaseIdentity | null = null;
+  private schemaCeilingRejected = false;
+  private schemaCeilingRejection: DatabaseCompatibilityError | null = null;
+  private connectionClosed = false;
+  private writableReady = false;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     if (dbPath !== ':memory:') {
       try {
         mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -1270,10 +1299,88 @@ export class Database {
       }
     }
 
+    if (dbPath !== ':memory:' && existsSync(dbPath)) {
+      this.expectedIdentity = inspectDatabaseIdentity(dbPath);
+      let inspectionDb: DatabaseSync;
+      try {
+        inspectionDb = new DatabaseSync(
+          sqliteFileUri(this.expectedIdentity.canonicalPath, 'ro'),
+          {
+            readOnly: true,
+            timeout: 5000,
+            enableForeignKeyConstraints: false,
+          },
+        );
+      } catch (err) {
+        if (isSqliteReadonlyRollback(err)) {
+          throw new DatabaseCompatibilityError(
+            'engine_recovery_required',
+            `Database engine recovery is required before schema inspection at ${dbPath}`,
+            err,
+          );
+        }
+        throw new WhatSoupError(
+          `Cannot open database at ${dbPath} for read-only schema preflight`,
+          'DATABASE_ERROR',
+          err,
+        );
+      }
+
+      this.db = inspectionDb;
+      try {
+        assertSchemaCeiling(this.db, this.dbPath);
+      } catch (err) {
+        const rejection = normalizeDatabaseCompatibilityError(this.dbPath, err);
+        this.installReadOnlyRejectionFence(rejection);
+        return;
+      }
+
+      try {
+        inspectionDb.close();
+        this.connectionClosed = true;
+      } catch (err) {
+        throw new WhatSoupError(
+          `Failed to close database schema preflight at ${dbPath}`,
+          'DATABASE_ERROR',
+          err,
+        );
+      }
+
+      const identityAfterInspection = inspectDatabaseIdentity(dbPath);
+      if (!sameDatabaseIdentity(this.expectedIdentity, identityAfterInspection)) {
+        throw new DatabaseCompatibilityError(
+          'database_identity_changed',
+          `Database identity changed after read-only schema inspection at ${dbPath}`,
+        );
+      }
+    }
+
     try {
-      this.db = new DatabaseSync(dbPath);
+      const writerPath = this.expectedIdentity
+        ? sqliteFileUri(this.expectedIdentity.canonicalPath, 'rw')
+        : dbPath;
+      this.db = new DatabaseSync(writerPath, { timeout: 5000 });
+      this.connectionClosed = false;
     } catch (err) {
-      throw new WhatSoupError(`Cannot open database at ${dbPath}`, 'DATABASE_ERROR', err);
+      const qualifier = this.expectedIdentity ? 'existing database' : 'database';
+      throw new WhatSoupError(`Cannot open ${qualifier} at ${dbPath}`, 'DATABASE_ERROR', err);
+    }
+
+    if (dbPath !== ':memory:' && !this.expectedIdentity) {
+      this.expectedIdentity = inspectDatabaseIdentity(dbPath);
+    }
+    if (this.expectedIdentity) {
+      try {
+        this.assertDatabaseIdentity();
+      } catch (err) {
+        try {
+          this.db.close();
+          this.connectionClosed = true;
+        } catch {
+          // Best effort: constructor is already failing closed.
+        }
+        throw err;
+      }
     }
   }
 
@@ -1282,16 +1389,76 @@ export class Database {
    * No admin phone seeding — that belongs in main.ts.
    */
   open(): void {
-    try {
-      this.db.exec('PRAGMA journal_mode = WAL');
-      this.db.exec('PRAGMA busy_timeout = 5000');
-      this.db.exec('PRAGMA foreign_keys = ON');
-      this.db.exec('PRAGMA synchronous = NORMAL');
-    } catch (err) {
-      throw new WhatSoupError('Failed to set database pragmas', 'DATABASE_ERROR', err);
+    if (this.schemaCeilingRejection) throw this.schemaCeilingRejection;
+    if (this.connectionClosed) {
+      throw new WhatSoupError('Cannot open a closed database connection', 'DATABASE_ERROR');
     }
 
-    // Verify WAL mode took effect
+    try {
+      this.db.exec('PRAGMA busy_timeout = 5000');
+      this.db.exec('PRAGMA foreign_keys = ON');
+    } catch (err) {
+      throw new WhatSoupError(
+        'Failed to inspect schema migration ceiling because database connection setup failed',
+        'DATABASE_ERROR',
+        err,
+      );
+    }
+
+    let transactionOpen = false;
+    try {
+      this.assertDatabaseIdentity();
+      this.db.exec('BEGIN IMMEDIATE');
+      transactionOpen = true;
+      this.assertDatabaseIdentity();
+      assertSchemaCeiling(this.db, this.dbPath);
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      this.runPendingMigrations();
+      this.verifyRequiredTables();
+      this.assertDatabaseIdentity();
+      this.db.exec('COMMIT');
+      transactionOpen = false;
+    } catch (err) {
+      if (transactionOpen) {
+        try {
+          this.db.exec('ROLLBACK');
+        } catch (rollbackErr) {
+          throw new WhatSoupError(
+            'Database initialization failed and the schema transaction could not roll back',
+            'DATABASE_ERROR',
+            new AggregateError([err, rollbackErr]),
+          );
+        }
+      }
+      if (err instanceof DatabaseCompatibilityError) {
+        this.installReadOnlyRejectionFence(err);
+        throw err;
+      }
+      throw err instanceof WhatSoupError
+        ? err
+        : new WhatSoupError('Failed to initialize database schema transaction', 'DATABASE_ERROR', err);
+    }
+
+    try {
+      // SQLite forbids changing journal mode while a transaction is active.
+      // Schema writes commit under the database's existing mode; WAL conversion
+      // is therefore deliberately last.
+      this.db.exec('PRAGMA journal_mode = WAL');
+      this.db.exec('PRAGMA synchronous = NORMAL');
+    } catch (err) {
+      throw new WhatSoupError(
+        'Database schema committed but post-commit WAL configuration failed',
+        'DATABASE_ERROR',
+        err,
+      );
+    }
+
     const journalMode = (
       this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string } | undefined
     )?.journal_mode;
@@ -1299,25 +1466,42 @@ export class Database {
       log.warn({ journalMode }, 'Expected WAL journal mode but got something else');
     }
 
-    // Ensure schema_migrations exists before running migrations
-    try {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-          version INTEGER PRIMARY KEY,
-          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-      `);
-    } catch (err) {
-      throw new WhatSoupError(
-        'Failed to create schema_migrations table',
-        'DATABASE_ERROR',
-        err,
+    this.writableReady = true;
+    log.info('Database opened and schema initialised');
+  }
+
+  private installReadOnlyRejectionFence(rejection: DatabaseCompatibilityError): void {
+    this.schemaCeilingRejected = true;
+    this.schemaCeilingRejection = rejection;
+    this.writableReady = false;
+    installReadOnlyRejectionFence(this.db, rejection, () => {
+      this.connectionClosed = true;
+    });
+  }
+
+  private assertDatabaseIdentity(): void {
+    assertDatabaseIdentity(this.db, this.dbPath, this.expectedIdentity);
+  }
+
+  assertWritableCompatibility(): void {
+    if (this.schemaCeilingRejection) throw this.schemaCeilingRejection;
+    if (!this.writableReady || this.connectionClosed) {
+      throw new DatabaseCompatibilityError(
+        'database_not_writable',
+        'Database is not in a writable, schema-compatible runtime state',
       );
     }
-
-    this.runPendingMigrations();
-    this.verifyRequiredTables();
-    log.info('Database opened and schema initialised');
+    try {
+      this.assertDatabaseIdentity();
+      // Re-read the canonical migration ledger at every provider/runtime
+      // admission boundary. Path and inode checks alone cannot detect a newer
+      // cooperative writer advancing the schema on the same database file.
+      assertSchemaCeiling(this.db, this.dbPath);
+    } catch (err) {
+      const rejection = normalizeDatabaseCompatibilityError(this.dbPath, err);
+      this.installReadOnlyRejectionFence(rejection);
+      throw rejection;
+    }
   }
 
   /** Run any migrations not yet recorded in schema_migrations. */
@@ -1339,17 +1523,10 @@ export class Database {
 
       log.info({ version }, 'Applying migration');
       try {
-        this.db.exec('BEGIN');
         migrateFn(this.db);
         insertVersion.run(version);
-        this.db.exec('COMMIT');
         log.info({ version }, 'Migration applied');
       } catch (err) {
-        try {
-          this.db.exec('ROLLBACK');
-        } catch {
-          // best effort
-        }
         throw new WhatSoupError(`Migration ${version} failed`, 'DATABASE_ERROR', err);
       }
     }
@@ -1636,15 +1813,25 @@ export class Database {
 
   /** WAL checkpoint and close the connection. */
   close(): void {
-    try {
-      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-    } catch (err) {
-      log.warn({ err }, 'WAL checkpoint failed during close');
+    if (this.connectionClosed) {
+      log.info('Database closed');
+      return;
     }
-    try {
-      this.db.close();
-    } catch (err) {
-      log.warn({ err }, 'Error closing database');
+    if (this.writableReady && !this.schemaCeilingRejected) {
+      try {
+        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      } catch (err) {
+        log.warn({ err }, 'WAL checkpoint failed during close');
+      }
+    }
+    if (!this.connectionClosed) {
+      try {
+        this.db.close();
+        this.connectionClosed = true;
+      } catch (err) {
+        log.warn({ err }, 'Error closing database');
+        return;
+      }
     }
     log.info('Database closed');
   }

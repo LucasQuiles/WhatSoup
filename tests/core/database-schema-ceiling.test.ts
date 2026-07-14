@@ -1,0 +1,732 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  readFileSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  CURRENT_SCHEMA_MIGRATION,
+  Database,
+  DatabaseCompatibilityError,
+} from '../../src/core/database.ts';
+import { inspectExistingDatabaseForBootstrap } from '../../src/core/database-compatibility-early.ts';
+import { WhatSoupError } from '../../src/errors.ts';
+
+function fileSha256(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+describe('database schema ceiling', () => {
+  const cleanup: string[] = [];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const path of cleanup.splice(0)) {
+      rmSync(path, { recursive: true, force: true });
+    }
+  });
+
+  it('classifies a genuine hot rollback journal without rolling it back or changing bytes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-hot-journal-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'hot.db');
+    const journalPath = `${dbPath}-journal`;
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE hot_journal_probe (id INTEGER PRIMARY KEY, value BLOB NOT NULL);
+      WITH RECURSIVE ids(id) AS (
+        VALUES (1)
+        UNION ALL
+        SELECT id + 1 FROM ids WHERE id < 512
+      )
+      INSERT INTO hot_journal_probe(id, value)
+      SELECT id, zeroblob(4096) FROM ids;
+    `);
+    seed.close();
+
+    const crashWriter = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { statSync } from 'node:fs';
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(${JSON.stringify(dbPath)});
+      db.exec('PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA cache_size = 8;');
+      db.exec('BEGIN IMMEDIATE; UPDATE hot_journal_probe SET value = randomblob(4096);');
+      if (statSync(${JSON.stringify(journalPath)}).size <= 512) process.exit(86);
+      process.kill(process.pid, 'SIGKILL');
+    `], { encoding: 'utf8' });
+    expect(crashWriter.signal).toBe('SIGKILL');
+    expect(existsSync(journalPath)).toBe(true);
+    expect(readFileSync(journalPath).byteLength).toBeGreaterThan(512);
+
+    const databaseBefore = fileSha256(dbPath);
+    const journalBefore = fileSha256(journalPath);
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({
+      reason: 'engine_recovery_required',
+      observedMigration: null,
+      requiredMigration: CURRENT_SCHEMA_MIGRATION,
+    });
+    expect(fileSha256(dbPath)).toBe(databaseBefore);
+    expect(fileSha256(journalPath)).toBe(journalBefore);
+    let db: Database | null = null;
+    let failure: unknown;
+    try {
+      db = new Database(dbPath);
+      db.open();
+    } catch (err) {
+      failure = err;
+    }
+    expect(failure).toBeInstanceOf(DatabaseCompatibilityError);
+    expect(failure).toMatchObject({ reason: 'engine_recovery_required' });
+    db?.close();
+
+    expect(fileSha256(dbPath)).toBe(databaseBefore);
+    expect(fileSha256(journalPath)).toBe(journalBefore);
+  });
+
+  it('refuses a newer database before changing journal mode or applying migrations', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'future.db');
+    const futureVersion = CURRENT_SCHEMA_MIGRATION + 1;
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE future_schema_sentinel (id INTEGER PRIMARY KEY);
+    `);
+    const insertVersion = seed.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+    for (let version = 1; version <= futureVersion; version += 1) insertVersion.run(version);
+    seed.close();
+
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toEqual({
+      reason: 'future_schema',
+      observedMigration: futureVersion,
+      requiredMigration: CURRENT_SCHEMA_MIGRATION,
+    });
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(
+        new RegExp(`schema migration ${futureVersion}.*binary ceiling ${CURRENT_SCHEMA_MIGRATION}`, 'i'),
+      );
+
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+      expect(db.raw.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+      expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: futureVersion });
+      expect(db.raw.prepare(`
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'future_schema_sentinel'
+      `).get()).toEqual({ count: 1 });
+      expect(db.raw.prepare(`
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages'
+      `).get()).toEqual({ count: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not checkpoint, truncate, or remove a sole rejected future-schema WAL', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-wal-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'future-wal.db');
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    const futureVersion = CURRENT_SCHEMA_MIGRATION + 1;
+
+    const crashWriter = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(${JSON.stringify(dbPath)});
+      db.exec(\`
+        PRAGMA journal_mode = WAL;
+        PRAGMA wal_autocheckpoint = 0;
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE future_schema_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+        WITH RECURSIVE versions(version) AS (
+          VALUES (1)
+          UNION ALL
+          SELECT version + 1 FROM versions WHERE version < ${futureVersion}
+        )
+        INSERT INTO schema_migrations (version) SELECT version FROM versions;
+        INSERT INTO future_schema_sentinel (id, value) VALUES (1, 'pending');
+      \`);
+      process.kill(process.pid, 'SIGKILL');
+    `], { encoding: 'utf8' });
+    expect(crashWriter.signal).toBe('SIGKILL');
+    expect(existsSync(walPath)).toBe(true);
+    expect(existsSync(shmPath)).toBe(true);
+
+    const databaseBefore = fileSha256(dbPath);
+    const walBefore = fileSha256(walPath);
+    expect(readFileSync(walPath).byteLength).toBeGreaterThan(0);
+
+    const db = new Database(dbPath);
+    expect(() => db.open()).toThrow(/exceeds binary ceiling/i);
+    expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+      .toEqual({ version: futureVersion });
+    expect(db.raw.prepare('SELECT value FROM future_schema_sentinel WHERE id = 1').get())
+      .toEqual({ value: 'pending' });
+    db.close();
+
+    expect(fileSha256(dbPath)).toBe(databaseBefore);
+    expect(fileSha256(walPath)).toBe(walBefore);
+    // The WAL-index is transient coordination state: a safe read-only connection
+    // may update reader marks or rebuild it, but must not remove the aux files.
+    expect(existsSync(walPath)).toBe(true);
+    expect(existsSync(shmPath)).toBe(true);
+  });
+
+  it('uses a no-create writer open when the inspected database disappears', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-no-recreate-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'existing.db');
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+
+    const originalClose = DatabaseSync.prototype.close;
+    let removedAfterInspection = false;
+    vi.spyOn(DatabaseSync.prototype, 'close').mockImplementation(function closeWithRemoval(
+      this: DatabaseSync,
+    ) {
+      const location = this.location('main');
+      originalClose.call(this);
+      if (!removedAfterInspection && location === dbPath) {
+        removedAfterInspection = true;
+        rmSync(dbPath, { force: true });
+      }
+    });
+
+    expect(() => new Database(dbPath)).toThrow(/cannot open.*existing database|identity/i);
+    expect(removedAfterInspection).toBe(true);
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it('rejects symlink and hardlink database aliases before compatibility inspection', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-alias-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'canonical.db');
+    const symlinkPath = join(dir, 'symlink.db');
+    const hardlinkPath = join(dir, 'hardlink.db');
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    symlinkSync(dbPath, symlinkPath);
+
+    expect(() => new Database(symlinkPath)).toThrow(/symbolic link|canonical database path/i);
+
+    linkSync(dbPath, hardlinkPath);
+    expect(() => new Database(hardlinkPath)).toThrow(/hard link|link count|database identity/i);
+  });
+
+  it('detects pathname replacement before beginning the authoritative write transaction', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-replaced-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'target.db');
+    const replacementPath = join(dir, 'replacement.db');
+
+    const target = new Database(dbPath);
+    target.open();
+    target.close();
+    const replacement = new Database(replacementPath);
+    replacement.open();
+    replacement.close();
+
+    const db = new Database(dbPath);
+    rmSync(dbPath);
+    copyFileSync(replacementPath, dbPath);
+    const replacementBefore = fileSha256(dbPath);
+
+    expect(() => db.open()).toThrow(/database identity.*changed|path.*replaced/i);
+    expect(fileSha256(dbPath)).toBe(replacementBefore);
+    db.close();
+  });
+
+  it('holds BEGIN IMMEDIATE across the authoritative ceiling check and schema writes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-writer-race-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'race.db');
+    const latest = CURRENT_SCHEMA_MIGRATION;
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    const rewind = new DatabaseSync(dbPath);
+    rewind.prepare('DELETE FROM schema_migrations WHERE version = ?').run(latest);
+    rewind.close();
+
+    const db = new Database(dbPath);
+    const competitor = new DatabaseSync(dbPath, { timeout: 0 });
+    const originalExec = db.raw.exec.bind(db.raw);
+    let competingWriteFailure: unknown;
+    vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      originalExec(sql);
+      if (sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') {
+        try {
+          competitor.prepare('INSERT INTO schema_migrations(version) VALUES (?)')
+            .run(CURRENT_SCHEMA_MIGRATION + 1);
+        } catch (err) {
+          competingWriteFailure = err;
+        }
+      }
+    });
+
+    try {
+      db.open();
+      expect(competingWriteFailure).toMatchObject({ code: 'ERR_SQLITE_ERROR' });
+      expect(String((competingWriteFailure as Error).message)).toMatch(/locked|busy/i);
+      expect(db.raw.prepare(
+        'SELECT COUNT(*) AS count FROM schema_migrations WHERE version > ?',
+      ).get(CURRENT_SCHEMA_MIGRATION)).toEqual({ count: 0 });
+    } finally {
+      competitor.close();
+      db.close();
+    }
+  });
+
+  it('rechecks the migration ceiling at runtime admission on the same database inode', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-runtime-advance-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'runtime.db');
+    const db = new Database(dbPath);
+    db.open();
+
+    const newerWriter = new DatabaseSync(dbPath);
+    try {
+      newerWriter.prepare('INSERT INTO schema_migrations(version) VALUES (?)')
+        .run(CURRENT_SCHEMA_MIGRATION + 1);
+
+      let rejection: unknown;
+      try {
+        db.assertWritableCompatibility();
+      } catch (err) {
+        rejection = err;
+      }
+      expect(rejection).toBeInstanceOf(DatabaseCompatibilityError);
+      expect(rejection).toMatchObject({
+        reason: 'future_schema',
+        observedMigration: CURRENT_SCHEMA_MIGRATION + 1,
+      });
+      expect(() => db.raw.exec('CREATE TABLE must_stay_blocked(id INTEGER)')).toThrow(/read.?only/i);
+    } finally {
+      newerWriter.close();
+      db.close();
+    }
+  });
+
+  it('latches and closes the runtime handle when the database pathname is replaced', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-runtime-replace-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'runtime.db');
+    const replacementPath = join(dir, 'replacement.db');
+    const db = new Database(dbPath);
+    db.open();
+    const replacement = new Database(replacementPath);
+    replacement.open();
+    replacement.close();
+
+    rmSync(dbPath);
+    copyFileSync(replacementPath, dbPath);
+    const replacementBefore = fileSha256(dbPath);
+    let rejection: unknown;
+    try {
+      db.assertWritableCompatibility();
+    } catch (err) {
+      rejection = err;
+    }
+
+    expect(rejection).toBeInstanceOf(DatabaseCompatibilityError);
+    expect(rejection).toMatchObject({ reason: 'database_identity_changed' });
+    expect(() => db.raw.exec('CREATE TABLE must_stay_closed(id INTEGER)')).toThrow(/closed|not open/i);
+    expect(fileSha256(dbPath)).toBe(replacementBefore);
+    expect(() => db.assertWritableCompatibility()).toThrow(rejection as Error);
+    db.close();
+  });
+
+  it('rolls back the ledger and every schema mutation when a migration fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-atomic-failure-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'atomic.db');
+    const db = new Database(dbPath);
+    const originalExec = db.raw.exec.bind(db.raw);
+
+    vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      if (sql.includes('CREATE TABLE IF NOT EXISTS messages (')) {
+        throw new Error('injected migration failure');
+      }
+      originalExec(sql);
+    });
+
+    expect(() => db.open()).toThrow(/migration 1 failed/i);
+    expect(db.raw.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type='table' AND name IN ('schema_migrations', 'messages')
+    `).get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('rolls back all earlier schema work when the final migration fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-late-failure-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'late.db');
+    const db = new Database(dbPath);
+    const originalExec = db.raw.exec.bind(db.raw);
+
+    vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      if (sql.includes('ADD COLUMN total_cache_read_tokens')) {
+        throw new Error('injected final migration failure');
+      }
+      originalExec(sql);
+    });
+
+    expect(() => db.open()).toThrow(/migration 44 failed/i);
+    expect(db.raw.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type='table' AND name IN ('schema_migrations', 'messages', 'agent_sessions')
+    `).get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('changes DELETE journaling to WAL only after the guarded schema transaction commits', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-journal-order-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'journal.db');
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    const rollbackMode = new DatabaseSync(dbPath);
+    rollbackMode.exec('PRAGMA journal_mode = DELETE');
+    rollbackMode.close();
+
+    const db = new Database(dbPath);
+    const originalExec = db.raw.exec.bind(db.raw);
+    const statements: string[] = [];
+    vi.spyOn(db.raw, 'exec').mockImplementation((sql: string) => {
+      statements.push(sql.trim().replaceAll(/\s+/g, ' ').toUpperCase());
+      originalExec(sql);
+    });
+    try {
+      db.open();
+      const begin = statements.indexOf('BEGIN IMMEDIATE');
+      const commit = statements.indexOf('COMMIT');
+      const wal = statements.indexOf('PRAGMA JOURNAL_MODE = WAL');
+      expect(begin).toBeGreaterThanOrEqual(0);
+      expect(commit).toBeGreaterThan(begin);
+      expect(wal).toBeGreaterThan(commit);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('fails closed before writes when an existing migration ledger shape is unreadable', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-malformed-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'malformed.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE schema_migrations (unexpected TEXT NOT NULL);
+      INSERT INTO schema_migrations (unexpected) VALUES ('future');
+    `);
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      let failure: unknown;
+      try {
+        db.open();
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toBeInstanceOf(WhatSoupError);
+      expect(failure).toMatchObject({ code: 'DATABASE_ERROR' });
+      expect(String((failure as Error).message)).toMatch(/table shape is not canonical/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+      expect(db.raw.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+      expect(db.raw.prepare(`
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages'
+      `).get()).toEqual({ count: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves the cause when schema inspection itself fails', () => {
+    const db = new Database(':memory:');
+    const inspectionFailure = new Error('schema inspection failed');
+    vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
+      throw inspectionFailure;
+    });
+
+    try {
+      let failure: unknown;
+      try {
+        db.open();
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toBeInstanceOf(WhatSoupError);
+      expect(failure).toMatchObject({ code: 'DATABASE_ERROR', cause: inspectionFailure });
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a readable ledger containing a version outside the supported range', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-gap-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'gap.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_migrations (version) VALUES (0), (${CURRENT_SCHEMA_MIGRATION});
+    `);
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/outside the supported range/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+      expect(db.raw.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('accepts a ledger gap so an idempotent migration receipt can be repaired', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-repair-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'repair.db');
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    const missingVersion = Math.max(1, CURRENT_SCHEMA_MIGRATION - 1);
+    const rewind = new DatabaseSync(dbPath);
+    rewind.prepare('DELETE FROM schema_migrations WHERE version = ?').run(missingVersion);
+    rewind.close();
+
+    const reopened = new Database(dbPath);
+    try {
+      expect(() => reopened.open()).not.toThrow();
+      expect(reopened.raw.prepare(
+        'SELECT version FROM schema_migrations WHERE version = ?',
+      ).get(missingVersion)).toEqual({ version: missingVersion });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('rejects a readable ledger whose table shape is not canonical', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-shape-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'shape.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_migrations (version) VALUES (${CURRENT_SCHEMA_MIGRATION});
+    `);
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/table shape is not canonical/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+      expect(db.raw.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects hidden or generated additions to the canonical ledger shape', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-hidden-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'hidden.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+        generated_version TEXT GENERATED ALWAYS AS (version) VIRTUAL
+      )
+    `);
+    const insert = seed.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+    for (let version = 1; version <= CURRENT_SCHEMA_MIGRATION; version += 1) {
+      insert.run(version);
+    }
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/table shape is not canonical/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a case-variant migration ledger instead of bypassing the ceiling', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-case-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'case.db');
+    const futureVersion = CURRENT_SCHEMA_MIGRATION + 1;
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE SCHEMA_MIGRATIONS (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    const insert = seed.prepare('INSERT INTO SCHEMA_MIGRATIONS (version) VALUES (?)');
+    for (let version = 1; version <= futureVersion; version += 1) insert.run(version);
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/name is not canonical/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a nonempty database with no migration ledger', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-unledgered-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'unledgered.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE future_unledgered_state (id INTEGER PRIMARY KEY)');
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/nonempty database has no canonical migration ledger/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects an empty ledger that accompanies unledgered schema objects', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-empty-ledger-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'empty-ledger.db');
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE future_unledgered_state (id INTEGER PRIMARY KEY);
+    `);
+    seed.close();
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).toThrow(/empty migration ledger accompanies unledgered schema/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([
+    { label: 'legacy', latest: CURRENT_SCHEMA_MIGRATION - 1 },
+    { label: 'current', latest: CURRENT_SCHEMA_MIGRATION },
+  ])('admits a supported $label migration ledger to normal schema verification', ({ latest }) => {
+    const dir = mkdtempSync(join(tmpdir(), `whatsoup-schema-ceiling-${latest}-`));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'supported.db');
+
+    const initial = new Database(dbPath);
+    initial.open();
+    initial.close();
+    if (latest < CURRENT_SCHEMA_MIGRATION) {
+      const rewind = new DatabaseSync(dbPath);
+      rewind.prepare('DELETE FROM schema_migrations WHERE version > ?').run(latest);
+      rewind.close();
+    }
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).not.toThrow();
+      expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: CURRENT_SCHEMA_MIGRATION });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('accepts a fresh database with no migration ledger', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-fresh-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'fresh.db');
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.open()).not.toThrow();
+      expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: CURRENT_SCHEMA_MIGRATION });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('accepts an empty canonical ledger and applies the supported migration set', () => {
+    const db = new Database(':memory:');
+    db.raw.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    try {
+      expect(() => db.open()).not.toThrow();
+      expect(db.raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+        .toEqual({ version: CURRENT_SCHEMA_MIGRATION });
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 0 });
+    } finally {
+      db.close();
+    }
+  });
+});

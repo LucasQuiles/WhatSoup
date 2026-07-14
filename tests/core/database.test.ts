@@ -1584,11 +1584,11 @@ describe('database.ts uncovered-branch coverage', () => {
     cleanup(freshPath, legacyPath);
   });
 
-  it('open wraps pragma failures from a closed raw connection', () => {
+  it('open wraps schema preflight failures from a closed raw connection', () => {
     const db = new Database(':memory:');
     db.raw.close();
 
-    expect(() => db.open()).toThrow(/Failed to set database pragmas/);
+    expect(() => db.open()).toThrow(/inspect schema migration ceiling/i);
   });
 
   it('constructor wraps parent directory creation failures', () => {
@@ -1602,11 +1602,11 @@ describe('database.ts uncovered-branch coverage', () => {
     }
   });
 
-  it('constructor wraps sqlite open failures after directory setup succeeds', () => {
+  it('constructor rejects a directory at the canonical database path', () => {
     const directoryPath = mkdtempSync(join(tmpdir(), 'whatsoup-db-file-'));
 
     try {
-      expect(() => new Database(directoryPath)).toThrow(/Cannot open database at/);
+      expect(() => new Database(directoryPath)).toThrow(/not a regular file/i);
     } finally {
       rmSync(directoryPath, { recursive: true, force: true });
     }
@@ -1623,7 +1623,8 @@ describe('database.ts uncovered-branch coverage', () => {
 
     const db = new Database(path);
     try {
-      expect(() => db.open()).toThrow(/Failed to create schema_migrations table/);
+      expect(() => db.open()).toThrow(/inspect schema migration ceiling/i);
+      expect(db.raw.prepare('PRAGMA query_only').get()).toEqual({ query_only: 1 });
     } finally {
       db.raw.close();
       cleanup(path);
