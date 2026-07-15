@@ -208,6 +208,36 @@ describe('formatProviderErrorForUser', () => {
       expect(formatProviderErrorForUser(raw).endsWith('…')).toBe(false);
     });
   });
+
+  // The docstring promises "concise, user-readable copy (max 600 chars)". Every
+  // return path must respect that bound — not just the plain-text passthrough.
+  // MAX_ERROR_TEXT_CHARS (600) is intentionally not exported (public-surface
+  // guard); mirror it here as a literal.
+  describe('output length bounds (all branches)', () => {
+    const MAX = 600; // == MAX_ERROR_TEXT_CHARS in src/lib/provider-errors.ts
+
+    it('bounds the HTTP-prefix branch to MAX_ERROR_TEXT_CHARS', () => {
+      // A 5xx whose body is a long, non-Cloudflare, non-JSON blob (e.g. a stack
+      // trace) is echoed verbatim by the "HTTP <code>: <rest>" path.
+      const body = 'y'.repeat(5000);
+      const raw = `500 ${body}`;
+      const result = formatProviderErrorForUser(raw);
+      expect(result.length).toBeLessThanOrEqual(MAX);
+      // Classification prefix must survive truncation at the head.
+      expect(result).toContain('HTTP 500');
+    });
+
+    it('bounds the JSON error-payload branch to MAX_ERROR_TEXT_CHARS', () => {
+      const longMessage = 'z'.repeat(5000);
+      const raw = JSON.stringify({
+        error: { type: 'server_error', message: longMessage },
+      });
+      const result = formatProviderErrorForUser(raw);
+      expect(result.length).toBeLessThanOrEqual(MAX);
+      // Classification prefix must survive truncation at the head.
+      expect(result).toContain('server_error');
+    });
+  });
 });
 
 describe('formatThrownErrorForUser', () => {

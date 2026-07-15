@@ -26,6 +26,18 @@ function truncateUtf16Safe(text: string, maxChars: number): string {
 
 const MAX_ERROR_TEXT_CHARS = 600;
 
+/**
+ * Bound any user-facing error string to MAX_ERROR_TEXT_CHARS, appending an
+ * ellipsis when truncation occurs. One code unit is reserved for the ellipsis so
+ * the returned length never exceeds MAX_ERROR_TEXT_CHARS. Applied to every
+ * variable-length return path so the "max 600 chars" contract holds regardless
+ * of which branch produced the copy.
+ */
+function boundUserErrorText(text: string): string {
+  if (text.length <= MAX_ERROR_TEXT_CHARS) return text;
+  return `${truncateUtf16Safe(text, MAX_ERROR_TEXT_CHARS - 1)}…`;
+}
+
 const ERROR_PAYLOAD_PREFIX_RE =
   /^(?:error|(?:[a-z][\w-]*\s+)?api\s*error|apierror|openai\s*error|anthropic\s*error|gemini\s*error|gateway\s*error)(?:\s+\d{3})?[:\s-]+/i;
 
@@ -233,24 +245,24 @@ export function formatProviderErrorForUser(raw?: string): string {
     );
   }
 
+  // Variable-length branches (HTTP-prefix, JSON payload, plain-text passthrough)
+  // all funnel through a single bound so no path can echo an unbounded body.
+  let result = trimmed;
+
   const httpMatch = trimmed.match(HTTP_STATUS_PREFIX_RE);
-  if (httpMatch) {
-    const rest = httpMatch[2].trim();
-    if (!rest.startsWith('{')) {
-      return `HTTP ${httpMatch[1]}: ${rest}`;
+  const httpRest = httpMatch ? httpMatch[2].trim() : '';
+  if (httpMatch && !httpRest.startsWith('{')) {
+    result = `HTTP ${httpMatch[1]}: ${httpRest}`;
+  } else {
+    const info = parseApiErrorInfo(trimmed);
+    if (info?.message) {
+      const prefix = info.httpCode ? `HTTP ${info.httpCode}` : 'API error';
+      const type = info.type ? ` ${info.type}` : '';
+      result = `${prefix}${type}: ${info.message}`;
     }
   }
 
-  const info = parseApiErrorInfo(trimmed);
-  if (info?.message) {
-    const prefix = info.httpCode ? `HTTP ${info.httpCode}` : 'API error';
-    const type = info.type ? ` ${info.type}` : '';
-    return `${prefix}${type}: ${info.message}`;
-  }
-
-  return trimmed.length > MAX_ERROR_TEXT_CHARS
-    ? `${truncateUtf16Safe(trimmed, MAX_ERROR_TEXT_CHARS)}…`
-    : trimmed;
+  return boundUserErrorText(result);
 }
 
 /**
