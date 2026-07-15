@@ -45,6 +45,10 @@ const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
+const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
+const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
+const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
+const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 
@@ -132,6 +136,7 @@ type WrapperFixture = {
   root: string;
   wrapper: string;
   bootstrap: string;
+  trustChecker: string;
   fakeNode: string;
   trace: string;
   home: string;
@@ -148,21 +153,29 @@ function makeWrapperFixture(): WrapperFixture {
   const root = makeTmpDir();
   const deploy = join(root, 'deploy');
   const lib = join(deploy, 'lib');
+  const scripts = join(root, 'scripts');
+  const scriptsLib = join(scripts, 'lib');
   const src = join(root, 'src');
+  const srcLib = join(src, 'lib');
   const home = join(root, 'home');
   const configHome = join(root, 'config');
   const dataHome = join(root, 'data');
   const wrapper = join(deploy, 'whatsoup');
   const bootstrap = join(src, 'database-compatibility-bootstrap.ts');
+  const trustChecker = join(scripts, 'source-runtime-drift-check.ts');
   const fakeNode = join(root, 'fake-node');
   const trace = join(root, 'trace.log');
 
-  for (const path of [lib, src, home, configHome, dataHome]) {
+  for (const path of [lib, scriptsLib, srcLib, home, configHome, dataHome]) {
     mkdirSync(path, { recursive: true });
   }
   copyFileSync(WRAPPER, wrapper);
   chmodSync(wrapper, 0o755);
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
+  copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
+  copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
+  copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
+  copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
@@ -217,11 +230,33 @@ if [[ "$*" == *src/bootstrap.ts* ]]; then
   printf 'runtime\\n' >> "$WHATSOUP_TEST_TRACE"
   exit 0
 fi
+if [[ "$*" == *scripts/source-runtime-drift-check.ts* ]]; then
+  exec ${JSON.stringify(PINNED_NODE)} "$@"
+fi
 exit 9
 `,
   );
 
-  return { root, wrapper, bootstrap, fakeNode, trace, home, configHome, dataHome };
+  gitFixture(root, ['init', '-q']);
+  gitFixture(root, ['add', '.']);
+  gitFixture(root, ['commit', '-m', 'wrapper fixture']);
+
+  return {
+    root,
+    wrapper,
+    bootstrap,
+    trustChecker,
+    fakeNode,
+    trace,
+    home,
+    configHome,
+    dataHome,
+  };
+}
+
+function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
+  gitFixture(fixture.root, ['add', '.']);
+  gitFixture(fixture.root, ['commit', '-m', message]);
 }
 
 function runWrapper(
@@ -606,6 +641,177 @@ process.stdout.write('ready\\n');
     expect(result.stderr).toContain('FATAL: unsafe database compatibility entrypoint');
     expect(result.stderr).toContain('regular non-symlink file');
     expect(result.stderr).toContain(fixture.bootstrap);
+  });
+
+  it('rejects a dirty regular database bootstrap before its sentinel executes', () => {
+    const fixture = makeWrapperFixture();
+    const sentinel = join(fixture.root, 'dirty-bootstrap-executed');
+    writeFileSync(
+      fixture.bootstrap,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+process.stdout.write('ready\\n');
+`,
+      'utf8',
+    );
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-dirty');
+  });
+
+  it('rejects a missing transitive database bootstrap import before its sentinel executes', () => {
+    const fixture = makeWrapperFixture();
+    const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
+    const sentinel = join(fixture.root, 'partial-graph-executed');
+    writeFileSync(dependency, 'export const dependency = true;\n', 'utf8');
+    writeFileSync(
+      fixture.bootstrap,
+      `import './database-compatibility-dependency.ts';
+import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+process.stdout.write('ready\\n');
+`,
+      'utf8',
+    );
+    commitWrapperFixture(fixture, 'add database compatibility dependency');
+    rmSync(dependency);
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('import-missing');
+    expect(result.stderr).toContain('database-compatibility-dependency.ts');
+  });
+
+  it('rejects a transitive symlink redirect before its target sentinel executes', () => {
+    const fixture = makeWrapperFixture();
+    const dependency = join(fixture.root, 'src', 'database-compatibility-dependency.ts');
+    const redirect = join(fixture.root, 'src', 'database-compatibility-redirect.ts');
+    const sentinel = join(fixture.root, 'transitive-symlink-executed');
+    writeFileSync(dependency, 'export const dependency = true;\n', 'utf8');
+    writeFileSync(
+      fixture.bootstrap,
+      "import './database-compatibility-dependency.ts';\nprocess.stdout.write('ready\\n');\n",
+      'utf8',
+    );
+    commitWrapperFixture(fixture, 'add regular database compatibility graph');
+    writeFileSync(
+      redirect,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+`,
+      'utf8',
+    );
+    rmSync(dependency);
+    symlinkSync(redirect, dependency);
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-kind');
+    expect(result.stderr).toContain('database-compatibility-dependency.ts');
+  });
+
+  it('rejects a dirty trust checker before checker code can execute', () => {
+    const fixture = makeWrapperFixture();
+    const sentinel = join(fixture.root, 'dirty-checker-executed');
+    writeFileSync(
+      fixture.trustChecker,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+`,
+      'utf8',
+    );
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: unsafe database bootstrap trust checker');
+    expect(result.stderr).toContain('tracked, committed, and clean');
+  });
+
+  it('rejects a staged trust dependency before dependency code can execute', () => {
+    const fixture = makeWrapperFixture();
+    const guardCore = join(fixture.root, 'scripts', 'lib', 'guard-core.ts');
+    const sentinel = join(fixture.root, 'staged-checker-dependency-executed');
+    writeFileSync(
+      guardCore,
+      `import { writeFileSync } from 'node:fs';
+const sentinel = process.env['WHATSOUP_TEST_SENTINEL'];
+if (!sentinel) throw new Error('missing test sentinel');
+writeFileSync(sentinel, 'executed', 'utf8');
+`,
+      'utf8',
+    );
+    gitFixture(fixture.root, ['add', 'scripts/lib/guard-core.ts']);
+
+    const result = runWrapper(fixture, {
+      WHATSOUP_NODE: PINNED_NODE,
+      WHATSOUP_SKIP_PREFLIGHT: '1',
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: unsafe database bootstrap trust checker');
+    expect(result.stderr).toContain('tracked, committed, and clean');
+  });
+
+  it('clears injected Git config before the trust precheck can execute a hook', () => {
+    const fixture = makeWrapperFixture();
+    const sentinel = join(fixture.root, 'injected-git-config-executed');
+    const fsmonitor = join(fixture.root, 'fsmonitor-hook');
+    writeExecutable(
+      fsmonitor,
+      `#!/usr/bin/env bash
+set -euo pipefail
+: > "$WHATSOUP_TEST_SENTINEL"
+`,
+    );
+
+    const result = runWrapper(fixture, {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_0: fsmonitor,
+      WHATSOUP_TEST_SENTINEL: sentinel,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
   });
 });
 

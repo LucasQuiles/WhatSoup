@@ -89,8 +89,71 @@ if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
   exit 1
 fi
 
-# Database compatibility precedes restart preflight, git metadata, tmp
-# creation, full config parsing, and every provider credential/keyring lookup.
+# The compatibility verdict runs before the full restart preflight, so its
+# smaller import graph needs an independent trust root. Verify the static
+# checker and every local module it executes before asking that checker to walk
+# the bootstrap graph. The graph walk reads source only; it never imports or
+# evaluates bootstrap modules.
+DATABASE_BOOTSTRAP_TRUST_CHECKER="scripts/source-runtime-drift-check.ts"
+DATABASE_BOOTSTRAP_TRUST_PATHS=(
+  "$DATABASE_BOOTSTRAP_TRUST_CHECKER"
+  "scripts/lib/guard-core.ts"
+  "src/lib/git-env.ts"
+  "src/lib/type-guards.ts"
+)
+_database_bootstrap_trust_git() (
+  while IFS='=' read -r git_env_name _; do
+    case "$git_env_name" in
+      GIT_*) unset "$git_env_name" ;;
+    esac
+  done < <(env)
+  exec git -C "$REPO_ROOT" "$@"
+)
+if ! _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
+  | grep -qx 'true'; then
+  echo "FATAL: database bootstrap trust check requires a committed git work tree: $REPO_ROOT" >&2
+  exit 1
+fi
+for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+  trust_absolute="$REPO_ROOT/$trust_path"
+  if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
+    || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
+    || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
+    || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
+    echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+    echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
+    exit 1
+  fi
+done
+
+if ! (
+  cd "$REPO_ROOT"
+  "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$REPO_ROOT/$DATABASE_BOOTSTRAP_TRUST_CHECKER" \
+    --manifest /dev/stdin >/dev/null <<'JSON'
+{
+  "schemaVersion": 1,
+  "scope": "database-compatibility-bootstrap",
+  "entrypoints": [
+    {
+      "path": "src/database-compatibility-bootstrap.ts",
+      "importGraph": true
+    }
+  ]
+}
+JSON
+); then
+  echo "FATAL: database compatibility bootstrap trust check failed" >&2
+  exit 1
+fi
+unset DATABASE_BOOTSTRAP_TRUST_CHECKER DATABASE_BOOTSTRAP_TRUST_PATHS \
+  trust_path trust_absolute
+unset -f _database_bootstrap_trust_git
+
+# Database compatibility precedes restart preflight, checkout version reporting,
+# tmp creation, full config parsing, and every provider credential/keyring lookup.
 # A future schema or hot rollback journal enters the dependency-free health
 # drain directly, so unrelated startup damage cannot mask the storage verdict.
 DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
