@@ -1,7 +1,7 @@
 /**
  * Tests for src/core/heal.ts — circuit breaker state machine and heal report management.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,7 @@ import {
   getGlobalValveCount,
   GLOBAL_VALVE_LIMIT,
   parseHealContext,
+  checkDegradationSignals,
 } from '../../src/core/heal.ts';
 
 // ---------------------------------------------------------------------------
@@ -844,5 +845,109 @@ describe('heal.ts uncovered-branch coverage', () => {
     // recentLogs truthy branch (formatHealReport line 387)
     expect(message).toContain('Recent logs:');
     expect(message).toContain('log line 3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkDegradationSignals — #1788: the query compared a Z-form (toISOString)
+// cutoff against the space-form `decryption_failures.created_at` column with a
+// raw TEXT `>`, so same-UTC-day rows sorted below the cutoff regardless of
+// their actual time (byte 11 is ' ' 0x20 in the column vs 'T' 0x54 in the
+// cutoff). The detector was therefore dead code except in the seconds after
+// UTC midnight.
+// ---------------------------------------------------------------------------
+
+describe('checkDegradationSignals (#1788 timestamp compare)', () => {
+  function insertFailure(db: Database, opts: {
+    id: string;
+    senderJid: string;
+    createdAt: string;
+    resolved?: 0 | 1;
+  }): void {
+    db.raw.prepare(`
+      INSERT INTO decryption_failures
+        (message_id, chat_jid, conversation_key, sender_jid, error_message, raw_key, resolved, created_at)
+      VALUES (?, ?, ?, ?, 'MAC verification failed', 'raw-key-blob', ?, ?)
+    `).run(opts.id, `${opts.senderJid}@s.whatsapp.net`, `${opts.senderJid}@s.whatsapp.net`, `${opts.senderJid}@s.whatsapp.net`, opts.resolved ?? 0, opts.createdAt);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fires on same-UTC-day failures inside the 5-minute window (space-form vs toISOString cutoff)', () => {
+    // "now" is mid-afternoon UTC, so the 5-minute cutoff built by
+    // toISOString() shares the same YYYY-MM-DD date prefix as the space-form
+    // rows below — exactly the byte-11 collision (' ' vs 'T') #1788 describes.
+    vi.setSystemTime(new Date('2026-07-14T15:00:00.000Z'));
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // 5 failures from the same sender, 4 minutes ago (after the 5-minute
+    // cutoff of 14:55:00, same UTC day) — must be selected.
+    for (let i = 0; i < 5; i++) {
+      insertFailure(db, {
+        id: `same-day-${i}`,
+        senderJid: '15551234000',
+        createdAt: '2026-07-14 14:56:00',
+      });
+    }
+
+    checkDegradationSignals(db, messenger, null, null);
+
+    const reports = db.raw.prepare(`SELECT error_type FROM heal_reports WHERE error_type = 'degraded'`).all();
+    // Pre-fix: raw TEXT `>` sorts '2026-07-14 14:56:00' below
+    // '2026-07-14T14:55:00.000Z' (byte 11 ' ' < 'T'), so the query returns
+    // zero rows and emitHealReport is never called. Post-fix: datetime()
+    // normalizes both sides and the row is correctly newer than cutoff.
+    expect(reports).toHaveLength(1);
+  });
+
+  it('does not fire on failures from a prior UTC day, confirming the datetime() wrap did not invert direction', () => {
+    vi.setSystemTime(new Date('2026-07-14T15:00:00.000Z'));
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // 5 failures from yesterday — genuinely older than the 5-minute cutoff,
+    // on a different calendar day. Must stay excluded both before and after
+    // the fix; this guards against the datetime() wrap accidentally widening
+    // the match instead of just correcting the same-day byte compare.
+    for (let i = 0; i < 5; i++) {
+      insertFailure(db, {
+        id: `yesterday-${i}`,
+        senderJid: '15559990000',
+        createdAt: '2026-07-13 10:00:00',
+      });
+    }
+
+    checkDegradationSignals(db, messenger, null, null);
+
+    const reports = db.raw.prepare(`SELECT error_type FROM heal_reports WHERE error_type = 'degraded'`).all();
+    expect(reports).toHaveLength(0);
+  });
+
+  it('does not fire on a same-day sender whose failures are all before the 5-minute cutoff', () => {
+    vi.setSystemTime(new Date('2026-07-14T15:00:00.000Z'));
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // 6 minutes ago — same UTC day, but genuinely before the 14:55:00 cutoff.
+    // Confirms the fix doesn't flip a should-exclude same-day row to included.
+    for (let i = 0; i < 5; i++) {
+      insertFailure(db, {
+        id: `too-old-same-day-${i}`,
+        senderJid: '15558880000',
+        createdAt: '2026-07-14 14:54:00',
+      });
+    }
+
+    checkDegradationSignals(db, messenger, null, null);
+
+    const reports = db.raw.prepare(`SELECT error_type FROM heal_reports WHERE error_type = 'degraded'`).all();
+    expect(reports).toHaveLength(0);
   });
 });

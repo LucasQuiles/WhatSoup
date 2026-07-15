@@ -88,7 +88,7 @@ describe('prepared statement caching', () => {
 
     const toolCallId = engine.recordToolCall('conv-1', 'send_message', '{"text":"hi"}', 'unsafe');
     engine.markToolExecuting(toolCallId);
-    engine.markToolComplete(toolCallId, '{"sent":true}');
+    engine.markToolComplete(toolCallId, '{"sent":true}', false);
 
     engine.upsertSessionCheckpoint('conv-1', { sessionId: 'sess-1', sessionStatus: 'active' });
     engine.getSessionCheckpoint('conv-1');

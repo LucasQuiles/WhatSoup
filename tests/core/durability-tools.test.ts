@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { errorResult } from '../../src/mcp/types.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ describe('DurabilityEngine tool_calls', () => {
     const id = engine.recordToolCall('conv-1', 'send_message', '{}', 'unsafe');
     engine.markToolExecuting(id);
     const startedAt = db.raw.prepare(`SELECT unixepoch('now') AS value`).get() as { value: number };
-    engine.markToolComplete(id, '{"sent":true}');
+    engine.markToolComplete(id, '{"sent":true}', false);
     const finishedAt = db.raw.prepare(`SELECT unixepoch('now') AS value`).get() as { value: number };
     const row = db.raw.prepare(
       `SELECT status,
@@ -115,7 +116,7 @@ describe('DurabilityEngine tool_calls', () => {
   it('markToolComplete stores optional outboundOpId', () => {
     const id = engine.recordToolCall('conv-1', 'send_message', '{}', 'unsafe');
     engine.markToolExecuting(id);
-    engine.markToolComplete(id, 'ok', 99);
+    engine.markToolComplete(id, 'ok', false, 99);
     const row = db.raw.prepare('SELECT outbound_op_id FROM tool_calls WHERE id = ?').get(id) as any;
     expect(row.outbound_op_id).toBe(99);
   });
@@ -124,11 +125,35 @@ describe('DurabilityEngine tool_calls', () => {
     const id1 = engine.recordToolCall('conv-1', 'tool_a', '{}', 'safe');
     const id2 = engine.recordToolCall('conv-1', 'tool_b', '{}', 'read_only');
     expect(id1).not.toBe(id2);
-    engine.markToolComplete(id1, 'result-a');
+    engine.markToolComplete(id1, 'result-a', false);
     const row1 = db.raw.prepare('SELECT status FROM tool_calls WHERE id = ?').get(id1) as any;
     const row2 = db.raw.prepare('SELECT status FROM tool_calls WHERE id = ?').get(id2) as any;
     expect(row1.status).toBe('complete');
     expect(row2.status).toBe('pending');
+  });
+
+  // #1787: a failed tool call must persist a distinct terminal status, not
+  // 'complete' — otherwise a status-only failure metric reads 0% forever.
+  it('markToolComplete persists status=error when isError is true', () => {
+    const id = engine.recordToolCall('conv-1', 'send_message', '{}', 'unsafe');
+    engine.markToolExecuting(id);
+    engine.markToolComplete(id, 'error: boom', true);
+    const row = db.raw.prepare('SELECT status, result FROM tool_calls WHERE id = ?').get(id) as any;
+    expect(row.status).toBe('error');
+    expect(row.result).toBe('error: boom');
+  });
+
+  // #1787 recovery-neutrality: getRecoverableToolCalls only ever selects
+  // 'executing'/'pending' — a terminal 'error' row must never be re-selected
+  // for replay, exactly like an existing 'complete' row.
+  it('a tool call marked error is not re-selected by getRecoverableToolCalls', () => {
+    const id = engine.recordToolCall('conv-1', 'send_message', '{}', 'safe');
+    engine.markToolExecuting(id);
+    engine.markToolComplete(id, 'error: boom', true);
+    const recoverable = db.raw
+      .prepare(`SELECT id FROM tool_calls WHERE status IN ('executing', 'pending')`)
+      .all() as Array<{ id: number }>;
+    expect(recoverable.find((r) => r.id === id)).toBeUndefined();
   });
 });
 
@@ -186,7 +211,9 @@ describe('ToolRegistry durability integration', () => {
     expect(row.replay_policy).toBe('safe');
   });
 
-  it('records tool call as complete even when handler throws', async () => {
+  // #1787: previously persisted status='complete' even though the handler
+  // threw — a failed tool call must be distinguishable from a successful one.
+  it('records tool call as error (not complete) when handler throws', async () => {
     registry.register(makeTool({
       name: 'failing_tool',
       schema: z.object({}),
@@ -199,8 +226,52 @@ describe('ToolRegistry durability integration', () => {
     const row = db.raw.prepare(
       `SELECT status, result FROM tool_calls WHERE conversation_key = 'conv-3' AND tool_name = 'failing_tool'`,
     ).get() as any;
-    expect(row.status).toBe('complete');
+    expect(row.status).toBe('error');
     expect(row.result).toContain('boom');
+  });
+
+  // #1787: the success path can still fail "softly" — the handler resolves
+  // normally but returns an isError-tagged payload (errorResult/toolError).
+  // isToolErrorPayload's computed `isError` must drive the persisted status
+  // the same way a thrown error does.
+  it('records tool call as error when handler resolves with an isError payload', async () => {
+    registry.register(makeTool({
+      name: 'soft_failing_tool',
+      schema: z.object({}),
+      handler: async () => errorResult('nope, denied by policy'),
+    }));
+
+    const result = await registry.call('soft_failing_tool', {}, makeSession({ conversationKey: 'conv-6' }));
+
+    expect(result.isError).toBe(true);
+    const row = db.raw.prepare(
+      `SELECT status, result FROM tool_calls WHERE conversation_key = 'conv-6' AND tool_name = 'soft_failing_tool'`,
+    ).get() as any;
+    expect(row.status).toBe('error');
+    expect(row.result).toContain('nope, denied by policy');
+  });
+
+  // #1787: the deny path (R1 sensitive-tool gate) writes its own forensic
+  // record via the same markToolComplete chokepoint — it must label 'error'
+  // too, not just the main success/throw paths.
+  it('records tool call as error on the sensitive-tool deny path', async () => {
+    registry.register(makeTool({
+      name: 'sensitive_tool',
+      sensitive: true,
+      schema: z.object({}),
+      handler: async () => 'should never run',
+    }));
+    // No authorizer installed → sensitiveAllowed() fails closed, denying
+    // every call regardless of actorJid.
+
+    const result = await registry.call('sensitive_tool', {}, makeSession({ conversationKey: 'conv-7' }));
+
+    expect(result.isError).toBe(true);
+    const row = db.raw.prepare(
+      `SELECT status, result FROM tool_calls WHERE conversation_key = 'conv-7' AND tool_name = 'sensitive_tool'`,
+    ).get() as any;
+    expect(row.status).toBe('error');
+    expect(row.result).toContain('denied');
   });
 
   it('records tool call under the __global__ sentinel when a global-tier session has no conversationKey', async () => {

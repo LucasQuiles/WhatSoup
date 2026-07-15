@@ -436,7 +436,7 @@ Append an entity observation. Append/supersede semantics; existing rows are not 
 
 ### list_beads
 
-List beads with optional filters.
+List beads with optional filters. `review_overdue` surfaces `status='proposed'` beads whose `review_by_at` deadline has passed (#1773) and overrides any `status` filter with the hardcoded proposed predicate.
 
 | | |
 |---|---|
@@ -454,6 +454,7 @@ List beads with optional filters.
 | due_before | number | optional | Filter by due timestamp. |
 | since | number | optional | Filter by creation/update timestamp. |
 | limit | number | optional | Maximum rows, up to 500. |
+| review_overdue | boolean | optional | Surface only `status='proposed'` beads past `review_by_at` (overdue for review). Overrides `status` when set. |
 
 ---
 

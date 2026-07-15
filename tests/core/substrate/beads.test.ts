@@ -7,7 +7,7 @@ import { Database } from '../../../src/core/database.ts';
 import {
   createBead, getBead, listBeads, updateBead,
   completeBead, cancelBead, approveProposal, rejectProposal,
-  activityFeed,
+  activityFeed, countOverdueProposals,
 } from '../../../src/core/substrate/beads.ts';
 import { upsertEntity, captureObservation, forgetObservation } from '../../../src/core/substrate/entities.ts';
 
@@ -254,6 +254,41 @@ describe('beads core', () => {
     expect(limited).toHaveLength(1);
     // since filter: a far-future timestamp matches nothing.
     expect(listBeads(db.raw, { since: 9_999_999_999 })).toHaveLength(0);
+  });
+
+  // #1773 rem-4 regression: review_by_at was written by the proposal sweep
+  // but never read anywhere — no SELECT, scheduler, sweep, or alert consumed
+  // it, so overdue proposals accumulated silently (683 on one live instance).
+  it('listBeads(reviewOverdue) surfaces only overdue OPEN proposals', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const overdueProposal = createBead(db.raw, {
+      kind: 'task', title: 'overdue-proposal', ownerJid: 'mw', actor: 'user',
+      status: 'proposed', reviewByAt: now - 1000, confidence: 0.6, proposalReason: 'inline',
+    });
+    createBead(db.raw, {
+      kind: 'task', title: 'not-yet-due-proposal', ownerJid: 'mw', actor: 'user',
+      status: 'proposed', reviewByAt: now + 100_000, confidence: 0.6, proposalReason: 'inline',
+    });
+    // A bead whose review_by_at has passed but is NOT status='proposed' (already
+    // disposed via approve_proposal/reject_proposal, or never had a proposal
+    // lifecycle) must never surface as overdue — its review_by_at is inert.
+    const approvedPastDue = createBead(db.raw, {
+      kind: 'task', title: 'approved-past-due', ownerJid: 'mw', actor: 'user',
+      status: 'proposed', reviewByAt: now - 1000, confidence: 0.6, proposalReason: 'inline',
+    });
+    approveProposal(db.raw, approvedPastDue.id, { actor: 'user' });
+
+    const overdue = listBeads(db.raw, { reviewOverdue: true });
+    expect(overdue.map(b => b.title)).toEqual(['overdue-proposal']);
+    expect(overdue.map(b => b.id)).toEqual([overdueProposal.id]);
+
+    // reviewOverdue overrides an explicit conflicting status filter rather
+    // than ANDing a second contradictory predicate.
+    expect(listBeads(db.raw, { reviewOverdue: true, status: 'active' }).map(b => b.title))
+      .toEqual(['overdue-proposal']);
+
+    expect(countOverdueProposals(db.raw, now)).toBe(1);
+    expect(countOverdueProposals(db.raw, now - 2000)).toBe(0);
   });
 
   it('activityFeed with no owner filter returns bead events across owners', () => {

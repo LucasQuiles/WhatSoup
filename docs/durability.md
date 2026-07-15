@@ -635,8 +635,8 @@ rewriting either durable disposition.
 | `session_checkpoint_id` | INTEGER | FK to `session_checkpoints.id`. Links the tool call to the agent session. |
 | `tool_name` | TEXT NOT NULL | Name of the MCP tool invoked. |
 | `tool_input` | TEXT NOT NULL | JSON-serialized input arguments. |
-| `status` | TEXT NOT NULL | `pending`, `executing`, `complete`, `replayed`, `quarantined`. Default `'pending'`. |
-| `result` | TEXT | JSON-serialized tool result. Populated by `markToolComplete()`. |
+| `status` | TEXT NOT NULL | `pending`, `executing`, `complete`, `error`, `replayed`, `quarantined`. Default `'pending'`. `error` (added #1787) is the terminal state for a failed tool call — success-with-`isError` payload, a thrown handler, and a denied sensitive-tool attempt all mark `error` through the single `markToolComplete()` chokepoint. `complete`, `error`, `replayed`, and `quarantined` are the terminal statuses retention deletes (`database-retention.ts`); recovery only ever selects `executing`/`pending` (§4.1 Step 3), so `error` is never re-selected once written. |
+| `result` | TEXT | JSON-serialized tool result, or the `error: ...` message when `status = 'error'`. Populated by `markToolComplete()`. |
 | `replay_policy` | TEXT NOT NULL | Same semantics as `outbound_ops.replay_policy`. |
 | `created_at` | TEXT | Timestamp of record creation. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |

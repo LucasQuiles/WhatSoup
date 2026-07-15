@@ -604,6 +604,25 @@ function validateAgentOptions(
     );
   }
 
+  // perChatConversationBound hardens the non-sandbox per-chat actor socket:
+  // it requires per_chat scope and is rejected alongside sandboxPerChat,
+  // whose sessions are chat-scoped (already confined) and never construct
+  // that socket.
+  if (opts['perChatConversationBound'] === true) {
+    if (opts['sessionScope'] !== 'per_chat') {
+      return err(
+        'agentOptions.perChatConversationBound',
+        'agentOptions.perChatConversationBound requires sessionScope "per_chat"',
+      );
+    }
+    if (opts['sandboxPerChat'] === true) {
+      return err(
+        'agentOptions.perChatConversationBound',
+        'agentOptions.perChatConversationBound is incompatible with sandboxPerChat',
+      );
+    }
+  }
+
   // allowM365Mutations (#411): per-instance opt-in for propagating the
   // `ALLOW_M365_MUTATIONS` env var when WHATSOUP_CONNECTOR_FAILCLOSED=1.
   // The REQUIRED_DENY floor is enforced separately in settings templates.

@@ -200,7 +200,7 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
   it('completed tool calls are not touched by recovery', () => {
     const tcId = engine.recordToolCall('k1', 'completed_tool', '{}', 'unsafe');
     engine.markToolExecuting(tcId);
-    engine.markToolComplete(tcId, '{"ok":true}');
+    engine.markToolComplete(tcId, '{"ok":true}', false);
 
     engine.preConnectRecovery();
     expect(getToolCall(db, tcId)['status']).toBe('complete');

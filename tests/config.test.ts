@@ -472,6 +472,7 @@ describe('config — memory section (substrate slice 1)', () => {
     expect(config.memory.sweep.beadProposeMin).toBe(0.55);
     expect(config.memory.sweep.beadUpdateMin).toBe(0.8);
     expect(config.memory.sweep.reviewByDays).toBe(7);
+    expect(config.memory.sweep.overdueProposalAlertThreshold).toBe(10);
     expect(config.memory.watchTtl.defaultHours).toBe(24);
     expect(config.memory.watchTtl.maxHours).toBe(72);
     expect(config.memory.vaultPath.startsWith('/')).toBe(true);

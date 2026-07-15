@@ -382,7 +382,7 @@ export function checkDegradationSignals(
   const failures = db.raw.prepare(`
     SELECT sender_jid, COUNT(*) as cnt
     FROM decryption_failures
-    WHERE resolved = 0 AND created_at > ?
+    WHERE resolved = 0 AND datetime(created_at) > datetime(?)
     GROUP BY sender_jid
     HAVING cnt >= 5
   `).all(cutoff) as Array<{ sender_jid: string; cnt: number }>;

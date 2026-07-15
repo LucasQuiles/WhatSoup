@@ -265,6 +265,7 @@ if (instanceType === 'agent') {
       bash: { enabled: boolean };
     };
     sandboxPerChat?: boolean;
+    perChatConversationBound?: boolean;
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
@@ -281,6 +282,7 @@ if (instanceType === 'agent') {
     sandbox: agentOpts?.sandbox,
     model: agentModel,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
+    perChatConversationBound: agentOpts?.perChatConversationBound as boolean | undefined,
     pluginDirs: agentOpts?.pluginDirs?.map(d => {
       const resolved = resolveTilde(d);
       // A pinned plugin version dir (e.g. .../superpowers/5.0.7) disappears
@@ -859,6 +861,10 @@ const triggerPoller = new TriggerPoller(db.raw, connectionManager, {
   agentJobDispatch: runtime instanceof AgentRuntime
     ? (jobCtx) => runtime.dispatchAgentJob(jobCtx)
     : undefined,
+  // #1773 rem-3: backlog-growth alert for bead proposals stuck past
+  // review_by_at. instance attributes the alert via emitAlertChecked.
+  instance: config.botName,
+  overdueProposalAlertThreshold: config.memory.sweep.overdueProposalAlertThreshold,
 });
 triggerPoller.start();
 

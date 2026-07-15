@@ -7,7 +7,7 @@
 // Resolution order at request time:
 //   1. inline apiKey (when non-empty) — caller-supplied
 //   2. apiKeyService via lookupCredential() (when service is non-empty)
-//   3. process.env[envVar] — last-resort fallback, preserves prior behavior
+//   3. process.env[envVar] — last-resort fallback (when allowEnvFallback !== false)
 //   4. '' — missing-key signaling is the caller's responsibility
 //
 // A misconfigured service (lookupCredential returns null/empty) MUST NOT
@@ -15,6 +15,13 @@
 // The fall-through is deliberate (resilience) but NOT silent: it is logged so a
 // configured-service miss that silently uses the global env key — breaking
 // per-instance account isolation — is observable to operators (QR-104).
+//
+// W-3 (Phase C): callers can set `allowEnvFallback: false` to restrict the
+// resolver to the keyring only (no env fallback). This is the precedence
+// reversal described in docs/security-handoffs/2026-05-09-env-secret-exposure.md
+// Phase C: "Env fallback should be explicit and restricted to development/test
+// call sites." The default is `true` (backward-compatible) so existing callers
+// are unaffected until they opt in.
 
 import { lookupCredential } from './keyring.ts';
 import { createChildLogger } from '../logger.ts';
@@ -28,6 +35,13 @@ export interface ResolveApiKeyOptions {
   service?: string;
   /** Conventional env var name to consult as the final fallback. */
   envVar: string;
+  /**
+   * When `false`, the resolver skips the env-var fallback path and returns ''
+   * if no keyring hit is found. Use this in production call sites where env
+   * fallback is not desired (W-3 precedence reversal). Default: `true`
+   * (backward-compatible — preserves the prior env-fallback behavior).
+   */
+  allowEnvFallback?: boolean;
 }
 
 /**
@@ -40,10 +54,20 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     return opts.inline;
   }
 
+  // W-3: when env fallback is explicitly disabled, the resolver consults the
+  // keyring ONLY. A missing keyring hit returns '' (visible missing-key
+  // downstream) rather than silently falling back to the process env.
+  const allowEnvFallback = opts.allowEnvFallback !== false;
+
   if (opts.service && opts.service.length > 0) {
     const fromKeyring = lookupCredential(opts.service);
     if (fromKeyring && fromKeyring.length > 0) {
       return fromKeyring;
+    }
+    if (!allowEnvFallback) {
+      // Keyring miss + env fallback disabled → return '' (no env consultation).
+      // This is the W-3 strict mode: the resolver does not read process.env.
+      return '';
     }
     // Service set but lookup miss → fall through to env (do not error). Make the
     // fallback OBSERVABLE: warn only when the env fallback actually yields a key
@@ -59,5 +83,10 @@ export function resolveApiKey(opts: ResolveApiKeyOptions): string {
     return envFallback;
   }
 
+  // No service configured. If env fallback is disabled and there's no service
+  // to look up, return '' — there's nothing to resolve.
+  if (!allowEnvFallback) {
+    return '';
+  }
   return process.env[opts.envVar] ?? '';
 }

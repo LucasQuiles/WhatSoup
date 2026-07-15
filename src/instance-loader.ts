@@ -46,6 +46,7 @@ interface AgentOptions {
   mcp?: unknown;
   perUserDirs?: unknown;
   sandboxPerChat?: boolean;
+  perChatConversationBound?: boolean;
   enabledPlugins?: Record<string, boolean>;
   autoCompactInputTokens?: number;
   /** Provider identifier — maps to the registry. Defaults to 'claude-cli'. */

@@ -158,6 +158,7 @@ import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+import { perChatActorSession } from './per-chat-actor-session.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -430,6 +431,13 @@ export interface AgentRuntimeOptions {
   model?: string;
   /** When true, each chat gets an isolated workspace directory with its own Claude config. Requires sessionScope 'per_chat'. */
   sandboxPerChat?: boolean;
+  /**
+   * When true, the per-chat actor socket carries a conversation-bound
+   * SessionContext (see per-chat-actor-session.ts and docs/configuration.md).
+   * Default false — the #1785 rec-3 behavior (send confinement only) is
+   * unchanged. Requires sessionScope 'per_chat'; incompatible with sandboxPerChat.
+   */
+  perChatConversationBound?: boolean;
   /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
   pluginDirs?: string[];
   /** Per-instance plugin enablement. Written to project settings.json to override global. */
@@ -698,6 +706,7 @@ export class AgentRuntime implements Runtime {
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
+  private readonly perChatConversationBound: boolean;
   /** F-STICKY-ACTOR (QR-263): nlRouting adds a DYNAMIC actor-race surface — a live
    *  per-sender `/model` pin can route a turn to a non-claude CLI provider at runtime,
    *  independent of the static primary/fallback config. Mutable only in tests. */
@@ -2102,6 +2111,7 @@ export class AgentRuntime implements Runtime {
     this.sandbox = options?.sandbox;
     this.model = options?.model;
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
+    this.perChatConversationBound = options?.perChatConversationBound ?? false;
     this.serviceRestarter = options?.serviceRestarter;
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
@@ -2388,6 +2398,22 @@ export class AgentRuntime implements Runtime {
     if (res?.socketServer) {
       res.socketServer.updateDeliveryJid(newJid);
       log.info({ conversationKey, newJid }, 'updated delivery JID on socket server');
+    }
+
+    // Conversation-bound per-chat actor sockets: replace the frozen binding
+    // atomically so future injected sends fill the new alias while in-flight
+    // requests keep the pair they were admitted under.
+    if (this.perChatConversationBound) {
+      for (const [key, sockRes] of this.perChatSocketResources) {
+        try {
+          if (toConversationKey(key) === conversationKey) {
+            sockRes.socketServer.updateConversationBinding(newJid);
+            log.info({ conversationKey, newJid }, 'rekeyed conversation binding on per-chat actor socket');
+          }
+        } catch (err) {
+          log.debug({ err, key }, 'JID parsing failed during per-chat actor socket rekey — skipping');
+        }
+      }
     }
 
     // Shared-mode outbound queues (keyed by canonical JID — may need re-key)
@@ -6543,7 +6569,7 @@ export class AgentRuntime implements Runtime {
     const socketServer = new WhatSoupSocketServer(
       socketPath,
       this.registry,
-      { tier: 'global', allowedRoot: this.cwd ?? homedir(), conversationKey: toConversationKey(chatJid) },
+      perChatActorSession(chatJid, this.cwd ?? homedir(), this.perChatConversationBound),
       () => this.resolveExecutingActor(chatJid),
     );
     socketServer.start();

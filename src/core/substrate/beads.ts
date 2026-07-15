@@ -98,14 +98,38 @@ export function getBead(db: DatabaseSync, id: number): GetBeadResult | null {
 export interface ListBeadsFilter {
   ownerJid?: string; kind?: BeadKind; status?: BeadStatus; chatJid?: string;
   dueBefore?: number; since?: number; limit?: number;
+  /**
+   * Surface status='proposed' beads whose review_by_at deadline has already
+   * passed (#1773 — review_by_at was written by the inline-extractor sweep
+   * but never read anywhere: no SELECT, scheduler, sweep, or alert consumed
+   * it, so proposals accumulated silently forever, 683 on one live instance).
+   * When true this OVERRIDES any explicit `status` filter with the hardcoded
+   * 'proposed' predicate below — a non-proposed bead's review_by_at is no
+   * longer actionable (approve_proposal/reject_proposal only accept
+   * status='proposed'), so it is never overdue-relevant regardless of what
+   * `status` the caller also passed.
+   */
+  reviewOverdue?: boolean;
 }
+
+/**
+ * Shared predicate for "overdue proposal" — kept as a single source of truth
+ * between listBeads' reviewOverdue filter and countOverdueProposals so the
+ * backlog-alert count (rem-3) can never drift from what list_beads surfaces
+ * to a caller (rem-1). Takes one bind param: the `now` cutoff.
+ */
+const OVERDUE_PROPOSAL_WHERE = `status = 'proposed' AND review_by_at IS NOT NULL AND review_by_at < ?`;
 
 export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}): BeadRow[] {
   const w: string[] = [];
   const b: SQLInputValue[] = [];
   if (f.ownerJid) { w.push('owner_jid = ?'); b.push(f.ownerJid); }
   if (f.kind)     { w.push('kind = ?');      b.push(f.kind); }
-  if (f.status)   { w.push('status = ?');    b.push(f.status); }
+  if (f.reviewOverdue) {
+    w.push(OVERDUE_PROPOSAL_WHERE); b.push(nowUnixSec());
+  } else if (f.status) {
+    w.push('status = ?'); b.push(f.status);
+  }
   if (f.chatJid)  { w.push('chat_jid = ?');  b.push(f.chatJid); }
   if (f.dueBefore != null) { w.push('due_at <= ?'); b.push(f.dueBefore); }
   if (f.since != null)     { w.push('updated_at >= ?'); b.push(f.since); }
@@ -113,6 +137,20 @@ export function listBeads(db: DatabaseSync, f: ListBeadsFilter = {}): BeadRow[] 
                ORDER BY updated_at DESC, id DESC LIMIT ?`;
   b.push(f.limit ?? 200);
   return db.prepare(sql).all(...b) as unknown as BeadRow[];
+}
+
+/**
+ * Count of status='proposed' beads whose review_by_at deadline has passed.
+ * A dedicated COUNT query (not a paginated listBeads call) so the backlog
+ * gauge / alert threshold check (#1773 rem-3) is accurate even when the
+ * backlog exceeds listBeads' page size (683 proposals were observed on one
+ * live instance — well past the 200-row default limit).
+ */
+export function countOverdueProposals(db: DatabaseSync, now: number = nowUnixSec()): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS c FROM beads WHERE ${OVERDUE_PROPOSAL_WHERE}`,
+  ).get(now) as { c: number };
+  return row.c;
 }
 
 export interface UpdateBeadArgs {

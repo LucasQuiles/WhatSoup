@@ -3,7 +3,7 @@ import type { Server, Socket } from 'node:net';
 import { unlinkSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import type { ToolRegistry } from './registry.ts';
-import type { SessionContext } from './types.ts';
+import { makeConversationBinding, type SessionContext } from './types.ts';
 
 const log = createChildLogger('WhatSoupSocketServer');
 
@@ -60,6 +60,12 @@ export class WhatSoupSocketServer {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
+    // Binding objects are immutable by contract (types.ts): enforce it at the
+    // trust boundary so every per-request shallow snapshot below can safely
+    // share the reference — a rekey REPLACES the object, never mutates it.
+    if (session.binding && !Object.isFrozen(session.binding)) {
+      session.binding = Object.freeze({ ...session.binding });
+    }
     this.actorResolver = actorResolver;
   }
 
@@ -217,9 +223,15 @@ export class WhatSoupSocketServer {
   /**
    * Update delivery JID on the base session AND all active connections.
    * This ensures JID alias changes (e.g., LID resolution) propagate
-   * to every connected MCP client.
+   * to every connected MCP client. On a conversation-bound socket the frozen
+   * binding is replaced in the same call, so the top-level mirror and the
+   * binding can never diverge (no split-brain).
    */
   updateDeliveryJid(jid: string): void {
+    if (this.baseSession.binding) {
+      this.updateConversationBinding(jid);
+      return;
+    }
     this.baseSession.deliveryJid = jid;
     for (const session of this.connectionSessions.values()) {
       session.deliveryJid = jid;
@@ -240,14 +252,51 @@ export class WhatSoupSocketServer {
   }
 
   /**
-   * Update conversation binding on the base session AND all active connections.
-   * Shared/global runtimes call this at turn start so injected tools inherit the
-   * originating conversation and the registry's cross-conversation guard can fire.
+   * Update the turn-pinned conversation key on the base session AND all active
+   * connections. Shared/global runtimes call this at turn start so injected
+   * tools inherit the originating conversation and the registry's
+   * cross-conversation guard can fire. REFUSED on a conversation-bound socket:
+   * its conversation is fixed for the socket's lifetime, and a turn-pin here
+   * would diverge the mirror from the binding.
    */
   updateConversationKey(conversationKey: string | undefined): void {
+    if (this.baseSession.binding) {
+      log.warn(
+        { socketPath: this.socketPath, requested: conversationKey, bound: this.baseSession.binding.conversationKey },
+        'updateConversationKey refused — socket is conversation-bound for its lifetime',
+      );
+      return;
+    }
     this.baseSession.conversationKey = conversationKey;
     for (const session of this.connectionSessions.values()) {
       session.conversationKey = conversationKey;
+    }
+  }
+
+  /**
+   * Atomically rekey a conversation-bound socket (JID alias migration): build
+   * ONE new frozen binding and install it — with its top-level mirrors — on
+   * the base session and every active connection in the same synchronous
+   * pass. In-flight requests keep the previous frozen binding object their
+   * per-request snapshot captured. No-op (with a warning) on a socket that
+   * was not constructed conversation-bound: a binding is a construction-time
+   * property, never acquired later.
+   */
+  updateConversationBinding(deliveryJid: string): void {
+    const current = this.baseSession.binding;
+    if (!current) {
+      log.warn({ socketPath: this.socketPath }, 'updateConversationBinding refused — socket has no conversation binding');
+      return;
+    }
+    const next = makeConversationBinding(current.conversationKey, deliveryJid);
+    const install = (session: SessionContext): void => {
+      session.binding = next;
+      session.conversationKey = next.conversationKey;
+      session.deliveryJid = next.deliveryJid;
+    };
+    install(this.baseSession);
+    for (const session of this.connectionSessions.values()) {
+      install(session);
     }
   }
 

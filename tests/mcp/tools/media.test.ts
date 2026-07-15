@@ -887,6 +887,55 @@ describe('transcribe_audio', () => {
     expect(result.content[0].text).not.toContain('Secret transcript');
   });
 
+  it('conversation-bound session: DENIES a cross-conversation transcript via the BINDING even with no top-level conversationKey (fail-open regression)', async () => {
+    // Before assertConversationAccess keyed on the binding, a session whose
+    // top-level conversationKey was absent fell through the guard entirely —
+    // the real-handler proof that the allowlisted transcribe_audio is
+    // conversation-safe for bound sessions.
+    testDb.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
+        content, content_text, is_from_me, timestamp)
+      VALUES ('other@g.us', 'other_at_g.us', 'sender@s.whatsapp.net', 'msg-other-audio2', 'audio',
+        ?, 'Secret transcript', 0, 1700000000)
+    `).run(JSON.stringify({ type: 'audio', transcription: 'Secret transcript' }));
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-other-audio2' },
+      {
+        tier: 'global',
+        binding: Object.freeze({ kind: 'conversation-bound', conversationKey: 'chat_at_g.us', deliveryJid: 'chat@g.us' }),
+      } as SessionContext,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('different conversation');
+    expect(result.content[0].text).not.toContain('Secret transcript');
+  });
+
+  it('conversation-bound session: serves its OWN conversation transcript (allowlisted global tool, end to end)', async () => {
+    insertAudioMessage('msg-own-audio', {
+      content: JSON.stringify({ type: 'audio', duration: 5, ptt: true, transcription: 'Own transcript' }),
+    });
+    testDb.raw.prepare('UPDATE messages SET content_text = ? WHERE message_id = ?')
+      .run('Own transcript', 'msg-own-audio');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-own-audio' },
+      {
+        tier: 'global',
+        conversationKey: 'chat_at_g.us',
+        deliveryJid: 'chat@g.us',
+        binding: Object.freeze({ kind: 'conversation-bound', conversationKey: 'chat_at_g.us', deliveryJid: 'chat@g.us' }),
+      } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('Own transcript');
+    expect(body.cached).toBe(true);
+  });
+
   it('returns error when no media_path and no raw_message', async () => {
     insertAudioMessage('msg-no-media');
 

@@ -207,6 +207,30 @@ describe('substrate MCP tools', () => {
     expect(list.beads.map((b: { title: string }) => b.title)).toContain('test task');
   });
 
+  // #1773 rem-1/rem-4: list_beads(review_overdue: true) is the MCP-layer
+  // consumable surface for review_by_at — previously written but never read
+  // anywhere (no SELECT, scheduler, sweep, or alert).
+  it('list_beads(review_overdue) surfaces only overdue open proposals', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const overdue = createBead(db.raw, {
+      kind: 'task', title: 'overdue', ownerJid: adminPhone, actor: 'test',
+      status: 'proposed', reviewByAt: now - 1000,
+    });
+    createBead(db.raw, {
+      kind: 'task', title: 'not-due-yet', ownerJid: adminPhone, actor: 'test',
+      status: 'proposed', reviewByAt: now + 100_000,
+    });
+    const approved = createBead(db.raw, {
+      kind: 'task', title: 'approved-past-due', ownerJid: adminPhone, actor: 'test',
+      status: 'proposed', reviewByAt: now - 1000,
+    });
+    await registry.call('approve_proposal', { id: approved.id }, adminSession);
+
+    const res = parseResult(await registry.call('list_beads', { review_overdue: true }, adminSession));
+    expect(res.beads.map((b: { title: string }) => b.title)).toEqual(['overdue']);
+    expect(res.beads.map((b: { id: number }) => b.id)).toEqual([overdue.id]);
+  });
+
   it('regenerate_vault projects existing beads and entities', async () => {
     const task = createBead(db.raw, {
       kind: 'task',

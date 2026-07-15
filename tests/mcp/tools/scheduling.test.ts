@@ -458,4 +458,67 @@ describe('scheduling tools', () => {
     expect(sent.isError).toBe(true);
     expect(sent.content[0].text).toMatch(/is sent and cannot be cancelled/);
   });
+
+  describe('conversation-bound session confinement', () => {
+    // The handler-local assertSessionAccess used to key on tier ===
+    // 'chat-scoped' only, so a conversation-bound session (tier:'global' +
+    // binding) bypassed it entirely — cross-conversation scheduled-message
+    // access from a bound per-chat socket. It must enforce the binding.
+    const boundSession = (): SessionContext => ({
+      tier: 'global',
+      conversationKey: CHAT_ALPHA_KEY,
+      deliveryJid: CHAT_ALPHA_JID,
+      binding: Object.freeze({
+        kind: 'conversation-bound' as const,
+        conversationKey: CHAT_ALPHA_KEY,
+        deliveryJid: CHAT_ALPHA_JID,
+      }),
+    });
+
+    beforeEach(() => {
+      db.raw.prepare(
+        'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+      ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'mine' }), 1700000100, 'pending');
+      db.raw.prepare(
+        'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+      ).run(CHAT_BETA_JID, 'text', JSON.stringify({ text: 'theirs' }), 1700000200, 'pending');
+    });
+
+    it('list_scheduled only shows the bound conversation', async () => {
+      const result = await registry.call('list_scheduled', {}, boundSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { count: number; messages: Array<{ chatJid: string }> };
+      expect(data.count).toBe(1);
+      expect(data.messages[0].chatJid).toBe(CHAT_ALPHA_JID);
+    });
+
+    it('get_scheduled and cancel_scheduled DENY another conversation\'s row', async () => {
+      const got = await registry.call('get_scheduled', { id: 2 }, boundSession());
+      expect(got.isError).toBe(true);
+      expect(got.content[0].text).not.toContain('theirs');
+
+      const cancelled = await registry.call('cancel_scheduled', { id: 2 }, boundSession());
+      expect(cancelled.isError).toBe(true);
+      const row = db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = 2').get() as { status: string };
+      expect(row.status).toBe('pending');
+    });
+
+    it('cancel_scheduled still works for the bound conversation\'s own row', async () => {
+      const result = await registry.call('cancel_scheduled', { id: 1 }, boundSession());
+      expect(result.isError).toBeUndefined();
+      const row = db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = 1').get() as { status: string };
+      expect(row.status).toBe('cancelled');
+    });
+
+    it('an unbound global session with a turn-pinned conversationKey keeps full visibility (operator non-regression)', async () => {
+      const result = await registry.call(
+        'list_scheduled',
+        {},
+        { tier: 'global', conversationKey: CHAT_ALPHA_KEY }, // turn-pinned, NOT bound
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { count: number };
+      expect(data.count).toBe(2);
+    });
+  });
 });

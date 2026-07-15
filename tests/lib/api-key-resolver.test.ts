@@ -199,4 +199,81 @@ describe('resolveApiKey', () => {
       expect(mockLog.warn).not.toHaveBeenCalled();
     });
   });
+
+  // W-3 (Phase C): allowEnvFallback flag restricts the resolver to keyring-only.
+  describe('allowEnvFallback (W-3 precedence reversal)', () => {
+    it('returns empty string when allowEnvFallback is false and no service is configured', () => {
+      process.env.OPENAI_API_KEY = 'env-key';
+
+      const result = resolveApiKey({
+        envVar: 'OPENAI_API_KEY',
+        allowEnvFallback: false,
+      });
+
+      expect(result).toBe('');
+    });
+
+    it('returns empty string when allowEnvFallback is false, service is set, and keyring misses', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue(null);
+
+      const result = resolveApiKey({
+        service: 'anthropic',
+        envVar: 'ANTHROPIC_API_KEY',
+        allowEnvFallback: false,
+      });
+
+      expect(result).toBe('');
+      // Keyring was consulted, env was NOT.
+      expect(mockedLookup).toHaveBeenCalledWith('anthropic');
+    });
+
+    it('returns the keyring value when allowEnvFallback is false and keyring hits', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue('keyring-key');
+
+      const result = resolveApiKey({
+        service: 'anthropic',
+        envVar: 'ANTHROPIC_API_KEY',
+        allowEnvFallback: false,
+      });
+
+      expect(result).toBe('keyring-key');
+    });
+
+    it('does NOT warn about env fallback when allowEnvFallback is false (no fallback happened)', () => {
+      process.env.ANTHROPIC_API_KEY = 'env-key';
+      mockedLookup.mockReturnValue(null);
+
+      resolveApiKey({
+        service: 'anthropic',
+        envVar: 'ANTHROPIC_API_KEY',
+        allowEnvFallback: false,
+      });
+
+      expect(mockLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('inline key still wins when allowEnvFallback is false', () => {
+      process.env.OPENAI_API_KEY = 'env-key';
+
+      const result = resolveApiKey({
+        inline: 'inline-key',
+        envVar: 'OPENAI_API_KEY',
+        allowEnvFallback: false,
+      });
+
+      expect(result).toBe('inline-key');
+    });
+
+    it('defaults to true (backward-compatible env fallback) when not specified', () => {
+      process.env.OPENAI_API_KEY = 'env-key';
+
+      const result = resolveApiKey({
+        envVar: 'OPENAI_API_KEY',
+      });
+
+      expect(result).toBe('env-key');
+    });
+  });
 });

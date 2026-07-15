@@ -736,6 +736,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
+| `perChatConversationBound` | boolean | no | `false` | Harden the per-chat actor socket (non-sandbox `per_chat`, `claude-cli`): the socket's MCP session carries a conversation binding, so global tools are default-denied outside the registry's reviewed conversation-safe allowlist (`transcribe_audio`), caller-supplied conversation keys are confined to the socket's own chat, and injected targets are filled from the binding (caller-supplied targets rejected). Also enables `memory_write` for the bound session. Default `false` = the existing behavior (injected-send confinement only). Requires `sessionScope: per_chat`; incompatible with `sandboxPerChat`. **Capability note:** enabling this removes cross-conversation reads and unreviewed global tools from the per-chat agent by design — opt in per instance only after confirming the instance does not rely on them. |
 | `sandbox` | object | no | — | Sandbox constraints applied via agent enforcement hooks. See [sandbox](#agentoptionssandbox). |
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the `claude-cli` agent subprocess. Tilde is expanded (`~` → `$HOME`). **Version resilience:** when an entry pins a version directory (e.g. `~/.claude/plugins/superpowers/5.0.7`) that no longer exists — for example after `claude plugin update` bumps it to `5.1.0` — the highest existing semver sibling under the same parent is substituted automatically at startup. Non-version paths and still-present directories are passed through unchanged. |
@@ -1312,6 +1313,7 @@ The loader enforces these constraints before the process starts:
 - Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
 - `agent` instances may omit `sessionScope` (the runtime defaults it to `single`); a present value must be `single`, `shared`, or `per_chat`. An empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
+- `agentOptions.perChatConversationBound: true` requires `sessionScope: per_chat` and is rejected together with `sandboxPerChat: true`.
 - The fallback/custom-endpoint combinations listed under [Cross-field validation rules](#cross-field-validation-rules) are rejected.
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
