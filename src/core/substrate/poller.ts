@@ -42,7 +42,10 @@ import { basename, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { nowUnixSec } from './time.ts';
-import { dueTriggers, validateTriggerSpec, isSafeSqliteSql } from './triggers.ts';
+import {
+  dueTriggers, validateTriggerSpec, isSafeSqliteSql,
+  countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
+} from './triggers.ts';
 import { TERMINAL, countOverdueProposals } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
@@ -244,6 +247,13 @@ export interface TriggerPollerOptions {
    * Production passes config.memory.sweep.overdueProposalAlertThreshold.
    */
   overdueProposalAlertThreshold?: number;
+  /**
+   * #1765 — grace window (seconds) before an active, never-fired trigger whose
+   * next_fire_at is in the past is reported as a liveness violation. Default 24h
+   * (86400s). Only consulted when `instance` is set (same gate as the backlog
+   * alert). Tests inject a small value to exercise the watchdog deterministically.
+   */
+  triggerPastDueGraceSeconds?: number;
 }
 
 interface SqliteSpec {
@@ -346,6 +356,14 @@ export class TriggerPoller {
    * re-alert every tick while the condition persists.
    */
   private overdueProposalAlertEmitted = false;
+  private readonly triggerPastDueGraceSeconds: number;
+  /**
+   * State-transition guard for the #1765 past-due liveness alert (same latch
+   * shape as overdueProposalAlertEmitted): fire once when an active never-fired
+   * trigger crosses the grace window, clear once none remain — never re-alert
+   * every tick while the firing path stays down.
+   */
+  private triggerPastDueAlertEmitted = false;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -370,6 +388,7 @@ export class TriggerPoller {
     this.agentJobDispatch = opts.agentJobDispatch ?? null;
     this.instance = opts.instance ?? null;
     this.overdueProposalAlertThreshold = opts.overdueProposalAlertThreshold ?? DEFAULT_OVERDUE_PROPOSAL_ALERT_THRESHOLD;
+    this.triggerPastDueGraceSeconds = opts.triggerPastDueGraceSeconds ?? DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC;
   }
 
   start(): void {
@@ -438,6 +457,16 @@ export class TriggerPoller {
     } catch (err) {
       log.error({ err }, 'overdue-proposal backlog check failed unexpectedly');
     }
+    // 4. Liveness watchdog (#1765). Runs AFTER the due loop, which drains and
+    //    stamps every trigger it processes — so a non-zero count here means the
+    //    firing path did NOT drain the row. Isolated in its own try/catch for
+    //    the same reason as the backlog check: a count-query fault must never
+    //    disrupt trigger draining above.
+    try {
+      this.checkPastDueTriggers(now);
+    } catch (err) {
+      log.error({ err }, 'past-due trigger liveness check failed unexpectedly');
+    }
     this.lastRunAt = new Date(now * 1000).toISOString();
     return processed;
   }
@@ -475,6 +504,43 @@ export class TriggerPoller {
         `overdueCount=${count} <= threshold=${this.overdueProposalAlertThreshold}`,
       );
       this.overdueProposalAlertEmitted = false;
+    }
+  }
+
+  /**
+   * #1765 liveness watchdog: alert when any active trigger is >grace past its
+   * next_fire_at yet has never fired (last_fire_at IS NULL) — nothing fired and,
+   * without this, nothing alerts. A healthy poller drains such a row within one
+   * tick, so a non-zero count means the firing path is down (paused poller,
+   * clock skew, or a unit bug). State-transition guarded (fire once, clear once
+   * resolved) via triggerPastDueAlertEmitted, mirroring
+   * checkOverdueProposalBacklog. No-ops when `instance` is unset — an alert with
+   * no attributable instance name cannot be routed through emitAlertChecked.
+   */
+  private checkPastDueTriggers(now: number): void {
+    if (!this.instance) return;
+    const count = countPastDueTriggers(this.db, now, this.triggerPastDueGraceSeconds);
+    const over = count > 0;
+    if (over && !this.triggerPastDueAlertEmitted) {
+      this.triggerPastDueAlertEmitted = emitAlertChecked(
+        this.instance,
+        'trigger_past_due',
+        `whatsoup@${this.instance} has ${count} active trigger(s) past due by more than ${this.triggerPastDueGraceSeconds}s with zero runs — the firing path may be down`,
+        [
+          `pastDueCount=${count}`,
+          `graceSeconds=${this.triggerPastDueGraceSeconds}`,
+          `checkedAt=${new Date(now * 1000).toISOString()}`,
+          "ref: #1765 — active trigger with next_fire_at far in the past and last_fire_at IS NULL fires/alerts nothing; a healthy poller drains it within one tick. Inspect: SELECT * FROM bead_triggers WHERE status='active' AND last_fire_at IS NULL AND next_fire_at IS NOT NULL.",
+        ].join('\n'),
+        'warning',
+      );
+    } else if (!over && this.triggerPastDueAlertEmitted) {
+      clearAlertSourceChecked(
+        this.instance,
+        'trigger_past_due',
+        `pastDueCount=0 (graceSeconds=${this.triggerPastDueGraceSeconds})`,
+      );
+      this.triggerPastDueAlertEmitted = false;
     }
   }
 
