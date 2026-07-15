@@ -9,6 +9,7 @@ import {
   createTrigger, listTriggers, pauseTrigger, extendTrigger,
   validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
   normalizeFireAtSeconds, MAX_REASONABLE_FIRE_AT_SEC,
+  countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from '../../../src/core/substrate/triggers.ts';
 import { nextCronRun } from '../../../src/core/cron.ts';
 
@@ -388,5 +389,69 @@ describe('#1757: fire_at ms/sec normalization', () => {
       reportChatJid: 'c', actor: 'user',
     });
     expect(t.next_fire_at).toBe(fireAtSec);
+  });
+});
+
+// #1765 — countPastDueTriggers: liveness gauge for active triggers whose
+// next_fire_at is >grace in the past AND that have never fired (last_fire_at IS
+// NULL). Each boundary test isolates ONE clause of the predicate so a green
+// result cannot be earned by the wrong column.
+describe('countPastDueTriggers (#1765)', () => {
+  let path: string; let db: Database;
+  const NOW = 1_000_000_000;
+  const GRACE = DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  // Active trigger with a caller-controlled next_fire_at; last_fire_at starts NULL.
+  function activeTrigger(nextFireAt: number) {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    return createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '0 8 * * *' },
+      reportChatJid: 'c', nextFireAt, actor: 'u',
+    });
+  }
+
+  it('defaults grace to 24h (86400s) when omitted', () => {
+    expect(GRACE).toBe(86_400);
+    activeTrigger(NOW - GRACE - 1);
+    // now defaulted to real clock would not see this row; pass now explicitly,
+    // grace omitted so the DEFAULT is exercised.
+    expect(countPastDueTriggers(db.raw, NOW)).toBe(1);
+  });
+
+  it('counts an active trigger past due beyond the grace window with zero runs', () => {
+    activeTrigger(NOW - GRACE - 1);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(1);
+  });
+
+  it('excludes a trigger sitting exactly at the grace boundary (strict <)', () => {
+    // next_fire_at === now - grace is NOT counted; one second older IS.
+    const t = activeTrigger(NOW - GRACE);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(NOW - GRACE - 1, t.id);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(1);
+  });
+
+  it('excludes a trigger that has already fired (last_fire_at IS NOT NULL) — isolates the last_fire_at clause', () => {
+    const t = activeTrigger(NOW - GRACE - 1000);
+    // Same status + ancient next_fire_at as a counted row; only last_fire_at differs.
+    db.raw.prepare(`UPDATE bead_triggers SET last_fire_at = ? WHERE id = ?`).run(NOW - 500, t.id);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
+  });
+
+  it('excludes a paused trigger — isolates the status clause', () => {
+    const t = activeTrigger(NOW - GRACE - 1000);
+    // Flip ONLY status; keep next_fire_at ancient and last_fire_at NULL so the
+    // exclusion can only come from status != 'active' (not from pauseTrigger's
+    // side effect of nulling next_fire_at).
+    db.raw.prepare(`UPDATE bead_triggers SET status = 'paused' WHERE id = ?`).run(t.id);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
+  });
+
+  it('excludes an active trigger with next_fire_at IS NULL', () => {
+    const t = activeTrigger(NOW - GRACE - 1000);
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = NULL WHERE id = ?`).run(t.id);
+    expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
   });
 });

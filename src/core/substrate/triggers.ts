@@ -282,3 +282,35 @@ export function dueTriggers(db: DatabaseSync, now: number, batchSize: number): T
      LIMIT ?`
   ).all(now, now, batchSize) as unknown as TriggerRow[];
 }
+
+/**
+ * #1765 — default grace window (seconds) before an active, never-fired trigger
+ * whose next_fire_at is in the past is treated as a liveness violation. 24h: a
+ * healthy poller ticks every 30s, so a row this stale has missed thousands of
+ * fire windows — it means the firing path is DOWN, not merely lagging.
+ */
+export const DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC = 86_400;
+
+/**
+ * #1765 liveness gauge: count active triggers whose next_fire_at is more than
+ * `graceSeconds` in the past AND that have never fired (last_fire_at IS NULL).
+ * A healthy poller drains such a trigger within one tick (stamping
+ * last_fire_at), so a non-zero count means the firing path failed silently —
+ * nothing fired, and without this gauge nothing alerts. A dedicated COUNT
+ * (mirroring countOverdueProposals) so the gauge stays accurate past any page
+ * size. Note the strict `<`: a row exactly at `now - grace` is not yet past due.
+ */
+export function countPastDueTriggers(
+  db: DatabaseSync,
+  now: number = nowUnixSec(),
+  graceSeconds: number = DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
+): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS c FROM bead_triggers
+     WHERE status = 'active'
+       AND next_fire_at IS NOT NULL
+       AND next_fire_at < ?
+       AND last_fire_at IS NULL`,
+  ).get(now - graceSeconds) as { c: number };
+  return row.c;
+}
