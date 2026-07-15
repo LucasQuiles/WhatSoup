@@ -199,7 +199,10 @@ describe('createCapabilityGrantManager — arm', () => {
     const { manager, store } = makeManager();
     const result = await manager.arm('camera', null, ownerAuth);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.record.expiresAtMs).toBeNull();
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.record.expiresAtMs).toBeNull();
+    expect(result.record.group).toBe('camera');
+    expect(store.record?.expiresAtMs).toBeNull();
   });
 
   it('supersedes an existing grant (reverts diff first)', async () => {
@@ -260,6 +263,7 @@ describe('createCapabilityGrantManager — disarm', () => {
     expect(store.record).not.toBeNull();
     await manager.disarm(ownerAuth);
     expect(store.record).toBeNull();
+    expect(store.writes).toBeGreaterThanOrEqual(2); // arm + disarm-clear
   });
 
   it('fires onDisarm callback', async () => {
@@ -303,7 +307,9 @@ describe('createCapabilityGrantManager — status', () => {
     const { manager } = makeManager();
     await manager.arm('camera', null, ownerAuth);
     const s = await manager.status();
+    expect(s.armed).toBe(true);
     expect(s.remainingMs).toBeNull();
+    expect(s.expiresAtMs).toBeNull();
   });
 });
 
