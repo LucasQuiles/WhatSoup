@@ -1,5 +1,9 @@
 import { Buffer } from 'node:buffer';
 import type { ProviderFailureKind } from './failure-taxonomy.ts';
+import {
+  admissionRejectInboundFailureClass,
+  type AdmissionRejectClass,
+} from '../../core/inbound-failure-class.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from '../../core/turn-recovery-contract.ts';
 import type {
   FinalizeTurnTerminalParams,
@@ -24,7 +28,15 @@ export type AttemptOutcome =
     readonly class: ProviderFailureKind | 'crash' | 'processor_throw' | 'unknown_terminal';
   }
   | { readonly kind: 'suppressed_by_policy' }
-  | { readonly kind: 'admission_rejected' };
+  | {
+    readonly kind: 'admission_rejected';
+    /**
+     * Distinct rejection reason (#1750). Absent preserves the legacy
+     * undifferentiated rejection (durable attempt_failure_class stays null,
+     * failure_class coerces to 'unknown').
+     */
+    readonly class?: AdmissionRejectClass;
+  };
 
 export type InboundDisposition =
   | 'finalized_replied'
@@ -157,9 +169,13 @@ export function toTurnTerminalPersistence(
     managerId: result.identity.managerId,
     generation: result.identity.generation,
     attemptKind: result.attemptOutcome.kind,
+    // admission_rejected carries its distinct subclass on the durable
+    // attempt_failure_class column (#1750); absent stays null (legacy).
     attemptFailureClass: result.attemptOutcome.kind === 'failed'
       ? result.attemptOutcome.class
-      : null,
+      : result.attemptOutcome.kind === 'admission_rejected'
+        ? result.attemptOutcome.class ?? null
+        : null,
     inboundDisposition: result.inboundDisposition,
     // not_sent collapses to the same persisted shape as 'none': the core
     // contract's failed_terminal invariant requires deliveryKind='none', and
@@ -214,7 +230,7 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
       }
       if (seq === null) return undefined;
       const failureClass = result.attemptOutcome.kind === 'admission_rejected'
-        ? 'unknown'
+        ? admissionRejectInboundFailureClass(result.attemptOutcome.class)
         : result.attemptOutcome.class === 'crash'
           ? 'session_crash'
           : result.attemptOutcome.class === 'processor_throw' ||
