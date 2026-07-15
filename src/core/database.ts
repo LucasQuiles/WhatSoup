@@ -1254,6 +1254,71 @@ function runMigration24(db: DatabaseSync): void {
 
 export const CURRENT_SCHEMA_MIGRATION = Math.max(...MIGRATIONS.keys());
 
+/**
+ * Snapshot the schema a fully-migrated database is expected to have, by
+ * replaying every migration against a throwaway in-memory database. This is the
+ * registry-driven source of truth for {@link Database.verifyRequiredTables} — it
+ * means any table a future migration adds is protected automatically, without a
+ * hand-maintained allowlist (#1778).
+ *
+ * Returns a map of user-table name → the `CREATE TABLE` SQL that builds it plus
+ * the `CREATE INDEX` SQL for every index that belongs to it. SQLite-internal
+ * objects and FTS shadow tables (whose `sql` is NULL) are excluded; the base
+ * virtual table keeps its recreatable DDL.
+ */
+export function migratedSchemaSnapshot(): Map<string, { createSql: string; indexes: string[] }> {
+  const ref = new DatabaseSync(':memory:');
+  try {
+    ref.exec('PRAGMA foreign_keys = ON');
+    ref.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    for (const [, migrateFn] of MIGRATIONS) {
+      migrateFn(ref);
+    }
+
+    const snapshot = new Map<string, { createSql: string; indexes: string[] }>();
+    for (const { name, sql } of ref
+      .prepare(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+      )
+      .all() as Array<{ name: string; sql: string }>) {
+      snapshot.set(name, { createSql: sql, indexes: [] });
+    }
+    for (const { tbl_name, sql } of ref
+      .prepare(
+        "SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'",
+      )
+      .all() as Array<{ tbl_name: string; sql: string }>) {
+      snapshot.get(tbl_name)?.indexes.push(sql);
+    }
+    return snapshot;
+  } finally {
+    ref.close();
+  }
+}
+
+/**
+ * Last-resort table DDL, used only if {@link migratedSchemaSnapshot} itself
+ * throws — guarantees the historically-critical `chat_aliases` table is still
+ * healed, so generalising the integrity guard is strictly additive and never
+ * worse than the pre-#1778 one-table allowlist.
+ */
+const CRITICAL_FALLBACK_TABLES: Array<{ table: string; ddl: string }> = [
+  {
+    table: 'chat_aliases',
+    ddl: `CREATE TABLE IF NOT EXISTS chat_aliases (
+  alias TEXT NOT NULL PRIMARY KEY,
+  chat_jid TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+  },
+];
+
 export class Database {
   private db: DatabaseSync;
 
@@ -1357,31 +1422,67 @@ export class Database {
 
 
   /**
-   * Guard against phantom migrations — a migration recorded as applied but
-   * whose DDL is missing (e.g. table was dropped externally). Re-runs the
-   * idempotent DDL for critical tables that use CREATE TABLE IF NOT EXISTS.
+   * Guard against phantom migrations — a migration recorded as applied but whose
+   * table is missing (dropped externally, transaction-boundary/partial-failure
+   * drift, file replacement). Rather than a hand-maintained one-table allowlist,
+   * the expected table set is derived from the migration registry (see
+   * {@link migratedSchemaSnapshot}), so EVERY migrated table is protected — the
+   * next missing table is found by this guard, not by a health-probe error storm
+   * (#1778). Any table present in the canonical snapshot but missing from the
+   * live database is recreated idempotently along with its indexes. Recreation is
+   * best-effort per object so one failure cannot abort healing the rest or block
+   * startup.
    */
   private verifyRequiredTables(): void {
-    const requiredIdempotentDDL: Array<{ table: string; ddl: string }> = [
-      {
-        table: 'chat_aliases',
-        ddl: `CREATE TABLE IF NOT EXISTS chat_aliases (
-  alias TEXT NOT NULL PRIMARY KEY,
-  chat_jid TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-      },
-    ];
+    const live = new Set(
+      (
+        this.db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name),
+    );
 
-    for (const { table, ddl } of requiredIdempotentDDL) {
-      const exists = this.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
-        .get(table) as { name: string } | undefined;
-      if (!exists) {
+    let snapshot: Map<string, { createSql: string; indexes: string[] }> | undefined;
+    try {
+      snapshot = migratedSchemaSnapshot();
+    } catch (err) {
+      // Deriving the canonical schema must never block startup. Fall back to the
+      // hardcoded critical-table DDL so we are never worse than the pre-#1778
+      // one-table guard.
+      log.error(
+        { err },
+        'Failed to derive canonical schema for integrity check — falling back to critical-table DDL',
+      );
+    }
+
+    if (snapshot) {
+      for (const [table, { createSql, indexes }] of snapshot) {
+        if (live.has(table)) continue;
         log.warn({ table }, 'Required table missing despite migration recorded — recreating');
-        this.db.exec(ddl);
+        this.recreateSchemaObject(table, createSql);
+        for (const indexSql of indexes) {
+          this.recreateSchemaObject(`${table} (index)`, indexSql);
+        }
       }
+      return;
+    }
+
+    for (const { table, ddl } of CRITICAL_FALLBACK_TABLES) {
+      if (live.has(table)) continue;
+      log.warn({ table }, 'Required table missing despite migration recorded — recreating');
+      this.recreateSchemaObject(table, ddl);
+    }
+  }
+
+  /** Recreate one schema object (table or index) best-effort; never throws. */
+  private recreateSchemaObject(label: string, ddl: string): void {
+    try {
+      this.db.exec(ddl);
+    } catch (err) {
+      log.error(
+        { err, object: label },
+        'Failed to recreate missing schema object during integrity check',
+      );
     }
   }
 
