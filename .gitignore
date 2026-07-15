@@ -100,3 +100,6 @@ tests/browser/__screenshots__/
 # pytest-cov data file
 .coverage
 .coverage.*
+
+# Local-only tooling (never tracked — contains host-specific paths/identifiers)
+.local/

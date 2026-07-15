@@ -36,6 +36,7 @@ import {
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
 
 const log = createChildLogger('session-manager');
@@ -181,14 +182,25 @@ export function buildChildEnv(
   const env = buildBaseChildEnv(baseOpts);
 
   // Provider-specific credentials — each provider only receives the keys it needs.
+  // W-4: keys are resolved via resolveApiKey() (keyring-first, env-fallback)
+  // rather than read directly from process.env. This removes the direct env
+  // reads flagged by tests/scripts/secret-env-read-guard.test.ts and ensures
+  // keyring-stored keys are forwarded to children even when the parent env is
+  // empty. See docs/security-handoffs/2026-05-09-env-secret-exposure.md Phase D.
   switch (provider) {
     case 'claude-cli':
-      // OPENAI_API_KEY is allowed for this provider's auxiliary features.
+      // OPENAI_API_KEY is allowed for this provider's auxiliary features (Whisper).
       // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      {
+        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
+        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
+      }
       break;
     case 'codex-cli':
-      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      {
+        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
+        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
+      }
       break;
     case 'gemini-cli':
       if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -196,8 +208,12 @@ export function buildChildEnv(
       break;
     case 'opencode-cli': {
       // OpenCode reads from its own config or standard API keys
-      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-      if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+      {
+        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
+        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
+        const anthropicKey = resolveApiKey({ service: 'anthropic', envVar: 'ANTHROPIC_API_KEY' });
+        if (anthropicKey) env.ANTHROPIC_API_KEY = anthropicKey;
+      }
       // Forward the fleet fallback trio keys (deepseek/minimax/glm) from the
       // standard keychain so `opencode run -m minimax/...` / `deepseek/...` /
       // `glm/...` can auth (opencode's catalog still allows other models
