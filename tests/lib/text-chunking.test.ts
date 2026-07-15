@@ -84,15 +84,13 @@ describe('chunkText', () => {
   it('preserves surrogate pairs (emoji)', () => {
     const text = '😀'.repeat(10); // 10 emoji = 20 UTF-16 units
     const chunks = chunkText(text, 5);
-    // Each chunk must not split a surrogate pair
-    for (const chunk of chunks) {
-      // A valid string — no lone high surrogate at end
+    expect(chunks.length).toBeGreaterThan(0);
+    // Each chunk must not end with a lone high surrogate
+    const bad = chunks.filter((chunk) => {
       const lastCode = chunk.charCodeAt(chunk.length - 1);
-      if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
-        // Shouldn't happen — there should be a low surrogate after
-        expect.fail(`Chunk ends with lone high surrogate: ${JSON.stringify(chunk)}`);
-      }
-    }
+      return lastCode >= 0xd800 && lastCode <= 0xdbff;
+    });
+    expect(bad).toEqual([]);
   });
 });
 
