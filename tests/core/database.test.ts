@@ -3,7 +3,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  unlinkSync,
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import {
   Database,
   storeDecryptionFailure,
@@ -14,7 +21,7 @@ import {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function tmpFile(): string {
-  return join(tmpdir(), `whatsoup-test-${randomBytes(8).toString('hex')}.db`);
+  return join(realpathSync(tmpdir()), `whatsoup-test-${randomBytes(8).toString('hex')}.db`);
 }
 
 function cleanup(...paths: string[]): void {

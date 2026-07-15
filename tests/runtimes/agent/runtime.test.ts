@@ -12698,18 +12698,17 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // REAL store DB: the full schema via Database.open() (migrations), so the
     // constructor's genuine SQL (outbound_sends writer, lid_mappings, the
     // flag-gated preference schema) runs for real instead of against stubs.
-    const { Database: RealDatabase } = await import('../../../src/core/database.ts');
     const os = await import('node:os');
     const fs = await import('node:fs');
     const path = await import('node:path');
     const crypto = await import('node:crypto');
-    routingDbPath = path.join(os.tmpdir(), `routing-h-${crypto.randomBytes(6).toString('hex')}.db`);
+    routingDbPath = path.join(fs.realpathSync(os.tmpdir()), `routing-h-${crypto.randomBytes(6).toString('hex')}.db`);
     const real = new RealDatabase(routingDbPath);
     real.open();
     routingDb = real as unknown as Database;
     const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
     ensurePrefSchema = prefMod.ensureChatPreferenceSchema;
-    eventsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'route-ev-'));
+    eventsDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'route-ev-'));
     cfgAny().nlRouting = true;
     cfgAny().nlRoutingEventsDir = eventsDir;
     // The runtime reads its provider from config (config.agentProvider), which
@@ -12735,6 +12734,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     for (const suffix of ['', '-wal', '-shm']) {
       if (fs.existsSync(routingDbPath + suffix)) fs.unlinkSync(routingDbPath + suffix);
     }
+    fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
   function makeRoutingRuntime(): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {

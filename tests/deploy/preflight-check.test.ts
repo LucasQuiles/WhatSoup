@@ -503,6 +503,8 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — pre-flight behavior', () => {
   });
 });
 
+// @skip-env the wrapper ordering harness executes the pinned TypeScript entrypoint;
+// out-of-pin Node versions are covered by guard:node-pin-consistency.
 describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', () => {
   it('runs database check, restart preflight, then runtime on ready', () => {
     const fixture = makeWrapperFixture();
