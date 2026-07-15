@@ -24,6 +24,16 @@ export type InboundFailureClass =
   | 'session_spawn_failed'
   | 'crash_recovery'
   | 'stale_reclaim'
+  // Admission-rejection subclasses (#1750). A turn admitted-then-rejected is
+  // NOT one bucket: benign backpressure (queue_full / queue_closed) must be
+  // separable from fault conditions (queue_halted / pre_dispatch_error /
+  // scope_blocked_recovery) so alerting can page on deadlocks without
+  // false-positiving on capacity sheds. The names mirror AdmissionRejectClass.
+  | 'queue_full'
+  | 'queue_halted'
+  | 'queue_closed'
+  | 'pre_dispatch_error'
+  | 'scope_blocked_recovery'
   | 'unknown';
 
 export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
@@ -36,8 +46,53 @@ export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
   'session_spawn_failed',
   'crash_recovery',
   'stale_reclaim',
+  'queue_full',
+  'queue_halted',
+  'queue_closed',
+  'pre_dispatch_error',
+  'scope_blocked_recovery',
   'unknown',
 ]);
+
+/**
+ * Distinct reasons an admitted turn can be rejected before dispatch (#1750).
+ * Each maps 1:1 onto the same-named InboundFailureClass so the durable
+ * failure_class column carries the operator-facing driver split. Absent (a
+ * legacy/undifferentiated rejection) collapses to 'unknown', preserving the
+ * pre-#1750 null attempt_failure_class invariant for those rows.
+ */
+export type AdmissionRejectClass =
+  | 'queue_full'
+  | 'queue_halted'
+  | 'queue_closed'
+  | 'pre_dispatch_error'
+  | 'scope_blocked_recovery';
+
+export const ADMISSION_REJECT_CLASSES: ReadonlySet<string> = new Set<string>([
+  'queue_full',
+  'queue_halted',
+  'queue_closed',
+  'pre_dispatch_error',
+  'scope_blocked_recovery',
+]);
+
+/**
+ * Shared lockstep mapping from an admission-rejection subclass (as carried on
+ * the durable attempt_failure_class column, or absent) to its distinct inbound
+ * failure_class. Both the agent-side mapper (turn-terminal.ts) and the core
+ * finalization contract (turn-finalization-contract.ts) call THIS function so
+ * their two ternaries can never drift. Absent → 'unknown'; a known subclass →
+ * the same-named class; anything else is a contract violation.
+ */
+export function admissionRejectInboundFailureClass(
+  admissionClass: string | null | undefined,
+): InboundFailureClass {
+  if (admissionClass === null || admissionClass === undefined) return 'unknown';
+  if (ADMISSION_REJECT_CLASSES.has(admissionClass)) {
+    return admissionClass as InboundFailureClass;
+  }
+  throw new Error('admission_rejected terminal disposition has an invalid rejection class');
+}
 
 /**
  * Map a caller-supplied value onto the bounded vocabulary. Any absent or

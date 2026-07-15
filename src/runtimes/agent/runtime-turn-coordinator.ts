@@ -7,7 +7,7 @@ import type {
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
-import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
+import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -956,7 +956,8 @@ async applyRecoveredRuntimeTurnFinalization(
 
 enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
-    this.finalizeRejectedRuntimeTurn(turn);
+    // Shutdown-time admission rejection is a closed queue (#1750).
+    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
     return false;
   }
   let queue = this.host.perChatTurnQueues.get(mapKey);
@@ -964,10 +965,10 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
     const queueKey = { value: mapKey };
     queue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
-      onReject: (rejected) => {
-        this.finalizeRejectedRuntimeTurn(rejected);
+      onReject: (rejected, reason) => {
+        this.finalizeRejectedRuntimeTurn(rejected, reason);
         log.warn(
-          { chatJid: rejected.chatJid, senderJid: rejected.senderJid, mapKey: queueKey.value },
+          { chatJid: rejected.chatJid, senderJid: rejected.senderJid, mapKey: queueKey.value, reason },
           'per-chat turn rejected — agent queue full or halted',
         );
       },
@@ -980,7 +981,7 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   return queue.enqueue(turn);
 }
 
-finalizeRejectedRuntimeTurn(turn: QueuedTurn): void {
+finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
   const context = turn.runtimeContext;
   if (!context) {
     if (turn.inboundSeq !== undefined) {
@@ -988,8 +989,13 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn): void {
     }
     return;
   }
+  // #1750: carry the distinct rejection reason into the admission outcome so it
+  // lands as a distinct durable failure_class; absent stays legacy 'unknown'.
+  const attemptOutcome: AttemptOutcome = reason === undefined
+    ? { kind: 'admission_rejected' }
+    : { kind: 'admission_rejected', class: reason };
   let tracked!: Promise<void>;
-  tracked = this.finalizeUndispatchedRuntimeTurn(context)
+  tracked = this.finalizeUndispatchedRuntimeTurn(context, undefined, attemptOutcome)
     .then(async (result) => {
       if (result.kind !== 'terminal' && !result.mayAdvance) {
         await this.host.runtimeTurnSupervisor.waitForRecovery(context);

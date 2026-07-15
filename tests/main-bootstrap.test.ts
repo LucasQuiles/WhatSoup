@@ -687,7 +687,11 @@ describe('main bootstrap', () => {
     expect(h.checkDegradationSignals).toHaveBeenCalledWith(h.db, h.connection, h.durability, null);
 
     await vi.advanceTimersByTimeAsync(30 * 60_000);
-    expect(h.reconcileLidMappings).toHaveBeenCalledWith(h.db, '/tmp/whatsoup-main-auth');
+    expect(h.reconcileLidMappings).toHaveBeenCalledWith(
+      h.db,
+      '/tmp/whatsoup-main-auth',
+      expect.objectContaining({ lastMaxPk: expect.any(Number), knownUnresolvedLids: expect.any(Set) }),
+    );
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
   });
 
