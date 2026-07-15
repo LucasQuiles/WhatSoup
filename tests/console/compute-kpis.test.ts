@@ -43,6 +43,7 @@ const zeroKpis = {
   totalSent: 0,
   totalReceived: 0,
   totalMedia: 0,
+  staleExcluded: 0,
 };
 
 describe('computeKpis', () => {
@@ -211,6 +212,77 @@ describe('computeKpis', () => {
       totalSent: 5,
       totalReceived: 6,
       totalMedia: 3,
+      staleExcluded: 0,
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  //  Health freshness gate (#1762 remediation 2)
+  //
+  //  `stale` (enrichInstance, src/fleet/routes/lines.ts) means the poller is
+  //  currently failing and `health` is carried forward from an older successful
+  //  observation. Summing the carried-forward health BODY (runtime.passive.unread,
+  //  runtime.agent.activeSessions) across stale instances inflates fleet totals
+  //  with values that no longer reflect the live instant. Gate ONLY those
+  //  body-derived counts; per rem-1 the status-derived (connected / needAttention)
+  //  and DB-derived (messageStats) fields must stay visible through the outage.
+  // ---------------------------------------------------------------------------
+
+  it('excludes a stale instance health-body counts (unread/agentSessions) but keeps its status + messageStats', () => {
+    const result = computeKpis([
+      makeLine({
+        status: 'online',
+        stale: true,
+        error: 'boom',
+        health: {
+          status: 'ok',
+          uptime_seconds: 1,
+          messages_total: 0,
+          whatsapp: { connection: { state: 'open' } },
+          sqlite: { messages_total: 0, schema_version: 5 },
+          runtime: {
+            passive: { unreadCount: 5, lastActivityAt: null },
+            agent: { activeSessions: 3, lastSessionStatus: null, lastSessionStartedAt: null },
+          },
+        },
+        messageStats: { sent: 10, received: 20, images: 1, audio: 1, documents: 1 },
+      }),
+      makeLine({
+        status: 'online',
+        stale: false,
+        health: {
+          status: 'ok',
+          uptime_seconds: 1,
+          messages_total: 0,
+          whatsapp: { connection: { state: 'open' } },
+          sqlite: { messages_total: 0, schema_version: 5 },
+          runtime: {
+            passive: { unreadCount: 4, lastActivityAt: null },
+            agent: { activeSessions: 2, lastSessionStatus: null, lastSessionStartedAt: null },
+          },
+        },
+      }),
+    ]);
+    // Body-derived counts: only the fresh line contributes.
+    expect(result.unread).toBe(4);
+    expect(result.agentSessions).toBe(2);
+    // Status-derived: the stale line still counts (rem-1 keeps status visible).
+    expect(result.connected).toBe(2);
+    expect(result.needAttention).toBe(1); // stale line has error -> attention
+    // DB-derived messageStats persist through the outage.
+    expect(result.totalSent).toBe(10);
+    expect(result.totalReceived).toBe(20);
+    expect(result.totalMedia).toBe(3);
+    // Explicit: the gate is surfaced, not silent.
+    expect(result.staleExcluded).toBe(1);
+  });
+
+  it('reports staleExcluded even for a stale instance with no health body', () => {
+    const result = computeKpis([
+      makeLine({ status: 'online', stale: true, health: null }),
+      makeLine({ status: 'online', stale: false, health: null }),
+    ]);
+    expect(result.connected).toBe(2);
+    expect(result.staleExcluded).toBe(1);
   });
 });
