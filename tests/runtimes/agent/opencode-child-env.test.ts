@@ -184,10 +184,16 @@ describe('buildChildEnv — opencode-cli model-derived key', () => {
     expect(env.DEEPSEEK_API_KEY).toBe('ds-secret-123');
     expect(env.MINIMAX_API_KEY).toBe('mm-secret-456');
     expect(env.ZAI_API_KEY).toBe('zai-secret-789');
+    // W-4: opencode-cli now resolves openai + anthropic via resolveApiKey →
+    // lookupCredential (keyring-first) alongside the fleet fallback trio, so the
+    // call-list includes them even when unset. Env output above is unchanged —
+    // openai/anthropic resolve to null here and are not forwarded.
     expect(lookupCredentialMock.mock.calls.map(([svc]) => svc).sort()).toEqual([
+      'anthropic',
       'deepseek',
       'glm',
       'minimax',
+      'openai',
     ]);
     expect(warnMock).not.toHaveBeenCalled();
   });

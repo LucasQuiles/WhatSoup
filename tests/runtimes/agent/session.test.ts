@@ -86,6 +86,24 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
 }));
 
+// Mock keyring so lookupCredential is a pure env-lookup (no fs/execFileSync
+// side effects). SERVICE_ENV_MAP and resolveProviderKeyService are preserved
+// from the real module. This prevents the node:fs mock pollution above from
+// leaking into buildChildEnv tests after the W-4 migration routed key reads
+// through resolveApiKey → lookupCredential.
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    lookupCredential: vi.fn((service: string): string | null => {
+      const envVar = actual.SERVICE_ENV_MAP[service];
+      if (!envVar) return null;
+      const val = process.env[envVar];
+      return val && val.length > 0 ? val : null;
+    }),
+  };
+});
+
 // Import after mocks are registered
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
