@@ -17,6 +17,7 @@ import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
 import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
+import { countPastDueTriggers } from './substrate/triggers.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -1196,6 +1197,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         status = 'degraded';
       }
 
+      // #1765 — surface the past-due liveness gauge (active triggers >grace past
+      // next_fire_at with zero runs). Exposition only; the poller owns the alert.
+      const pastDueTriggers = safeDbQuery(
+        () => countPastDueTriggers(deps.db.raw),
+        0,
+        'failed to count past-due triggers',
+      );
+
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
       // fallback provider and when that window expires.
@@ -1301,6 +1310,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           unprocessed: enrichmentStats.unprocessed,
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
+          past_due_triggers: pastDueTriggers,
         },
         access_control: {
           pending_count: pendingCount,
