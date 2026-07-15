@@ -3,12 +3,58 @@
 
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
-import type { RuntimeConnection } from '../transport/runtime-connection.ts';
+import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { emitAlertChecked } from '../lib/emit-alert.ts';
 
 const log = createChildLogger('scheduler');
+
+/**
+ * Narrow, CORE-LOCAL view of the transport surface the scheduler consumes.
+ * Structural, so `src/core/` need not import from `src/transport/` (the
+ * import-boundary guard forbids core→transport). The real RuntimeConnection /
+ * ConnectionManager satisfies this by shape — `main.ts` still injects the
+ * concrete connection unchanged.
+ */
+interface SchedulerConnection {
+  sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt>;
+  sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
+  /** Optional link-state snapshot; absent on transports without one (e.g. SMS). */
+  getConnectionState?(): SchedulerConnectionState;
+}
+
+/**
+ * Narrow, CORE-LOCAL view of the connection-state fields the #1779 link gate
+ * reads. The transport ConnectionStateSnapshot is a structural superset, so a
+ * live snapshot satisfies this without a core→transport import.
+ */
+interface SchedulerConnectionState {
+  connected: boolean;
+  lastDisconnectReason: string | null;
+  authBond?: { status: string };
+}
+
+/**
+ * #1779 — reason stamped on a due row held because the instance's WhatsApp link
+ * is de-linked (logged out / device-bond lost). The row stays `pending` and is
+ * NEVER burned to `failed`; it fires on re-link.
+ */
+const DELINK_HOLD_REASON =
+  'Held: instance de-linked from WhatsApp (logged out / device-bond lost); retained until re-link';
+
+/**
+ * Link-state classification of the transport, consulted before a fire-time send.
+ * - `linked`     — connected; send normally.
+ * - `delinked`   — logged out / device-bond lost: TERMINAL, needs human re-pair.
+ *                  Hold the send (defer) + raise a loud producer signal — never
+ *                  silently burn it (the #1779 defect).
+ * - `transient`  — dropped but actively reconnecting: keep trying (existing
+ *                  retry path); a daily job must survive a socket blip.
+ * - `unknown`    — transport exposes no link state (e.g. SMS): never gate.
+ */
+type LinkState = 'linked' | 'delinked' | 'transient' | 'unknown';
 
 interface ScheduledRow {
   id: number;
@@ -53,13 +99,23 @@ function advanceRecurringRun(
 export class MessageScheduler {
   private timer: NodeJS.Timeout | null = null;
   private db: Database;
-  private connection: RuntimeConnection;
-  private config: { intervalMs: number; maxRetries: number };
+  private connection: SchedulerConnection;
+  private config: { intervalMs: number; maxRetries: number; instance?: string };
+
+  /**
+   * #1779 latch: true once the de-linked-hold owner alert has fired for the
+   * current de-link episode. Re-armed by clearDeLinkLatch() on the first linked
+   * tick (evaluated before the empty-candidates return, so it clears even in an
+   * idle window) — a later de-link alerts again, but a persistent outage alerts
+   * only once (mirrors ConnectionManager.loggedOutAlertEmitted, which clears
+   * unconditionally on the 'open' event).
+   */
+  private deLinkAlertEmitted = false;
 
   constructor(
     db: Database,
-    connection: RuntimeConnection,
-    config: { intervalMs: number; maxRetries: number },
+    connection: SchedulerConnection,
+    config: { intervalMs: number; maxRetries: number; instance?: string },
   ) {
     this.db = db;
     this.connection = connection;
@@ -164,6 +220,16 @@ export class MessageScheduler {
   async tick(): Promise<void> {
     const now = nowUnixSec();
 
+    // #1779 — assess transport link state up front. Clearing the de-link alert
+    // latch here, BEFORE the empty-candidates early return, re-arms it on
+    // re-link even during a window with no due message — matching
+    // ConnectionManager.loggedOutAlertEmitted, which clears on the 'open' event
+    // unconditionally rather than being gated on scheduler activity. Without
+    // this, a re-link during an idle window would leave the latch stuck and a
+    // later de-link episode would hold sends without alerting.
+    const linkState = this.assessLinkState();
+    if (linkState === 'linked') this.clearDeLinkLatch();
+
     // Fetch pending rows whose scheduled_at (one-shot) or next_run_at (recurring)
     // has passed, then claim each by id. Fetching ids first and updating by id
     // ensures we only process rows we explicitly claimed in this tick —
@@ -182,6 +248,17 @@ export class MessageScheduler {
       .all(now, now) as unknown as ScheduledRow[];
 
     if (candidates.length === 0) return;
+
+    // #1779 — fire-time link-state gate. A due send fired against a DE-LINKED
+    // instance (logged out / device-bond lost, e.g. an instance left de-linked
+    // for weeks) must NOT be accepted-then-silently-burned: hold it pending
+    // re-link and raise a loud producer signal. A TRANSIENT reconnect blip is
+    // distinguished and still processed (keep trying); unknown transports (no
+    // link state) are never gated.
+    if (linkState === 'delinked') {
+      this.deferForDeLink(candidates, now);
+      return;
+    }
 
     // Claim by id to avoid touching pre-existing 'processing' rows
     const ids = candidates.map((r) => r.id);
@@ -341,6 +418,78 @@ export class MessageScheduler {
     log.info({ id: row.id, chatJid: row.chat_jid }, 'scheduler: message sent');
   }
 
+  /**
+   * Classify the transport's link state for the fire-time gate. De-linked is the
+   * TERMINAL logged-out / device-bond-lost state (a human must re-pair) — the
+   * definitive signal is `lastDisconnectReason === 'loggedOut'` (Baileys maps
+   * DisconnectReason.loggedOut → the 'loggedOut' key) or an absent/poisoned auth
+   * bond. `connected` false without those is a transient reconnect blip. A
+   * transport that exposes no snapshot is never gated (fail-safe 'unknown').
+   */
+  private assessLinkState(): LinkState {
+    const getState = this.connection.getConnectionState;
+    if (typeof getState !== 'function') return 'unknown';
+    let snap: SchedulerConnectionState;
+    try {
+      snap = getState.call(this.connection);
+    } catch {
+      return 'unknown';
+    }
+    if (snap.connected) return 'linked';
+    const deLinked =
+      snap.lastDisconnectReason === 'loggedOut' ||
+      snap.authBond?.status === 'missing' ||
+      snap.authBond?.status === 'invalid';
+    return deLinked ? 'delinked' : 'transient';
+  }
+
+  /**
+   * #1779 — hold every due row for a de-linked instance instead of dropping it.
+   * Rows stay `pending` (never claimed to `processing`, never burned to
+   * `failed`); retry_count is untouched so a de-link can never walk a send to
+   * permanent failure. They fire on the first tick after re-link. A loud,
+   * latched owner alert (the producer-feedback seam shared with #1745) fires
+   * once per de-link episode.
+   */
+  private deferForDeLink(candidates: ScheduledRow[], now: number): void {
+    const ids = candidates.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.raw
+      .prepare(
+        `UPDATE scheduled_messages SET error = ?
+         WHERE id IN (${placeholders}) AND status = 'pending'`,
+      )
+      .run(DELINK_HOLD_REASON, ...ids);
+
+    log.warn(
+      { heldCount: ids.length, ids, event: 'scheduler_delink_hold' },
+      'scheduler: instance de-linked from WhatsApp; scheduled sends held until re-link (not dropped)',
+    );
+
+    if (!this.deLinkAlertEmitted && this.config.instance) {
+      this.deLinkAlertEmitted = true;
+      emitAlertChecked(
+        this.config.instance,
+        'scheduler_delinked_send_held',
+        `whatsoup@${this.config.instance} is DE-LINKED from WhatsApp (logged out) — holding ${ids.length} due scheduled send(s) until re-link; nothing dropped`,
+        [
+          `heldCount=${ids.length}`,
+          `firstHeldId=${ids[0]}`,
+          `detectedAt=${new Date(now * 1000).toISOString()}`,
+          'ref: #1779 — a scheduled send fired against a de-linked instance was previously retried 3× then silently marked permanently-failed. It is now held pending re-link. Re-pair the WhatsApp link (auth CLI) to resume delivery, or delete the scheduled_messages row to cancel.',
+        ].join('\n'),
+        'warning',
+      );
+    }
+  }
+
+  /** Re-arm the de-link alert latch once the instance is linked again. */
+  private clearDeLinkLatch(): void {
+    if (!this.deLinkAlertEmitted) return;
+    this.deLinkAlertEmitted = false;
+    log.info({ event: 'scheduler_relinked' }, 'scheduler: instance re-linked; resuming scheduled sends');
+  }
+
   private handleSendFailure(row: ScheduledRow, err: unknown): void {
     const newRetryCount = row.retry_count + 1;
     const errorMsg = errorMessage(err);
@@ -408,6 +557,25 @@ export class MessageScheduler {
           )
           .run(newRetryCount, errorMsg, row.id);
         log.warn({ id: row.id, retries: newRetryCount, err }, 'scheduler: message permanently failed');
+        // #1779 remediation #3 — a permanent one-shot drop must be LOUD, not
+        // merely a log line found later by log mining. This is also the backstop
+        // for a de-link the fire-time gate could not classify (e.g. an SMS
+        // transport with no link-state snapshot, or creds rejected with no
+        // logout event this lifetime).
+        if (this.config.instance) {
+          emitAlertChecked(
+            this.config.instance,
+            'scheduler_send_failed',
+            `whatsoup@${this.config.instance} permanently failed a scheduled send (id ${row.id}) after ${newRetryCount} attempts — message DROPPED: ${errorMsg}`,
+            [
+              `scheduledId=${row.id}`,
+              `attempts=${newRetryCount}`,
+              `error=${errorMsg}`,
+              'ref: #1779 remediation #3 — a permanent scheduled-send drop is now surfaced as an alert. If the transport is de-linked, re-pair the WhatsApp link; otherwise inspect the send error.',
+            ].join('\n'),
+            'warning',
+          );
+        }
       }
     } else {
       this.db.raw
@@ -450,7 +618,7 @@ export class MessageScheduler {
         Object.assign(rest, legacyRest);
       }
 
-      await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as Parameters<RuntimeConnection["sendMedia"]>[1]);
+      await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as OutboundMedia);
     }
   }
 }
