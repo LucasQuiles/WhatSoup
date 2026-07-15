@@ -287,10 +287,10 @@ describe('adaptEmojisForSingleSlot', () => {
 
 describe('DEFAULT_STATUS_REACTION_EMOJIS', () => {
   it('has all required states', () => {
-    expect(DEFAULT_STATUS_REACTION_EMOJIS.queued).toBeTruthy();
-    expect(DEFAULT_STATUS_REACTION_EMOJIS.thinking).toBeTruthy();
-    expect(DEFAULT_STATUS_REACTION_EMOJIS.tool).toBeTruthy();
-    expect(DEFAULT_STATUS_REACTION_EMOJIS.done).toBeTruthy();
-    expect(DEFAULT_STATUS_REACTION_EMOJIS.error).toBeTruthy();
+    expect(DEFAULT_STATUS_REACTION_EMOJIS.queued).toBe('👀');
+    expect(DEFAULT_STATUS_REACTION_EMOJIS.thinking).toBe('🤔');
+    expect(DEFAULT_STATUS_REACTION_EMOJIS.tool).toBe('🔧');
+    expect(DEFAULT_STATUS_REACTION_EMOJIS.done).toBe('✅');
+    expect(DEFAULT_STATUS_REACTION_EMOJIS.error).toBe('❌');
   });
 });
