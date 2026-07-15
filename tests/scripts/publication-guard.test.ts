@@ -278,6 +278,50 @@ describe('publication audit root list drift pin', () => {
   });
 });
 
+describe('publication guard tilde-relative home paths', () => {
+  it('flags tilde-relative operator home paths the same way as absolute home paths', () => {
+    // Compose literals via join so this test source carries no flaggable path
+    // of its own (the commit runs the staged guard over these added lines).
+    const labPath = ['~', 'LAB', 'WhatSoup'].join('/');
+    expect(
+      scanTextForPrivateLiterals('docs/public-note.md', `Operator checkout: ${labPath}`).map((issue) => issue.code),
+    ).toEqual(['local-home-path']);
+
+    const claudePath = ['~', '.claude', 'settings.json'].join('/');
+    expect(
+      scanTextForPrivateLiterals('docs/public-note.md', `Agent config: ${claudePath}`).map((issue) => issue.code),
+    ).toEqual(['local-home-path']);
+
+    // Ambiguous XDG form: the absolute rule flags /Users/<user>/.config/whatsoup,
+    // so the tilde form flags too (symmetry with the absolute-path rule).
+    const xdgPath = ['~', '.config', 'whatsoup'].join('/');
+    expect(
+      scanTextForPrivateLiterals('docs/public-note.md', `Install path: ${xdgPath}`).map((issue) => issue.code),
+    ).toEqual(['local-home-path']);
+  });
+
+  it('allows tilde paths whose first segment is on the shared allowlist (symmetry with the absolute rule)', () => {
+    const deployUserPath = ['~', 'whatsoup', 'instances'].join('/');
+    expect(scanTextForPrivateLiterals('docs/public-note.md', `Deploy user path: ${deployUserPath}`)).toEqual([]);
+
+    const runnerPath = ['~', 'runner', 'work'].join('/');
+    expect(scanTextForPrivateLiterals('docs/public-note.md', `CI path: ${runnerPath}`)).toEqual([]);
+  });
+
+  it('does not match a bare tilde used as prose', () => {
+    expect(scanTextForPrivateLiterals('docs/public-note.md', 'takes ~ 5 minutes to run')).toEqual([]);
+  });
+
+  it('fails release mode when a PUBLIC doc contains a tilde-relative operator home path', () => {
+    const tildePath = ['~', 'LAB', 'WhatSoup'].join('/');
+    const repo = makeRepo(`Operator path: ${tildePath}\n`, 'PUBLIC');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--release'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('local-home-path');
+  });
+});
+
 describe('publication guard operational allowlist', () => {
   it('allows template-unit tokens only in operational fleet files, never alongside a real address', () => {
     // Composed so the test source itself carries no email-shaped literal.
