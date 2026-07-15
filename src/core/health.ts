@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
 import { safeStringEqual } from '../lib/safe-compare.ts';
+import { lookupCredential } from '../lib/keyring.ts';
 import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth } from './arc-binding-health.ts';
@@ -476,7 +477,11 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
 
 function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
   const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-  const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+  // Route through the shared credential resolver (W-2). lookupCredential checks
+  // the keyring first (when configured), falling back to WHATSOUP_HEALTH_TOKEN
+  // env var. This centralizes secret reads for the W-1 closed-registry gate
+  // and the future W-5 keyring migration off tokens.env.
+  const expectedToken = lookupCredential('whatsoup-health-token') ?? undefined;
   if (!verifyBearer(authHeader, expectedToken)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));

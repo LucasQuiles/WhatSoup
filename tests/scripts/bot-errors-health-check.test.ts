@@ -2017,7 +2017,15 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
   });
 
   it('refuses symlinked or loose fleet API token files before probing the fleet API', () => {
-    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    // Anchor under /tmp, not os.tmpdir(): the fleet-token secure-open in
+    // deploy/scripts/bot-errors-health-check.py (read_fleet_token_text) opens every
+    // ancestor dir with O_RDONLY|O_DIRECTORY|O_NOFOLLOW, which requires read on each.
+    // On systemd hosts pam sets TMPDIR=/tmp/user/<uid>, whose parent /tmp/user is
+    // 0711 root-owned (unreadable), so the walk returns token_parent_refused (EACCES)
+    // before reaching the token leaf, masking the token_symlink_refused /
+    // token_mode_too_open assertions below. /tmp has world-readable ancestors; matches
+    // the mkdtempSync('/tmp/bot-errors-health-') pattern already used above.
+    tmpRoot = mkdtempSync('/tmp/bot-errors-health-');
     const credentialRoot = join(tmpRoot, '.config', 'whatsoup');
     const outsideToken = join(tmpRoot, 'outside-fleet-tokens.json');
     const tokenPath = join(credentialRoot, 'fleet-tokens.json');

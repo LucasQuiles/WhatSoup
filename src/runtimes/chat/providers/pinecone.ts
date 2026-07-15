@@ -5,6 +5,7 @@ import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { errorMessage } from '../../../lib/error-message.ts';
 import { shortHash } from '../../../lib/short-hash.ts';
+import { resolveApiKey } from '../../../lib/api-key-resolver.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
@@ -113,7 +114,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
     return { state: 'disabled', index: targetIndex };
   }
 
-  const apiKey = process.env[configuredPineconeApiKeyEnv()]?.trim();
+  const apiKey = resolvePineconeApiKey().trim();
   if (!apiKey) {
     return { state: 'disabled', index: targetIndex };
   }
@@ -146,6 +147,24 @@ function configuredPineconeApiKeyEnv(): string {
   const memory = (config as { memory?: { pinecone?: { apiKeyEnv?: string } } }).memory;
   const apiKeyEnv = memory?.pinecone?.apiKeyEnv;
   return typeof apiKeyEnv === 'string' && apiKeyEnv.trim() !== '' ? apiKeyEnv : 'PINECONE_API_KEY';
+}
+
+// Optional keyring service name for the Pinecone API key. When set (e.g.
+// 'pinecone'), resolveApiKey() consults the keyring first, falling back to the
+// configured env var. Undefined (the default) preserves env-only behavior.
+function configuredPineconeApiKeyService(): string | undefined {
+  const memory = (config as { memory?: { pinecone?: { apiKeyService?: string } } }).memory;
+  const apiKeyService = memory?.pinecone?.apiKeyService;
+  return typeof apiKeyService === 'string' && apiKeyService.trim() !== '' ? apiKeyService : undefined;
+}
+
+// Centralized Pinecone API-key resolution through the shared resolver.
+// Precedence: apiKeyService keyring lookup (when configured) → configured env var.
+function resolvePineconeApiKey(): string {
+  return resolveApiKey({
+    service: configuredPineconeApiKeyService(),
+    envVar: configuredPineconeApiKeyEnv(),
+  });
 }
 
 function configuredPineconeProjectGuard(): PineconeProjectGuard {
@@ -389,7 +408,7 @@ export class PineconeMemory {
   private projectGuardCheck: Promise<string | null> | null = null;
 
   constructor() {
-    this.client = new Pinecone({ apiKey: process.env[configuredPineconeApiKeyEnv()] ?? '' });
+    this.client = new Pinecone({ apiKey: resolvePineconeApiKey() });
     this.index = this.client.index(config.pineconeIndex);
   }
 
