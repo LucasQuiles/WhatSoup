@@ -57,6 +57,11 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
       { failure_class: string | null }).failure_class;
   const jobState = (jobId: number) =>
     engine.getTurnRecoveryJob(jobId)!.state;
+  // Age an inbound's received_at, mirroring the sweep-test harness. The reclaim
+  // bucket now shares bucket 1's min-age grace window (#1833), so a row must be
+  // pushed past that window before the sweep will reclaim it.
+  const backdate = (seq: number, interval: string) =>
+    db.raw.prepare(`UPDATE inbound_events SET received_at = datetime('now', ?) WHERE seq = ?`).run(interval, seq);
 
   /**
    * Persist a transferred_to_recovery_owner terminal record + pending job for a
@@ -129,6 +134,8 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
 
     // The owning op reaches a terminal non-echoed state — it can never echo.
     engine.markFailedPermanent(opId, 'outbound governor ceiling exceeded');
+    // Age past the grace window: no late echo arrived, so the reclaim may fire.
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -142,9 +149,42 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     expect(res.reclaimedRecoveryOwned).toBe(1);
   });
 
+  it('does NOT reclaim within the 5-minute grace window so a late echo can still settle (#1833)', () => {
+    const { inboundSeq, opId, jobId } = buildTransfer('grace-in');
+    // failed_permanent/quarantined ops are NOT terminal for echo:
+    // selectOutboundForEchoMatch still treats them as valid late-echo candidates,
+    // and markEcho re-flips the op to `echoed` without re-settling an inbound the
+    // reclaim already failed. Firing the reclaim on the very next sweep records a
+    // delivered turn as a reclaim-failure. received_at defaults to now → inside the
+    // grace window, so this sweep must hold off.
+    engine.markFailedPermanent(opId, 'dead');
+
+    const res = engine.sweepStuckInbound();
+
+    expect(engine.getInboundStatus(inboundSeq)).toBe('processing');
+    expect(jobState(jobId)).toBe('pending');
+    expect(engine.hasOutstandingTurnRecoveryForScope(SCOPE, CONVERSATION_KEY)).toBe(true);
+    expect(res.reclaimedRecoveryOwned).toBe(0);
+  });
+
+  it('reclaims once the inbound ages past the 5-minute grace window (#1833)', () => {
+    const { inboundSeq, opId, jobId } = buildTransfer('grace-out');
+    engine.markFailedPermanent(opId, 'dead');
+    // The grace window elapsed and no late echo arrived — the reclaim may fire.
+    backdate(inboundSeq, '-10 minutes');
+
+    const res = engine.sweepStuckInbound();
+
+    expect(engine.getInboundStatus(inboundSeq)).toBe('failed');
+    expect(failureClass(inboundSeq)).toBe('recovery_owner_reclaimed');
+    expect(jobState(jobId)).toBe('exhausted');
+    expect(res.reclaimedRecoveryOwned).toBe(1);
+  });
+
   it('reclaims a pending-owned inbound whose owning op is quarantined', () => {
     const { inboundSeq, opId, jobId } = buildTransfer('qn');
     engine.markQuarantined(opId);
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -167,6 +207,7 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     expect(jobState(jobId)).toBe('exhausted');
     // An exhausted job already does not block admission, but the inbound leaks.
     expect(engine.getInboundStatus(inboundSeq)).toBe('processing');
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -179,6 +220,7 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
   it('rem-3(b): no processing inbound stays excluded from every bucket while its op is terminal non-echoed', () => {
     const { inboundSeq, opId } = buildTransfer('inv');
     engine.markFailedPermanent(opId, 'dead');
+    backdate(inboundSeq, '-10 minutes');
 
     engine.sweepStuckInbound();
 
@@ -189,6 +231,9 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
   it('does NOT reclaim a recoverable transfer whose owning op is still maybe_sent', () => {
     const { inboundSeq, jobId } = buildTransfer('live');
     // op left maybe_sent; job pending — a late echo could still settle this.
+    // Age past the grace window so the ONLY reason this holds is the op-state
+    // guard, not the min-age window (#1833).
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -210,6 +255,7 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     const b = finalizeTransferFor(inboundSeq, messageId, 'dup-b', 4);
     engine.markFailedPermanent(a.opId, 'dead');
     engine.markFailedPermanent(b.opId, 'dead');
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -232,6 +278,7 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
     );
     expect(jobState(jobId)).toBe('claimed');
     engine.markFailedPermanent(opId, 'dead'); // the leased op can never echo
+    backdate(inboundSeq, '-10 minutes');
 
     const res = engine.sweepStuckInbound();
 
@@ -242,8 +289,9 @@ describe('sweepStuckInbound — recovery-owner reclaim (#1749 rem-2/3b)', () => 
   });
 
   it('is idempotent — a second sweep reclaims nothing further', () => {
-    const { opId } = buildTransfer('idem');
+    const { inboundSeq, opId } = buildTransfer('idem');
     engine.markFailedPermanent(opId, 'dead');
+    backdate(inboundSeq, '-10 minutes');
 
     const first = engine.sweepStuckInbound();
     expect(first.reclaimedRecoveryOwned).toBe(1);

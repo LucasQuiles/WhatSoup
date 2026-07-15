@@ -596,10 +596,16 @@ export class DurabilityEngine {
       // inverse: an open inbound WHOSE terminal record transferred to a recovery owner
       // whose selected op is provably dead (`failed_permanent`/`quarantined`) — so it
       // can never echo-settle — or whose linked recovery job is already `exhausted`.
-      // Such a row is otherwise unreclaimable at any age. `completed` jobs are excluded
-      // (their inbound completed via echo settlement; a completed source may never leave
-      // terminal, per the turn_recovery_completed_source_stays_terminal trigger). An
-      // echoed terminal op still wins (mutual exclusion with bucket 1). Bounded to 200.
+      // Such a row is otherwise unreclaimable, so once past the grace window below this
+      // bucket is its only path. `completed` jobs are excluded (their inbound completed
+      // via echo settlement; a completed source may never leave terminal, per the
+      // turn_recovery_completed_source_stays_terminal trigger). An echoed terminal op
+      // still wins (mutual exclusion with bucket 1). #1833: gated on the same
+      // `-5 minutes` min-age window as bucket 1 — a `failed_permanent`/`quarantined` op
+      // is NOT terminal for echo (selectOutboundForEchoMatch still accepts it as a
+      // late-echo candidate), so a genuine echo can still arrive and re-settle the op;
+      // the grace window (measured from received_at, like every sibling bucket) lets a
+      // late echo land before the reclaim records the turn a failure. Bounded to 200.
       getRecoveryOwnedReclaimable: prepare(
         `SELECT DISTINCT i.seq AS seq, j.id AS job_id, j.state AS job_state
          FROM inbound_events i
@@ -609,6 +615,7 @@ export class DurabilityEngine {
          JOIN outbound_ops o ON o.id = t.delivery_op_id
          JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
          WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+           AND i.received_at < datetime('now', '-5 minutes')
            AND j.state <> 'completed'
            AND (
              o.status IN ('failed_permanent', 'quarantined')
