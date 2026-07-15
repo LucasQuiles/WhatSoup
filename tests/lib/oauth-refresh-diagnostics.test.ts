@@ -80,8 +80,8 @@ describe('reasonLabel', () => {
 
 describe('redactLocalPaths', () => {
   it('redacts .lock paths', () => {
-    expect(redactLocalPaths('failed to open /home/user/auth.lock')).toContain('<local-path>');
-    expect(redactLocalPaths('failed to open /home/user/auth.lock')).not.toContain('/home/user');
+    expect(redactLocalPaths('failed to open /srv/app/auth.lock')).toContain('<local-path>');
+    expect(redactLocalPaths('failed to open /srv/app/auth.lock')).not.toContain('/srv/app');
   });
 
   it('redacts .token paths', () => {
@@ -93,7 +93,7 @@ describe('redactLocalPaths', () => {
   });
 
   it('redacts .auth paths', () => {
-    expect(redactLocalPaths('locked at /home/q/.config/session.auth')).toBe(
+    expect(redactLocalPaths('locked at /srv/app/session.auth')).toBe(
       'locked at <local-path>',
     );
   });
@@ -107,7 +107,7 @@ describe('redactLocalPaths', () => {
   });
 
   it('redacts multiple paths in one string', () => {
-    const out = redactLocalPaths('lock1: /home/a.lock lock2: /tmp/b.lock');
+    const out = redactLocalPaths('lock1: /srv/a.lock lock2: /tmp/b.lock');
     expect(out.match(/<local-path>/g)).toHaveLength(2);
   });
 });
@@ -145,13 +145,13 @@ describe('dedupFailurePrefixes', () => {
 describe('formatOAuthRefreshFailure', () => {
   it('classifies, redacts, and hints for oauth mode', () => {
     const result = formatOAuthRefreshFailure({
-      message: 'Error: Error: invalid_grant at /home/user/auth.lock',
+      message: 'Error: Error: invalid_grant at /srv/app/auth.lock',
       provider: 'anthropic',
       authMode: 'oauth',
     });
     expect(result.reason).toBe('invalid_grant');
     expect(result.message).not.toContain('Error: Error:');
-    expect(result.message).not.toContain('/home/user');
+    expect(result.message).not.toContain('/srv/app');
     expect(result.hint).toContain('anthropic');
     expect(result.hint).toContain('Re-authenticate');
   });

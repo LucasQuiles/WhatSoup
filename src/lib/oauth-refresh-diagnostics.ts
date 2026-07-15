@@ -7,7 +7,7 @@
  * Two concerns:
  *
  * 1. **Lock-path redaction.** Refresh failures often include local filesystem
- *    lock paths (`/home/.../auth.lock`, `/tmp/.../token.lock`) that leak host
+ *    lock paths (`<local>/auth.lock`, `<local>/token.lock`) that leak host
  *    internals. `redactLocalPaths()` replaces them with `<local-path>`.
  * 2. **Duplicate-prefix deduplication.** The same failure surfaced through
  *    multiple layers can accumulate repeated identical prefixes
@@ -91,7 +91,7 @@ export function reasonLabel(reason: OAuthRefreshFailureReason): string {
 export function redactLocalPaths(text: string): string {
   if (!text) return text;
   // Match absolute paths that look like lock/auth/token files: /foo/bar/baz.lock
-  // or /home/.../auth, /tmp/.../token, /var/.../credentials, etc.
+  // or <local>/auth, <local>/token, <local>/credentials, etc.
   return text.replace(
     /(?:\/(?:home|Users|tmp|var|etc|root|opt|app)[\w./-]*)?(?:\/[\w.-]+)*\.(?:lock|token|cred(?:ential)?s?|auth|key)/g,
     '<local-path>',
