@@ -318,7 +318,7 @@ pre-connect recovery. It is wired in `main.ts` to run once at startup and then e
 | 1. Echoed but not finalized | open (`pending`/`processing`/`turn_done`) with an `is_terminal`, `echoed` outbound op, `received_at` older than **5 minutes** | `completeInbound(seq, 'recovered_response_sent')` |
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
-| 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, and no echoed terminal op | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
+| 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
@@ -388,7 +388,12 @@ blocking the scope, while it and the `recovery_pending_operator_catchup` disposi
 lost message operator-visible (health stays degraded). The reclaim never touches an op that is
 still `maybe_sent` with a live job — that message may yet have been delivered — nor an orphan
 transfer (a `transferred_to_recovery_owner` record with no linked job), which is tracked
-separately as a corrupt link. `unfinalized_retry_owned` incidents are owned by the finalization
+separately as a corrupt link. The reclaim also waits out the same **5-minute** min-age window
+(measured from `received_at`) as bucket 1 before firing (#1833): a `failed_permanent`/`quarantined`
+op is *not* terminal for echo — `selectOutboundForEchoMatch` still accepts it as a late-echo
+candidate, and a genuine echo can flip it to `echoed` — so the grace window gives that echo a
+chance to land and re-settle the turn before the reclaim would otherwise record a delivered turn as
+a reclaim-failure. `unfinalized_retry_owned` incidents are owned by the finalization
 supervisor's own exhaustion (§4.6), not by this recovery-owner reclaim.
 
 ---
