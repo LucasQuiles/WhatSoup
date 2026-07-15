@@ -254,6 +254,72 @@ export function _resetBackendCache(): void {
   _cachedBackend = undefined;
 }
 
+// ─── Typed lookup with closed-id gate (W-1 / Pattern A) ───────────────────────
+
+/**
+ * Reason code explaining why a typed credential lookup returned what it did.
+ * Mirrors the classification shape recommended by the OpenClaw clean-room
+ * comparison audit (Pattern B: credential-state reason-code taxonomy).
+ */
+export type CredentialLookupReasonCode =
+  | 'ok'                // value found
+  | 'unknown_service'   // service not in SERVICE_ENV_MAP — closed-id gate rejected it
+  | 'not_found';        // service is known but no credential was available
+
+/**
+ * Typed result from {@link lookupCredentialTyped}. Carries the value (or null)
+ * plus a reason code so callers can distinguish "not configured" from "misnamed"
+ * without re-deriving it. The `service` field echoes the input for log context.
+ */
+export interface CredentialLookupResult {
+  value: string | null;
+  reason: CredentialLookupReasonCode;
+  service: string;
+}
+
+/**
+ * Check whether a service name is in the closed registry (SERVICE_ENV_MAP).
+ * This is the Pattern A closed-id gate: only registry-known services can be
+ * resolved through the typed API, preventing callers from probing arbitrary
+ * service names through the resolver. Mirrors OpenClaw's
+ * `isKnownSecretTargetId` / `isKnownCoreSecretTargetId` gate
+ * (`src/gateway/server-methods/secrets.ts:134-146`).
+ */
+export function isKnownService(service: string): boolean {
+  return Object.hasOwn(SERVICE_ENV_MAP, service);
+}
+
+/**
+ * Typed credential lookup with a closed-id gate.
+ *
+ * Phase W-1 of the env-secret-exposure remediation. Wraps the existing
+ * {@link lookupCredential} with:
+ *   1. A closed-registry gate: services not in SERVICE_ENV_MAP are rejected
+ *      with `reason: 'unknown_service'` (value: null). This extends QR-248's
+ *      provider-config exfil guard to ALL resolver calls, not just those that
+ *      flow through `providerConfig.apiKeyService`.
+ *   2. A typed result: callers get `value` + `reason` instead of `string | null`,
+ *      so they can surface "unknown service" vs "known but not configured"
+ *      without re-deriving it.
+ *
+ * Existing callers of {@link lookupCredential} are unaffected — this is a new
+ * API. Migrated providers should adopt it as they move through W-2.
+ */
+export function lookupCredentialTyped(
+  service: string,
+  options?: CredentialLookupOptions,
+): CredentialLookupResult {
+  if (!isKnownService(service)) {
+    return { value: null, reason: 'unknown_service', service };
+  }
+
+  const value = lookupCredential(service, options);
+  if (value && value.length > 0) {
+    return { value, reason: 'ok', service };
+  }
+  return { value: null, reason: 'not_found', service };
+}
+
 // ─── Write path ───────────────────────────────────────────────────────────────
 
 export type KeyringErrorCode =
