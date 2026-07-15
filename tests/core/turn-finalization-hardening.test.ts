@@ -829,6 +829,7 @@ describe('turn finalization proof boundary', () => {
       completedEchoed: 0,
       completedTurnDone: 0,
       failedStale: 0,
+      reclaimedRecoveryOwned: 0,
     });
     expect(inboundState(echoedRetry)).toMatchObject({ processing_status: 'processing' });
     expect(inboundState(staleTurnDone)).toMatchObject({ processing_status: 'turn_done' });

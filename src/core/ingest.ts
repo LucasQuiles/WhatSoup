@@ -15,7 +15,8 @@ import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from '
 import { shouldRespond } from './access-policy.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isLidJid } from './jid-constants.ts';
+import { isLidJid, bareNumber } from './jid-constants.ts';
+import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
@@ -432,6 +433,21 @@ export function createIngestHandler(
         if (durability) {
           seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
+        }
+
+        // Strip the bot's own @mention token from inbound GROUP text so the agent
+        // sees the user's intent, not the bot's own identifier (WhatsApp embeds the
+        // raw `@<jid-digits>` at the mention point). The stored copy was persisted
+        // above with the raw text; only the runtime-bound content is cleaned. #1854
+        if (msg.isGroup && msg.content) {
+          const botIds: string[] = [];
+          const bj = getBotJid();
+          if (bj) botIds.push(bj, bareNumber(bj));
+          const bl = getBotLid();
+          if (bl) botIds.push(bl, bareNumber(bl));
+          if (botIds.length > 0) {
+            msg.content = stripSelfMentionsFrom(msg.content, botIds);
+          }
         }
 
         // 6. Dispatch to runtime

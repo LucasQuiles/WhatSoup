@@ -44,7 +44,7 @@ import {
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import { lookupAccess, updateAccess, insertAllowed, seedAutoRespondGroups, resolvePhoneFromJid } from './core/access-list.ts';
-import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir } from './core/lid-resolver.ts';
+import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir, type LidReconcileState } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
@@ -814,10 +814,13 @@ const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
   } catch (err) { log.error({ err }, 'degradation signal check failed'); }
 }, 60_000) : null;
 
-// 15. L6: Periodic LID reconciliation — re-reads auth dir + finds unresolved LIDs
+// 15. L6: Periodic LID reconciliation — re-reads auth dir + finds unresolved LIDs.
+// Persistent state (#1781): the sweep scans only messages newer than the last
+// high-water mark and warns on the per-sweep delta, not the full known cohort.
+const lidReconcileState: LidReconcileState = { lastMaxPk: 0, knownUnresolvedLids: new Set<string>() };
 const lidReconcileInterval = setInterval(() => {
   try {
-    const result = reconcileLidMappings(db, config.authDir);
+    const result = reconcileLidMappings(db, config.authDir, lidReconcileState);
     if (result.hydrated > 0 || result.unresolvedLids.length > 0) {
       log.info({
         hydrated: result.hydrated,
@@ -833,6 +836,9 @@ const lidReconcileInterval = setInterval(() => {
 const messageScheduler = new MessageScheduler(db, connectionManager, {
   intervalMs: 60_000,   // check every minute
   maxRetries: 3,
+  // #1779: attribute the de-linked-hold / permanent-drop owner alerts to this
+  // instance (mirrors the trigger poller's `instance` wiring).
+  instance: config.botName,
 });
 messageScheduler.recoverStale();
 messageScheduler.start();

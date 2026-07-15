@@ -35,7 +35,7 @@ vi.mock('../../../src/logger.ts', () => ({
 const CHAT_JID = 'bench@s.whatsapp.net';
 const INSTANCE = 'Bench';
 const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
-const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
+const STALL_TEXT = `_${INSTANCE}: still working — this is taking a while..._`;
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,13 @@ const slow = (toolId: string, elapsedMs = 9_000): ProgressEvent =>
   ({ type: 'operation_slow', toolId, toolName: 'Read', category: 'reading', elapsedMs, expectedMs: 3_000 });
 const stalled = (toolId: string, elapsedMs: number): ProgressEvent =>
   ({ type: 'operation_stalled', toolId, toolName: 'Read', category: 'reading', elapsedMs });
+// operation_progress keeps a GENUINELY ADVANCING elapsed clock (the periodic
+// setInterval path, deliberately untouched by #1843), so it is the correct vehicle
+// for the "distinct content never coalesces" invariant. operation_slow is one-shot
+// with a constant threshold value post-#1843, so distinct-elapsed slow events now
+// render identical text and legitimately collapse — they can no longer prove it.
+const progress = (toolId: string, elapsedMs: number): ProgressEvent =>
+  ({ type: 'operation_progress', toolId, toolName: 'Read', category: 'reading', elapsedMs, state: 'running' });
 
 /** Drain queued sends without looping forever on the typing heartbeat. */
 const drain = (n = 1) => vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS * n + 1);
@@ -99,8 +106,8 @@ describe('progress-coalescing BENCH', () => {
 
     it('distinct text is never collapsed (full mode, different elapsed)', async () => {
       const b = bench('full');
-      b.queue.enqueueProgressUpdate(slow('a', 45_000), INSTANCE);
-      b.queue.enqueueProgressUpdate(slow('b', 90_000), INSTANCE);
+      b.queue.enqueueProgressUpdate(progress('a', 45_000), INSTANCE);
+      b.queue.enqueueProgressUpdate(progress('b', 90_000), INSTANCE);
       await drain(2);
       expect(b.calls).toHaveLength(2);
       expect(b.calls[0]).toContain('45s');
@@ -240,7 +247,7 @@ describe('progress-coalescing BENCH', () => {
 
     it('50 distinct-elapsed placeholders are all delivered (no over-coalescing)', async () => {
       const b = bench('full');
-      for (let i = 1; i <= 50; i++) b.queue.enqueueProgressUpdate(slow(`tool-${i}`, i * 1_000), INSTANCE);
+      for (let i = 1; i <= 50; i++) b.queue.enqueueProgressUpdate(progress(`tool-${i}`, i * 1_000), INSTANCE);
       await drain(50);
       expect(b.calls).toHaveLength(50);
       b.queue.abortTurn();

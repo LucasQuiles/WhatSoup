@@ -191,6 +191,14 @@ export interface StuckInboundSweepResult {
   completedEchoed: number;
   completedTurnDone: number;
   failedStale: number;
+  /**
+   * #1749: inbound rows released from the recovery-owner trap — pinned by a
+   * `transferred_to_recovery_owner` terminal record whose selected op is
+   * terminally non-echoed (`failed_permanent`/`quarantined`) or whose recovery
+   * job is `exhausted`. Failed `recovery_owner_reclaimed`, with any pending/
+   * claimed owning job driven to `exhausted` so the scope becomes admissible.
+   */
+  reclaimedRecoveryOwned: number;
 }
 
 export interface OutboundOpParams {
@@ -249,6 +257,7 @@ type DurabilityStatements = {
   getOpenInboundWithEchoedTerminal: PreparedStatement;
   getStaleTurnDoneNoSuccess: PreparedStatement;
   getStaleOpenNoSuccess: PreparedStatement;
+  getRecoveryOwnedReclaimable: PreparedStatement;
   getStaleSubmitted: PreparedStatement;
   getMessageByWaMessageId: PreparedStatement;
   resetMaybeSentWithWaToPending: PreparedStatement;
@@ -577,6 +586,44 @@ export class DurabilityEngine {
            AND NOT EXISTS (
              SELECT 1 FROM outbound_ops o
              WHERE o.source_inbound_seq = i.seq AND o.is_terminal = 1 AND o.status = 'echoed'
+           )
+         ORDER BY i.seq ASC
+         LIMIT 200`,
+      ),
+      // #1749 recovery-owner reclaim bucket. The three buckets above deliberately
+      // require NOT EXISTS turn_terminal_records, so a `transferred_to_recovery_owner`
+      // record excludes its inbound from every one of them. This bucket is the exact
+      // inverse: an open inbound WHOSE terminal record transferred to a recovery owner
+      // whose selected op is provably dead (`failed_permanent`/`quarantined`) — so it
+      // can never echo-settle — or whose linked recovery job is already `exhausted`.
+      // Such a row is otherwise unreclaimable, so once past the grace window below this
+      // bucket is its only path. `completed` jobs are excluded (their inbound completed
+      // via echo settlement; a completed source may never leave terminal, per the
+      // turn_recovery_completed_source_stays_terminal trigger). An echoed terminal op
+      // still wins (mutual exclusion with bucket 1). #1833: gated on the same
+      // `-5 minutes` min-age window as bucket 1 — a `failed_permanent`/`quarantined` op
+      // is NOT terminal for echo (selectOutboundForEchoMatch still accepts it as a
+      // late-echo candidate), so a genuine echo can still arrive and re-settle the op;
+      // the grace window (measured from received_at, like every sibling bucket) lets a
+      // late echo land before the reclaim records the turn a failure. Bounded to 200.
+      getRecoveryOwnedReclaimable: prepare(
+        `SELECT DISTINCT i.seq AS seq, j.id AS job_id, j.state AS job_state
+         FROM inbound_events i
+         JOIN turn_terminal_records t
+           ON t.inbound_seq_key = i.seq
+          AND t.inbound_disposition = 'transferred_to_recovery_owner'
+         JOIN outbound_ops o ON o.id = t.delivery_op_id
+         JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
+         WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+           AND i.received_at < datetime('now', '-5 minutes')
+           AND j.state <> 'completed'
+           AND (
+             o.status IN ('failed_permanent', 'quarantined')
+             OR j.state = 'exhausted'
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_ops e
+             WHERE e.source_inbound_seq = i.seq AND e.is_terminal = 1 AND e.status = 'echoed'
            )
          ORDER BY i.seq ASC
          LIMIT 200`,
@@ -1751,12 +1798,23 @@ export class DurabilityEngine {
       let completedEchoed = 0;
       let completedTurnDone = 0;
       let failedStale = 0;
+      let reclaimedRecoveryOwned = 0;
 
       const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
       const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
       const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
-      if (echoed.length === 0 && turnDone.length === 0 && staleOpen.length === 0) {
-        return { completedEchoed, completedTurnDone, failedStale };
+      const recoveryOwned = this.statements.getRecoveryOwnedReclaimable.all() as Array<{
+        seq: number;
+        job_id: number;
+        job_state: string;
+      }>;
+      if (
+        echoed.length === 0 &&
+        turnDone.length === 0 &&
+        staleOpen.length === 0 &&
+        recoveryOwned.length === 0
+      ) {
+        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -1785,7 +1843,38 @@ export class DurabilityEngine {
         failedStale += 1;
       }
 
-      const result: StuckInboundSweepResult = { completedEchoed, completedTurnDone, failedStale };
+      // #1749: release the recovery-owner trap. Drive EVERY pending/claimed owning
+      // job to `exhausted` (so none of them pin admission), then fail each source
+      // inbound ONCE so retention can reclaim it and the loss is operator-visible.
+      // One inbound_seq_key can own more than one transferred terminal record
+      // (turn_terminal_records is UNIQUE per inbound_seq_key/logical_turn_id/
+      // generation), so the candidate set may repeat a seq. Failing it twice would
+      // re-run markInboundFailed after its disposition link exists and trip
+      // disposition_inbound_proof_immutable, aborting the whole sweep — so the
+      // inbound mutation is deduplicated by seq.
+      const reclaimedSeqs = new Set<number>();
+      for (const row of recoveryOwned) {
+        if (row.job_state === 'pending' || row.job_state === 'claimed') {
+          this.turnRecovery.reclaimDeadDeliveryRecoveryJobWithinCallerTransaction(row.job_id);
+        }
+        reclaimedSeqs.add(row.seq);
+      }
+      for (const seq of reclaimedSeqs) {
+        this.recoveryEvidence.recordPendingWithinTransaction(
+          seq,
+          recovery,
+          'recovery_owner_reclaimed',
+          () => this.markInboundFailed(seq, 'recovery_owner_reclaimed'),
+        );
+        reclaimedRecoveryOwned += 1;
+      }
+
+      const result: StuckInboundSweepResult = {
+        completedEchoed,
+        completedTurnDone,
+        failedStale,
+        reclaimedRecoveryOwned,
+      };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
       this.recoveryEvidence.finalize(
@@ -1793,7 +1882,12 @@ export class DurabilityEngine {
         recoveryStats,
         JSON.stringify({ ...result, openRecoveries: recoveryStats.openRecoveries }),
       );
-      if (completedEchoed > 0 || completedTurnDone > 0 || failedStale > 0) {
+      if (
+        completedEchoed > 0 ||
+        completedTurnDone > 0 ||
+        failedStale > 0 ||
+        reclaimedRecoveryOwned > 0
+      ) {
         log.info(result, 'sweepStuckInbound: finalized stuck inbound rows');
       }
       return result;

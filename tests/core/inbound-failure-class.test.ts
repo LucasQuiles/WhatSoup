@@ -1,26 +1,62 @@
 import { describe, it, expect } from 'vitest';
 import {
+  ADMISSION_REJECT_CLASSES,
   INBOUND_FAILURE_CLASSES,
+  admissionRejectInboundFailureClass,
   coerceInboundFailureClass,
   classifyErrorForInbound,
 } from '../../src/core/inbound-failure-class.ts';
 
 describe('inbound-failure-class — vocabulary', () => {
-  it('exposes exactly the ten bounded classes', () => {
+  it('exposes exactly the bounded classes (incl. #1750 admission subclasses + #1749 recovery reclaim)', () => {
     expect([...INBOUND_FAILURE_CLASSES].sort()).toEqual(
       [
         'crash_recovery',
         'db_error',
         'provider_failure',
+        'recovery_owner_reclaimed',
         'session_crash',
         'session_spawn_failed',
         'stale_reclaim',
         'timeout',
         'transport_disconnected',
         'transport_send_failed',
+        // #1750 admission-rejection subclasses
+        'queue_full',
+        'queue_halted',
+        'queue_closed',
+        'pre_dispatch_error',
+        'scope_blocked_recovery',
         'unknown',
       ].sort(),
     );
+  });
+
+  it('every admission-rejection subclass is a member of the durable vocabulary', () => {
+    // Guards the coerce gate: any AdmissionRejectClass not admitted into
+    // INBOUND_FAILURE_CLASSES would be silently collapsed to 'unknown' at write.
+    for (const cls of ADMISSION_REJECT_CLASSES) {
+      expect(INBOUND_FAILURE_CLASSES.has(cls)).toBe(true);
+    }
+  });
+});
+
+describe('inbound-failure-class — admissionRejectInboundFailureClass (#1750)', () => {
+  it('maps each admission subclass to its same-named distinct failure class', () => {
+    expect(admissionRejectInboundFailureClass('queue_full')).toBe('queue_full');
+    expect(admissionRejectInboundFailureClass('queue_halted')).toBe('queue_halted');
+    expect(admissionRejectInboundFailureClass('queue_closed')).toBe('queue_closed');
+    expect(admissionRejectInboundFailureClass('pre_dispatch_error')).toBe('pre_dispatch_error');
+    expect(admissionRejectInboundFailureClass('scope_blocked_recovery')).toBe('scope_blocked_recovery');
+  });
+
+  it('maps a legacy (null/undefined) admission class to unknown', () => {
+    expect(admissionRejectInboundFailureClass(null)).toBe('unknown');
+    expect(admissionRejectInboundFailureClass(undefined)).toBe('unknown');
+  });
+
+  it('rejects an out-of-vocabulary admission class rather than silently coercing', () => {
+    expect(() => admissionRejectInboundFailureClass('disk_on_fire')).toThrow(/invalid rejection class/);
   });
 });
 

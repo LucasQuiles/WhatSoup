@@ -17,6 +17,7 @@ import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
 import { enqueueScheduledMessage, type EnqueueMessageParams } from './schedule-enqueue.ts';
+import { countPastDueTriggers } from './substrate/triggers.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -86,15 +87,76 @@ export interface HealthDeps {
   loopLagSampler?: LoopLagSampler;
 }
 
+/**
+ * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
+ * failure (e.g. `no such table`) must not re-log on every ~5 s poll forever —
+ * one observed instance emitted 24,613 identical lines over 34 h, another
+ * 40,005. The degraded-state latch still fires every poll (the SIGNAL), but the
+ * LOG is emitted on the 1st failure and then only at power-of-two counts,
+ * turning O(polls) log lines into O(log polls) while a permanent error can never
+ * become an unbounded storm.
+ */
+export class ProbeErrorThrottle {
+  private readonly failures = new Map<string, number>();
+
+  /**
+   * Record a probe failure for `key`. Returns the running failure count when
+   * this occurrence should be logged (the 1st, then powers of two), or `null`
+   * to suppress it.
+   */
+  onFailure(key: string): number | null {
+    const n = (this.failures.get(key) ?? 0) + 1;
+    this.failures.set(key, n);
+    // Powers of two (and 1) satisfy (n & (n - 1)) === 0.
+    return (n & (n - 1)) === 0 ? n : null;
+  }
+
+  /**
+   * Record a probe success for `key`. Returns the number of accumulated
+   * failures cleared (0 when the probe was already healthy).
+   */
+  onSuccess(key: string): number {
+    const n = this.failures.get(key) ?? 0;
+    if (n > 0) this.failures.delete(key);
+    return n;
+  }
+
+  reset(): void {
+    this.failures.clear();
+  }
+}
+
+const probeErrorThrottle = new ProbeErrorThrottle();
+
+/** Test-support: clear the module probe-throttle state between cases. */
+export function resetProbeErrorThrottle(): void {
+  probeErrorThrottle.reset();
+}
+
+/** Log a probe failure through the throttle so a permanent error cannot storm. */
+function logProbeFailure(warnMsg: string, err: unknown): void {
+  const n = probeErrorThrottle.onFailure(warnMsg);
+  if (n !== null) log.error({ err, failureCount: n }, warnMsg);
+}
+
+/** Note a probe success; emit a single recovery line if it had been failing. */
+function noteProbeSuccess(warnMsg: string): void {
+  const cleared = probeErrorThrottle.onSuccess(warnMsg);
+  if (cleared > 1) {
+    log.info({ probe: warnMsg, clearedFailures: cleared }, 'health probe recovered after transient failures');
+  }
+}
+
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   const start = Date.now();
   try {
     const result = fn();
     const elapsed = Date.now() - start;
     if (elapsed > 2_000) log.warn({ elapsed }, warnMsg + ' (slow query)');
+    noteProbeSuccess(warnMsg);
     return result;
   } catch (err) {
-    log.error({ err }, warnMsg);
+    logProbeFailure(warnMsg, err);
     return fallback;
   }
 }
@@ -1187,14 +1249,24 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       try {
         const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
         pendingPollsTotal = row?.cnt ?? 0;
+        noteProbeSuccess('failed to count pending polls');
       } catch (err) {
+        // The degraded latch below still fires every poll; only the LOG is bounded (#1778).
         pendingPollsReadable = false;
-        log.error({ err }, 'failed to count pending polls');
+        logProbeFailure('failed to count pending polls', err);
       }
 
       if (status === 'healthy' && (!schemaReady || !pendingPollsReadable)) {
         status = 'degraded';
       }
+
+      // #1765 — surface the past-due liveness gauge (active triggers >grace past
+      // next_fire_at with zero runs). Exposition only; the poller owns the alert.
+      const pastDueTriggers = safeDbQuery(
+        () => countPastDueTriggers(deps.db.raw),
+        0,
+        'failed to count past-due triggers',
+      );
 
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
@@ -1301,6 +1373,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           unprocessed: enrichmentStats.unprocessed,
           pending_polls_total: pendingPollsTotal,
           pending_polls_readable: pendingPollsReadable,
+          past_due_triggers: pastDueTriggers,
         },
         access_control: {
           pending_count: pendingCount,

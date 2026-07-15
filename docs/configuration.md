@@ -697,9 +697,9 @@ The operation tracker detects and recovers from stuck operations regardless of t
 
 | Mode | Progress updates | Slow warning | Stall warning |
 |------|-----------------|--------------|---------------|
-| `full` | Elapsed time every 30s | Timing details and expected duration | "Still working" with elapsed time |
-| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "Still working" with elapsed time |
-| `minimal` | Typing indicator only | "Still working..." | "Still working" with elapsed time |
+| `full` | Elapsed time every 30s | "taking longer than expected" (threshold notice, no live clock) | "still working — this is taking a while" (threshold notice, no live clock) |
+| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "still working — this is taking a while" |
+| `minimal` | Typing indicator only | Typing indicator only | Typing indicator only |
 
 ### `agentOptions`
 
