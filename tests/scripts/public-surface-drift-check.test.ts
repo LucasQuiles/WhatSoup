@@ -88,6 +88,20 @@ describe('public surface drift check', () => {
     expect(findPublicSurfaceDrift({ cwd: repoRoot })).toEqual([]);
   });
 
+  it('registers both normal and inspection-only health status contracts', () => {
+    const registry = readFileSync(path.join(repoRoot, 'docs/public-surface.md'), 'utf8');
+    const healthStatusRow = registry
+      .split('\n')
+      .find((line) => line.includes('`http:health.status`'));
+
+    expect(healthStatusRow).toContain('`src/core/health.ts:1024`');
+    expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:150`');
+    expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
+    expect(healthStatusRow).toContain('`startup_block`');
+    expect(healthStatusRow).toContain('provider and synthetic admission blocked');
+    expect(healthStatusRow).toContain('`runtime.chat.database_compatibility`');
+  });
+
   it('exposes the disposable canary artifact validator as an operator-facing npm proof surface', () => {
     const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
       scripts?: Record<string, string>;

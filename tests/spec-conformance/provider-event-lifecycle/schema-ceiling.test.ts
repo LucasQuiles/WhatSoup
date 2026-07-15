@@ -92,6 +92,8 @@ describe('provider-event lifecycle schema allocation', () => {
     expect(allocations).toEqual(specFiles.map((file) => ({ file, allocation: expected })));
   });
 
+  // @check CHK-001
+  // @traces CON-005.AC-01
   it('keeps normative body allocations aligned with the canonical migration sequence', () => {
     const allocations = bodyAllocationExpectations.map(({ file, pattern, migrationOffset }) => {
       const text = readFileSync(

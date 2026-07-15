@@ -92,6 +92,7 @@ export class ChatRuntime implements Runtime {
   private botName: string;
   private cachedIdentityBlock: string | null = null;
   private cachedIdentityJid: string = '';
+  private databaseCompatibilityRejection: DatabaseCompatibilityError | null = null;
 
   constructor(
     db: Database,
@@ -136,7 +137,9 @@ export class ChatRuntime implements Runtime {
     const enrichmentLastRunAt = this.enrichmentPoller?.lastRunAt ?? null;
 
     let status: RuntimeHealth['status'] = 'healthy';
-    if ((queue?.queuedChats ?? 0) > 0) {
+    if (this.databaseCompatibilityRejection) {
+      status = 'unhealthy';
+    } else if ((queue?.queuedChats ?? 0) > 0) {
       // Waiters are backed up — signal degraded
       status = 'degraded';
     } else if (enrichmentLastRunAt !== null) {
@@ -153,6 +156,13 @@ export class ChatRuntime implements Runtime {
         enrichmentLastRunAt,
         queueDepth: queue?.queuedChats ?? 0,
         enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
+        databaseCompatibility: this.databaseCompatibilityRejection
+          ? {
+              reason: this.databaseCompatibilityRejection.reason,
+              observedMigration: this.databaseCompatibilityRejection.observedMigration,
+              requiredMigration: this.databaseCompatibilityRejection.requiredMigration,
+            }
+          : null,
       },
     };
   }
@@ -163,11 +173,35 @@ export class ChatRuntime implements Runtime {
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
+    if (this.databaseCompatibilityRejection) {
+      throw this.databaseCompatibilityRejection;
+    }
     const traceId = randomBytes(4).toString('hex');
     const startTime = Date.now();
 
     // Enqueue via chatQueue for per-chat sequential processing
-    this.chatQueue.enqueue(msg.chatJid, () => this.processMessage(msg, traceId, startTime));
+    void this.chatQueue.enqueue(msg.chatJid, async () => {
+      try {
+        await this.processMessage(msg, traceId, startTime);
+      } catch (err) {
+        if (!(err instanceof DatabaseCompatibilityError)) throw err;
+        this.latchDatabaseCompatibilityRejection(err);
+      }
+    });
+  }
+
+  private latchDatabaseCompatibilityRejection(rejection: DatabaseCompatibilityError): void {
+    if (this.databaseCompatibilityRejection) return;
+    this.databaseCompatibilityRejection = rejection;
+    this.enrichmentPoller?.stop();
+    log.error(
+      {
+        reason: rejection.reason,
+        observedMigration: rejection.observedMigration,
+        requiredMigration: rejection.requiredMigration,
+      },
+      'database compatibility rejection latched; Chat runtime admission is blocked',
+    );
   }
 
   private async processMessage(msg: IncomingMessage, traceId: string, startTime: number): Promise<void> {

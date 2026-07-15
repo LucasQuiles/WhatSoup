@@ -1428,6 +1428,58 @@ describe('GET /health', () => {
     expect(json.sqlite.pending_polls_readable).toBe(true);
   });
 
+  it('reports unhealthy when the database schema is newer than this binary', async () => {
+    db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)')
+      .run(CURRENT_SCHEMA_MIGRATION + 1);
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(503);
+    expect(json.status).toBe('unhealthy');
+    expect(json.sqlite.schema_migration_latest).toBe(CURRENT_SCHEMA_MIGRATION + 1);
+    expect(json.sqlite.schema_migration_required).toBe(CURRENT_SCHEMA_MIGRATION);
+    expect(json.sqlite.schema_ready).toBe(false);
+  });
+
+  it('surfaces a queued Chat compatibility rejection in the health body', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'unhealthy',
+          details: {
+            queue: { activeChats: 0, queuedChats: 0 },
+            databaseCompatibility: {
+              reason: 'invalid_schema',
+              observedMigration: 44,
+              requiredMigration: 44,
+              dbPath: '/private/runtime/bot.db',
+              chatJid: '15551230008@s.whatsapp.net',
+              message: 'private prompt text',
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(503);
+    expect(json.status).toBe('unhealthy');
+    expect(json.runtime.chat.database_compatibility).toEqual({
+      reason: 'invalid_schema',
+      observed_migration: 44,
+      required_migration: 44,
+    });
+    expect(body).not.toContain('/private/runtime/bot.db');
+    expect(body).not.toContain('15551230008@s.whatsapp.net');
+    expect(body).not.toContain('private prompt text');
+    db2.close();
+  });
+
   it('degrades health when pending_polls is unreadable instead of masking schema drift', async () => {
     db.raw.exec('DROP TABLE pending_polls');
 

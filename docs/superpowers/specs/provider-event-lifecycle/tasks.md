@@ -237,7 +237,7 @@
   - [x] Add the marked `CHK-071` conformance case under
     `tests/spec-conformance/provider-event-lifecycle/` so real SQLite future-schema
     rejection and the 44/45/46 allocation remain executable against this spec.
-  - [ ] Add or relocate the remaining marked `CHK-001` plan-stage conformance case
+  - [x] Add or relocate the remaining marked `CHK-001` plan-stage conformance case
     without duplicating existing migration unit coverage.
   - [x] Capture the marked `CHK-071` stale-documentation RED against the existing
     production rejection behavior. The current branch extends
@@ -248,8 +248,12 @@
   - [ ] After exact-head review and publication, deploy and verify the guard fleet-wide
     before any schema-45/46 writer; record and prohibit older pre-guard binary
     fingerprints as rollback targets.
-  - [ ] Preserve recovery retention roots required by the installed tables; remove
+  - [x] Preserve recovery retention roots required by the installed tables; remove
     incident-specific labels and regenerate current-main indexes/manifests only.
+    Relative to canonical main, this prerequisite changes no historical
+    `database-migration-*.ts`, recovery-pruning, or retention-policy source. The
+    regenerated tracked work index and the current runtime manifest contain no
+    incident chat, sequence, or private-path identifiers.
   - [ ] Run the focused migration/recovery suite, `npm run typecheck:all`,
     `npm run guard:test-integrity`, and `npm run verify:release` through
     `scripts/run-with-pinned-npm.sh`.

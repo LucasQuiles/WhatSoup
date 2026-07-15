@@ -352,7 +352,7 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 |--------|-----------|---------|
 | `healthy` | 200 | WhatsApp connected, enrichment fresh, no degraded state |
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
-| `unhealthy` | 503 | WhatsApp disconnected. Messages cannot be received or sent. |
+| `unhealthy` | 503 | WhatsApp is disconnected or a runtime-global safety condition, such as database compatibility loss, blocks safe message processing. |
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
 
@@ -366,6 +366,15 @@ HTTP 503 with `service_mode: "inspection_only"` and a `startup_block.code` of
 database writes are disabled, and provider and synthetic-turn admission remain
 blocked. The watchdog intentionally does not restart a valid inspection-only
 drain.
+
+If a running Chat process observes a database compatibility rejection after
+startup, its normal health body first becomes HTTP 503 and exposes only
+`runtime.chat.database_compatibility.reason`, `observed_migration`, and
+`required_migration`. The runtime stops enrichment and rejects later Chat
+admission; it does not write a terminal marker through the now read-only
+database handle. One watchdog restart moves the process into the startup
+classification above, where a valid drain is held without a restart loop and a
+stable invalid artifact exits 78.
 
 Preserve the database artifact and collect only read-only health, service-exit,
 and log evidence. Diagnose whether the artifact requires a compatible newer

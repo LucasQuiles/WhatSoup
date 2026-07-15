@@ -670,15 +670,6 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
     );
   }
 
-  if (row.latest !== null && row.latest > CURRENT_SCHEMA_MIGRATION) {
-    throw new DatabaseCompatibilityError(
-      'future_schema',
-      `Database schema migration ${row.latest} exceeds binary ceiling ${CURRENT_SCHEMA_MIGRATION}; refusing writes`,
-      undefined,
-      row.latest,
-    );
-  }
-
   if (
     row.invalid_versions !== 0
     || row.row_count !== row.distinct_versions
@@ -687,6 +678,15 @@ export function assertSchemaCeiling(db: DatabaseSync, dbPath: string): void {
   ) {
     throw invalidSchemaError(
       'Failed to inspect schema migration ceiling: recorded versions fall outside the supported range',
+    );
+  }
+
+  if (row.latest !== null && row.latest > CURRENT_SCHEMA_MIGRATION) {
+    throw new DatabaseCompatibilityError(
+      'future_schema',
+      `Database schema migration ${row.latest} exceeds binary ceiling ${CURRENT_SCHEMA_MIGRATION}; refusing writes`,
+      undefined,
+      row.latest,
     );
   }
 

@@ -52,7 +52,7 @@ TimeoutStopSec=15
 # systemd won't fail if the file is missing (token simply won't be set).
 # W-5 migration: once the instance's health token is stored in the OS keyring
 # (service=whatsoup-health-token, account=<instance-name>), this line AND the
-# wrapper export at deploy/whatsoup:174-182 can both be removed — health.ts
+# WHATSOUP_HEALTH_TOKEN export block in deploy/whatsoup can both be removed — health.ts
 # resolves the token at request time via lookupCredential('whatsoup-health-token').
 # Use deploy/check-health-token-keyring.sh <instance> to verify readiness.
 # Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md

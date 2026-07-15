@@ -983,18 +983,37 @@ describe('LLM retry jitter (B05)', () => {
 // ===========================================================================
 
 describe('Runtime interface', () => {
-  it('queued processing rejects compatibility before rate-limit, media, attempt, or provider work', async () => {
+  it('queued processing latches compatibility before rate-limit, media, attempt, or provider work', async () => {
     const { handler, db, messenger, primary, fallback } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
     const rejection = new DatabaseCompatibilityError(
       'future_schema',
       'database compatibility drained',
+      undefined,
+      45,
     );
     vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
       throw rejection;
     });
 
-    await expect(handleAndDrain(handler, makeIncomingMessage())).rejects.toBe(rejection);
+    await expect(handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 73 })))
+      .resolves.toBeUndefined();
 
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentPollerStop()).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+    expect(handler.getHealthSnapshot()).toMatchObject({
+      status: 'unhealthy',
+      details: {
+        databaseCompatibility: {
+          reason: 'future_schema',
+          observedMigration: 45,
+        },
+      },
+    });
+    await expect(handler.handleMessage(makeIncomingMessage({ messageId: 'msg-after-latch' })))
+      .rejects.toBe(rejection);
     expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
     expect(mockCheckRateLimit).not.toHaveBeenCalled();
     expect(mockProcessMedia).not.toHaveBeenCalled();
@@ -1459,14 +1478,14 @@ describe('Database compatibility provider rejection', () => {
     return new DatabaseCompatibilityError('future_schema', 'schema advanced during the turn');
   }
 
-  it('propagates from the first primary attempt without retry, fallback, alert, or outage reply', async () => {
+  it('latches the first primary compatibility rejection without retry, fallback, alert, or outage reply', async () => {
     const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
     const error = rejection();
     vi.mocked(db.assertWritableCompatibility)
       .mockImplementationOnce(() => undefined)
       .mockImplementationOnce(() => { throw error; });
 
-    await expect(handleAndDrain(handler, makeIncomingMessage())).rejects.toBe(error);
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
 
     expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(2);
     expect(primary.generate).not.toHaveBeenCalled();
@@ -1475,7 +1494,7 @@ describe('Database compatibility provider rejection', () => {
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('propagates from the primary retry without advancing to fallback or outage handling', async () => {
+  it('latches a primary-retry compatibility rejection without fallback or outage handling', async () => {
     vi.useFakeTimers();
     const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
     const error = rejection();
@@ -1485,7 +1504,7 @@ describe('Database compatibility provider rejection', () => {
       .mockImplementationOnce(() => { throw error; });
     vi.mocked(primary.generate).mockRejectedValueOnce(new Error('transient primary failure'));
 
-    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).rejects.toBe(error);
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
     await vi.runAllTimersAsync();
     await completion;
 
@@ -1496,7 +1515,7 @@ describe('Database compatibility provider rejection', () => {
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('propagates from bad-request fallback without alerting or sending an outage reply', async () => {
+  it('latches a bad-request fallback compatibility rejection without alerting or outage reply', async () => {
     const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
     const error = rejection();
     vi.mocked(db.assertWritableCompatibility)
@@ -1507,7 +1526,7 @@ describe('Database compatibility provider rejection', () => {
       new WhatSoupError('bad request', 'LLM_BAD_REQUEST'),
     );
 
-    await expect(handleAndDrain(handler, makeIncomingMessage())).rejects.toBe(error);
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
 
     expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(3);
     expect(primary.generate).toHaveBeenCalledOnce();
@@ -1516,7 +1535,7 @@ describe('Database compatibility provider rejection', () => {
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('propagates from terminal fallback without alerting or sending an outage reply', async () => {
+  it('latches a terminal fallback compatibility rejection without alerting or outage reply', async () => {
     vi.useFakeTimers();
     const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
     const error = rejection();
@@ -1527,7 +1546,7 @@ describe('Database compatibility provider rejection', () => {
       .mockImplementationOnce(() => { throw error; });
     vi.mocked(primary.generate).mockRejectedValue(new Error('transient primary failure'));
 
-    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).rejects.toBe(error);
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
     await vi.runAllTimersAsync();
     await completion;
 

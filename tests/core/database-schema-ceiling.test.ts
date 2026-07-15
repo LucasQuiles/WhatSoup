@@ -1073,6 +1073,58 @@ describe('database schema ceiling', () => {
     }
   });
 
+  it('early bootstrap gives an invalid ledger precedence over a future migration', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-invalid-future-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'mixed.db');
+    const lockPath = join(dir, 'state', 'whatsoup.lock');
+    const previousConfig = process.env.INSTANCE_CONFIG;
+
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      PRAGMA journal_mode = DELETE;
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_migrations (version)
+      VALUES (0), (${CURRENT_SCHEMA_MIGRATION + 1});
+    `);
+    seed.close();
+
+    const inspection = inspectExistingDatabaseForBootstrap(dbPath);
+    expect(inspection).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'invalid_schema' },
+    });
+
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    const startServer = vi.fn(async () => {
+      throw new Error('invalid ledger must not start the compatibility drain server');
+    });
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate({
+        acquireLock: () => ({ path: lockPath, pid: process.pid, token: 'test-lock' }),
+        releaseLock: () => true,
+        startServer,
+      }).catch((err: unknown) => err);
+
+      expect(failure).toMatchObject({
+        name: 'DatabaseCompatibilityPermanentStartupError',
+        cause: expect.objectContaining({ reason: 'invalid_schema' }),
+      });
+      expect(databaseCompatibilityStartupExitCode(failure)).toBe(78);
+      expect(startServer).not.toHaveBeenCalled();
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+    }
+  });
+
   it('preserves a transient schema inspection cause without latching read-only mode', () => {
     const db = new Database(':memory:');
     const inspectionFailure = new Error('schema inspection failed');
