@@ -413,7 +413,7 @@ and final verdict.
 
 | Check | Exact method | Expected result and verdict threshold | Artifact |
 |---|---|---|---|
-| Repository and runtime identity | `git rev-parse --show-toplevel && git status --short --branch && bash scripts/run-with-pinned-npm.sh node --version` | Root is this worktree, intended branch is checked out, and Node is 24.15.x; mismatch is `Blocked` | `artifacts/primary/repo-runtime.txt` |
+| Repository and runtime identity | `git rev-parse --show-toplevel && git status --short --branch && bash scripts/run-with-pinned-npm.sh exec -- node --version` | Root is this worktree, intended branch is checked out, and Node is 24.15.x; mismatch is `Blocked` | `artifacts/primary/repo-runtime.txt` |
 | Baseline seams | Run the focused command in **Baseline and Setup** through `scripts/run-with-pinned-npm.sh` | All named files execute and exit 0; no-file, filtered, skipped, or masked execution is `Inconclusive`; any assertion failure is `Fail` | `artifacts/primary/focused-baseline.txt` |
 | Ambient-runtime trap | Never use bare `npm test` as evidence. Confirm the pinned wrapper on `tests/scripts/run-with-pinned-node-symlink-entrypoint.test.ts` | Both wrapper-entrypoint assertions pass; ambient-only output is non-pass | `artifacts/primary/pinned-entrypoint.txt` |
 | Contract and config seams | Inspect `src/config.ts`, `src/core/agent-config-validator.ts`, `src/core/provider-mcp-config.ts`, and OpenCode argv/env builders | One canonical profile field and one credential resolver are identified; an untraced alternate source is `Blocked` | `artifacts/primary/config-flow.txt` |
@@ -1974,7 +1974,7 @@ assertion count, output path, SHA, and verdict in `artifacts/run_manifest.json`:
 git rev-parse --show-toplevel
 git status --short --branch
 git log -2 --oneline
-bash scripts/run-with-pinned-npm.sh node --version
+bash scripts/run-with-pinned-npm.sh exec -- node --version
 bash scripts/run-with-pinned-npm.sh ci
 bash scripts/run-with-pinned-npm.sh --prefix console ci
 bash scripts/run-with-pinned-npm.sh test -- \
