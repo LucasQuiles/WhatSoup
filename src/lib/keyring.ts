@@ -286,7 +286,7 @@ export interface CredentialLookupResult {
  * (`src/gateway/server-methods/secrets.ts:134-146`).
  */
 export function isKnownService(service: string): boolean {
-  return service in SERVICE_ENV_MAP;
+  return Object.hasOwn(SERVICE_ENV_MAP, service);
 }
 
 /**

@@ -54,6 +54,18 @@ describe('isKnownService (closed-id gate)', () => {
     expect(isKnownService('zai-api-key')).toBe(false);
     expect(isKnownService('gemini')).toBe(false);
   });
+
+  it('returns false for Object.prototype member names (prototype-chain bypass)', () => {
+    // SECURITY: SERVICE_ENV_MAP is a plain object literal, so the `in` operator
+    // walks its prototype chain and reports Object.prototype members as "known".
+    // The closed-id gate must reject them via an own-property check — otherwise
+    // 'constructor'/'__proto__'/etc. bypass the closed registry.
+    expect(isKnownService('constructor')).toBe(false);
+    expect(isKnownService('__proto__')).toBe(false);
+    expect(isKnownService('toString')).toBe(false);
+    expect(isKnownService('hasOwnProperty')).toBe(false);
+    expect(isKnownService('valueOf')).toBe(false);
+  });
 });
 
 describe('lookupCredentialTyped', () => {
@@ -106,6 +118,21 @@ describe('lookupCredentialTyped', () => {
     it('rejects service names that look like file paths', () => {
       const result = lookupCredentialTyped('/etc/shadow');
       expect(result.reason).toBe('unknown_service');
+    });
+
+    it('rejects Object.prototype member names via the closed-id gate', () => {
+      // SECURITY: 'constructor'/'__proto__'/etc. are inherited via the object's
+      // prototype chain. The typed lookup must reject them at the gate — value
+      // null, reason unknown_service — never reaching the keyring backend.
+      expect(lookupCredentialTyped('constructor')).toEqual({
+        value: null,
+        reason: 'unknown_service',
+        service: 'constructor',
+      });
+      expect(lookupCredentialTyped('__proto__').reason).toBe('unknown_service');
+      expect(lookupCredentialTyped('toString').reason).toBe('unknown_service');
+      expect(lookupCredentialTyped('hasOwnProperty').reason).toBe('unknown_service');
+      expect(lookupCredentialTyped('valueOf').reason).toBe('unknown_service');
     });
   });
 
