@@ -234,6 +234,20 @@ WhatSoup distinguishes target-host actions from client-device actions:
   non-command status and the complete command remains on the authorized operator surface.
 - The literal redaction placeholder is never presented as pasteable shell input.
 
+## Decision 10: Role-scoped Provider Hooks
+
+Instance provider configuration must distinguish operational bots from development or
+test-authoring agents. An operational WhatSoup instance does not load a development-only
+test-integrity hook/plugin that can intercept ordinary shell work. A development instance
+may load one only through an explicit `enabledPlugins` declaration and remains subject to
+its own hook policy.
+
+Health/parity evidence records the requested and observed role/plugin set. A hook denial
+on an operation outside the plugin's declared role is a configuration mismatch, not a
+provider failure and not a reason to ask the client to run the command. Project-trust
+state for CLI allowlists is inventoried by the private fleet controller because it is a
+target-user configuration surface; WhatSoup reports only safe preflight failure classes.
+
 ## Rollout and Rollback
 
 1. Land detection, persistence migration, explicit profile plumbing, and redacted health

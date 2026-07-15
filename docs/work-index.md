@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 62
+**Total entries:** 63
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=4, plan=31, review=3, spec=23, state=1 |
-| Status | active=9, closed=4, completed=31, deferred=7, pending=10, unknown=1 |
-| Status source | body-marker=61, state-md-status=1 |
+| Kind | handoff=4, plan=32, review=3, spec=23, state=1 |
+| Status | active=9, closed=4, completed=31, deferred=7, pending=10, unknown=2 |
+| Status source | body-marker=62, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -48,10 +48,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (1)
+### Unknown-status — triage needed (2)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
+| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-07-15 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
 ### Cross-tree topic clusters (4)
@@ -103,7 +104,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(31 entries)_
+### docs/superpowers/plans  _(32 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -138,6 +139,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
+| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | unknown | body-marker | headless-fallback-runtime-alignment | 2026-07-15 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -188,4 +190,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-15T21:26:50Z from commit `043c531e3dae51635dc60a5a85238e866ccbe291`
+- Generated at 2026-07-15T23:04:22Z from commit `14bd21c4ea793eca9fba32a571d8386811970525`
