@@ -1,4 +1,8 @@
 import type { InboundFailureClass } from './inbound-failure-class.ts';
+import {
+  ADMISSION_REJECT_CLASSES,
+  admissionRejectInboundFailureClass,
+} from './inbound-failure-class.ts';
 import { parseWhatsAppDeliveryNamespace } from './jid-constants.ts';
 import {
   TURN_RECOVERY_MAX_ID_BYTES,
@@ -210,12 +214,10 @@ function expectedTerminalInboundFailureClass(
   terminal: TurnTerminalPersistenceParams,
 ): InboundFailureClass {
   if (terminal.attemptKind === 'admission_rejected') {
-    if (terminal.attemptFailureClass !== null) {
-      throw new Error(
-        'failed_terminal terminal disposition has an invalid admission failure class',
-      );
-    }
-    return 'unknown';
+    // Lockstep with turn-terminal.ts#toInboundMutation via the shared mapping:
+    // null (legacy) → 'unknown'; a known admission subclass → its distinct
+    // class; anything else is a contract violation (#1750).
+    return admissionRejectInboundFailureClass(terminal.attemptFailureClass);
   }
   const detailed = terminal.attemptFailureClass;
   if (terminal.attemptKind !== 'failed' || detailed === null) {
@@ -280,10 +282,17 @@ export function normalizeFinalizeTurnTerminalParams(
     ) {
       throw new Error('Terminal attempt axis requires a bounded exact failure class');
     }
+  } else if (terminal.attemptKind === 'admission_rejected') {
+    // #1750: admission_rejected may carry a distinct subclass on
+    // attempt_failure_class (or null for a legacy/undifferentiated rejection).
+    if (
+      terminal.attemptFailureClass !== null &&
+      !ADMISSION_REJECT_CLASSES.has(terminal.attemptFailureClass)
+    ) {
+      throw new Error('Terminal attempt axis has an incoherent failure class');
+    }
   } else if (
-    !['completed', 'suppressed_by_policy', 'admission_rejected'].includes(
-      terminal.attemptKind,
-    ) ||
+    !['completed', 'suppressed_by_policy'].includes(terminal.attemptKind) ||
     terminal.attemptFailureClass !== null
   ) {
     throw new Error('Terminal attempt axis has an incoherent failure class');

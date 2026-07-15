@@ -106,7 +106,7 @@ import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
-import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
+import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import {
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
@@ -2145,9 +2145,9 @@ export class AgentRuntime implements Runtime {
 
     this.turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
-      onReject: (turn) => {
-        this.finalizeRejectedRuntimeTurn(turn);
-        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid },
+      onReject: (turn, reason) => {
+        this.finalizeRejectedRuntimeTurn(turn, reason);
+        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
           'turn rejected — agent queue full');
       },
       onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
@@ -3966,8 +3966,8 @@ export class AgentRuntime implements Runtime {
     return this.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, turn);
   }
 
-  private finalizeRejectedRuntimeTurn(turn: QueuedTurn): void {
-    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn);
+  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
+    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
   }
 
   private finalizePerChatProcessorError(
