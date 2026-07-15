@@ -110,6 +110,7 @@ export class EnrichmentPoller {
     for (const [chatJid, chatMessages] of byChat) {
       try {
         const facts = await extractFacts(this.extractionProvider, chatMessages);
+        if (this.stopped) return;
         totalExtracted = totalExtracted + facts.length;
 
         if (facts.length === 0) {
@@ -118,6 +119,7 @@ export class EnrichmentPoller {
         }
 
         const validated = await validateFacts(this.validationProvider, facts, chatMessages);
+        if (this.stopped) return;
 
         if (validated.length === 0) {
           for (const msg of chatMessages) successPks.push(msg.pk);

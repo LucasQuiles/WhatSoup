@@ -90,16 +90,36 @@ describe('public surface drift check', () => {
 
   it('registers both normal and inspection-only health status contracts', () => {
     const registry = readFileSync(path.join(repoRoot, 'docs/public-surface.md'), 'utf8');
+    const release = readFileSync(
+      path.join(repoRoot, 'docs/releases/2026-07-14-database-compatibility-drain.md'),
+      'utf8',
+    );
+    const runbook = readFileSync(path.join(repoRoot, 'docs/runbook.md'), 'utf8');
+    const healthSection = registry
+      .split('### Health server (per-instance)')[1]
+      ?.split('\n### ')[0];
+    const normalizedHealthSection = healthSection?.replaceAll(/\s+/g, ' ');
+    const normalizedRelease = release.replaceAll(/\s+/g, ' ');
+    const normalizedRunbook = runbook.replaceAll(/\s+/g, ' ');
     const healthStatusRow = registry
       .split('\n')
       .find((line) => line.includes('`http:health.status`'));
 
+    expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
+    expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
     expect(healthStatusRow).toContain('`src/core/health.ts:1024`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:150`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
     expect(healthStatusRow).toContain('provider and synthetic admission blocked');
     expect(healthStatusRow).toContain('`runtime.chat.database_compatibility`');
+    expect(normalizedRelease).toContain(
+      'Every running runtime reports a schema newer than the binary as unhealthy',
+    );
+    expect(normalizedRelease).toContain('`schema_ready: false`');
+    expect(normalizedRunbook).toContain(
+      'systemd `Restart=on-failure` does not react to HTTP `503`',
+    );
   });
 
   it('exposes the disposable canary artifact validator as an operator-facing npm proof surface', () => {

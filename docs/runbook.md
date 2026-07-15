@@ -367,14 +367,20 @@ database writes are disabled, and provider and synthetic-turn admission remain
 blocked. The watchdog intentionally does not restart a valid inspection-only
 drain.
 
-If a running Chat process observes a database compatibility rejection after
-startup, its normal health body first becomes HTTP 503 and exposes only
+If a running Chat process observes a database compatibility rejection in its
+queue or a guarded background provider after startup, its normal health body
+first becomes HTTP 503 and exposes only
 `runtime.chat.database_compatibility.reason`, `observed_migration`, and
-`required_migration`. The runtime stops enrichment and rejects later Chat
-admission; it does not write a terminal marker through the now read-only
-database handle. One watchdog restart moves the process into the startup
-classification above, where a valid drain is held without a restart loop and a
-stable invalid artifact exits 78.
+`required_migration`. The runtime stops enrichment and memory consolidation,
+and an in-flight enrichment poller performs no post-provider writes. It rejects
+later Chat admission and does not write a terminal marker through the now
+read-only database handle.
+
+The launchd health watchdog can perform one transition restart into the startup
+classification above. systemd `Restart=on-failure` does not react to HTTP `503`;
+on systemd, a controlled operator restart is required. After that approved
+transition, a valid drain is held without a restart loop and a stable invalid
+artifact exits 78.
 
 Preserve the database artifact and collect only read-only health, service-exit,
 and log evidence. Diagnose whether the artifact requires a compatible newer

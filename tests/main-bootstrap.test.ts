@@ -38,6 +38,7 @@ function runtimeStub() {
     shutdown: vi.fn(async () => {}),
     handleMessage: vi.fn(async () => {}),
     handleJidAliasChanged: vi.fn(),
+    handleDatabaseCompatibilityRejection: vi.fn(),
   };
 }
 
@@ -237,7 +238,11 @@ async function importMainWithMocks(options: {
     })),
     createAnthropicProvider: vi.fn(() => ({ name: 'anthropic' })),
     createOpenAIProvider: vi.fn(() => ({ name: 'openai' })),
-    withDatabaseCompatibility: vi.fn((_db: unknown, provider: { name: string }) => ({
+    withDatabaseCompatibility: vi.fn((
+      _db: unknown,
+      provider: { name: string },
+      _onCompatibilityRejection?: (rejection: Error) => void,
+    ) => ({
       name: provider.name,
       guardedProvider: provider,
     })),
@@ -502,12 +507,18 @@ describe('main bootstrap', () => {
       1,
       h.db,
       h.createAnthropicProvider.mock.results[0]?.value,
+      expect.any(Function),
     );
     expect(h.withDatabaseCompatibility).toHaveBeenNthCalledWith(
       2,
       h.db,
       h.createOpenAIProvider.mock.results[0]?.value,
+      expect.any(Function),
     );
+    const compatibilityHandler = h.withDatabaseCompatibility.mock.calls[0]?.[2] as
+      | ((rejection: Error) => void)
+      | undefined;
+    expect(compatibilityHandler).toBe(h.withDatabaseCompatibility.mock.calls[1]?.[2]);
     const guardedAnthropic = h.withDatabaseCompatibility.mock.results[0]?.value;
     const guardedOpenAI = h.withDatabaseCompatibility.mock.results[1]?.value;
     expect(h.ChatRuntime).toHaveBeenCalledWith(
@@ -524,6 +535,13 @@ describe('main bootstrap', () => {
       expect.any(Object),
     );
     expect(h.memoryScheduler.start).toHaveBeenCalledOnce();
+    expect(h.ChatRuntime.mock.invocationCallOrder[0])
+      .toBeLessThan(h.memoryScheduler.start.mock.invocationCallOrder[0]!);
+    const compatibilityRejection = new Error('future schema');
+    compatibilityHandler?.(compatibilityRejection);
+    expect(h.chatRuntime.handleDatabaseCompatibilityRejection)
+      .toHaveBeenCalledWith(compatibilityRejection);
+    expect(h.memoryScheduler.stop).toHaveBeenCalledOnce();
     expect(h.chatRuntime.setDurability).toHaveBeenCalledWith(h.durability);
     expect(h.createIngestHandler).toHaveBeenCalledWith(
       h.db,

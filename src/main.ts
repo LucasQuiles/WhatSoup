@@ -21,6 +21,7 @@ import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { withDatabaseCompatibility } from './runtimes/chat/providers/database-compatibility.ts';
+import type { DatabaseCompatibilityError } from './core/database-compatibility.ts';
 import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { startHealthServer } from './core/health.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
@@ -350,12 +351,24 @@ if (instanceType === 'agent') {
   });
 } else {
   // chat (default): create chat-specific providers
-  const anthropic = withDatabaseCompatibility(db, createAnthropicProvider());
+  let chatRuntime: ChatRuntime;
+  const handleDatabaseCompatibilityRejection = (
+    rejection: DatabaseCompatibilityError,
+  ): void => {
+    chatRuntime.handleDatabaseCompatibilityRejection(rejection);
+    void memoryConsolidationScheduler?.stop();
+  };
+  const anthropic = withDatabaseCompatibility(
+    db,
+    createAnthropicProvider(),
+    handleDatabaseCompatibilityRejection,
+  );
   const openai = withDatabaseCompatibility(
     db,
     createOpenAIProvider(
       config.chatOpenAIProviderConfig as { baseUrl?: string; apiKeyService?: string } | undefined,
     ),
+    handleDatabaseCompatibilityRejection,
   );
   const pinecone = new PineconeMemory();
   // Enrichment is queue-backed: the poller enqueues validated facts into
@@ -366,6 +379,13 @@ if (instanceType === 'agent') {
   // routing plus export acknowledgement.
   const enableEnrichment =
     typeof config.pineconeIndex === 'string' && config.pineconeIndex.length > 0;
+  chatRuntime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
+    enableEnrichment,
+    getBotJid: () => connectionManager.botJid ?? '',
+    getBotLid: () => connectionManager.botLid,
+    botName: config.botName,
+  });
+  runtime = chatRuntime;
   if (
     enableEnrichment &&
     config.memory.consolidation.enabled &&
@@ -383,12 +403,6 @@ if (instanceType === 'agent') {
       pineconeReadiness: pineconeReadiness.state,
     }, 'memory consolidation enabled but not started');
   }
-  runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
-    enableEnrichment,
-    getBotJid: () => connectionManager.botJid ?? '',
-    getBotLid: () => connectionManager.botLid,
-    botName: config.botName,
-  });
 }
 
 // 6. Wire durability to runtime and message handler

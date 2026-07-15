@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../../src/core/database.ts';
+import { DatabaseCompatibilityError } from '../../../../src/core/database-compatibility.ts';
 import { withDatabaseCompatibility } from '../../../../src/runtimes/chat/providers/database-compatibility.ts';
 import type {
   GenerateRequest,
@@ -21,20 +22,41 @@ function makeDatabase(assertion: () => void): Database {
 }
 
 describe('withDatabaseCompatibility', () => {
-  it('propagates the exact compatibility error without calling the delegate', async () => {
-    const rejection = new Error('database compatibility drained');
+  it('notifies the runtime before propagating the exact compatibility rejection', async () => {
+    const rejection = new DatabaseCompatibilityError(
+      'future_schema',
+      'database compatibility drained',
+      undefined,
+      45,
+    );
     const db = makeDatabase(() => {
       throw rejection;
     });
+    const onCompatibilityRejection = vi.fn();
     const delegate: LLMProvider = {
       name: 'primary',
       generate: vi.fn(),
     };
 
-    const provider = withDatabaseCompatibility(db, delegate);
+    const provider = withDatabaseCompatibility(db, delegate, onCompatibilityRejection);
 
     await expect(provider.generate(request)).rejects.toBe(rejection);
     expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(onCompatibilityRejection).toHaveBeenCalledOnce();
+    expect(onCompatibilityRejection).toHaveBeenCalledWith(rejection);
+    expect(delegate.generate).not.toHaveBeenCalled();
+  });
+
+  it('does not report an unrelated assertion failure as database compatibility loss', async () => {
+    const rejection = new Error('database unavailable');
+    const db = makeDatabase(() => { throw rejection; });
+    const onCompatibilityRejection = vi.fn();
+    const delegate: LLMProvider = { name: 'primary', generate: vi.fn() };
+
+    const provider = withDatabaseCompatibility(db, delegate, onCompatibilityRejection);
+
+    await expect(provider.generate(request)).rejects.toBe(rejection);
+    expect(onCompatibilityRejection).not.toHaveBeenCalled();
     expect(delegate.generate).not.toHaveBeenCalled();
   });
 

@@ -185,12 +185,12 @@ export class ChatRuntime implements Runtime {
         await this.processMessage(msg, traceId, startTime);
       } catch (err) {
         if (!(err instanceof DatabaseCompatibilityError)) throw err;
-        this.latchDatabaseCompatibilityRejection(err);
+        this.handleDatabaseCompatibilityRejection(err);
       }
     });
   }
 
-  private latchDatabaseCompatibilityRejection(rejection: DatabaseCompatibilityError): void {
+  handleDatabaseCompatibilityRejection(rejection: DatabaseCompatibilityError): void {
     if (this.databaseCompatibilityRejection) return;
     this.databaseCompatibilityRejection = rejection;
     this.enrichmentPoller?.stop();
