@@ -171,6 +171,16 @@ fi
 # Health server auth token — used by POST /heal and POST /send on all instances.
 # Prefer an already-loaded value (e.g. from EnvironmentFile=tokens.env in the systemd unit) so a
 # missing or unresponsive platform keyring cannot delay startup.
+#
+# W-5 migration: health.ts (line 484) now resolves the token at request time via
+# lookupCredential('whatsoup-health-token') — keyring-first, env-fallback (PR #1804).
+# This wrapper export is redundant when the token is in the keyring. Once the
+# per-instance token is stored in the keyring (service=whatsoup-health-token,
+# account=<instance>), this block AND the tokens.env EnvironmentFile line in the
+# systemd unit can both be removed. Use deploy/check-health-token-keyring.sh
+# <instance> to verify readiness.
+# Migration tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md
+# Phase E (W-5).
 if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
   WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
   if [ -z "$WHATSOUP_HEALTH_TOKEN" ]; then
