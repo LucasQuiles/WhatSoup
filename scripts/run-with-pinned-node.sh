@@ -6,15 +6,19 @@ if [ "$#" -lt 1 ]; then
   exit 64
 fi
 
+# Resolve a path to its physical (fully symlink-free) location. Uses `pwd -P`
+# so directory-level symlinks are resolved too — not just a trailing symlinked
+# file. This must mirror how Node canonicalises the main module: Node realpaths
+# the entrypoint, so `import.meta.url` is always the physical file:// URL.
 _resolve_symlinks() {
   local p="$1"
   while [ -L "$p" ]; do
     local dir
-    dir="$(cd "$(dirname "$p")" && pwd)"
+    dir="$(cd "$(dirname "$p")" && pwd -P)"
     p="$(readlink "$p")"
     [[ "$p" != /* ]] && p="$dir/$p"
   done
-  echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+  echo "$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$(_resolve_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
@@ -31,6 +35,15 @@ if [ ! -f "$TARGET" ]; then
   echo "FATAL: script not found: $TARGET" >&2
   exit 1
 fi
+
+# Pass Node the physical (realpath'd) entrypoint so process.argv[1] matches the
+# realpath'd import.meta.url that Node derives for the main module. Otherwise a
+# run from a symlinked/out-of-tree worktree (e.g. macOS /tmp -> /private/tmp)
+# would make every `import.meta.url === pathToFileURL(process.argv[1]).href`
+# main-module gate compare a physical URL against a logical path — they mismatch,
+# the guard body silently never runs, and pre-push node-wrapper guards fail OPEN
+# (exit 0). Resolving TARGET here fixes all such guards at a single source. (#1831)
+TARGET="$(_resolve_symlinks "$TARGET")"
 
 NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || true)"
 if [ -z "$NVMRC_VERSION" ]; then
