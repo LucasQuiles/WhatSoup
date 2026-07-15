@@ -2312,20 +2312,20 @@ export class AgentRuntime implements Runtime {
 
   /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
   private createOutboundQueue(chatJid: string, reason: string): OutboundQueue {
-    // QR-069: inherit a prior queue's echo-guard token when one exists. Pass the
-    // 3rd arg only when defined so a genuinely-new queue keeps the 2-arg
-    // construction contract (no trailing `undefined`) — mirrors the QR-028
-    // conditional-call precedent for optional positional params.
+    // Durable attribution is DB-canonical and immutable. Delivery routing may
+    // later move between a phone JID and LID without rewriting conversation_key.
+    const conversationKey = canonicalConversationKey(chatJid, this.db);
+    // QR-069: inherit a prior queue's echo-guard token when one exists.
     const priorToken = this.priorSenderTokenForChat(chatJid);
-    const q = priorToken !== undefined
-      ? new OutboundQueue(this.messenger, chatJid, priorToken)
-      : new OutboundQueue(this.messenger, chatJid);
+    const q = new OutboundQueue(this.messenger, chatJid,
+      { conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }) });
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
     q.setTextAggregateDelayMs(config.textAggregateDelayMs);
     log.debug({
       chatJid,
+      conversationKey,
       reason,
       sessionScope: this.sessionScope,
       shared: this.shared,
