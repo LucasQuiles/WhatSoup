@@ -310,7 +310,13 @@ export function SummaryTab({
       </div>
 
       {/* Row 4: Providers & Keys — agent mode only (read-only) */}
-      {line.mode === 'agent' && <ProvidersKeysCard lineName={line.name} />}
+      {line.mode === 'agent' && (
+        <ProvidersKeysCard
+          lineName={line.name}
+          stale={line.stale}
+          healthObservedAt={line.healthObservedAt}
+        />
+      )}
 
       {/* Confirmation dialogs for destructive actions */}
       <ConfirmDialog
