@@ -34,6 +34,9 @@ export type InboundFailureClass =
   | 'queue_closed'
   | 'pre_dispatch_error'
   | 'scope_blocked_recovery'
+  // Recovery-owner reclaim (#1749): a terminally non-echoed recovery-owned
+  // inbound released by the stuck-inbound sweep (bucket 4).
+  | 'recovery_owner_reclaimed'
   | 'unknown';
 
 export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
@@ -51,6 +54,7 @@ export const INBOUND_FAILURE_CLASSES: ReadonlySet<string> = new Set<string>([
   'queue_closed',
   'pre_dispatch_error',
   'scope_blocked_recovery',
+  'recovery_owner_reclaimed',
   'unknown',
 ]);
 
