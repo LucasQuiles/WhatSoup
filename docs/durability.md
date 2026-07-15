@@ -311,16 +311,20 @@ missed (the QR-102 ordering strand), or a turn that finished with no reply and n
 finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
-**15 minutes**, and reconciles three buckets in a single transaction:
+**15 minutes**, and reconciles four buckets in a single transaction:
 
 | Bucket | Selection | Disposition |
 |---|---|---|
 | 1. Echoed but not finalized | open (`pending`/`processing`/`turn_done`) with an `is_terminal`, `echoed` outbound op, `received_at` older than **5 minutes** | `completeInbound(seq, 'recovered_response_sent')` |
-| 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op | `markInboundComplete(seq, 'recovered_turn_done')` |
-| 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op | `markInboundFailed(seq)` (terminal_reason `error`) |
+| 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
+| 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
+| 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, and no echoed terminal op | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
 
-The buckets are mutually exclusive (bucket 1 requires an echoed terminal op; buckets 2 and 3
-require its absence), so no row is disposed twice. Each SELECT is bounded to 200 rows so a
+Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
+record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
+Bucket 4 is the exact inverse: it selects **only** inbound rows owning such a terminal record
+whose delivery can never echo-settle, so the four buckets remain mutually exclusive and no row is
+disposed twice (an echoed terminal op still routes to bucket 1). Each SELECT is bounded to 200 rows so a
 large backlog drains over successive sweeps rather than in one long transaction. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
@@ -359,6 +363,33 @@ until the crash evidence has reached durable terminal state. If a journaled inbo
 provable immutable context, destructive cleanup is withheld entirely. Crash history is
 preserved after terminal cleanup, so health remains degraded and the exhausted episode stays
 visible.
+
+### 4.7 Recovery-Owner Reclaim (#1749)
+
+An unresolved delivery finalizes `transferred_to_recovery_owner`: the answer op is `maybe_sent`
+(it may still echo late), so the turn transfers ownership and waits, writing a
+`turn_terminal_records` row plus a recovery job. Late-echo settlement
+(`completeEchoedTurnRecoveryInbound`) closes the source inbound only when that **same** selected
+op reaches `echoed`. If the op instead reaches a terminal non-echoed state
+(`failed_permanent`/`quarantined`) it can never echo-settle, and there is no live worker that
+would otherwise exhaust the job. The terminal record simultaneously excludes the inbound from
+buckets 1–3 of §4.5 and from `preConnectRecovery`, so without a reclaim the inbound stays
+`processing` forever (retention only deletes terminal rows) and a still-`pending`/`claimed` job
+pins admission on the scope indefinitely — the recovery-owner trap.
+
+Remediation 1 (#1748) closed the trigger for future turns: a deterministic non-send now produces
+the `not_sent` delivery evidence that finalizes `failed_terminal` (closing its inbound) instead
+of transferring. Remediation 2/3 (this section) is the reclaim for rows already pinned. Sweep
+bucket 4 (§4.5) fails such an inbound `recovery_owner_reclaimed` and drives any `pending`/
+`claimed` owning job to the existing terminal `exhausted` state
+(`reclaimDeadDeliveryRecoveryJobWithinCallerTransaction`). Because admission counts only
+`pending`/`claimed` jobs plus orphan transfers (§ recovery jobs, below), the exhausted job stops
+blocking the scope, while it and the `recovery_pending_operator_catchup` disposition keep the
+lost message operator-visible (health stays degraded). The reclaim never touches an op that is
+still `maybe_sent` with a live job — that message may yet have been delivered — nor an orphan
+transfer (a `transferred_to_recovery_owner` record with no linked job), which is tracked
+separately as a corrupt link. `unfinalized_retry_owned` incidents are owned by the finalization
+supervisor's own exhaustion (§4.6), not by this recovery-owner reclaim.
 
 ---
 
@@ -526,7 +557,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
-| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim`. An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. |
+| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. |
 
 ### `outbound_ops`
 
@@ -606,7 +637,10 @@ Runtime health reports an admission-active `outstanding` count (`pending` plus `
 orphan transfers), every job-state bucket (including live claims), unmatched operator catch-ups,
 quarantined selected deliveries, orphan transfers, corrupt links, and echo conflicts.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
-per-chat or global scope. Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
+per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
+`quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
+`pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
 an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
 an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
 independently keeps health degraded until operator closure or retention resolution. Appending the

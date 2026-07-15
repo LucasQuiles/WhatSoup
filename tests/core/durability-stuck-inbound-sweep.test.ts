@@ -57,7 +57,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     expect(status(seq)).toBe('complete');
     expect(reason(seq)).toBe('recovered_response_sent');
-    expect(res).toEqual({ completedEchoed: 1, completedTurnDone: 0, failedStale: 0 });
+    expect(res).toEqual({ completedEchoed: 1, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0 });
   });
 
   it('leaves a fresh (<5 min) open inbound with an echoed terminal op untouched', () => {
@@ -68,7 +68,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     const res = engine.sweepStuckInbound();
 
     expect(status(seq)).toBe('processing');
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0 });
   });
 
   it('completes a stale turn_done inbound with no outbound op (recovered_turn_done)', () => {
@@ -80,7 +80,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     expect(status(seq)).toBe('complete');
     expect(reason(seq)).toBe('recovered_turn_done');
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 1, failedStale: 0 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 1, failedStale: 0, reclaimedRecoveryOwned: 0 });
   });
 
   it('fails a stale processing inbound with no outbound op (error)', () => {
@@ -92,7 +92,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     expect(status(seq)).toBe('failed');
     expect(reason(seq)).toBe('error');
     expect(failureClass(seq)).toBe('stale_reclaim');
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1, reclaimedRecoveryOwned: 0 });
   });
 
   it('fails a stale processing inbound whose only terminal op is quarantined', () => {
@@ -109,7 +109,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     expect(status(seq)).toBe('failed');
     expect(reason(seq)).toBe('error');
     expect(failureClass(seq)).toBe('stale_reclaim');
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 1, reclaimedRecoveryOwned: 0 });
   });
 
   it('leaves an open inbound younger than 24h with no op untouched', () => {
@@ -118,7 +118,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     const res = engine.sweepStuckInbound();
 
     expect(status(seq)).toBe('processing');
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0 });
   });
 
   it('a second sweep makes no further changes (idempotent)', () => {
@@ -134,10 +134,10 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
     backdate(failSeq, '-25 hours');
 
     const first = engine.sweepStuckInbound();
-    expect(first).toEqual({ completedEchoed: 1, completedTurnDone: 1, failedStale: 1 });
+    expect(first).toEqual({ completedEchoed: 1, completedTurnDone: 1, failedStale: 1, reclaimedRecoveryOwned: 0 });
 
     const second = engine.sweepStuckInbound();
-    expect(second).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0 });
+    expect(second).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0 });
   });
 
   it('does not re-touch rows already finalized by preConnectRecovery', () => {
@@ -149,7 +149,7 @@ describe('sweepStuckInbound — live stuck-inbound reconciler (W2b)', () => {
 
     const res = engine.sweepStuckInbound();
 
-    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0 });
+    expect(res).toEqual({ completedEchoed: 0, completedTurnDone: 0, failedStale: 0, reclaimedRecoveryOwned: 0 });
     expect(status(seq)).toBe('complete');
     expect(reason(seq)).toBe('recovered_turn_done'); // unchanged
   });

@@ -62,6 +62,11 @@ function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: numbe
 }
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
+  // #1749 recovery-owner reclaim added the bucket-4 sweep query + reclaim
+  // wiring to this cohesive core durability engine, taking it just over the
+  // 2000-line arch.file-size warn budget (~2076). Grandfathered per the project
+  // norm for large core files; a durability.ts slice is a separate follow-up.
+  'src/core/durability.ts',
   'src/runtimes/agent/runtime.ts',
   'src/runtimes/agent/session.ts',
   'src/transport/connection.ts',
