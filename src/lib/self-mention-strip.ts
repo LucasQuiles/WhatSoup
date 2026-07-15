@@ -88,13 +88,25 @@ export function buildSelfMentionStripPatterns(
 export function stripSelfMentions(text: string, patterns: readonly RegExp[]): string {
   if (!text) return text;
   let out = text;
+  let changed = false;
   for (const pattern of patterns) {
     // Reset lastIndex in case a caller passed a previously-used regex.
     pattern.lastIndex = 0;
-    out = out.replace(pattern, '');
+    const next = out.replace(pattern, '');
+    if (next !== out) {
+      changed = true;
+      out = next;
+    }
   }
-  // Collapse runs of whitespace to a single space, then trim.
-  return out.replace(/\s+/g, ' ').trim();
+  // Non-destructive: if no mention matched, return the text verbatim. Only when a
+  // token was removed do we tidy the stray horizontal whitespace it left behind —
+  // collapsing runs of spaces/tabs and trimming line edges, while PRESERVING
+  // newlines so multi-line message structure (lists, code blocks) survives.
+  if (!changed) return text;
+  return out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[ \t]+|[ \t]+$/gm, '')
+    .trim();
 }
 
 /**

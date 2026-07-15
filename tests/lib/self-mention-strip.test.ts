@@ -152,6 +152,20 @@ describe('stripSelfMentions', () => {
     patterns[1].lastIndex = 5;
     expect(stripSelfMentions('@bot hello', patterns)).toBe('hello');
   });
+
+  it('preserves newlines and message structure when stripping a mention (#1854)', () => {
+    const patterns = buildSelfMentionStripPatterns(['bot']);
+    // A group @mention on a multi-line message must not flatten the structure.
+    const input = '@bot here is my list:\n- item one\n- item two';
+    expect(stripSelfMentions(input, patterns)).toBe('here is my list:\n- item one\n- item two');
+  });
+
+  it('returns multi-line text verbatim when no mention is present (non-destructive #1854)', () => {
+    const patterns = buildSelfMentionStripPatterns(['bot']);
+    // No self-mention → must NOT collapse newlines, blank lines, or internal spacing.
+    const input = 'line one\nline  two\n\nline three';
+    expect(stripSelfMentions(input, patterns)).toBe(input);
+  });
 });
 
 describe('stripSelfMentionsFrom (convenience)', () => {
