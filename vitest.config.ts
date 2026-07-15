@@ -35,6 +35,10 @@ export default defineConfig({
     // tests/browser-motion/** runs only via vitest.browser.motion.config.ts (F-B5-1).
     exclude: ['tests/browser/**', 'tests/browser-motion/**'],
     testTimeout: 10_000,
+    // Bound setup/teardown hooks so a hung teardown fails fast instead of
+    // blocking indefinitely under --pool=forks (issue #1834 root cause was
+    // an incomplete child_process mock; this timeout is defense-in-depth).
+    hookTimeout: 10_000,
     setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
     coverage: {
       provider: 'v8',
