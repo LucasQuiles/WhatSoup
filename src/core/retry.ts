@@ -36,8 +36,11 @@ export class AbortSleepError extends Error {
  * class lets callers distinguish a deliberate cancel from an unexpected failure.
  */
 export function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
+  // Abort takes precedence over the ms<=0 fast-path: an already-aborted signal must
+  // reject even for a zero/negative wait, so a retry loop honoring the abort does not
+  // fall through and run another attempt.
   if (signal?.aborted) return Promise.reject(new AbortSleepError(ms));
+  if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout>;
     const onAbort = () => {
@@ -76,7 +79,15 @@ export function jitteredDelayPositive(
   maxMs = 30_000,
   jitterFraction = 0.25,
 ): number {
-  const exp = baseMs * Math.pow(2, attempt);
-  const capped = Math.min(exp, maxMs);
-  return capped * (1 + Math.random() * jitterFraction);
+  // Clamp untrusted inputs so a malformed baseMs/attempt/maxMs/jitterFraction can never
+  // yield a negative, NaN, or floor-undercutting delay. Mirrors the isFinite+clamp guard
+  // in OutboundQueue.retryAfterMs. NaN→0 (not isFinite) so a genuine Infinity baseMs
+  // still degrades to maxMs via Math.min rather than collapsing to 0.
+  const safeBaseMs = Number.isNaN(baseMs) ? 0 : Math.max(baseMs, 0);
+  const safeAttempt = Number.isNaN(attempt) ? 0 : Math.max(attempt, 0);
+  const safeMaxMs = Number.isFinite(maxMs) && maxMs > 0 ? maxMs : 30_000;
+  const safeJitterFraction = Number.isFinite(jitterFraction) && jitterFraction > 0 ? jitterFraction : 0;
+  const exp = safeBaseMs * Math.pow(2, safeAttempt);
+  const capped = Math.min(exp, safeMaxMs);
+  return capped * (1 + Math.random() * safeJitterFraction);
 }
