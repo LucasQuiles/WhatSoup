@@ -1497,15 +1497,23 @@ describe('OutboundQueue', () => {
         expectedMs: 15_000,
       };
 
-      // Full mode — contains elapsed and instance name
+      // Full mode — threshold notice, instance name, and NO live-clock elapsed (#1843).
+      // A one-shot slow timer fires once at the fixed slow threshold, so the elapsed
+      // value is constant by construction; rendering it as "(45s)" made every slow
+      // notice identical across chats and read as a frozen counter. Mirror the #1777
+      // stall fix: word it as a threshold crossing with no parenthesized clock.
       const full = makeMessenger();
       const qFull = new OutboundQueue(full.messenger, CHAT_JID);
       qFull.setToolUpdateMode('full');
       qFull.enqueueProgressUpdate(baseEvent, INSTANCE);
       await vi.runAllTimersAsync();
       expect(full.calls).toHaveLength(1);
-      expect(full.calls[0]).toContain('45s');
+      // Still conveys the bot is alive and working longer than usual…
+      expect(full.calls[0]).toContain('taking longer than expected');
       expect(full.calls[0]).toContain(INSTANCE);
+      // …but carries NO parenthesized elapsed clock (the value that never advanced).
+      expect(full.calls[0]).not.toMatch(/\(\d/);
+      expect(full.calls[0]).not.toContain('45s');
 
       // Friendly mode — contains instance name, simpler language
       const friendly = makeMessenger();
@@ -1596,19 +1604,23 @@ describe('OutboundQueue', () => {
 
     it('does NOT coalesce progress placeholders that render distinct text', async () => {
       // Safety boundary for the coalescing fix: only *identical* text is suppressed.
-      // Two slow events with different elapsed render different strings and must both send,
-      // so genuinely distinct progress information is never lost.
+      // operation_progress carries a GENUINELY ADVANCING elapsed clock (the periodic
+      // setInterval path is deliberately untouched by #1843), so two progress events
+      // with different elapsed render different strings and must both send — distinct
+      // progress information is never lost. (operation_slow is no longer a valid vehicle
+      // for this boundary post-#1843: its one-shot threshold value is constant, so two
+      // slow events render identical text and legitimately coalesce.)
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       queue.setToolUpdateMode('full');
       queue.setProgressFloorMs(0); // isolate the 30s text-window layer; floor covered separately
 
       queue.enqueueProgressUpdate(
-        { type: 'operation_slow', toolId: 't1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, expectedMs: 15_000 },
+        { type: 'operation_progress', toolId: 't1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, state: 'running' },
         INSTANCE,
       );
       queue.enqueueProgressUpdate(
-        { type: 'operation_slow', toolId: 't2', toolName: 'Bash', category: 'running', elapsedMs: 90_000, expectedMs: 15_000 },
+        { type: 'operation_progress', toolId: 't2', toolName: 'Bash', category: 'running', elapsedMs: 90_000, state: 'running' },
         INSTANCE,
       );
       await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS * 2);
@@ -2947,8 +2959,10 @@ describe('OutboundQueue', () => {
       await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
       expect(state.turnStatusCount).toBe(1);
 
-      // 8 more within the floor window (distinct elapsed → distinct text, so the
-      // floor — not the text window — is what suppresses them). None may count.
+      // 8 more within the floor window. Post-#1843 every operation_slow renders the
+      // same constant threshold text; regardless, the per-chat rate floor is checked
+      // BEFORE the text window (source: enqueueProgress), so it is the floor that
+      // suppresses these and returns before the cap gate. None may count.
       for (let i = 1; i <= 8; i++) {
         queue.enqueueProgressUpdate(
           { type: 'operation_slow', toolId: `t${i}`, toolName: 'Read', category: 'reading', elapsedMs: (i + 1) * 9_000, expectedMs: 3_000 },

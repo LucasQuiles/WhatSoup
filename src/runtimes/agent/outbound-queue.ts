@@ -834,13 +834,13 @@ export class OutboundQueue implements IOutboundQueue {
           this.startTyping();
           return;
         }
+        // One-shot slow timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1843; mirrors #1777).
         if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name} is still working on it..._`);
         } else {
-          const elapsed = formatElapsed(event.elapsedMs);
-          this.enqueueProgress(`_\u23f3 ${name} is taking longer than expected (${elapsed})..._`);
+          this.enqueueProgress(`_\u23f3 ${name} is taking longer than expected..._`);
         }
         return;
       }
