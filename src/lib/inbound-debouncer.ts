@@ -40,6 +40,14 @@ export interface InboundDebouncerParams {
   clock?: DebounceClock;
   /** Injectable timer factory (default: global setTimeout/clearTimeout). */
   timers?: DebounceTimerFactory;
+  /**
+   * Called when the `onFlush` callback throws synchronously or returns a
+   * rejecting promise. The debouncer isolates the failure internally so a
+   * single bad flush cannot crash the process (uncaught exception from a timer
+   * callback / unhandled rejection) or strand other senders' pending batches.
+   * Default: no-op (the error is swallowed).
+   */
+  onError?: (error: Error, context: string) => void;
 }
 
 export interface FlushedBatch<TMessage> {
@@ -82,8 +90,13 @@ interface PendingBatch<TMessage> {
 
 export function createInboundDebouncer<TMessage>(
   params: InboundDebouncerParams,
-  onFlush: (batch: FlushedBatch<TMessage>) => void,
+  onFlush: (batch: FlushedBatch<TMessage>) => void | Promise<void>,
 ): InboundDebouncer<TMessage> {
+  if (!Number.isFinite(params.waitMs)) {
+    throw new TypeError(
+      `createInboundDebouncer: waitMs must be a finite number, got ${String(params.waitMs)}`,
+    );
+  }
   const waitMs = Math.max(0, Math.floor(params.waitMs));
   const maxWaitMs =
     typeof params.maxWaitMs === 'number' && params.maxWaitMs > 0
@@ -98,6 +111,11 @@ export function createInboundDebouncer<TMessage>(
   const timers = params.timers ?? {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+
+  const onError = params.onError ?? (() => {});
+  const reportErr = (err: unknown, context: string) => {
+    onError(err instanceof Error ? err : new Error(String(err)), context);
   };
 
   const pending = new Map<string, PendingBatch<TMessage>>();
@@ -127,7 +145,26 @@ export function createInboundDebouncer<TMessage>(
       lastAt: batch.lastAt,
       reason,
     };
-    onFlush(flushed);
+
+    // Isolate the callback: a synchronous throw must not escape a timer
+    // callback (→ uncaught exception → crash) or strand the rest of a
+    // flushAll, and a rejecting promise must not become an unhandled
+    // rejection. Both are routed to onError. The batch is already removed
+    // from `pending` above, so a failing flush never blocks future batches.
+    try {
+      const result: unknown = onFlush(flushed);
+      if (
+        result !== null &&
+        typeof result === 'object' &&
+        typeof (result as { then?: unknown }).then === 'function'
+      ) {
+        void Promise.resolve(result as Promise<unknown>).catch((err) => {
+          reportErr(err, `onFlush(${key})`);
+        });
+      }
+    } catch (err) {
+      reportErr(err, `onFlush(${key})`);
+    }
     return flushed;
   };
 

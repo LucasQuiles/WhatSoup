@@ -288,4 +288,84 @@ describe('createInboundDebouncer', () => {
 
     vi.useRealTimers();
   });
+
+  // --- error isolation (onFlush must never crash the debouncer) ---
+
+  it('routes a synchronous onFlush throw to onError instead of crashing the timer', () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const boom = new Error('sync boom');
+    const debouncer = makeDebouncer<string>(
+      { waitMs: 500, onError },
+      () => {
+        throw boom;
+      },
+    );
+
+    debouncer.push('alice', 'x');
+    // Before the fix, the throw escapes the setTimeout callback: the timer
+    // callback throws (uncaught exception in production; advanceTimersByTime
+    // rethrows here). After the fix it is caught and routed to onError.
+    expect(() => vi.advanceTimersByTime(500)).not.toThrow();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toBe(boom);
+    // Batch was still cleared from pending.
+    expect(debouncer.pendingSenders()).toBe(0);
+
+    vi.useRealTimers();
+  });
+
+  it('routes an async onFlush rejection to onError instead of an unhandled rejection', async () => {
+    const onError = vi.fn();
+    const boom = new Error('async boom');
+    const debouncer = makeDebouncer<string>(
+      { waitMs: 500, onError },
+      () => Promise.reject(boom),
+    );
+
+    debouncer.push('alice', 'x');
+    // Synchronous trigger returns the rejecting promise from onFlush.
+    debouncer.flush('alice');
+    // Let the internal .catch microtask run.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toBe(boom);
+  });
+
+  it('rejects a non-finite waitMs at construction', () => {
+    expect(() => makeDebouncer<string>({ waitMs: Number.NaN }, vi.fn())).toThrow();
+    expect(() =>
+      makeDebouncer<string>({ waitMs: Number.POSITIVE_INFINITY }, vi.fn()),
+    ).toThrow();
+  });
+
+  it('flushAll continues past a sender whose onFlush throws', () => {
+    const onError = vi.fn();
+    const delivered: string[] = [];
+    const debouncer = makeDebouncer<string>(
+      { waitMs: 10000, onError },
+      (batch) => {
+        if (batch.key === 'bob') throw new Error('bob boom');
+        delivered.push(batch.key);
+      },
+    );
+
+    debouncer.push('alice', 'a');
+    debouncer.push('bob', 'b');
+    debouncer.push('carol', 'c');
+
+    const results = debouncer.flushAll();
+
+    // All three senders cleared despite bob throwing — no stranding.
+    expect(debouncer.pendingSenders()).toBe(0);
+    // Non-throwing senders were delivered.
+    expect(delivered).toContain('alice');
+    expect(delivered).toContain('carol');
+    // Bob's failure routed to onError, not propagated.
+    expect(onError).toHaveBeenCalledTimes(1);
+    // flushAll still reports all three attempted flushes.
+    expect(results.length).toBe(3);
+  });
 });
