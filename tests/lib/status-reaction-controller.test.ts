@@ -4,6 +4,7 @@ import {
   adaptEmojisForSingleSlot,
   createStatusReactionController,
   DEFAULT_STATUS_REACTION_EMOJIS,
+  MINIMAL_STATUS_REACTION_EMOJIS,
   type StatusReactionAdapter,
   type StatusReactionEmojis,
 } from '../../src/lib/status-reaction-controller.ts';
@@ -292,5 +293,15 @@ describe('DEFAULT_STATUS_REACTION_EMOJIS', () => {
     expect(DEFAULT_STATUS_REACTION_EMOJIS.tool).toBe('🔧');
     expect(DEFAULT_STATUS_REACTION_EMOJIS.done).toBe('✅');
     expect(DEFAULT_STATUS_REACTION_EMOJIS.error).toBe('❌');
+  });
+});
+
+describe('MINIMAL_STATUS_REACTION_EMOJIS', () => {
+  it('collapses progress states onto a single thumbs-up while keeping terminal markers', () => {
+    expect(MINIMAL_STATUS_REACTION_EMOJIS.queued).toBe('👍');
+    expect(MINIMAL_STATUS_REACTION_EMOJIS.thinking).toBe('👍');
+    expect(MINIMAL_STATUS_REACTION_EMOJIS.tool).toBe('👍');
+    expect(MINIMAL_STATUS_REACTION_EMOJIS.done).toBe('✅');
+    expect(MINIMAL_STATUS_REACTION_EMOJIS.error).toBe('❌');
   });
 });
