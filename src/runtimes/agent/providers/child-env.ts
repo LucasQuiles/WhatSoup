@@ -127,3 +127,30 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
     }).filter(([, v]) => v !== undefined),
   ) as NodeJS.ProcessEnv;
 }
+
+/**
+ * Minimal non-secret environment for an OpenCode headless child. This is a
+ * separate positive allowlist: Claude-specific auth, privilege, connector,
+ * mutation, and tuning variables never enter the object.
+ */
+export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.ProcessEnv {
+  const configRoots = childConfigRoots(opts);
+
+  return Object.fromEntries(
+    Object.entries({
+      PATH: process.env.PATH,
+      HOME: configRoots?.home ?? process.env.HOME,
+      USER: process.env.USER,
+      SHELL: process.env.SHELL,
+      LANG: process.env.LANG,
+      TERM: process.env.TERM,
+      NODE_PATH: process.env.NODE_PATH,
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
+      TMPDIR: process.env.TMPDIR,
+      WHATSOUP_INSTANCE: opts?.whatsoupInstance,
+      WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+    }).filter(([, value]) => value !== undefined),
+  ) as NodeJS.ProcessEnv;
+}

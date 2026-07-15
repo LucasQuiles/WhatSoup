@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "profile": "whatsoup-headless",
+  "artifactKind": "non_deployable_template",
+  "deployable": false,
+  "selector": "--agent",
+  "modelSelection": "route",
+  "runtime": {
+    "supportedVersions": [],
+    "workspacePatternAttestationRequired": true,
+    "workspaceBinding": {
+      "status": "unresolved",
+      "placeholder": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__",
+      "permissionPattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/*",
+      "exactRuntimePathRequired": true,
+      "interpolationOrCompositionVerified": false
+    },
+    "homeBinding": {
+      "status": "unresolved",
+      "placeholder": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__",
+      "exactRuntimePathRequired": true,
+      "interpolationOrCompositionVerified": false
+    }
+  },
+  "permissions": {
+    "read": [
+      { "pattern": "*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/*", "action": "allow" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.git", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.git/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.github", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.github/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.env*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.aws", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.aws/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.azure", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.azure/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.config/gcloud", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.config/gcloud/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.docker", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.docker/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.gnupg", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.gnupg/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.kube", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.kube/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.ssh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.ssh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/agents", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/agents/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/gh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/gh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/secrets", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/secrets/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.ssh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.ssh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/Library/Keychains", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/Library/Keychains/*", "action": "deny" }
+    ],
+    "edit": [
+      { "pattern": "*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/*", "action": "allow" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.git", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.git/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.github", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.github/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.env*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.aws", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.aws/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.azure", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.azure/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.config/gcloud", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.config/gcloud/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.docker", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.docker/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.gnupg", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.gnupg/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.kube", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.kube/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.ssh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_WORKSPACE_UNRESOLVED__/.ssh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/agents", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/opencode/agents/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/gh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/gh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/secrets", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.config/secrets/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.ssh", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/.ssh/*", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/Library/Keychains", "action": "deny" },
+      { "pattern": "__WHATSOUP_RUNTIME_HOME_UNRESOLVED__/Library/Keychains/*", "action": "deny" }
+    ],
+    "bash": [
+      { "pattern": "*", "action": "allow" },
+      { "pattern": "sudo *", "action": "deny" },
+      { "pattern": "git push*", "action": "deny" },
+      { "pattern": "gh *", "action": "deny" },
+      { "pattern": "ssh *", "action": "deny" },
+      { "pattern": "scp *", "action": "deny" },
+      { "pattern": "tailscale *", "action": "deny" },
+      { "pattern": "ufw *", "action": "deny" }
+    ],
+    "tools": {
+      "question": "deny",
+      "task": "deny",
+      "webfetch": "deny",
+      "websearch": "deny",
+      "external_directory": "deny"
+    }
+  },
+  "childEnvironment": {
+    "deniedExactKeys": [
+      "SUDO_ASKPASS",
+      "ALLOW_M365_MUTATIONS",
+      "CLAUDE_CONFIG_DIR"
+    ],
+    "exactlyOneSelectedProviderCredential": true,
+    "effectiveKeyNameProofRequired": true,
+    "credentialValuesMayBeRecorded": false
+  },
+  "claims": {
+    "dispatcherPolicyOnly": true,
+    "operatingSystemSandbox": false,
+    "installedRuntimeCapability": false
+  },
+  "tcc": {
+    "workspace": "not_required"
+  }
+}

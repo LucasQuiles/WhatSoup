@@ -18,7 +18,11 @@ import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
-import { buildBaseChildEnv, type BuildBaseChildEnvOptions } from './providers/child-env.ts';
+import {
+  buildBaseChildEnv,
+  buildOpenCodeBaseChildEnv,
+  type BuildBaseChildEnvOptions,
+} from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
@@ -36,8 +40,13 @@ import {
   buildProviderCrashMetadata,
 } from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
+import {
+  buildOpenCodeRunArgs,
+  opencodeUsesConfigModel,
+} from './providers/opencode-execution-profile.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -152,7 +161,7 @@ export interface SessionManagerOptions {
 }
 
 /**
- * Build an explicit environment for Claude Code child processes.
+ * Build an explicit environment for provider child processes.
  *
  * Security rationale: spawn() with no `env` option inherits process.env in full.
  * For a multi-provider system this is a security hole — Codex would receive
@@ -162,10 +171,6 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
-// Services whose model prefix resolved to no SERVICE_ENV_MAP entry — warned
-// once per service per process so spawn-per-turn providers don't spam logs.
-const warnedUnmappedKeyServices = new Set<string>();
-
 export function buildChildEnv(
   provider: string = 'claude-cli',
   baseOpts?: BuildBaseChildEnvOptions,
@@ -179,14 +184,14 @@ export function buildChildEnv(
     );
   }
 
-  const env = buildBaseChildEnv(baseOpts);
+  const env = provider === 'opencode-cli'
+    ? buildOpenCodeBaseChildEnv(baseOpts)
+    : buildBaseChildEnv(baseOpts);
 
-  // Provider-specific credentials — each provider only receives the keys it needs.
-  // W-4: keys are resolved via resolveApiKey() (keyring-first, env-fallback)
-  // rather than read directly from process.env. This removes the direct env
-  // reads flagged by tests/scripts/secret-env-read-guard.test.ts and ensures
-  // keyring-stored keys are forwarded to children even when the parent env is
-  // empty. See docs/security-handoffs/2026-05-09-env-secret-exposure.md Phase D.
+  // Provider-specific credentials — each provider only receives the keys it
+  // needs. Claude/Codex use resolveApiKey(); OpenCode resolves one selected
+  // service through lookupCredential(). Both paths are keyring-aware and avoid
+  // copying the parent credential environment. See the Phase D security handoff.
   switch (provider) {
     case 'claude-cli':
       // OPENAI_API_KEY is allowed for this provider's auxiliary features (Whisper).
@@ -207,59 +212,44 @@ export function buildChildEnv(
       if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
       break;
     case 'opencode-cli': {
-      // OpenCode reads from its own config or standard API keys
-      {
-        const openaiKey = resolveApiKey({ service: 'openai', envVar: 'OPENAI_API_KEY' });
-        if (openaiKey) env.OPENAI_API_KEY = openaiKey;
-        const anthropicKey = resolveApiKey({ service: 'anthropic', envVar: 'ANTHROPIC_API_KEY' });
-        if (anthropicKey) env.ANTHROPIC_API_KEY = anthropicKey;
-      }
-      // Forward the fleet fallback trio keys (deepseek/minimax/glm) from the
-      // standard keychain so `opencode run -m minimax/...` / `deepseek/...` /
-      // `glm/...` can auth (opencode's catalog still allows other models
-      // mid-session) — PLUS the session's configured model prefix key (via the
-      // shared resolver) so a primary/fallback outside the trio (e.g.
-      // openai/gpt-4o) can auth too. The Set dedupes overlapping services.
-      // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
-      // source of truth for the service→env-var mapping (no second copy).
-      const services = new Set<string>(['deepseek', 'minimax', 'glm']);
-      const warnUnmapped = (service: string, source: string): void => {
-        if (warnedUnmappedKeyServices.has(service)) return;
-        warnedUnmappedKeyServices.add(service);
-        log.warn(
-          { provider, model, service, source },
-          `[session-manager:buildChildEnv] ${source} resolves to key service "${service}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
-        );
-      };
-      // Custom-endpoint auth lane: the opencode.json provider block references
-      // the endpoint key as `{env:<ENVVAR>}` for the service named by
-      // providerConfig.apiKeyService — inject that service's key on top of the
-      // defaults so the interpolation resolves inside the child.
+      const hasCustomEndpoint = opencodeUsesConfigModel(providerConfig);
       const endpointServiceRaw = providerConfig?.['apiKeyService'];
-      const endpointService =
-        typeof endpointServiceRaw === 'string' && endpointServiceRaw.trim() !== ''
-          ? endpointServiceRaw
-          : undefined;
-      const endpointServiceMapped = endpointService !== undefined && Boolean(SERVICE_ENV_MAP[endpointService]);
-      if (endpointService) {
-        if (endpointServiceMapped) services.add(endpointService);
-        else warnUnmapped(endpointService, 'providerConfig.apiKeyService');
-      }
-      const modelService = resolveProviderKeyService(provider, model);
-      if (modelService) {
-        if (SERVICE_ENV_MAP[modelService]) {
-          services.add(modelService);
-        } else if (!endpointServiceMapped) {
-          // A mapped explicit endpoint key service already covers auth — a
-          // bare custom-endpoint model id has no meaningful prefix, so the
-          // unmapped-prefix warning would be misleading noise there.
-          warnUnmapped(modelService, 'model prefix');
+      let selectedService: string | null = null;
+
+      if (endpointServiceRaw !== undefined) {
+        if (!hasCustomEndpoint) {
+          throw new Error(
+            '[session-manager:buildChildEnv] providerConfig.apiKeyService requires a non-empty providerConfig.baseUrl for opencode-cli',
+          );
         }
+        if (
+          typeof endpointServiceRaw !== 'string'
+          || !PROVIDER_API_KEY_SERVICES.has(endpointServiceRaw)
+          || !SERVICE_ENV_MAP[endpointServiceRaw]
+        ) {
+          throw new Error(
+            '[session-manager:buildChildEnv] providerConfig.apiKeyService is not a mapped inference-provider service for opencode-cli',
+          );
+        }
+        selectedService = endpointServiceRaw;
       }
-      for (const svc of services) {
-        const key = lookupCredential(svc);
-        if (key) env[SERVICE_ENV_MAP[svc]!] = key;
+
+      if (selectedService === null) {
+        const modelService = resolveProviderKeyService(provider, model);
+        if (
+          modelService === null
+          || !PROVIDER_API_KEY_SERVICES.has(modelService)
+          || !SERVICE_ENV_MAP[modelService]
+        ) {
+          throw new Error(
+            `[session-manager:buildChildEnv] opencode-cli model ${JSON.stringify(model ?? null)} does not resolve to a mapped provider credential service`,
+          );
+        }
+        selectedService = modelService;
       }
+
+      const key = lookupCredential(selectedService);
+      if (key) env[SERVICE_ENV_MAP[selectedService]!] = key;
       break;
     }
     case 'openai-api':
@@ -335,10 +325,7 @@ export function getProviderBinary(provider: string): string | null {
  * catalog instead — so sessions with a baseUrl must omit `-m` and let
  * opencode resolve the model from the config file.
  */
-export function opencodeUsesConfigModel(providerConfig: Record<string, unknown> | undefined): boolean {
-  const baseUrl = providerConfig?.['baseUrl'];
-  return typeof baseUrl === 'string' && baseUrl.trim() !== '';
-}
+export { opencodeUsesConfigModel } from './providers/opencode-execution-profile.ts';
 
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
@@ -420,12 +407,7 @@ function resolveProviderArgs(
     case 'gemini-cli':
       return ['--acp'];
     case 'opencode-cli':
-      return [
-        'run',
-        '--format', 'json',
-        '--pure',
-        ...(model && !opencodeUsesConfigModel(providerConfig) ? ['-m', model] : []),
-      ];
+      return buildOpenCodeRunArgs({ providerConfig, model });
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -1010,33 +992,26 @@ export class SessionManager {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
       case 'opencode-cli': {
-        // Custom endpoint (providerConfig.baseUrl): the model is resolved from
-        // opencode.json's top-level `model` (written by the config merge), so
-        // `-m` must be omitted — see opencodeUsesConfigModel.
-        const modelArgs =
-          this.model && !opencodeUsesConfigModel(this.providerConfig)
-            ? ['-m', this.model]
-            : [];
+        const resumableSessionId =
+          this.sessionId && !this.sessionId.startsWith('opencode-cli-')
+            ? this.sessionId
+            : undefined;
         if (this.sessionId && !this.sessionId.startsWith('opencode-cli-')) {
           // Resume previous session for multi-turn memory
           log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'opencode: resuming session');
-          return [
-            'run',
-            '--format', 'json',
-            '--pure',
-            '--session', this.sessionId,
-            ...modelArgs,
+          return buildOpenCodeRunArgs({
+            providerConfig: this.providerConfig,
+            sessionId: resumableSessionId,
+            model: this.model,
             prompt,
-          ];
+          });
         }
         log.info({ chatJid: this.chatJid, provider: this.provider }, 'opencode: fresh session');
-        return [
-          'run',
-          '--format', 'json',
-          '--pure',
-          ...modelArgs,
+        return buildOpenCodeRunArgs({
+          providerConfig: this.providerConfig,
+          model: this.model,
           prompt,
-        ];
+        });
       }
 
       default:

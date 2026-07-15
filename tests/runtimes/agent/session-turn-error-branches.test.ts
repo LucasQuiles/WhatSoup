@@ -216,7 +216,7 @@ describe('buildChildEnv — credential forwarding branches', () => {
     });
   });
 
-  it('opencode-cli forwards OPENAI_API_KEY, ANTHROPIC_API_KEY, and standard fleet keys', async () => {
+  it('opencode-cli forwards only the credential selected by the model prefix', async () => {
     await withEnv(
       {
         OPENAI_API_KEY: 'env-openai-oc',
@@ -225,12 +225,11 @@ describe('buildChildEnv — credential forwarding branches', () => {
         MINIMAX_API_KEY: 'env-minimax',
       },
       () => {
-        const env = buildChildEnv('opencode-cli');
-        expect(env.OPENAI_API_KEY).toBe('env-openai-oc');
-        expect(env.ANTHROPIC_API_KEY).toBe('env-anthropic-oc');
-        // deepseek + minimax are forwarded from the standard fleet-key Set.
+        const env = buildChildEnv('opencode-cli', undefined, 'deepseek/test-model');
         expect(env.DEEPSEEK_API_KEY).toBe('env-deepseek');
-        expect(env.MINIMAX_API_KEY).toBe('env-minimax');
+        expect(env.OPENAI_API_KEY).toBeUndefined();
+        expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+        expect(env.MINIMAX_API_KEY).toBeUndefined();
       },
     );
   });
@@ -244,26 +243,29 @@ describe('buildChildEnv — credential forwarding branches', () => {
 
   it('opencode-cli adds a mapped custom-endpoint apiKeyService key', async () => {
     await withEnv({ GROQ_API_KEY: 'env-groq' }, () => {
-      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'groq' });
+      const env = buildChildEnv('opencode-cli', undefined, undefined, {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService: 'groq',
+      });
       expect(env.GROQ_API_KEY).toBe('env-groq');
     });
   });
 
-  it('opencode-cli ignores an unmapped custom-endpoint apiKeyService (warn path, no forward)', async () => {
+  it('opencode-cli rejects an unmapped custom-endpoint apiKeyService', async () => {
     await withEnv({ OPENAI_API_KEY: undefined }, () => {
-      const env = buildChildEnv('opencode-cli', undefined, undefined, {
+      expect(() => buildChildEnv('opencode-cli', undefined, undefined, {
+        baseUrl: 'https://endpoint.example/v1',
         apiKeyService: 'not-a-real-service',
-      });
-      // Unmapped service → no env var injected for it; defaults still resolve to nothing.
-      expect(env['NOT_A_REAL_SERVICE_API_KEY']).toBeUndefined();
+      })).toThrow(/mapped inference-provider service/);
     });
   });
 
-  it('opencode-cli treats a blank apiKeyService as undefined (whitespace branch)', async () => {
+  it('opencode-cli rejects a blank custom-endpoint apiKeyService', async () => {
     await withEnv({ OPENAI_API_KEY: undefined }, () => {
-      // Should not throw and should not forward anything from the blank service.
-      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: '   ' });
-      expect(env).toBeTypeOf('object');
+      expect(() => buildChildEnv('opencode-cli', undefined, undefined, {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService: '   ',
+      })).toThrow(/mapped inference-provider service/);
     });
   });
 });
@@ -467,6 +469,7 @@ describe('notifyUnexpectedExit via spawn-per-turn exit handler', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
       onCrash: opts.onCrash ?? vi.fn(),
       notifyUser: opts.notifyUser,
       providerConfig: opts.providerConfig,

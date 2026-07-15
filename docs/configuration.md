@@ -729,7 +729,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
-| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. For `opencode-cli`, `providerConfig.executionProfile` selects an explicit OpenCode agent. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [OpenCode headless execution profile](#opencode-headless-execution-profile) and [Custom endpoint](#custom-endpoint-providerconfigbaseurl). |
 | `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit, rate-limit, or auth-required terminal result and the selected fallback is usable, the runtime sends a short in-chat handoff notice and replays the interrupted turn on the fallback provider when no tool side effects have started. Usage-limit and rate-limit fallbacks automatically revert when the window ends; auth-required fallbacks stay armed until the primary passes a background recovery probe. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
 | `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
 | `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Auth-required failures skip same-provider entries because they share the failed auth surface and require an independent provider. Maximum 8 entries. |
@@ -790,10 +790,53 @@ config error):
 - **`providerConfig.apiKeyService` without `providerConfig.baseUrl`.** The key
   service only authenticates a custom endpoint; without one it would be
   silently inert.
+- **Malformed `providerConfig.executionProfile`.** When present, the OpenCode
+  agent name must be non-empty and contain only letters, digits, dot,
+  underscore, or hyphen. Values that could be parsed as options or paths are
+  rejected.
 
 A missing `sessionScope` is **not** an error: the runtime defaults it to
 `single`, so load and discovery accept the omission rather than flagging a
 config that would boot fine.
+
+#### OpenCode headless execution profile
+
+For `opencode-cli`, set `providerConfig.executionProfile` to the dedicated
+agent name provisioned for the instance, normally `whatsoup-headless`:
+
+```jsonc
+"agentOptions": {
+  "provider": "opencode-cli",
+  "providerConfig": {
+    "executionProfile": "whatsoup-headless"
+  }
+}
+```
+
+Every fresh turn, resumed turn, and model-usability probe with that field
+configured passes exactly one `--agent whatsoup-headless` selector. WhatSoup
+does not read OpenCode's `default_agent` and never adds `--auto`. An absent
+field remains a legacy, report-only state during the first source rollout;
+later hardened fallback admission treats that state as not aligned. A present
+but malformed field fails config validation.
+
+The checked policy contract is
+`docs/reliability-runner/opencode-headless-policy.json`. It is intentionally a
+`non_deployable_template`: its exact runtime workspace binding is unresolved,
+its supported-version list is empty, and it proves neither installation nor
+live tool capability. The permission rules are dispatcher policy, not an
+operating-system sandbox. A fleet lane becomes eligible only after separate
+static resolution and an edit-plus-shell canary prove the installed profile.
+
+OpenCode children use a fresh positive environment allowlist. The non-secret
+base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
+`XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `TMPDIR`, plus the
+instance/socket context `WHATSOUP_INSTANCE` and `WHATSOUP_MCP_SOCKET` when
+configured. Config-root isolation may rewrite `HOME` and the XDG config/data
+roots, but its controlling flag is not forwarded. The child does not receive
+`SUDO_ASKPASS`, `ALLOW_M365_MUTATIONS`, `CLAUDE_CONFIG_DIR`, unrelated
+connector/provider mutation flags, non-selected provider credentials, or
+unknown secret-shaped parent variables.
 
 #### Custom endpoint (`providerConfig.baseUrl`)
 
@@ -817,12 +860,16 @@ key value itself is never written to disk. The env var comes from the
 service→env-var map (`src/lib/provider-key-service.ts`) for the keyring
 service named by `providerConfig.apiKeyService`; when `apiKeyService` is
 omitted, the service is derived from the configured model's prefix (e.g.
-`minimax/MiniMax-M2` → `minimax`), and a bare model id with no known prefix
-gets no `apiKey` entry. The runtime injects that service's key (env var or
-platform keyring, `src/lib/keyring.ts`) into the session child's environment
-so the interpolation resolves at spawn time. `apiKeyService` must name an
-inference-provider service (`PROVIDER_API_KEY_SERVICES`) and requires
-`baseUrl` (see
+`minimax/MiniMax-M2` → `minimax`). The child environment selects exactly one
+credential service: a valid `apiKeyService` for a custom endpoint takes
+precedence; otherwise the selected model prefix must map to an inference
+provider. An absent or unmapped prefix is an explicit configuration error at
+spawn/probe time rather than a credential superset. The selected service is
+the only keyring lookup and, when present, the only provider credential added
+to the child environment. A missing credential leaves that selected env var
+absent for the existing pre-flight/runtime auth diagnostics. `apiKeyService`
+must name an inference-provider service (`PROVIDER_API_KEY_SERVICES`) and
+requires `baseUrl` (see
 [Cross-field validation rules](#cross-field-validation-rules)).
 
 **Routing and auth (API providers):** `openai-api` / `anthropic-api` consume

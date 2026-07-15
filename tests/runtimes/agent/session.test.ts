@@ -436,6 +436,7 @@ describe('SessionManager', () => {
       messenger,
       chatJid: CHAT_JID,
       provider: 'opencode-cli',
+      model: 'glm/test-model',
       onEvent: vi.fn(),
       onCrash,
       notifyUser,
@@ -1522,6 +1523,7 @@ describe('SessionManager', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
     await sm.spawnSession();
     await sm.sendTurn('hello');
@@ -2543,15 +2545,15 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('opencode-cli: forwards OPENAI_API_KEY and ANTHROPIC_API_KEY when set', () => {
+  it('opencode-cli: forwards only the credential selected by the model prefix', () => {
     const savedOai = process.env.OPENAI_API_KEY;
     const savedAnt = process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-openai-oc';
     process.env.ANTHROPIC_API_KEY = 'sk-ant-oc';
     try {
-      const env = buildChildEnv('opencode-cli');
+      const env = buildChildEnv('opencode-cli', undefined, 'openai/test-model');
       expect(env.OPENAI_API_KEY).toBe('sk-openai-oc');
-      expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-oc');
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     } finally {
       if (savedOai === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = savedOai;
@@ -2570,7 +2572,10 @@ describe('buildChildEnv', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     try {
-      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'deepseek' });
+      const env = buildChildEnv('opencode-cli', undefined, undefined, {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService: 'deepseek',
+      });
       expect(env.DEEPSEEK_API_KEY).toBe('ds-api-key-for-test');
     } finally {
       if (savedDeep === undefined) delete process.env.DEEPSEEK_API_KEY;
@@ -2580,14 +2585,14 @@ describe('buildChildEnv', () => {
     }
   });
 
-  it('opencode-cli: providerConfig.apiKeyService empty string is ignored (treated as no service)', () => {
+  it('opencode-cli: rejects an empty custom-endpoint apiKeyService', () => {
     const savedOai = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
     try {
-      // Should not throw, and empty apiKeyService should not register a service
-      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: '  ' });
-      // Result should be a valid env object
-      expect(typeof env).toBe('object');
+      expect(() => buildChildEnv('opencode-cli', undefined, undefined, {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService: '  ',
+      })).toThrow(/mapped inference-provider service/);
     } finally {
       if (savedOai !== undefined) process.env.OPENAI_API_KEY = savedOai;
     }
@@ -3173,7 +3178,7 @@ describe('spawn-per-turn error branches', () => {
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
-      provider: 'opencode-cli', notifyUser, onCrash,
+      provider: 'opencode-cli', model: 'glm/test-model', notifyUser, onCrash,
     });
 
     await sm.spawnSession();
@@ -3200,7 +3205,7 @@ describe('spawn-per-turn error branches', () => {
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
-      provider: 'opencode-cli', notifyUser, onCrash,
+      provider: 'opencode-cli', model: 'glm/test-model', notifyUser, onCrash,
     });
 
     await sm.spawnSession();
@@ -3224,7 +3229,7 @@ describe('spawn-per-turn error branches', () => {
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
-      provider: 'opencode-cli', notifyUser, onCrash,
+      provider: 'opencode-cli', model: 'glm/test-model', notifyUser, onCrash,
     });
 
     await sm.spawnSession();
@@ -3779,6 +3784,7 @@ describe('opencode-cli session resume via sessionId', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
 
     await sm.spawnSession();
@@ -3802,6 +3808,7 @@ describe('opencode-cli session resume via sessionId', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
     });
 
     await sm.spawnSession();
@@ -3857,31 +3864,26 @@ describe('session.ts uncovered-branch coverage', () => {
     vi.restoreAllMocks();
   });
 
-  // --- buildChildEnv: opencode-cli unmapped-service warning branches ---
-  // Targets the `warnUnmapped` paths for both apiKeyService and model-prefix
-  // resolution when the service is NOT in SERVICE_ENV_MAP (lines ~174, 193,
-  // 199, 203). buildChildEnv returns the env without the unmapped key.
+  // --- buildChildEnv: opencode-cli unmapped-service fail-closed branches ---
 
-  it('buildChildEnv opencode-cli: warns when apiKeyService resolves to an unmapped service', () => {
-    const env = buildChildEnv(
+  it('buildChildEnv opencode-cli: rejects an unmapped apiKeyService', () => {
+    expect(() => buildChildEnv(
       'opencode-cli',
       undefined,
       undefined,
-      { apiKeyService: 'totally-unknown-svc' },
-    );
-    // Unmapped service: no key env var injected, but PATH-level base env still present.
-    expect(Object.keys(env).length).toBeGreaterThanOrEqual(1);
-    expect(env).not.toHaveProperty('TOTALLY_UNKNOWN_SVC_API_KEY');
+      {
+        baseUrl: 'https://endpoint.example/v1',
+        apiKeyService: 'totally-unknown-svc',
+      },
+    )).toThrow(/mapped inference-provider service/);
   });
 
-  it('buildChildEnv opencode-cli: warns when model prefix resolves to an unmapped service', () => {
-    const env = buildChildEnv(
+  it('buildChildEnv opencode-cli: rejects an unmapped model prefix', () => {
+    expect(() => buildChildEnv(
       'opencode-cli',
       undefined,
       'unknownvendor/some-model',
-      { apiKeyService: '   ' }, // blank apiKeyService — exercises the falsy branch
-    );
-    expect(env).not.toHaveProperty('UNKNOWNVENDOR_API_KEY');
+    )).toThrow(/does not resolve to a mapped provider credential service/);
   });
 
   // --- resolveProviderBinary / resolveProviderArgs / resolveProviderParser
@@ -4763,6 +4765,7 @@ describe('session.ts uncovered-branch coverage', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
+      model: 'glm/test-model',
       onCrash,
       notifyUser,
     });

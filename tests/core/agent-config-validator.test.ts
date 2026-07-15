@@ -864,6 +864,34 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('baseUrl is not');
   });
 
+  it.each([null, 7, '', '   ', '--auto', 'nested/profile'])(
+    'rejects unsafe providerConfig.executionProfile value %j when provided',
+    (executionProfile) => {
+      const result = validateInstanceConfig(baseAgent({
+        agentOptions: {
+          sessionScope: 'single',
+          provider: 'opencode-cli',
+          providerConfig: { executionProfile },
+        },
+      }), ctx('load'));
+
+      expect(result?.field).toBe('agentOptions.providerConfig.executionProfile');
+      expect(result?.message).toContain('executionProfile');
+    },
+  );
+
+  it('accepts a safe non-empty providerConfig.executionProfile', () => {
+    const result = validateInstanceConfig(baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'opencode-cli',
+        providerConfig: { executionProfile: 'whatsoup-headless' },
+      },
+    }), ctx('load'));
+
+    expect(result).toBeNull();
+  });
+
   // ---- chatOptions.openaiProviderConfig (QR-218 PR-2 — chat OpenAI provider config) ----
   it('accepts a chat config with no chatOptions at all (backward-compat)', () => {
     expect(validateInstanceConfig(baseChat({}), ctx('create'))).toBeNull();

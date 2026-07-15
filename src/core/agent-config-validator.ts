@@ -49,6 +49,7 @@ export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
 // Managed-loop API providers (no CLI binary; the runtime drives the HTTP API
 // directly). A fallbackProvider of this type needs an explicit fallbackModel.
 const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
+const OPENCODE_EXECUTION_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
@@ -823,6 +824,18 @@ function validateAgentOptions(
       );
     }
     const pc = opts['providerConfig'] as Record<string, unknown>;
+    if (
+      pc['executionProfile'] !== undefined
+      && (
+        typeof pc['executionProfile'] !== 'string'
+        || !OPENCODE_EXECUTION_PROFILE_RE.test(pc['executionProfile'])
+      )
+    ) {
+      return err(
+        'agentOptions.providerConfig.executionProfile',
+        'agentOptions.providerConfig.executionProfile must be a non-empty OpenCode agent name containing only letters, digits, dot, underscore, or hyphen',
+      );
+    }
     // AGENT-ONLY: budget shape (not part of the shared baseUrl/apiKeyService
     // rules chat also uses — chatOptions.openaiProviderConfig has no budget).
     if (pc['budget'] !== undefined) {
