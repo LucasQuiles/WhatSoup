@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 106
+**Total classification rows:** 107
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 106 |
+| PRIVATE-ARCHIVE | 107 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 106 |
+| Total | 107 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -110,6 +110,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | PRIVATE-ARCHIVE | Internal audit remediation design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | PRIVATE-ARCHIVE | Internal release-proof pilot design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | PRIVATE-ARCHIVE | Internal behavior-preserving fitness remediation design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-07-15-headless-fallback-runtime-alignment-design.md` | PRIVATE-ARCHIVE | Internal runtime-alignment and rollout design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |
