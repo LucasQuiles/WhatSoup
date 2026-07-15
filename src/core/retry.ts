@@ -17,9 +17,11 @@ export function jitteredDelay(baseMs: number, attempt: number, maxMs = 30_000): 
  */
 export class AbortSleepError extends Error {
   readonly isAbortSleep = true;
-  constructor(public readonly requestedMs: number) {
+  readonly requestedMs: number;
+  constructor(requestedMs: number) {
     super(`sleep of ${requestedMs}ms aborted`);
     this.name = 'AbortSleepError';
+    this.requestedMs = requestedMs;
   }
 }
 
