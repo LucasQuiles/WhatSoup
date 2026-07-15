@@ -1419,7 +1419,12 @@ describe('OutboundQueue', () => {
       queue.abortTurn(); // clean up typing interval
     });
 
-    it('renders operation_stalled as still-working copy with elapsed time in full and friendly modes', async () => {
+    it('renders operation_stalled as a threshold notice without a live-clock elapsed value (#1777)', async () => {
+      // A one-shot stall timer fires once at the fixed stall threshold, so the elapsed
+      // value is constant by construction (bash/mcp always 15000*5 = "1m 15s"). Rendering
+      // it as "(1m 15s)" made every independent stall notice identical across chats and
+      // read as a frozen counter. The notice must read as a threshold crossing — still
+      // alive and working — not as a running clock that never advances.
       const baseEvent = {
         type: 'operation_stalled' as const,
         toolId: 'tool-1',
@@ -1437,8 +1442,12 @@ describe('OutboundQueue', () => {
         await vi.runAllTimersAsync();
 
         expect(calls.length).toBeGreaterThanOrEqual(1);
-        expect(calls[0]).toContain('Still working');
-        expect(calls[0]).toContain('1m 5s');
+        // Still conveys the bot is alive and working…
+        expect(calls[0]).toContain('still working');
+        expect(calls[0]).toContain('taking a while');
+        // …but carries NO parenthesized elapsed clock (the value that never advanced).
+        expect(calls[0]).not.toMatch(/\(\d/);
+        expect(calls[0]).not.toContain('1m 5s');
         expect(calls[0]).not.toContain('Something went wrong');
         expect(calls[0]).not.toContain('stuck');
       }

@@ -35,7 +35,7 @@ vi.mock('../../../src/logger.ts', () => ({
 const CHAT_JID = 'bench@s.whatsapp.net';
 const INSTANCE = 'Bench';
 const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
-const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
+const STALL_TEXT = `_${INSTANCE}: still working — this is taking a while..._`;
 
 // ─── Harness ──────────────────────────────────────────────────────────────────
 

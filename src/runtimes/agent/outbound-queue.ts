@@ -850,13 +850,13 @@ export class OutboundQueue implements IOutboundQueue {
           this.startTyping();
           return;
         }
-        const elapsed = formatElapsed(event.elapsedMs);
+        // One-shot stall timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1777).
         if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
-          this.enqueueProgress(`_${name}: Still working (${elapsed})..._`);
+          this.enqueueProgress(`_${name}: still working \u2014 this is taking a while..._`);
         } else {
-          this.enqueueProgress(`_\u23f3 ${name}: Still working (${elapsed})..._`);
+          this.enqueueProgress(`_\u23f3 ${name}: still working \u2014 this is taking a while..._`);
         }
         return;
       }
