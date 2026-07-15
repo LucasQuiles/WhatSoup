@@ -64,15 +64,12 @@ const RESOLVER_MODULE_ALLOWLIST = new Set<string>([
  * silent-pass bug (the guard stops catching regressions at that site).
  */
 const LINE_ALLOWLIST = new Map<string, string>([
-  // W-4: buildChildEnv forwards keys to CLI subprocess children. Not yet migrated.
-  // Tracking: docs/security-handoffs/2026-05-09-env-secret-exposure.md Phase D.
-  ['src/runtimes/agent/session.ts:188', 'W-4 child-env forwarding (buildChildEnv)'],
-  ['src/runtimes/agent/session.ts:191', 'W-4 child-env forwarding (buildChildEnv)'],
-  ['src/runtimes/agent/session.ts:199', 'W-4 child-env forwarding (buildChildEnv)'],
-  ['src/runtimes/agent/session.ts:200', 'W-4 child-env forwarding (buildChildEnv)'],
-  // W-2 (temporary, until #1801 merges): model-advisor live /v1/models scan.
-  ['src/lib/model-advisor.ts:134', 'W-2 model-advisor (PR #1801 in flight)'],
-  ['src/lib/model-advisor.ts:143', 'W-2 model-advisor (PR #1801 in flight)'],
+  // Currently empty: every previously-tracked direct-read site has been migrated
+  // through resolveApiKey()/lookupCredential() and has landed on main —
+  //   • src/lib/model-advisor.ts        (W-2, #1801)
+  //   • src/runtimes/agent/session.ts   buildChildEnv (W-4, #1808)
+  // Re-add an entry (`path:line` + tracking W-x/PR) ONLY for a NEW not-yet-migrated
+  // direct read; a stale entry is a silent-pass bug (see the no-stale-allowlist test).
 ]);
 
 function repoRelative(absPath: string): string {
