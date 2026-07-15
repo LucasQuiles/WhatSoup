@@ -169,9 +169,12 @@ describe('retryAsync', () => {
       shouldRetry: () => true,
     });
     const caught = pending.catch((e) => e);
-    // Abort at 5ms, before the 1000ms retry sleep completes.
-    setTimeout(() => controller.abort(), 5);
-    await vi.advanceTimersByTimeAsync(5);
+    // Flush microtasks so the first attempt rejects and the retry sleep schedules.
+    await vi.advanceTimersByTimeAsync(0);
+    // Abort synchronously while inside the sleep — no setTimeout needed.
+    controller.abort();
+    // Flush the abort through sleepWithAbort's signal listener.
+    await vi.advanceTimersByTimeAsync(1);
     expect(await caught).toBeInstanceOf(AbortSleepError);
   });
 
@@ -184,8 +187,10 @@ describe('retryAsync', () => {
       signal: controller.signal,
     });
     const caught = pending.catch((e) => e);
-    setTimeout(() => controller.abort(), 5);
-    await vi.advanceTimersByTimeAsync(5);
+    // Flush microtasks so the first attempt rejects and the retry sleep schedules.
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
     await caught;
     // Only the initial attempt ran; the retry sleep was aborted before run() could be called again.
     expect(run).toHaveBeenCalledTimes(1);
