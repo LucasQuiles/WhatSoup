@@ -128,7 +128,7 @@ describe('KeyedAsyncQueue', () => {
   });
 
   it('handles rapid re-enqueue of the same key before the first settles', async () => {
-    const queue = new KeyedAsyncQueue<number>();
+    const queue = new KeyedAsyncQueue<string>();
     const order: number[] = [];
 
     // Enqueue 5 tasks on the same key synchronously; they must all run in order.
