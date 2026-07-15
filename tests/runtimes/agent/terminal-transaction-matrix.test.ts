@@ -275,10 +275,19 @@ describe('runtime terminal transaction reachability', () => {
       expect(accepted).toBe(false);
       expect(durability.getTurnTerminal(seq, logicalTurnId, 1)).toMatchObject({
         attempt_kind: 'admission_rejected',
+        // #1750: a depth-cap shed (maxDepth=0) threads 'queue_full' end-to-end
+        // (queue -> onReject -> finalizeRejectedRuntimeTurn -> durability),
+        // giving operators a distinct, non-'unknown' driver.
+        attempt_failure_class: 'queue_full',
         inbound_disposition: 'failed_terminal',
         delivery_kind: 'none',
       });
       expect(durability.getInboundStatus(seq)).toBe('failed');
+      expect(
+        (db.raw
+          .prepare('SELECT failure_class FROM inbound_events WHERE seq = ?')
+          .get(seq) as { failure_class: string | null }).failure_class,
+      ).toBe('queue_full');
     } finally {
       db.close();
     }
