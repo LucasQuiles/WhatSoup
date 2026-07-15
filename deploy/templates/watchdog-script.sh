@@ -214,6 +214,7 @@ if service_mode == "inspection_only":
         and whatsapp.get("account_jid") == "not connected"
         and state == "not_started"
         and conn.get("reconnect_phase") is None
+        and type(conn.get("reconnect_attempts")) is int
         and conn.get("reconnect_attempts") == 0
         and conn.get("last_disconnect_reason") == "startup_schema_gate"
         and conn.get("last_status_code") is None

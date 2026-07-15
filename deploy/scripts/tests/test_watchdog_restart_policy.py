@@ -170,6 +170,16 @@ class TestDatabaseCompatibilityDrainNoRestart:
         body["instance"]["name"] = "other-agent"
         assert _run_decision(body, 503) != 0
 
+    def test_boolean_reconnect_attempts_is_restart_worthy(self):
+        body = self._body()
+        body["whatsapp"]["connection"]["reconnect_attempts"] = False
+        assert _run_decision(body, 503) != 0
+
+    def test_float_reconnect_attempts_is_restart_worthy(self):
+        body = self._body()
+        body["whatsapp"]["connection"]["reconnect_attempts"] = 0.0
+        assert _run_decision(body, 503) != 0
+
     def test_malformed_inspection_body_is_restart_worthy(self):
         cases = [
             (("status",), "degraded"),
