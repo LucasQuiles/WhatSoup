@@ -89,6 +89,55 @@ describe('jitteredDelayPositive', () => {
   });
 });
 
+describe('jitteredDelayPositive — input validation (clamps)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('clamps a negative baseMs to a 0 floor (never returns negative)', () => {
+    // Broken: -100 * 2^2 = -400 → capped -400 → a negative delay.
+    expect(jitteredDelayPositive(-100, 2)).toBe(0);
+  });
+
+  it('treats NaN baseMs as 0 (never returns NaN)', () => {
+    // Broken: NaN * 2^2 = NaN → returns NaN.
+    expect(jitteredDelayPositive(NaN, 2)).toBe(0);
+  });
+
+  it('clamps a negative attempt to 0 (floor = baseMs)', () => {
+    // safeAttempt = max(-3, 0) = 0 → exp = 100 * 2^0 = 100; random 0 → 100.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    expect(jitteredDelayPositive(100, -3)).toBe(100);
+  });
+
+  it('treats NaN attempt as 0 (floor = baseMs)', () => {
+    // Broken: 2^NaN = NaN → NaN result. Fixed: attempt clamped to 0 → floor 100.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    expect(jitteredDelayPositive(100, NaN)).toBe(100);
+  });
+
+  it('degrades Infinity baseMs to maxMs, not to 0', () => {
+    // Guard against a naive isFinite(baseMs) fix that would map Infinity → 0.
+    // Infinity * 2^2 = Infinity, capped at maxMs (30000); random 0 → 30000.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    expect(jitteredDelayPositive(Infinity, 2)).toBe(30_000);
+  });
+
+  it('guards a NaN maxMs (result is a finite number, never NaN)', () => {
+    // Broken: min(400, NaN) = NaN → returns NaN. Fixed: falls back to the 30000 default.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const v = jitteredDelayPositive(100, 2, NaN);
+    expect(Number.isNaN(v)).toBe(false);
+    expect(v).toBe(400);
+  });
+
+  it('floors a negative jitterFraction to 0 (never undercuts the exponential floor)', () => {
+    // Broken: 400 * (1 + 1 * -0.5) = 200 — BELOW the 400 floor. Fixed: floor preserved.
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    expect(jitteredDelayPositive(100, 2, 30_000, -0.5)).toBe(400);
+  });
+});
+
 describe('sleepWithAbort', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -134,6 +183,25 @@ describe('sleepWithAbort', () => {
     const controller = new AbortController();
     controller.abort();
     await expect(sleepWithAbort(25, controller.signal)).rejects.toBeInstanceOf(AbortSleepError);
+  });
+
+  it('rejects when already aborted even at ms = 0 (abort check precedes the ms<=0 fast-path)', async () => {
+    // Defect: if the ms<=0 fast-path runs before the abort check, an already-aborted
+    // signal resolves instead of rejecting — a retry loop would then run another attempt.
+    const controller = new AbortController();
+    controller.abort();
+    await expect(sleepWithAbort(0, controller.signal)).rejects.toBeInstanceOf(AbortSleepError);
+  });
+
+  it('rejects when already aborted even at negative ms', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(sleepWithAbort(-5, controller.signal)).rejects.toBeInstanceOf(AbortSleepError);
+  });
+
+  it('resolves at ms = 0 when a signal is present but NOT aborted (fast-path still works)', async () => {
+    const controller = new AbortController();
+    await expect(sleepWithAbort(0, controller.signal)).resolves.toBeUndefined();
   });
 
   it('rejects with AbortSleepError when the signal aborts mid-sleep', async () => {
