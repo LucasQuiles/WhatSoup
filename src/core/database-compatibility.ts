@@ -1,6 +1,7 @@
 import {
   closeSync,
   constants,
+  fstatSync,
   lstatSync,
   openSync,
   realpathSync,
@@ -135,7 +136,7 @@ export function databaseWriteCompatibilityError(
   return null;
 }
 
-export function createEmptyDatabaseFile(dbPath: string): void {
+export function createEmptyDatabaseFile(dbPath: string): DatabaseIdentity {
   let descriptor: number | null = null;
   try {
     descriptor = openSync(
@@ -143,8 +144,27 @@ export function createEmptyDatabaseFile(dbPath: string): void {
       constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
       0o600,
     );
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n) {
+      throw new DatabaseCompatibilityError(
+        'unsafe_database_identity',
+        `Exclusive database create did not produce one regular file at ${dbPath}`,
+      );
+    }
+    const identity = inspectDatabaseIdentity(dbPath);
+    if (
+      opened.dev !== identity.device
+      || opened.ino !== identity.inode
+      || opened.nlink !== identity.linkCount
+    ) {
+      throw new DatabaseCompatibilityError(
+        'database_identity_changed',
+        `Database identity changed during exclusive create at ${dbPath}`,
+      );
+    }
     closeSync(descriptor);
     descriptor = null;
+    return identity;
   } catch (err) {
     if (descriptor !== null) {
       try {
@@ -161,6 +181,7 @@ export function createEmptyDatabaseFile(dbPath: string): void {
         err,
       );
     }
+    if (err instanceof DatabaseCompatibilityError) throw err;
     const rejection = databaseWriteCompatibilityError(dbPath, err);
     if (rejection) throw rejection;
     throw new WhatSoupError(`Cannot create database at ${dbPath}`, 'DATABASE_ERROR', err);
@@ -244,6 +265,49 @@ function isMissingPathError(err: unknown): boolean {
   return (err as { code?: unknown })?.code === 'ENOENT';
 }
 
+function deterministicDatabasePathError(
+  dbPath: string,
+  err: unknown,
+  unsafeMessage: string,
+): DatabaseCompatibilityError | null {
+  const writeRejection = databaseWriteCompatibilityError(dbPath, err);
+  if (writeRejection) return writeRejection;
+  const code = (err as { code?: unknown })?.code;
+  if (
+    code === 'ELOOP'
+    || code === 'ENOTDIR'
+    || code === 'ENAMETOOLONG'
+    || code === 'EINVAL'
+    || code === 'ERR_INVALID_ARG_VALUE'
+  ) {
+    return new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      unsafeMessage,
+      err,
+    );
+  }
+  return null;
+}
+
+function assertTrustedDatabaseDirectoryMetadata(
+  info: { uid: number | bigint; mode: number | bigint },
+  path: string,
+): void {
+  const effectiveUserId = typeof process.geteuid === 'function' ? process.geteuid() : null;
+  if (effectiveUserId !== null && BigInt(info.uid) !== BigInt(effectiveUserId)) {
+    throw new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      `Database parent is not owned by the runtime user: ${path}`,
+    );
+  }
+  if ((BigInt(info.mode) & 0o077n) !== 0n) {
+    throw new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      `Database parent grants group or other access: ${path}`,
+    );
+  }
+}
+
 /**
  * Return the identity of an existing database, or prove that a missing target
  * can be created without following a pathname alias.
@@ -252,17 +316,18 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
   const absolutePath = resolve(dbPath);
   try {
     lstatSync(absolutePath);
-    return inspectDatabaseIdentity(absolutePath);
+    const identity = inspectDatabaseIdentity(absolutePath);
+    assertTrustedDatabaseParent(absolutePath);
+    return identity;
   } catch (err) {
     if (!isMissingPathError(err)) {
       if (err instanceof DatabaseCompatibilityError) throw err;
-      if ((err as { code?: unknown })?.code === 'ENOTDIR') {
-        throw new DatabaseCompatibilityError(
-          'unsafe_database_identity',
-          `Cannot create DB directory safely because a parent is not a directory: ${absolutePath}`,
-          err,
-        );
-      }
+      const deterministic = deterministicDatabasePathError(
+        absolutePath,
+        err,
+        `Cannot create DB directory safely because a parent is not a directory: ${absolutePath}`,
+      );
+      if (deterministic) throw deterministic;
       throw new DatabaseCompatibilityError(
         'database_identity_changed',
         `Database creation target could not be inspected at ${absolutePath}`,
@@ -281,6 +346,12 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
         ancestor = dirname(ancestor);
         continue;
       }
+      const deterministic = deterministicDatabasePathError(
+        absolutePath,
+        err,
+        `Cannot create DB directory safely because a parent is not a directory: ${ancestor}`,
+      );
+      if (deterministic) throw deterministic;
       throw new DatabaseCompatibilityError(
         'database_identity_changed',
         `Database parent path could not be inspected at ${ancestor}`,
@@ -303,6 +374,12 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
     try {
       canonicalAncestor = realpathSync(ancestor);
     } catch (err) {
+      const deterministic = deterministicDatabasePathError(
+        absolutePath,
+        err,
+        `Cannot resolve DB directory safely through an invalid parent: ${ancestor}`,
+      );
+      if (deterministic) throw deterministic;
       throw new DatabaseCompatibilityError(
         'database_identity_changed',
         `Database parent identity changed while resolving ${ancestor}`,
@@ -315,8 +392,53 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
         `Refusing non-canonical database parent path alias: ${ancestor}`,
       );
     }
+    assertTrustedDatabaseDirectoryMetadata(info, ancestor);
     return null;
   }
+}
+
+export function assertTrustedDatabaseParent(dbPath: string): void {
+  const absolutePath = resolve(dbPath);
+  const parent = dirname(absolutePath);
+  let info: BigIntStats;
+  try {
+    info = lstatSync(parent, { bigint: true });
+  } catch (err) {
+    const deterministic = deterministicDatabasePathError(
+      absolutePath,
+      err,
+      `Cannot trust database parent path: ${parent}`,
+    );
+    if (deterministic) throw deterministic;
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database parent identity changed before writer open at ${parent}`,
+      err,
+    );
+  }
+  let canonicalParent: string;
+  try {
+    canonicalParent = realpathSync(parent);
+  } catch (err) {
+    const deterministic = deterministicDatabasePathError(
+      absolutePath,
+      err,
+      `Cannot trust database parent path: ${parent}`,
+    );
+    if (deterministic) throw deterministic;
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database parent identity changed while resolving ${parent}`,
+      err,
+    );
+  }
+  if (info.isSymbolicLink() || !info.isDirectory() || canonicalParent !== parent) {
+    throw new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      `Database parent must be one canonical non-symlink directory: ${parent}`,
+    );
+  }
+  assertTrustedDatabaseDirectoryMetadata(info, parent);
 }
 
 function invalidSchemaError(

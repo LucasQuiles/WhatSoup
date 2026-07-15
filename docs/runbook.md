@@ -383,6 +383,17 @@ not a universal database-error classification: `database_identity_changed` and
 other genuinely transient startup failures remain exit 1 and retryable by the
 service manager.
 
+File-backed startup also requires the immediate database parent to be one
+canonical directory owned by the runtime user with no group or other access
+(normally mode `0700`). Exclusive creation attests the new inode through its
+still-open descriptor, and later pathname/device/inode checks reject ordinary
+replacement races before schema writes. This boundary does not claim defense
+against a privileged or same-UID process performing precisely timed
+rename-and-restore attacks: Node 24 opens the main database and its
+rollback/WAL/SHM sidecars by pathname, so closing that threat requires a native
+SQLite VFS or broker. A parent ownership or mode rejection is stable and exits
+78; repair the directory boundary instead of restart-looping the service.
+
 ### Quick Health Check
 
 ```bash

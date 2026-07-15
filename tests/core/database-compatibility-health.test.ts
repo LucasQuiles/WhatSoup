@@ -448,7 +448,7 @@ describe('database compatibility health drain', () => {
     const previousConfig = process.env.INSTANCE_CONFIG;
     const dbPath = join(dir, 'data', 'bot.db');
     const lockPath = join(dir, 'state', 'whatsoup.lock');
-    mkdirSync(join(dir, 'data'), { recursive: true });
+    mkdirSync(join(dir, 'data'), { recursive: true, mode: 0o700 });
     writeFileSync(dbPath, 'placeholder');
     process.env.INSTANCE_CONFIG = JSON.stringify({
       name: 'test-agent',
@@ -564,7 +564,7 @@ describe('database compatibility health drain', () => {
     const previousConfig = process.env.INSTANCE_CONFIG;
     const dbPath = join(dir, 'data', 'bot.db');
     const lockPath = join(dir, 'state', 'whatsoup.lock');
-    mkdirSync(join(dir, 'data'), { recursive: true });
+    mkdirSync(join(dir, 'data'), { recursive: true, mode: 0o700 });
     writeFileSync(dbPath, 'placeholder');
     process.env.INSTANCE_CONFIG = JSON.stringify({
       name: 'test-agent',

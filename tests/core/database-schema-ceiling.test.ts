@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   linkSync,
@@ -25,6 +26,7 @@ import {
 import {
   assertSchemaCeiling,
   databaseWriteCompatibilityError,
+  inspectDatabasePathBeforeCreate,
 } from '../../src/core/database-compatibility.ts';
 import {
   databaseCompatibilityStartupExitCode,
@@ -102,6 +104,12 @@ describe('database schema ceiling', () => {
       });
     },
   );
+
+  it('database path inspection classifies an invalid pathname as permanently unsafe', () => {
+    expect(() => inspectDatabasePathBeforeCreate('\0')).toThrow(
+      expect.objectContaining({ reason: 'unsafe_database_identity' }),
+    );
+  });
 
   it('database write compatibility classifier: walks cause and AggregateError branches', () => {
     const source = Object.assign(new Error('read-only database directory'), { errcode: 1544 });
@@ -664,6 +672,30 @@ describe('database schema ceiling', () => {
     });
     expect(() => new Database(aliasPath)).toThrow(/symbolic link|canonical database path/i);
     expect(existsSync(targetPath)).toBe(false);
+  });
+
+  it('rejects a database parent exposed to group mutation before creating a file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-mode-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'bot.db');
+    chmodSync(dir, 0o770);
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+    let opened: Database | null = null;
+    let failure: unknown;
+    try {
+      opened = new Database(dbPath);
+    } catch (err) {
+      failure = err;
+    } finally {
+      opened?.close();
+      chmodSync(dir, 0o700);
+    }
+
+    expect(failure).toMatchObject({ reason: 'unsafe_database_identity' });
+    expect(existsSync(dbPath)).toBe(false);
   });
 
   it('early bootstrap outcome: classifies a symlink database path as permanent', () => {

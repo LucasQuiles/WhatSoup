@@ -7,6 +7,7 @@ import {
   DatabaseCompatibilityError,
   assertDatabaseIdentity,
   assertSchemaCeiling,
+  assertTrustedDatabaseParent,
   createEmptyDatabaseFile,
   databaseRecoveryCompatibilityError,
   databaseWriteCompatibilityError,
@@ -1314,8 +1315,8 @@ export class Database {
             `Database appeared before exclusive create at ${absolutePath}`,
           );
         }
-        createEmptyDatabaseFile(absolutePath);
-        this.expectedIdentity = inspectDatabaseIdentity(absolutePath);
+        assertTrustedDatabaseParent(absolutePath);
+        this.expectedIdentity = createEmptyDatabaseFile(absolutePath);
       }
     }
 
