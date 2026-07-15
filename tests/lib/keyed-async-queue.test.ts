@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { KeyedAsyncQueue } from '../../src/lib/keyed-async-queue.ts';
+import {
+  KeyedAsyncQueue,
+  KeyedAsyncQueueReentrancyError,
+} from '../../src/lib/keyed-async-queue.ts';
 
 /**
  * Deterministic microtask-ordering helpers. Each task resolves after a
@@ -13,6 +16,40 @@ function tick(n = 1): Promise<void> {
     p = p.then(() => new Promise<void>((r) => setTimeout(r, 0)));
   }
   return p;
+}
+
+/**
+ * Advance `n` pure microtask hops — no timers, no real-time sleep. Used by the
+ * reentrancy tests as a deadlock detector: a self-deadlocked promise never
+ * settles, so racing it against a microtask-bounded sentinel converts a hang
+ * into a fast, deterministic assertion (see {@link outcomeWithin}).
+ */
+function microtasks(n: number): Promise<void> {
+  let p: Promise<void> = Promise.resolve();
+  for (let i = 0; i < n; i++) {
+    p = p.then(() => undefined);
+  }
+  return p;
+}
+
+type Outcome<T> =
+  | { kind: 'resolved'; value: T }
+  | { kind: 'rejected'; error: unknown }
+  | { kind: 'deadlock' };
+
+/**
+ * Resolve to the promise's settled outcome, or `{ kind: 'deadlock' }` if it has
+ * not settled within `budget` microtask hops. A correct reentrancy guard
+ * rejects within a handful of hops; a self-deadlock never settles, so the
+ * generous budget separates the two cases without any real-time wait.
+ */
+function outcomeWithin<T>(p: Promise<T>, budget = 200): Promise<Outcome<T>> {
+  const settled = p.then(
+    (value): Outcome<T> => ({ kind: 'resolved', value }),
+    (error): Outcome<T> => ({ kind: 'rejected', error }),
+  );
+  const timeout = microtasks(budget).then((): Outcome<T> => ({ kind: 'deadlock' }));
+  return Promise.race([settled, timeout]);
 }
 
 describe('KeyedAsyncQueue', () => {
@@ -170,5 +207,99 @@ describe('KeyedAsyncQueue', () => {
     await queue.enqueue('k', async () => { order.push('final'); });
 
     expect(order).toEqual(['long', 'short', 'final']);
+  });
+
+  it('rejects a reentrant same-key enqueue fast with KeyedAsyncQueueReentrancyError (no deadlock)', async () => {
+    const queue = new KeyedAsyncQueue<string>();
+
+    // A task running under key 'k' enqueues more work under 'k'. Without the
+    // guard the inner enqueue chains behind the outer task's tail while the
+    // outer task awaits the inner one — a circular wait that never settles.
+    // The guard must convert that into a fast rejection.
+    const outcome = await outcomeWithin(
+      queue.enqueue('k', async () => queue.enqueue('k', async () => 'inner')),
+    );
+
+    expect(outcome.kind).toBe('rejected');
+    if (outcome.kind === 'rejected') {
+      expect(outcome.error).toBeInstanceOf(KeyedAsyncQueueReentrancyError);
+      expect((outcome.error as KeyedAsyncQueueReentrancyError<string>).key).toBe('k');
+    }
+  });
+
+  it('does not poison the key after a reentrancy rejection (a later same-key task still runs)', async () => {
+    const queue = new KeyedAsyncQueue<string>();
+
+    const reentrant = await outcomeWithin(
+      queue.enqueue('k', async () => queue.enqueue('k', async () => 'never')),
+    );
+    expect(reentrant.kind).toBe('rejected');
+
+    // The rejected reentrant enqueue must not leave a stale tail; a fresh
+    // top-level task on the same key must run to completion.
+    const after = await outcomeWithin(queue.enqueue('k', async () => 'after'));
+    expect(after).toEqual({ kind: 'resolved', value: 'after' });
+  });
+
+  it('detects transitive same-key reentrancy (A -> enqueue(B) -> enqueue(A))', async () => {
+    const queue = new KeyedAsyncQueue<string>();
+
+    // 'A' re-enters via a different key 'B' on the same async chain. The guard
+    // threads the active-key set through the chain, so the nested enqueue('A')
+    // is caught even though the immediately enclosing task is keyed 'B'.
+    const outcome = await outcomeWithin(
+      queue.enqueue('A', async () =>
+        queue.enqueue('B', async () =>
+          queue.enqueue('A', async () => 'deep'),
+        ),
+      ),
+    );
+
+    expect(outcome.kind).toBe('rejected');
+    if (outcome.kind === 'rejected') {
+      expect(outcome.error).toBeInstanceOf(KeyedAsyncQueueReentrancyError);
+      expect((outcome.error as KeyedAsyncQueueReentrancyError<string>).key).toBe('A');
+    }
+  });
+
+  it('does not false-fire for a concurrent top-level caller of a busy key (still queues)', async () => {
+    const queue = new KeyedAsyncQueue<string>();
+    const order: string[] = [];
+
+    // Two independent top-level enqueues of the same busy key. Neither runs
+    // inside the other's async context, so this is ordinary serialization, not
+    // reentrancy — both must resolve, in order.
+    const first = queue.enqueue('k', async () => {
+      await microtasks(5);
+      order.push('first');
+      return 'first';
+    });
+    const second = queue.enqueue('k', async () => {
+      order.push('second');
+      return 'second';
+    });
+
+    const [o1, o2] = await Promise.all([outcomeWithin(first), outcomeWithin(second)]);
+    expect(o1).toEqual({ kind: 'resolved', value: 'first' });
+    expect(o2).toEqual({ kind: 'resolved', value: 'second' });
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('does not false-fire when independent chains each nest the same inner key', async () => {
+    const queue = new KeyedAsyncQueue<string>();
+
+    // Two separate top-level chains, each nesting an enqueue of the SAME inner
+    // key 'shared' under a DIFFERENT outer key. The active-key set is per-chain,
+    // so 'shared' does not appear in either chain's set at nest time — no throw.
+    const chain1 = queue.enqueue('outer-1', async () =>
+      queue.enqueue('shared', async () => 's1'),
+    );
+    const chain2 = queue.enqueue('outer-2', async () =>
+      queue.enqueue('shared', async () => 's2'),
+    );
+
+    const [o1, o2] = await Promise.all([outcomeWithin(chain1), outcomeWithin(chain2)]);
+    expect(o1).toEqual({ kind: 'resolved', value: 's1' });
+    expect(o2).toEqual({ kind: 'resolved', value: 's2' });
   });
 });
