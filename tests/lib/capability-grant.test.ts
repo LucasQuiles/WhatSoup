@@ -170,6 +170,26 @@ describe('createCapabilityGrantManager — arm', () => {
     if (!result.ok) expect(result.error).toContain('overflow');
   });
 
+  it('rejects zero duration fail-closed (no privileged window, no state mutation)', async () => {
+    const { manager, policy, store } = makeManager();
+    const result = await manager.arm('camera', 0, ownerAuth);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('duration');
+    // A rejected arm must not touch the policy or persist a record.
+    expect(store.record).toBeNull();
+    expect(store.writes).toBe(0);
+    expect(policy.applyCount).toBe(0);
+  });
+
+  it('rejects negative and non-finite durations fail-closed', async () => {
+    const { manager, policy } = makeManager();
+    for (const bad of [-1000, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+      const result = await manager.arm('camera', bad, ownerAuth);
+      expect(result.ok).toBe(false);
+    }
+    expect(policy.applyCount).toBe(0);
+  });
+
   it('adds capabilities to allow and removes from deny', async () => {
     const { manager, policy } = makeManager();
     // Pre-populate deny
@@ -255,6 +275,22 @@ describe('createCapabilityGrantManager — disarm', () => {
     await manager.arm('camera', 60_000, ownerAuth);
     const result = await manager.disarm(nonAdminAuth);
     expect(result.changed).toBe(false);
+  });
+
+  it('reports an unauthorized disarm distinguishably (not a silent manual no-op)', async () => {
+    const { manager, policy } = makeManager();
+    await manager.arm('camera', 60_000, ownerAuth);
+    const result = await manager.disarm(nonAdminAuth);
+    // Fails closed (grant stays armed) AND is distinguishable from a legit no-op.
+    expect(result.reason).toBe('unauthorized');
+    expect(policy.allow.has('camera.snap')).toBe(true);
+  });
+
+  it('a legitimate no-op disarm still reports reason "manual"', async () => {
+    const { manager } = makeManager();
+    const result = await manager.disarm(ownerAuth); // authorized, nothing armed
+    expect(result.changed).toBe(false);
+    expect(result.reason).toBe('manual');
   });
 
   it('clears the store record after disarm', async () => {
@@ -371,6 +407,31 @@ describe('createCapabilityGrantManager — expiry', () => {
     fakeNow = 1_000_000;
     await vi.advanceTimersByTimeAsync(200);
     expect(policy.allow.has('camera.snap')).toBe(true);
+    manager.stop();
+    vi.useRealTimers();
+  });
+
+  it('auto-disarms a timed grant even when reconcile() was never called (arm starts the poller)', async () => {
+    vi.useFakeTimers();
+    let fakeNow = 1000;
+    const onDisarm = vi.fn();
+    const { manager, policy } = makeManager({
+      now: () => fakeNow,
+      pollIntervalMs: 50,
+      onDisarm,
+    });
+
+    // Arm a timed grant but deliberately do NOT call reconcile(). A wiring path
+    // that arms without a prior reconcile() must still get expiry — otherwise the
+    // privileged window never closes (fail-open).
+    await manager.arm('camera', 200, ownerAuth); // expires at 1200
+    expect(policy.allow.has('camera.snap')).toBe(true);
+
+    fakeNow = 2000;
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(policy.allow.has('camera.snap')).toBe(false);
+    expect(onDisarm).toHaveBeenCalledWith(expect.objectContaining({ reason: 'expired' }));
     manager.stop();
     vi.useRealTimers();
   });

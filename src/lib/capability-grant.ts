@@ -101,7 +101,7 @@ export interface GrantStatus {
   remainingMs?: number | null;
 }
 
-export type DisarmReason = 'manual' | 'expired' | 'superseded' | 'reconcile';
+export type DisarmReason = 'manual' | 'expired' | 'superseded' | 'reconcile' | 'unauthorized';
 
 export interface DisarmResult {
   changed: boolean;
@@ -248,7 +248,7 @@ export function createCapabilityGrantManager(
   const _clearTimeout = options.clearTimeout ?? clearTimeout;
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  let reconciled = false;
+  let running = false;
 
   const resolveGroup = (group: GrantGroup): readonly string[] | null => {
     const def = options.groups[group];
@@ -317,7 +317,7 @@ export function createCapabilityGrantManager(
         .catch(() => {})
         .finally(() => {
           // Re-arm only if not stopped during tick
-          if (pollTimer === null && reconciled) {
+          if (pollTimer === null && running) {
             const handle = _setTimeout(fire, pollIntervalMs);
             pollTimer = handle;
             // unref the timer handle if supported
@@ -341,6 +341,15 @@ export function createCapabilityGrantManager(
     const capabilities = resolveGroup(group);
     if (!capabilities) {
       return { ok: false, error: `unknown group: ${group}` };
+    }
+
+    // Fail-closed duration validation: a non-positive or non-finite duration must
+    // be rejected outright. Otherwise arm() resolves expiresAtMs to now-or-past and
+    // opens a privileged window that only the next poll (up to pollIntervalMs later)
+    // would close. parseDurationMs guards the string path; arm() takes a raw number
+    // and must guard it independently.
+    if (durationMs !== null && (!Number.isSafeInteger(durationMs) || durationMs <= 0)) {
+      return { ok: false, error: 'duration must be a positive integer (ms)' };
     }
 
     const nowMs = now();
@@ -392,12 +401,23 @@ export function createCapabilityGrantManager(
       removedFromDeny: uniqSorted(removedFromDeny),
     };
     await options.store.write(record);
+    // Defence-in-depth: guarantee the expiry poller is live for a timed grant even
+    // when reconcile() was never called on this manager. Without this, a wiring path
+    // that arms before reconcile() would leave the privileged window open until the
+    // process restarts. Manual-only grants (no expiry) need no poller.
+    if (record.expiresAtMs !== null) {
+      running = true;
+      startPolling();
+    }
     return { ok: true, record };
   };
 
   const disarm: CapabilityGrantManager['disarm'] = async (auth) => {
     if (!isAuthorizedToMutateGrants(auth, 'admin')) {
-      return { changed: false, removed: [], restored: [], reason: 'manual' };
+      // Fail-closed AND distinguishable: an unauthorized disarm must not read as a
+      // legitimate no-op (reason:'manual'), so the wire can surface "not authorized"
+      // rather than silently reporting a successful no-op.
+      return { changed: false, removed: [], restored: [], reason: 'unauthorized' };
     }
     return disarmInternal('manual');
   };
@@ -419,7 +439,7 @@ export function createCapabilityGrantManager(
   };
 
   const reconcile: CapabilityGrantManager['reconcile'] = async () => {
-    reconciled = true;
+    running = true;
     const record = await options.store.read();
     if (!record) {
       startPolling();
@@ -439,7 +459,7 @@ export function createCapabilityGrantManager(
       _clearTimeout(pollTimer);
       pollTimer = null;
     }
-    reconciled = false;
+    running = false;
   };
 
   return { arm, disarm, status, reconcile, stop };
