@@ -40,12 +40,14 @@ export interface WithBoundedTimeoutOptions {
 /** Error thrown when the timeout fires before the wrapped promise settles. */
 export class TimeoutError extends Error {
   readonly isTimeout = true;
+  readonly timeoutMs: number;
   constructor(
-    public readonly timeoutMs: number,
+    timeoutMs: number,
     message?: string,
   ) {
     super(message ?? `operation timed out after ${timeoutMs}ms`);
     this.name = 'TimeoutError';
+    this.timeoutMs = timeoutMs;
   }
 }
 
