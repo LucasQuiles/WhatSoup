@@ -130,4 +130,68 @@ describe('withBoundedTimeout', () => {
     // Advance past the original timeout deadline — no throw means the guard works.
     await vi.advanceTimersByTimeAsync(50);
   });
+
+  // --- Fix 1: a throwing/rejecting onLateSettle must never leak an unhandled rejection.
+  // These two run on REAL timers: unhandledRejection is emitted on a real event-loop
+  // turn (not by draining the fake microtask queue), so fake timers would false-green.
+  // `await caught` (the actual TimeoutError signal) is the sync primitive — not a sleep;
+  // settlement is driven by a deferred, and real setImmediate turns surface the event.
+
+  it('does NOT leak an unhandled rejection when a sync-throwing onLateSettle runs on a late resolve', async () => {
+    vi.useRealTimers();
+    const unhandled: unknown[] = [];
+    const handler = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', handler);
+    try {
+      let resolveRun!: (value: string) => void;
+      const runP = new Promise<string>((res) => { resolveRun = res; });
+      const late = vi.fn(() => { throw new Error('onLateSettle sync throw'); });
+      const caught = withBoundedTimeout(() => runP, 1, { onLateSettle: late }).catch((e) => e);
+      expect(await caught).toBeInstanceOf(TimeoutError);
+      // Settle AFTER the timeout — exercises the late SUCCESS arrow.
+      resolveRun('late-value');
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(late).toHaveBeenCalledTimes(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', handler);
+    }
+  });
+
+  it('does NOT leak an unhandled rejection when an async-rejecting onLateSettle runs on a late reject', async () => {
+    vi.useRealTimers();
+    const unhandled: unknown[] = [];
+    const handler = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', handler);
+    try {
+      let rejectRun!: (error: unknown) => void;
+      const runP = new Promise<string>((_res, rej) => { rejectRun = rej; });
+      const late = vi.fn(async () => { throw new Error('onLateSettle async reject'); });
+      const caught = withBoundedTimeout(() => runP, 1, { onLateSettle: late }).catch((e) => e);
+      expect(await caught).toBeInstanceOf(TimeoutError);
+      // Settle AFTER the timeout — exercises the late ERROR arrow.
+      rejectRun(new Error('late failure'));
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(late).toHaveBeenCalledTimes(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', handler);
+    }
+  });
+
+  // --- Fix 2: non-finite / oversized timeoutMs must reject with RangeError and must NOT
+  // silently settle. The RangeError type assertion is itself the discriminator: a clamped
+  // ~1ms timer path would resolve the value (or reject TimeoutError), failing these.
+  it('rejects with RangeError for non-finite timeoutMs (never silently settling)', async () => {
+    // Non-finite check must precede the <= 0 branch: -Infinity is <= 0 yet must be RangeError.
+    await expect(withBoundedTimeout(() => Promise.resolve('x'), Number.NaN)).rejects.toBeInstanceOf(RangeError);
+    await expect(withBoundedTimeout(() => Promise.resolve('x'), Number.POSITIVE_INFINITY)).rejects.toBeInstanceOf(RangeError);
+    await expect(withBoundedTimeout(() => Promise.resolve('x'), Number.NEGATIVE_INFINITY)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('rejects with RangeError when timeoutMs exceeds the 32-bit timer ceiling', async () => {
+    await expect(withBoundedTimeout(() => Promise.resolve('x'), 2_147_483_648)).rejects.toBeInstanceOf(RangeError);
+  });
 });
