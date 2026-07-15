@@ -397,7 +397,7 @@ readiness constraint; local health, audit, and guard evidence are still mandator
     tests/runtimes/agent/primary-model-usability-adapters.test.ts \
     tests/runtimes/agent/opencode-child-env.test.ts \
     tests/runtimes/agent/providers/opencode-parser.test.ts \
-    tests/runtimes/agent/session-lifecycle-store.test.ts \
+    tests/core/session-lifecycle-store.test.ts \
     tests/runtimes/agent/provider-fallback.test.ts \
     --pool=forks
   ```
@@ -1450,7 +1450,7 @@ prose, source-green tests, or a fallback may not hide it.
 - Modify: `src/core/durability.ts`
 - Modify: checkpoint types/readers/writers identified by the compiler
 - Create: `tests/core/migration-session-route-identity.test.ts`
-- Modify: `tests/runtimes/agent/session-lifecycle-store.test.ts`
+- Modify: `tests/core/session-lifecycle-store.test.ts`
 - Modify: `tests/runtimes/agent/session-db.test.ts`
 
 - [ ] Add failing migration tests for the four additive columns and idempotent replay.
@@ -1981,7 +1981,7 @@ bash scripts/run-with-pinned-npm.sh test -- \
   tests/runtimes/agent/primary-model-usability-adapters.test.ts \
   tests/runtimes/agent/opencode-child-env.test.ts \
   tests/runtimes/agent/providers/opencode-parser.test.ts \
-  tests/runtimes/agent/session-lifecycle-store.test.ts \
+  tests/core/session-lifecycle-store.test.ts \
   tests/runtimes/agent/provider-fallback.test.ts \
   --pool=forks
 ```
