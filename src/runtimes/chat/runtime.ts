@@ -31,6 +31,7 @@ import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
+import { DatabaseCompatibilityError } from '../../core/database-compatibility.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { resolveModelRole } from '../../lib/model-advisor.ts';
 
@@ -170,6 +171,8 @@ export class ChatRuntime implements Runtime {
   }
 
   private async processMessage(msg: IncomingMessage, traceId: string, startTime: number): Promise<void> {
+    this.db.assertWritableCompatibility();
+
     // 1. Rate limit check — resolve sender to phone number so the same person
     //    via LID or JID shares a single rate limit bucket.
     //    Uses senderJid (not chatJid) so group chats track per-sender, not per-group.
@@ -330,6 +333,7 @@ export class ChatRuntime implements Runtime {
       );
       clearAlertSourceChecked(this.botName, 'llm_total_failure');
     } catch (primaryErr) {
+      if (primaryErr instanceof DatabaseCompatibilityError) throw primaryErr;
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: conversationModel, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
 
       // Auth and rate-limit errors won't be fixed by retrying any provider — fast-fail.
@@ -365,6 +369,7 @@ export class ChatRuntime implements Runtime {
           llmDurationMs = Date.now() - llmStart;
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
+          if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
@@ -394,6 +399,7 @@ export class ChatRuntime implements Runtime {
         );
         clearAlertSourceChecked(this.botName, 'llm_total_failure');
       } catch (retryErr) {
+        if (retryErr instanceof DatabaseCompatibilityError) throw retryErr;
         log.warn({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
         log.error({ traceId, err: retryErr }, 'primary provider retry failed — trying fallback');
 
@@ -414,6 +420,7 @@ export class ChatRuntime implements Runtime {
           );
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
+          if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
