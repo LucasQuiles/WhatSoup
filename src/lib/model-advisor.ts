@@ -25,6 +25,7 @@ import {
   type SymbolicModelSpec,
 } from './model-resolver.ts';
 import { errorMessage } from './error-message.ts';
+import { resolveApiKey } from './api-key-resolver.ts';
 
 const log = createChildLogger('model-advisor');
 
@@ -131,7 +132,7 @@ function sanitizeFetchFailureReason(err: unknown): string {
 export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
   const fetches: Promise<VendorModelFetchResult>[] = [];
   const attemptedVendors: string[] = [];
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
   if (anthropicKey) {
     attemptedVendors.push('anthropic');
     fetches.push(fetchModelIds(
@@ -140,7 +141,7 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
       'anthropic',
     ));
   }
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
   if (openaiKey) {
     attemptedVendors.push('openai');
     fetches.push(fetchModelIds(
