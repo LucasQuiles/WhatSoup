@@ -6,11 +6,6 @@
  * health, failure-copy, and credential-verify flows can consume the same
  * taxonomy so "why did this credential fail?" is answerable consistently.
  *
- * Adopted from OpenClaw's `src/agents/auth-profiles/credential-state.ts`
- * (clean-room comparison audit, Pattern B) — adapted for WhatSoup's
- * single-config model (no SecretRef indirection, no auth-profiles.json).
- *
- * See: ~/LAB/oc-re/audits/2026-07-14-whatsoup-secrets-comparison.md Pattern B.
  * Part of docs/security-handoffs/2026-05-09-env-secret-exposure.md (W-2 observability).
  */
 
@@ -52,8 +47,6 @@ export type TokenExpiryState = 'missing' | 'valid' | 'expiring' | 'expired' | 'i
  * Default refresh margin before expiry. A credential whose expiry falls
  * within this window is classified as 'expiring' rather than 'valid', so
  * refresh logic can act before the credential actually expires.
- *
- * Mirrors OpenClaw's DEFAULT_OAUTH_REFRESH_MARGIN_MS (5 minutes).
  */
 export const DEFAULT_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
