@@ -23,7 +23,7 @@ const CHAT_JID = 'ana-invoicing@s.whatsapp.net';
 const INSTANCE = 'Ana';
 const SLOW_TEXT = `_${INSTANCE} is still working on it..._`;
 const PROGRESS_TEXT = `_${INSTANCE} is working on something, this might take a moment..._`;
-const STALL_TEXT = `_${INSTANCE}: Still working (30s)..._`;
+const STALL_TEXT = `_${INSTANCE}: still working — this is taking a while..._`;
 
 const CONFIG: OperationTrackerConfig = {
   enabled: true,

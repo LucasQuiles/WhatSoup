@@ -1312,14 +1312,29 @@ describe('database.ts uncovered-branch coverage', () => {
     ).map((row) => row.version);
     expect(versions).toEqual([26, 27, 28, 29, 30, 31, 32]);
 
-    const absentTables = db.raw
+    // Branch coverage above is unchanged: migrations 26-40 ran against a DB whose
+    // migration-1..25 tables were absent and no-op'd cleanly (asserted via the
+    // 26-32 versions, the created `llm_attempts`, and open() not throwing). What
+    // changed post-#1778 is the FINAL state: after runPendingMigrations,
+    // verifyRequiredTables() derives the canonical schema and self-heals ANY
+    // recorded-but-missing table. `messages`, `scheduled_messages`, and
+    // `outbound_sends` are all in a fresh fully-migrated DB (54 canonical tables;
+    // `outbound_sends` is the post-migration-26 rename of `outbound_sends_v26`),
+    // so a DB that recorded their migrations while lacking them is precisely the
+    // drift #1778 repairs — the guard recreates them rather than leaving them
+    // absent behind an already-recorded migration.
+    const healedCanonicalTables = db.raw
       .prepare(`
         SELECT name FROM sqlite_master
         WHERE type = 'table' AND name IN ('messages', 'scheduled_messages', 'outbound_sends')
         ORDER BY name
       `)
       .all() as Array<{ name: string }>;
-    expect(absentTables).toHaveLength(0);
+    expect(healedCanonicalTables.map((row) => row.name)).toEqual([
+      'messages',
+      'outbound_sends',
+      'scheduled_messages',
+    ]);
 
     const llmAttempts = db.raw
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'llm_attempts'")

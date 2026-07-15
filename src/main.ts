@@ -836,6 +836,9 @@ const lidReconcileInterval = setInterval(() => {
 const messageScheduler = new MessageScheduler(db, connectionManager, {
   intervalMs: 60_000,   // check every minute
   maxRetries: 3,
+  // #1779: attribute the de-linked-hold / permanent-drop owner alerts to this
+  // instance (mirrors the trigger poller's `instance` wiring).
+  instance: config.botName,
 });
 messageScheduler.recoverStale();
 messageScheduler.start();

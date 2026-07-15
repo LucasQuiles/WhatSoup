@@ -8,12 +8,13 @@ import {
 } from '../../src/core/inbound-failure-class.ts';
 
 describe('inbound-failure-class — vocabulary', () => {
-  it('exposes exactly the bounded classes (incl. #1750 admission subclasses)', () => {
+  it('exposes exactly the bounded classes (incl. #1750 admission subclasses + #1749 recovery reclaim)', () => {
     expect([...INBOUND_FAILURE_CLASSES].sort()).toEqual(
       [
         'crash_recovery',
         'db_error',
         'provider_failure',
+        'recovery_owner_reclaimed',
         'session_crash',
         'session_spawn_failed',
         'stale_reclaim',
