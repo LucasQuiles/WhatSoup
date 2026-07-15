@@ -2317,10 +2317,8 @@ export class AgentRuntime implements Runtime {
     const conversationKey = canonicalConversationKey(chatJid, this.db);
     // QR-069: inherit a prior queue's echo-guard token when one exists.
     const priorToken = this.priorSenderTokenForChat(chatJid);
-    const q = new OutboundQueue(this.messenger, chatJid, {
-      conversationKey,
-      ...(priorToken === undefined ? {} : { senderToken: priorToken }),
-    });
+    const q = new OutboundQueue(this.messenger, chatJid,
+      { conversationKey, ...(priorToken === undefined ? {} : { senderToken: priorToken }) });
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
     q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
