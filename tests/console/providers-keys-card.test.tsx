@@ -432,3 +432,113 @@ describe('ProvidersKeysCard — load + error states', () => {
     })
   })
 })
+
+describe('ProvidersKeysCard — health freshness (#1762 remediation 2)', () => {
+  // The card consumes the instance `stale` flag (enrichInstance, src/fleet/routes/
+  // lines.ts) threaded down from SummaryTab. When stale, the fallback counters and
+  // the chain eligibility are carried forward from an older successful poll — so
+  // they must be TAGGED stale, never hidden (rem-1: link/history stays visible).
+
+  it('tags the fallback counters stale while STILL rendering the carried-forward values', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        turnsServed: 3,
+        turnsEmpty: 1,
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(
+      <ProvidersKeysCard lineName="line-stale-metrics" stale healthObservedAt="2026-06-12T11:58:00.000Z" />,
+    ))
+
+    // Carried-forward values remain visible — never hard-hidden.
+    expect(await screen.findByText('3 served')).toBeDefined()
+    expect(screen.getByText('1 empty')).toBeDefined()
+    // Stale affordance present so the counters are not misread as live.
+    expect(screen.getAllByText('stale').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('tags the fallback chain stale while STILL rendering ready/unavailable eligibility', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'opencode-cli',
+        model: 'minimax/MiniMax-M2',
+        keyPresent: false,
+        chain: [
+          { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
+          { provider: 'openai-api', model: 'gpt-4o-mini', eligible: true },
+        ],
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(
+      <ProvidersKeysCard lineName="line-stale-chain" stale healthObservedAt="2026-06-12T11:58:00.000Z" />,
+    ))
+
+    expect(await screen.findByText('chain')).toBeDefined()
+    // Eligibility still rendered — carried-forward, not hidden.
+    expect(screen.getByText('unavailable')).toBeDefined()
+    expect(screen.getByText('ready')).toBeDefined()
+    // Stale affordance on the chain block.
+    expect(screen.getAllByText('stale').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('renders the stale tag (without an "as of" timestamp) when stale but never successfully polled', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        turnsServed: 3,
+        turnsEmpty: 1,
+      }),
+      lineReachable: false,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    // healthObservedAt null = the line has never had a successful poll yet.
+    render(withProviders(
+      <ProvidersKeysCard lineName="line-stale-nohealth" stale healthObservedAt={null} />,
+    ))
+
+    expect(await screen.findByText('3 served')).toBeDefined()
+    expect(screen.getAllByText('stale').length).toBeGreaterThanOrEqual(1)
+    // No observation timestamp → no "as of …" affordance.
+    expect(screen.queryByText(/as of/)).toBeNull()
+  })
+
+  it('renders NO stale affordance when the instance is fresh', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        turnsServed: 3,
+        turnsEmpty: 1,
+        chain: [
+          { provider: 'openai-api', model: 'gpt-4o', eligible: true },
+          { provider: 'anthropic-api', model: 'claude-sonnet-4-6', eligible: false },
+        ],
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(<ProvidersKeysCard lineName="line-fresh" stale={false} />))
+
+    expect(await screen.findByText('3 served')).toBeDefined()
+    expect(screen.getByText('chain')).toBeDefined()
+    expect(screen.queryByText('stale')).toBeNull()
+  })
+})
