@@ -571,21 +571,72 @@ export function importLidMappings(
 // ── L6: Periodic reconciliation ─────────────────────────────────────────────
 
 /**
- * Full reconciliation sweep: re-reads auth directory files and reports gaps.
- * Intended to be called on a schedule (e.g. every 30 minutes).
+ * Cross-sweep state for {@link reconcileLidMappings}. The caller (main.ts)
+ * creates one at startup and threads it through every scheduled sweep so L6 can
+ * run incrementally instead of re-deriving the unresolved cohort from a full
+ * scan of the historical `messages` table every ~30 minutes (#1781).
  *
- * Returns { hydrated, unresolvedLids } where unresolvedLids are LIDs seen in
- * the messages table that have no mapping in lid_mappings.
+ *   - `lastMaxPk`     — high-water mark. Only messages with `pk > lastMaxPk` are
+ *     scanned for newly-appeared unresolved LIDs. `pk > ?` seeks on the INTEGER
+ *     PRIMARY KEY, so cost scales with new messages since the last sweep, not
+ *     with total corpus size (the old `sender_jid LIKE '%@lid'` predicate has a
+ *     leading wildcard and cannot use `idx_messages_sender`, forcing a full
+ *     table scan each cycle).
+ *   - `knownUnresolvedLids` — the carried-forward unresolvable cohort. Members
+ *     are re-checked cheaply against `lid_mappings` each sweep and dropped once
+ *     a mapping exists; they are NOT re-warned. Only the per-sweep delta of
+ *     genuinely-new unresolvables is warned, so the actionable signal (a new
+ *     unresolvable appearing / the cohort growing) survives instead of being
+ *     buried under a constant restatement of a known-permanent cohort.
+ *
+ * The state is intentionally in-memory: both defects in #1781 (repeated
+ * full-scan cost and warn spam) are process-lifetime problems, and a restart
+ * simply re-primes via a single full scan (`lastMaxPk` starts at 0).
+ * Correctness never depends on this state — access-policy.ts fails closed on
+ * unresolved LIDs regardless, and a permanently-unresolvable cohort is an
+ * expected steady state under WhatsApp's LID privacy model.
+ */
+export interface LidReconcileState {
+  lastMaxPk: number;
+  knownUnresolvedLids: Set<string>;
+}
+
+/**
+ * Reconciliation sweep: re-reads auth directory files and reports unresolved
+ * LID gaps. Intended to be called on a schedule (e.g. every 30 minutes).
+ *
+ * When `state` is provided (production path), the scan is bounded by the
+ * high-water mark and warnings are emitted only for the per-sweep delta of
+ * newly-appeared unresolvable LIDs. When omitted (one-off callers / legacy
+ * tests) each call behaves like a first pass: a full scan that warns the whole
+ * unresolved set.
+ *
+ * Returns `{ hydrated, unresolvedLids, newUnresolvedLids }` where
+ * `unresolvedLids` is the full current unresolvable cohort and
+ * `newUnresolvedLids` is the delta warned on this sweep.
  */
 export function reconcileLidMappings(
   db: Database,
   authDir: string,
-): { hydrated: number; unresolvedLids: string[] } {
+  state?: LidReconcileState,
+): { hydrated: number; unresolvedLids: string[]; newUnresolvedLids: string[] } {
   // Re-run L1 hydration (INSERT OR IGNORE — safe to repeat)
   const hydrated = hydrateLidMappings(db, authDir);
 
-  // Find LIDs in messages table that have no mapping
-  const unresolvedRows = db.raw.prepare(`
+  // No caller state → ephemeral first-pass state (full scan, warn whole set).
+  const st = state ?? { lastMaxPk: 0, knownUnresolvedLids: new Set<string>() };
+
+  // High-water mark for THIS sweep, read up front. Rows that arrive mid-sweep
+  // keep a pk > this value and are simply picked up next sweep (never skipped).
+  const maxPkRow = db.raw
+    .prepare('SELECT MAX(pk) AS maxPk FROM messages')
+    .get() as { maxPk: number | null } | undefined;
+  const currentMaxPk = maxPkRow?.maxPk ?? st.lastMaxPk;
+
+  // (1) BOUNDED scan — only messages newer than the last sweep. `pk > ?` seeks
+  // on the INTEGER PRIMARY KEY; the per-row LID extraction and NOT EXISTS check
+  // are unchanged from the historical query.
+  const newUnresolvedRows = db.raw.prepare(`
     SELECT DISTINCT
       CASE
         WHEN INSTR(m.sender_jid, ':') > 0 THEN SUBSTR(m.sender_jid, 1, INSTR(m.sender_jid, ':') - 1)
@@ -593,7 +644,8 @@ export function reconcileLidMappings(
         ELSE m.sender_jid
       END AS lid
     FROM messages m
-    WHERE m.sender_jid LIKE '%@lid'
+    WHERE m.pk > ?
+      AND m.sender_jid LIKE '%@lid'
       AND NOT EXISTS (
         SELECT 1 FROM lid_mappings lm
         WHERE lm.lid = CASE
@@ -602,12 +654,35 @@ export function reconcileLidMappings(
           ELSE m.sender_jid
         END
       )
-  `).all() as { lid: string }[];
+  `).all(st.lastMaxPk) as { lid: string }[];
 
-  const lids = unresolvedRows.map(r => r.lid);
+  // (2) Re-check the carried-forward cohort: any LID that has since gained a
+  // mapping (via L1–L5 or this pass's hydration) leaves the unresolvable set.
+  // This is O(cohort) indexed PRIMARY-KEY lookups on lid_mappings — NOT a table
+  // scan — and preserves the resolver's real job: resolvable LIDs still resolve
+  // and drop out. The lookup mirrors the scan's NOT EXISTS exactly (the stored
+  // entries are already the ':'/'@'-stripped lid key).
+  const mappingProbe = db.raw.prepare('SELECT 1 FROM lid_mappings WHERE lid = ?');
+  for (const lid of [...st.knownUnresolvedLids]) {
+    if (mappingProbe.get(lid)) st.knownUnresolvedLids.delete(lid);
+  }
 
-  if (lids.length > 0) {
-    log.warn({ count: lids.length, lids }, 'L6: unresolved LIDs found during reconciliation');
+  // (3) Delta = genuinely-new unresolvable LIDs not already tracked. Warn on the
+  // delta only, so a steady known cohort stays quiet while growth is surfaced.
+  const newUnresolvedLids: string[] = [];
+  for (const { lid } of newUnresolvedRows) {
+    if (!st.knownUnresolvedLids.has(lid)) {
+      st.knownUnresolvedLids.add(lid);
+      newUnresolvedLids.push(lid);
+    }
+  }
+  st.lastMaxPk = currentMaxPk;
+
+  if (newUnresolvedLids.length > 0) {
+    log.warn(
+      { count: newUnresolvedLids.length, lids: newUnresolvedLids, cohortSize: st.knownUnresolvedLids.size },
+      'L6: new unresolved LIDs found during reconciliation',
+    );
   }
 
   // Also check for LID-keyed chats that could now be migrated
@@ -633,7 +708,7 @@ export function reconcileLidMappings(
     }
   }
 
-  return { hydrated, unresolvedLids: lids };
+  return { hydrated, unresolvedLids: [...st.knownUnresolvedLids], newUnresolvedLids };
 }
 
 // ── L1.5: Lazy disk fallback ────────────────────────────────────────────────

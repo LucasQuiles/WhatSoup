@@ -180,6 +180,17 @@ cron agent_job. This is intentional — auto-pausing a once-daily invoicing job 
 would be the exact *silent* failure we forbid. Instead every failed fire emits its own alert; the
 job stays active and keeps trying (and alerting) daily.
 
+**Exception — forbidden target (#1745):** the "never auto-pause a cron" rule applies to failures
+whose alert can still reach `report_chat_jid`. It does NOT apply when the *notification send itself*
+is permanently rejected because the bot was removed from the target chat (`forbidden`/`403`). There
+"keep alerting daily" is impossible — the report chat is undeliverable — so after
+`MAX_CONSECUTIVE_FORBIDDEN_REJECTS` (default 3) consecutive `notify_forbidden_target` rejects the
+poller RETIRES the trigger (`status='paused'`, `next_fire_at=NULL`) and signals the producer
+out-of-band: a `trigger_paused` bead_event `{ reason:'forbidden_target' }` plus a
+`trigger_forbidden_target` BOT ERRORS alert. See `docs/runbooks/personal-line-watch.md` §"defensive
+policies". Transient send failures (timeout, connection closed, session `401`) are unaffected and
+keep retrying as before.
+
 ### Tests
 
 `tests/core/substrate/poller.test.ts` — added `describe('TriggerPoller — agent_job dispatch')`:

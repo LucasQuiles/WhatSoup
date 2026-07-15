@@ -667,7 +667,7 @@ describe('reconcileLidMappings', () => {
 
     const result = reconcileLidMappings(db, tmpDir);
 
-    expect(result).toEqual({ hydrated: 0, unresolvedLids: [] });
+    expect(result).toEqual({ hydrated: 0, unresolvedLids: [], newUnresolvedLids: [] });
     expect(
       db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(lidJid),
     ).toBeDefined();
