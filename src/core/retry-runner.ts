@@ -25,7 +25,7 @@ import {
   jitteredDelay,
   jitteredDelayPositive,
   sleepWithAbort,
-} from '../core/retry.ts';
+} from './retry.ts';
 
 export interface RetryOptions {
   /** Maximum retry attempts after the initial try (0 = no retry). */

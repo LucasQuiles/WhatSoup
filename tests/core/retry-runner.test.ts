@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AbortSleepError } from '../../src/core/retry.ts';
-import { retryAsync, type RetryOptions } from '../../src/lib/retry-runner.ts';
+import { retryAsync } from '../../src/core/retry-runner.ts';
 
-/** Fast, deterministic delays so the suite stays under a second. */
+/** Resolve/reject after `ms` — intercepted by vi.useFakeTimers(). */
 function rejectAfter<T = never>(ms: number, error: unknown): Promise<T> {
   return new Promise((_resolve, reject) => setTimeout(() => reject(error), ms));
 }
@@ -12,6 +12,15 @@ function resolveAfter<T>(ms: number, value: T): Promise<T> {
 }
 
 describe('retryAsync', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
   it('returns the value on first success (no retry needed)', async () => {
     const run = vi.fn().mockResolvedValue('first-ok');
     const result = await retryAsync(run, { retries: 3, baseMs: 1 });
@@ -24,8 +33,10 @@ describe('retryAsync', () => {
       .mockRejectedValueOnce(new Error('boom-1'))
       .mockRejectedValueOnce(new Error('boom-2'))
       .mockResolvedValueOnce('third-ok');
-    const result = await retryAsync(run, { retries: 5, baseMs: 1 });
-    expect(result).toBe('third-ok');
+    const pending = retryAsync(run, { retries: 5, baseMs: 1 });
+    // Advance past all retry sleeps (baseMs 1 → delays ~1ms, ~2ms, ~4ms).
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBe('third-ok');
     expect(run).toHaveBeenCalledTimes(3);
   });
 
@@ -35,7 +46,10 @@ describe('retryAsync', () => {
       .mockRejectedValueOnce(new Error('boom-1'))
       .mockRejectedValueOnce(new Error('boom-2'))
       .mockRejectedValueOnce(lastErr);
-    await expect(retryAsync(run, { retries: 2, baseMs: 1 })).rejects.toBe(lastErr);
+    const pending = retryAsync(run, { retries: 2, baseMs: 1 });
+    const caught = pending.catch((e) => e);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await caught).toBe(lastErr);
     expect(run).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 
@@ -63,11 +77,13 @@ describe('retryAsync', () => {
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValueOnce('ok');
-    await retryAsync(run, {
+    const pending = retryAsync(run, {
       retries: 5,
       baseMs: 1,
       shouldRetry: (err, attempt) => { attempts.push(attempt); return true; },
     });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     // Attempts 0 and 1 failed (shouldRetry called for each); attempt 2 succeeded.
     expect(attempts).toEqual([0, 1]);
   });
@@ -78,11 +94,9 @@ describe('retryAsync', () => {
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValueOnce('ok');
-    await retryAsync(run, {
-      retries: 5,
-      baseMs: 1,
-      shouldRetry: () => true,
-    });
+    const pending = retryAsync(run, { retries: 5, baseMs: 1, shouldRetry: () => true });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     for (const call of run.mock.calls) seen.push(call[0] as number);
     expect(seen).toEqual([0, 1, 2]);
   });
@@ -93,12 +107,14 @@ describe('retryAsync', () => {
       .mockRejectedValueOnce(new Error('rate-limited'))
       .mockResolvedValueOnce('ok');
     const getRetryAfterMs = vi.fn().mockReturnValue(15);
-    await retryAsync(run, {
+    const pending = retryAsync(run, {
       retries: 3,
-      baseMs: 1000, // large — would be very slow if getRetryAfterMs were ignored
+      baseMs: 1000,
       getRetryAfterMs,
       onRetry,
     });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     expect(getRetryAfterMs).toHaveBeenCalled();
     // onRetry's delayMs should be ~15 (the server value + positive jitter up to +25%).
     const delayMs = onRetry.mock.calls[0]![0].delayMs;
@@ -111,13 +127,15 @@ describe('retryAsync', () => {
     const run = vi.fn()
       .mockRejectedValueOnce(new Error('transient'))
       .mockResolvedValueOnce('ok');
-    await retryAsync(run, {
+    const pending = retryAsync(run, {
       retries: 3,
       baseMs: 10,
       maxMs: 50,
       getRetryAfterMs: () => null,
       onRetry,
     });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     // baseMs 10, attempt 0 → exp 10, jittered symmetric → [7.5, 12.5].
     const delayMs = onRetry.mock.calls[0]![0].delayMs;
     expect(delayMs).toBeGreaterThanOrEqual(7.5);
@@ -130,11 +148,9 @@ describe('retryAsync', () => {
     const run = vi.fn()
       .mockRejectedValueOnce(err)
       .mockResolvedValueOnce('ok');
-    await retryAsync(run, {
-      retries: 3,
-      baseMs: 5,
-      onRetry,
-    });
+    const pending = retryAsync(run, { retries: 3, baseMs: 5, onRetry });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     expect(onRetry).toHaveBeenCalledTimes(1);
     const info = onRetry.mock.calls[0]![0];
     expect(info.attempt).toBe(0);
@@ -152,9 +168,11 @@ describe('retryAsync', () => {
       signal: controller.signal,
       shouldRetry: () => true,
     });
-    // Abort shortly after the first failure schedules the long sleep.
+    const caught = pending.catch((e) => e);
+    // Abort at 5ms, before the 1000ms retry sleep completes.
     setTimeout(() => controller.abort(), 5);
-    await expect(pending).rejects.toBeInstanceOf(AbortSleepError);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(await caught).toBeInstanceOf(AbortSleepError);
   });
 
   it('does not call run again after an abort', async () => {
@@ -165,8 +183,10 @@ describe('retryAsync', () => {
       baseMs: 500,
       signal: controller.signal,
     });
+    const caught = pending.catch((e) => e);
     setTimeout(() => controller.abort(), 5);
-    await expect(pending).rejects.toBeInstanceOf(AbortSleepError);
+    await vi.advanceTimersByTimeAsync(5);
+    await caught;
     // Only the initial attempt ran; the retry sleep was aborted before run() could be called again.
     expect(run).toHaveBeenCalledTimes(1);
   });
@@ -176,13 +196,15 @@ describe('retryAsync', () => {
     const run = vi.fn()
       .mockRejectedValueOnce(new Error('x'))
       .mockResolvedValueOnce('ok');
-    await retryAsync(run, {
+    const pending = retryAsync(run, {
       retries: 3,
       baseMs: 100,
       getRetryAfterMs: () => 20, // server floor 20
       jitterFraction: 0.5,
       onRetry,
     });
+    await vi.advanceTimersByTimeAsync(100);
+    await pending;
     // Positive jitter above server floor 20, fraction 0.5 → [20, 30].
     const delayMs = onRetry.mock.calls[0]![0].delayMs;
     expect(delayMs).toBeGreaterThanOrEqual(20);
