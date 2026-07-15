@@ -176,13 +176,17 @@ describe('OutboundQueue turn delivery evidence', () => {
   });
 
   it('snapshots delivery and durability identity before a delayed send executes', async () => {
+    const canonicalConversationKey = 'canonical-phone';
+    const initialDeliveryJid = 'mapped-alias@lid';
     const firstSend = deferred<{ waMessageId: null }>();
     const messenger = makeMessenger();
     vi.mocked(messenger.sendMessage)
       .mockImplementationOnce(() => firstSend.promise)
       .mockResolvedValue({ waMessageId: null });
     const durability = makeDurability();
-    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const queue = new OutboundQueue(messenger, initialDeliveryJid, {
+      conversationKey: canonicalConversationKey,
+    });
     queue.setDurability(durability);
 
     queue.enqueueText('chain blocker');
@@ -191,7 +195,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     queue.setInboundSeq(41);
     queue.enqueueText('old identity');
 
-    const newJid = 'evidence-new@s.whatsapp.net';
+    const newJid = `${canonicalConversationKey}@s.whatsapp.net`;
     queue.updateDeliveryJid(newJid);
     queue.setInboundSeq(99);
     queue.enqueueText('new identity');
@@ -202,18 +206,18 @@ describe('OutboundQueue turn delivery evidence', () => {
 
     expect(evidence.answerOpIds).toEqual([2, 3]);
     expect(durability.createOutboundOp).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      chatJid: CHAT_JID,
-      conversationKey: toConversationKey(CHAT_JID),
+      chatJid: initialDeliveryJid,
+      conversationKey: canonicalConversationKey,
       sourceInboundSeq: 41,
     }));
     expect(durability.createOutboundOp).toHaveBeenNthCalledWith(3, expect.objectContaining({
       chatJid: newJid,
-      conversationKey: toConversationKey(newJid),
+      conversationKey: canonicalConversationKey,
       sourceInboundSeq: 99,
     }));
     expect(vi.mocked(messenger.sendMessage).mock.calls.map(([jid, text]) => [jid, text])).toEqual([
-      [CHAT_JID, 'chain blocker'],
-      [CHAT_JID, 'old identity'],
+      [initialDeliveryJid, 'chain blocker'],
+      [initialDeliveryJid, 'old identity'],
       [newJid, 'new identity'],
     ]);
   });

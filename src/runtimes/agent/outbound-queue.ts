@@ -32,6 +32,13 @@ export interface TurnDeliveryEvidence {
   readonly statusOpIds: readonly number[];
 }
 
+export interface OutboundQueueOptions {
+  /** Immutable durable attribution for every outbound operation owned by this queue. */
+  readonly conversationKey: string;
+  /** Echo-guard token inherited by a replacement queue. */
+  readonly senderToken?: string;
+}
+
 interface MutableTurnDeliveryEvidence {
   readonly turnId: string;
   readonly epoch: number;
@@ -279,7 +286,7 @@ export interface IOutboundQueue {
    *  group cooldown window gets a fresh random token and its legitimate reply is
    *  silently flood-suppressed. */
   getSenderToken(): string;
-  /** Retarget all subsequent sends to a different JID variant. */
+  /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void;
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
   setInboundSeq(seq: number | undefined): void;
@@ -311,8 +318,8 @@ export class OutboundQueue implements IOutboundQueue {
   private static readonly SEND_RETRY_MAX_MS = 8_000;
 
   private readonly messenger: Messenger;
-  private chatJid: string;
-  private cachedConversationKey: string;
+  private deliveryJid: string;
+  private readonly conversationKey: string;
   private durability: DurabilityEngine | undefined;
   /** inbound_events.seq for the current turn — threaded to outbound ops as sourceInboundSeq */
   private currentInboundSeq: number | undefined;
@@ -394,15 +401,19 @@ export class OutboundQueue implements IOutboundQueue {
    */
   private readonly senderToken: string;
 
-  constructor(messenger: Messenger, chatJid: string, senderToken?: string) {
+  constructor(
+    messenger: Messenger,
+    deliveryJid: string,
+    options?: OutboundQueueOptions,
+  ) {
     this.messenger = messenger;
-    this.chatJid = chatJid;
-    this.cachedConversationKey = toConversationKey(chatJid);
+    this.deliveryJid = deliveryJid;
+    this.conversationKey = options?.conversationKey ?? toConversationKey(deliveryJid);
     // QR-069: a replacement queue (provider fallback/respawn, /new, resume) for
     // the same chat INHERITS the prior queue's token so its first reply is NOT
     // flood-suppressed by the predecessor's still-active group cooldown. Falls
     // back to a fresh token for a genuinely new queue.
-    this.senderToken = senderToken ?? crypto.randomUUID();
+    this.senderToken = options?.senderToken ?? crypto.randomUUID();
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -582,8 +593,8 @@ export class OutboundQueue implements IOutboundQueue {
       role,
       turnId: this.activeTurnEvidence?.turnId,
       turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
-      chatJid: this.chatJid,
-      conversationKey: this.cachedConversationKey,
+      chatJid: this.deliveryJid,
+      conversationKey: this.conversationKey,
       sourceInboundSeq: this.currentInboundSeq,
     };
   }
@@ -880,7 +891,7 @@ export class OutboundQueue implements IOutboundQueue {
     ) {
       this.startTyping();
       log.info(
-        { chatJid: this.chatJid, floorMs: this.progressFloorMs },
+        { chatJid: this.deliveryJid, floorMs: this.progressFloorMs },
         'progress placeholder suppressed by per-chat rate floor',
       );
       return;
@@ -891,7 +902,7 @@ export class OutboundQueue implements IOutboundQueue {
     if (lastAt !== undefined && now - lastAt < PROGRESS_TEXT_DEDUPE_WINDOW_MS) {
       // Identical placeholder already shown recently \u2014 keep the indicator alive, drop the duplicate.
       this.startTyping();
-      log.info({ chatJid: this.chatJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
+      log.info({ chatJid: this.deliveryJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
       return;
     }
     // PR-E: hard per-turn status-narration cap. The floor + text window above
@@ -1014,7 +1025,7 @@ export class OutboundQueue implements IOutboundQueue {
     // leaves op identity unknown; only queue replacement may recover safely.
   }
 
-  get targetChatJid(): string { return this.chatJid; }
+  get targetChatJid(): string { return this.deliveryJid; }
 
   hasPendingWork(): boolean {
     return this.drainFailure !== undefined
@@ -1028,10 +1039,9 @@ export class OutboundQueue implements IOutboundQueue {
       || this.streamTimer !== null;
   }
 
-  /** Retarget all subsequent sends to a different JID variant. */
+  /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
-    this.chatJid = jid;
-    this.cachedConversationKey = toConversationKey(jid);
+    this.deliveryJid = jid;
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -1043,7 +1053,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.typingStartedAt = Date.now();
     if (this.isTyping) return;
     this.isTyping = true;
-    this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+    this.messenger.setTyping?.(this.deliveryJid, true).catch(() => {});
     // Re-assert composing every 8s — WA auto-clears it on the recipient side after ~10-15s.
     // This keeps the indicator alive during long tool chains with no intermediate messages.
     // The self-bound check caps the total lifetime to TYPING_MAX_MS so any future leak
@@ -1056,7 +1066,7 @@ export class OutboundQueue implements IOutboundQueue {
         this.stopTyping(false);
         return;
       }
-      this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+      this.messenger.setTyping?.(this.deliveryJid, true).catch(() => {});
     }, TYPING_REFRESH_MS);
   }
 
@@ -1073,7 +1083,7 @@ export class OutboundQueue implements IOutboundQueue {
       this.typingRefreshInterval = null;
     }
     if (notify) {
-      this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
+      this.messenger.setTyping?.(this.deliveryJid, false).catch(() => {});
     }
   }
 

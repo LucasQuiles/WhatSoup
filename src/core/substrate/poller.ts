@@ -77,6 +77,49 @@ const FAILED_RETRY_COOLDOWN_SEC = 60;
 /** Auto-pause a trigger after this many consecutive failed runs. */
 const MAX_CONSECUTIVE_FAILURES = 5;
 /**
+ * #1745 — auto-RETIRE a trigger after this many consecutive notification sends
+ * rejected with a PERMANENT per-target authz error. Deliberately smaller than
+ * MAX_CONSECUTIVE_FAILURES: a forbidden target (the bot was removed from the
+ * group) never self-heals by retrying the SAME chat, so every further fire is
+ * guaranteed-undeliverable and pure waste — the days-long incident loop.
+ */
+const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = 3;
+
+/**
+ * #1745 — classify a notification-send rejection as a PERMANENT per-target
+ * authz reject (the WhatsApp server refused because the bot is not a member
+ * of / is forbidden from the target chat, e.g. removed from the group). Unlike
+ * transient failures (timeout, connection closed, rate limit) this NEVER
+ * recovers by retrying the same target, so it must short-circuit the producer
+ * rather than loop forever.
+ *
+ * Grounded in the incident bytes: `outbound_ops.error` is stored verbatim as
+ * `err.message` (durability.markFailedPermanent / outbound-queue.ts), and the
+ * 167 quarantined rows read `error='forbidden'` — i.e. the raw thrown message
+ * for this rejection literally IS `forbidden`. The `output.statusCode === 403`
+ * fallback also catches a Boom-wrapped reject whose message is opaque.
+ *
+ * 401/`unauthorized` is deliberately EXCLUDED: it is a session/auth condition
+ * (a re-pair heals it), NOT a per-target verdict — treating it as terminal
+ * would wrongly retire a healthy producer during a transient auth blip.
+ */
+export function isForbiddenTargetReject(err: unknown): boolean {
+  const raw = errorMessage(err).toLowerCase();
+  if (/forbidden|\b403\b|not[- ]a[- ]participant|not a group member|no longer (a )?(member|participant)|not in (the )?group/.test(raw)) {
+    return true;
+  }
+  // Boom-shaped rejects carry the HTTP-ish code on output.statusCode; some
+  // wrappers surface it top-level. 403 == forbidden; 401 is intentionally NOT
+  // matched here (session auth, transient).
+  const candidate = err as { output?: { statusCode?: unknown }; statusCode?: unknown } | null;
+  const code = typeof candidate?.output?.statusCode === 'number'
+    ? candidate.output.statusCode
+    : typeof candidate?.statusCode === 'number'
+      ? candidate.statusCode
+      : null;
+  return code === 403;
+}
+/**
  * Default backlog-alert threshold for #1773 rem-3 (overridden by
  * config.memory.sweep.overdueProposalAlertThreshold in production). Alerts
  * once the count of status='proposed' beads past review_by_at exceeds this
@@ -193,6 +236,12 @@ export interface TriggerPollerOptions {
   clearTimeoutImpl?: typeof clearTimeout;
   /** Auto-pause threshold for consecutive failed runs. Default 5. */
   maxConsecutiveFailures?: number;
+  /**
+   * #1745 — auto-RETIRE threshold for consecutive notification sends rejected
+   * with a permanent per-target authz error (forbidden/403). Default 3. Smaller
+   * than maxConsecutiveFailures because a forbidden target never self-heals.
+   */
+  maxConsecutiveForbiddenRejects?: number;
   /** Minimum seconds between dispatches per trigger. Default 300 (5 min). */
   notificationThrottleMinIntervalSec?: number;
   /**
@@ -327,6 +376,12 @@ interface PostCommitActions {
 interface NotificationDispatch {
   waId: string | null;
   failed: boolean;
+  /**
+   * #1745 — set when `failed` is true AND the send threw a PERMANENT per-target
+   * authz reject (forbidden/403). Distinguishes a retry-forever transport blip
+   * from a target that will never accept a send (bot removed from the group).
+   */
+  terminalReject: boolean;
 }
 
 export class TriggerPoller {
@@ -340,6 +395,7 @@ export class TriggerPoller {
   private readonly setTimeoutImpl: typeof setTimeout;
   private readonly clearTimeoutImpl: typeof clearTimeout;
   private readonly maxConsecutiveFailures: number;
+  private readonly maxConsecutiveForbiddenRejects: number;
   private readonly notificationThrottleMinIntervalSec: number;
   private readonly pineconeAllowedIndexes: ReadonlySet<string>;
   private readonly pineconeSearch: PineconeSearchFn | null;
@@ -375,6 +431,7 @@ export class TriggerPoller {
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
+    this.maxConsecutiveForbiddenRejects = opts.maxConsecutiveForbiddenRejects ?? MAX_CONSECUTIVE_FORBIDDEN_REJECTS;
     this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
     this.pineconeAllowedIndexes = new Set(opts.pineconeAllowedIndexes ?? []);
     this.pineconeSearch = opts.pineconeSearch ?? null;
@@ -619,11 +676,29 @@ export class TriggerPoller {
         } catch (err) {
           log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
         }
+      } else if (dispatch.failed && dispatch.terminalReject) {
+        // #1745 — delivery was PERMANENTLY rejected for this target (forbidden/403:
+        // the bot was removed from the report chat). Retrying the same chat is
+        // guaranteed-undeliverable, so once this recurs past the small bound we
+        // RETIRE the producer (pause + clear next_fire_at) and signal it out-of-
+        // band (bead_event + BOT ERRORS alert) — the report chat itself cannot
+        // receive the failure notice, which is exactly why the loop ran for days.
+        try {
+          this.recordNotifyForbiddenTarget(runId);
+          const rejects = this.countConsecutiveForbiddenRejects(t.id);
+          if (rejects >= this.maxConsecutiveForbiddenRejects) {
+            this.retireTriggerOnForbiddenTarget(t, this.nowFn(), rejects);
+          }
+        } catch (err) {
+          log.error({ err, triggerId: t.id, runId }, 'failed to record/retire forbidden-target dispatch');
+        }
       } else if (dispatch.failed) {
-        // The trigger evaluated and fired, but delivery threw. Mark the already-
-        // committed run so a fired-but-undelivered run is distinguishable in
-        // telemetry from a throttled one — status is left EXACTLY as finishRun
-        // wrote it (the evaluation succeeded) and error_message stays NULL.
+        // The trigger evaluated and fired, but delivery threw a TRANSIENT error.
+        // Mark the already-committed run so a fired-but-undelivered run is
+        // distinguishable in telemetry from a throttled one — status is left
+        // EXACTLY as finishRun wrote it (the evaluation succeeded) and
+        // error_message stays NULL. The trigger keeps rescheduling (fail-loud,
+        // never silently retire) — a daily job must survive a transport blip.
         // Throttled / not-eligible runs never reach here (shouldDispatchNotification).
         try {
           this.recordNotifyDispatchFailed(runId);
@@ -1316,13 +1391,14 @@ export class TriggerPoller {
     const text = formatNotification(t, outcome);
     try {
       const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
-      return { waId: receipt.waMessageId ?? null, failed: false };
+      return { waId: receipt.waMessageId ?? null, failed: false, terminalReject: false };
     } catch (err) {
+      const terminalReject = isForbiddenTargetReject(err);
       log.error(
-        { err, triggerId: t.id, reportChatJid: t.report_chat_jid },
+        { err, triggerId: t.id, reportChatJid: t.report_chat_jid, terminalReject },
         'failed to dispatch trigger notification',
       );
-      return { waId: null, failed: true };
+      return { waId: null, failed: true, terminalReject };
     }
   }
 
@@ -1386,6 +1462,94 @@ export class TriggerPoller {
       `UPDATE trigger_runs SET error_kind = 'notify_dispatch_failed'
        WHERE id = ? AND error_kind IS NULL`,
     ).run(runId);
+  }
+
+  /**
+   * #1745 — mark a fired run whose notification delivery was PERMANENTLY
+   * rejected for the target chat (forbidden/403). A distinct error_kind from
+   * `notify_dispatch_failed` so the consecutive-reject circuit breaker (which
+   * reads error_kind, unlike the status-only countConsecutiveFailures) can
+   * count only permanent per-target rejects and never a transient blip. Same
+   * `error_kind IS NULL` guard as recordNotifyDispatchFailed: a fired outcome
+   * commits error_kind=NULL, so this never clobbers an execute classification.
+   */
+  private recordNotifyForbiddenTarget(runId: number): void {
+    this.db.prepare(
+      `UPDATE trigger_runs SET error_kind = 'notify_forbidden_target'
+       WHERE id = ? AND error_kind IS NULL`,
+    ).run(runId);
+  }
+
+  /**
+   * #1745 — count consecutive most-recent runs whose notification was
+   * forbidden-target rejected, stopping at the first run that was NOT (a
+   * successful delivery, a noop, or a transient failure resets the streak).
+   * Mirrors countConsecutiveFailures but keys on the forbidden-target
+   * error_kind rather than status — the reported producer is a schedule.cron
+   * trigger, which never reaches the status-based breaker (it always
+   * reschedules), so status alone can never bound this loop.
+   */
+  private countConsecutiveForbiddenRejects(triggerId: number): number {
+    const recent = this.db.prepare(
+      `SELECT error_kind FROM trigger_runs
+       WHERE trigger_id = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?`,
+    ).all(triggerId, this.maxConsecutiveForbiddenRejects) as Array<{ error_kind: string | null }>;
+    let count = 0;
+    for (const row of recent) {
+      if (row.error_kind === 'notify_forbidden_target') count++;
+      else break;
+    }
+    return count;
+  }
+
+  /**
+   * #1745 — retire a producer whose target chat permanently rejects delivery:
+   * pause the trigger and clear next_fire_at (so dueTriggers can never select
+   * it again — bounding the quarantine that its fires would otherwise keep
+   * feeding), write a `trigger_paused` bead_event with reason `forbidden_target`
+   * (the producer signal, readable by the bead owner surface), and emit a
+   * BOT ERRORS alert naming the bead/trigger/chat. The alert is the out-of-band
+   * channel BECAUSE the report chat itself is undeliverable — the exact gap that
+   * let the incident run silently for ~4 days. `status='active'` guard keeps the
+   * pause idempotent.
+   */
+  private retireTriggerOnForbiddenTarget(t: TriggerRow, now: number, rejectCount: number): void {
+    const info = this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'paused', next_fire_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'active'`,
+    ).run(now, t.id);
+    if (info.changes === 0) return; // already retired by a prior tick — do not double-signal
+    writeBeadEvent(this.db, {
+      beadId: t.bead_id,
+      eventType: 'trigger_paused',
+      actor: 'trigger-poller',
+      payload: {
+        trigger_id: t.id,
+        reason: 'forbidden_target',
+        report_chat_jid: t.report_chat_jid,
+        reject_count: rejectCount,
+      },
+      at: now,
+    });
+    if (this.instance) {
+      emitAlertChecked(
+        this.instance,
+        'trigger_forbidden_target',
+        `whatsoup@${this.instance} retired trigger ${t.id} (bead ${t.bead_id}) after ${rejectCount} consecutive forbidden-target send rejections to ${t.report_chat_jid}`,
+        [
+          `triggerId=${t.id}`,
+          `beadId=${t.bead_id}`,
+          `reportChatJid=${t.report_chat_jid}`,
+          `consecutiveForbiddenRejects=${rejectCount}`,
+          `retiredAt=${new Date(now * 1000).toISOString()}`,
+          'ref: #1745 — the target chat permanently rejects delivery (bot removed from the group); the trigger is paused so it stops looping and stops feeding the quarantine. Re-arm only after the bot is re-added, or delete the producing bead.',
+        ].join('\n'),
+        'warning',
+      );
+    }
   }
 
   private scheduleNextFire(
