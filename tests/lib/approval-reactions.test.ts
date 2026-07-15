@@ -192,14 +192,13 @@ describe('resolve — approval', () => {
       authorizedApprovers: ['admin'],
       actionId: 'act',
     });
-    const result = store.resolve({
+    expect(store.resolve({
       accountId: 'a',
       conversationKey: 'c',
       messageId: 'm',
       reactorId: 'intruder',
       emoji: '👍',
-    });
-    expect(result).toBeNull();
+    })).toBeNull();
   });
 
   it('returns null for an unrecognized emoji', () => {
@@ -211,26 +210,24 @@ describe('resolve — approval', () => {
       authorizedApprovers: ['admin'],
       actionId: 'act',
     });
-    const result = store.resolve({
+    expect(store.resolve({
       accountId: 'a',
       conversationKey: 'c',
       messageId: 'm',
       reactorId: 'admin',
       emoji: '🎉',
-    });
-    expect(result).toBeNull();
+    })).toBeNull();
   });
 
   it('returns null when target is missing', () => {
     const store = createApprovalReactionStore();
-    const result = store.resolve({
+    expect(store.resolve({
       accountId: 'a',
       conversationKey: 'c',
       messageId: 'missing',
       reactorId: 'admin',
       emoji: '👍',
-    });
-    expect(result).toBeNull();
+    })).toBeNull();
   });
 
   it('returns null when target has expired', () => {
@@ -244,14 +241,13 @@ describe('resolve — approval', () => {
       actionId: 'act',
     });
     clock += 2000;
-    const result = store.resolve({
+    expect(store.resolve({
       accountId: 'a',
       conversationKey: 'c',
       messageId: 'm',
       reactorId: 'admin',
       emoji: '👍',
-    });
-    expect(result).toBeNull();
+    })).toBeNull();
   });
 
   it('supports multiple authorized approvers', () => {
