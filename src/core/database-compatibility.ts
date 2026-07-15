@@ -289,6 +289,97 @@ function deterministicDatabasePathError(
   return null;
 }
 
+type DatabaseDirectoryInspectionDependencies = {
+  lstat(path: string): BigIntStats;
+  realpath(path: string): string;
+  stat(path: string): BigIntStats;
+};
+
+const databaseDirectoryInspectionDependencies: DatabaseDirectoryInspectionDependencies = {
+  lstat: (path) => lstatSync(path, { bigint: true }),
+  realpath: (path) => realpathSync(path),
+  stat: (path) => statSync(path, { bigint: true }),
+};
+
+function inspectCanonicalDatabaseDirectory(
+  path: string,
+  dbPath: string,
+  dependencies: DatabaseDirectoryInspectionDependencies,
+): BigIntStats {
+  let linkInfo: BigIntStats;
+  try {
+    linkInfo = dependencies.lstat(path);
+  } catch (err) {
+    if (err instanceof DatabaseCompatibilityError) throw err;
+    const deterministic = deterministicDatabasePathError(
+      dbPath,
+      err,
+      `Cannot trust database directory path: ${path}`,
+    );
+    if (deterministic) throw deterministic;
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database directory identity changed before writer open at ${path}`,
+      err,
+    );
+  }
+  if (linkInfo.isSymbolicLink() || !linkInfo.isDirectory()) {
+    throw new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      `Refusing symbolic link or non-directory in canonical database path: ${path}`,
+    );
+  }
+
+  let canonicalPath: string;
+  try {
+    canonicalPath = dependencies.realpath(path);
+  } catch (err) {
+    if (err instanceof DatabaseCompatibilityError) throw err;
+    const deterministic = deterministicDatabasePathError(
+      dbPath,
+      err,
+      `Cannot trust database directory path: ${path}`,
+    );
+    if (deterministic) throw deterministic;
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database directory identity changed while resolving ${path}`,
+      err,
+    );
+  }
+  if (canonicalPath !== path) {
+    throw new DatabaseCompatibilityError(
+      'unsafe_database_identity',
+      `Refusing non-canonical database directory path alias: ${path}`,
+    );
+  }
+
+  let targetInfo: BigIntStats;
+  try {
+    targetInfo = dependencies.stat(canonicalPath);
+  } catch (err) {
+    if (err instanceof DatabaseCompatibilityError) throw err;
+    const deterministic = deterministicDatabasePathError(
+      dbPath,
+      err,
+      `Cannot trust resolved database directory path: ${path}`,
+    );
+    if (deterministic) throw deterministic;
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database directory identity changed after resolving ${path}`,
+      err,
+    );
+  }
+  if (targetInfo.dev !== linkInfo.dev || targetInfo.ino !== linkInfo.ino) {
+    throw new DatabaseCompatibilityError(
+      'database_identity_changed',
+      `Database directory identity changed while resolving ${path}`,
+    );
+  }
+  return targetInfo;
+}
+
 function assertTrustedDatabaseDirectoryMetadata(
   info: { uid: number | bigint; mode: number | bigint },
   path: string,
@@ -305,6 +396,54 @@ function assertTrustedDatabaseDirectoryMetadata(
       'unsafe_database_identity',
       `Database parent grants group or other access: ${path}`,
     );
+  }
+}
+
+function assertTrustedDatabaseDirectoryChain(
+  leaf: string,
+  dbPath: string,
+  dependencies: DatabaseDirectoryInspectionDependencies,
+): void {
+  let childPath = leaf;
+  let childInfo = inspectCanonicalDatabaseDirectory(childPath, dbPath, dependencies);
+  assertTrustedDatabaseDirectoryMetadata(childInfo, childPath);
+  const effectiveUserId = typeof process.geteuid === 'function'
+    ? BigInt(process.geteuid())
+    : null;
+
+  while (dirname(childPath) !== childPath) {
+    const ancestorPath = dirname(childPath);
+    const ancestorInfo = inspectCanonicalDatabaseDirectory(
+      ancestorPath,
+      dbPath,
+      dependencies,
+    );
+    const ancestorUserId = BigInt(ancestorInfo.uid);
+    if (
+      effectiveUserId !== null
+      && ancestorUserId !== 0n
+      && ancestorUserId !== effectiveUserId
+    ) {
+      throw new DatabaseCompatibilityError(
+        'unsafe_database_identity',
+        `Database ancestor is controlled by another runtime user: ${ancestorPath}`,
+      );
+    }
+
+    if ((BigInt(ancestorInfo.mode) & 0o022n) !== 0n) {
+      const hasStickyRenameProtection = (BigInt(ancestorInfo.mode) & 0o1000n) !== 0n
+        && effectiveUserId !== null
+        && BigInt(childInfo.uid) === effectiveUserId;
+      if (!hasStickyRenameProtection) {
+        throw new DatabaseCompatibilityError(
+          'unsafe_database_identity',
+          `Database ancestor permits untrusted entry replacement: ${ancestorPath}`,
+        );
+      }
+    }
+
+    childPath = ancestorPath;
+    childInfo = ancestorInfo;
   }
 }
 
@@ -338,9 +477,8 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
 
   let ancestor = dirname(absolutePath);
   while (true) {
-    let info: ReturnType<typeof lstatSync>;
     try {
-      info = lstatSync(ancestor);
+      lstatSync(ancestor);
     } catch (err) {
       if (isMissingPathError(err) && dirname(ancestor) !== ancestor) {
         ancestor = dirname(ancestor);
@@ -358,87 +496,22 @@ export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentit
         err,
       );
     }
-    if (info.isSymbolicLink()) {
-      throw new DatabaseCompatibilityError(
-        'unsafe_database_identity',
-        `Refusing symbolic link in canonical database parent path: ${ancestor}`,
-      );
-    }
-    if (!info.isDirectory()) {
-      throw new DatabaseCompatibilityError(
-        'unsafe_database_identity',
-        `Cannot create DB directory safely because a parent is not a directory: ${ancestor}`,
-      );
-    }
-    let canonicalAncestor: string;
-    try {
-      canonicalAncestor = realpathSync(ancestor);
-    } catch (err) {
-      const deterministic = deterministicDatabasePathError(
-        absolutePath,
-        err,
-        `Cannot resolve DB directory safely through an invalid parent: ${ancestor}`,
-      );
-      if (deterministic) throw deterministic;
-      throw new DatabaseCompatibilityError(
-        'database_identity_changed',
-        `Database parent identity changed while resolving ${ancestor}`,
-        err,
-      );
-    }
-    if (canonicalAncestor !== ancestor) {
-      throw new DatabaseCompatibilityError(
-        'unsafe_database_identity',
-        `Refusing non-canonical database parent path alias: ${ancestor}`,
-      );
-    }
-    assertTrustedDatabaseDirectoryMetadata(info, ancestor);
+    assertTrustedDatabaseDirectoryChain(
+      ancestor,
+      absolutePath,
+      databaseDirectoryInspectionDependencies,
+    );
     return null;
   }
 }
 
-export function assertTrustedDatabaseParent(dbPath: string): void {
+export function assertTrustedDatabaseParent(
+  dbPath: string,
+  dependencies: DatabaseDirectoryInspectionDependencies = databaseDirectoryInspectionDependencies,
+): void {
   const absolutePath = resolve(dbPath);
   const parent = dirname(absolutePath);
-  let info: BigIntStats;
-  try {
-    info = lstatSync(parent, { bigint: true });
-  } catch (err) {
-    const deterministic = deterministicDatabasePathError(
-      absolutePath,
-      err,
-      `Cannot trust database parent path: ${parent}`,
-    );
-    if (deterministic) throw deterministic;
-    throw new DatabaseCompatibilityError(
-      'database_identity_changed',
-      `Database parent identity changed before writer open at ${parent}`,
-      err,
-    );
-  }
-  let canonicalParent: string;
-  try {
-    canonicalParent = realpathSync(parent);
-  } catch (err) {
-    const deterministic = deterministicDatabasePathError(
-      absolutePath,
-      err,
-      `Cannot trust database parent path: ${parent}`,
-    );
-    if (deterministic) throw deterministic;
-    throw new DatabaseCompatibilityError(
-      'database_identity_changed',
-      `Database parent identity changed while resolving ${parent}`,
-      err,
-    );
-  }
-  if (info.isSymbolicLink() || !info.isDirectory() || canonicalParent !== parent) {
-    throw new DatabaseCompatibilityError(
-      'unsafe_database_identity',
-      `Database parent must be one canonical non-symlink directory: ${parent}`,
-    );
-  }
-  assertTrustedDatabaseDirectoryMetadata(info, parent);
+  assertTrustedDatabaseDirectoryChain(parent, absolutePath, dependencies);
 }
 
 function invalidSchemaError(

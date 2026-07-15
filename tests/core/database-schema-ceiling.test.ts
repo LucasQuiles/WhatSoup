@@ -5,12 +5,14 @@ import {
   copyFileSync,
   existsSync,
   linkSync,
+  lstatSync,
   readFileSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
 } from 'node:fs';
 import type { Server } from 'node:http';
@@ -25,6 +27,7 @@ import {
 } from '../../src/core/database.ts';
 import {
   assertSchemaCeiling,
+  assertTrustedDatabaseParent,
   databaseWriteCompatibilityError,
   inspectDatabasePathBeforeCreate,
 } from '../../src/core/database-compatibility.ts';
@@ -696,6 +699,48 @@ describe('database schema ceiling', () => {
 
     expect(failure).toMatchObject({ reason: 'unsafe_database_identity' });
     expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it('rejects a private database parent beneath a non-sticky writable ancestor', () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-ancestor-mode-'));
+    cleanup.push(root);
+    const writableAncestor = join(root, 'shared');
+    const databaseParent = join(writableAncestor, 'private');
+    const dbPath = join(databaseParent, 'bot.db');
+    mkdirSync(databaseParent, { recursive: true, mode: 0o700 });
+    chmodSync(writableAncestor, 0o777);
+
+    expect(inspectExistingDatabaseForBootstrap(dbPath)).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+    expect(() => new Database(dbPath)).toThrow(
+      expect.objectContaining({ reason: 'unsafe_database_identity' }),
+    );
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it('rejects a parent whose resolved inode differs from its lstat identity', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-identity-'));
+    cleanup.push(dir);
+    const dbPath = join(dir, 'bot.db');
+    const assertWithDependencies = assertTrustedDatabaseParent as unknown as (
+      path: string,
+      dependencies: {
+        lstat(path: string): unknown;
+        realpath(path: string): string;
+        stat(path: string): unknown;
+      },
+    ) => void;
+
+    expect(() => assertWithDependencies(dbPath, {
+      lstat: (path) => lstatSync(path, { bigint: true }),
+      realpath: realpathSync,
+      stat: (path) => {
+        const info = statSync(path, { bigint: true });
+        return path === dir ? { ...info, ino: info.ino + 1n } : info;
+      },
+    })).toThrow(expect.objectContaining({ reason: 'database_identity_changed' }));
   });
 
   it('early bootstrap outcome: classifies a symlink database path as permanent', () => {

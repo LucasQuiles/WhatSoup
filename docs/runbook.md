@@ -384,15 +384,21 @@ other genuinely transient startup failures remain exit 1 and retryable by the
 service manager.
 
 File-backed startup also requires the immediate database parent to be one
-canonical directory owned by the runtime user with no group or other access
-(normally mode `0700`). Exclusive creation attests the new inode through its
+canonical directory owned by the runtime user whose mode bits grant no group or
+other access (normally mode `0700`). Every ancestor is identity-bound across
+`lstat`/`realpath`/`stat`, must be controlled by the runtime user or root, and
+must deny group/other entry replacement unless sticky-bit rules protect the
+runtime-owned child. Exclusive creation attests the new inode through its
 still-open descriptor, and later pathname/device/inode checks reject ordinary
-replacement races before schema writes. This boundary does not claim defense
-against a privileged or same-UID process performing precisely timed
-rename-and-restore attacks: Node 24 opens the main database and its
-rollback/WAL/SHM sidecars by pathname, so closing that threat requires a native
-SQLite VFS or broker. A parent ownership or mode rejection is stable and exits
-78; repair the directory boundary instead of restart-looping the service.
+replacement races before schema writes.
+
+This boundary enforces UID and POSIX mode/sticky-bit metadata. ACL-mediated
+external mutation must be prevented operationally and is outside the claim. It
+also does not claim defense against a privileged or same-UID process performing
+precisely timed rename-and-restore attacks: Node 24 opens the main database and
+its rollback/WAL/SHM sidecars by pathname, so closing those threats requires a
+native SQLite VFS or broker. A parent/ancestor trust rejection is stable and
+exits 78; repair the directory boundary instead of restart-looping the service.
 
 ### Quick Health Check
 
