@@ -1,6 +1,6 @@
 # Provider-Event Lifecycle Implementation Tasks
 
-**Status:** Active — refreshed at canonical main `9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d`, which understands migrations through 44; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification and later fleet verification; no provider-lifecycle implementation or deployment is authorized
+**Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`, which understands migrations through 44; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification and later fleet verification; no provider-lifecycle implementation or deployment is authorized
 
 **Schema allocation:** current canonical schema is migration 44; bounded terminal recovery/canonical `not_sent` is forward migration 45; the provider-event lifecycle ledger is migration 46.
 
@@ -26,7 +26,7 @@
    (`cf1fc6e3e2d3faa3cae80737466f52d40e34b9bf`, reviewed head
    `1dad6a9d7171060351142f7e4e0f88146a5b8508`), restoring immutable historical
    migrations 41/42 and adding forward repair migration 43. Canonical main
-   `9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d` additionally contains migration
+   `3f560389aa14112ff91350ecfb841e771d99e6d9` additionally contains migration
    44's token-accounting separation, introduced by
    `f14a53f85c490811daa3fd5d4cb1673abdd84296` and merged in PR #1790 as
    `e0cfc1e12c75caaa27bbc278528b5fd5ccbb0218`. The schema-ceiling guard is

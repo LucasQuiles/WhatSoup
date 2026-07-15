@@ -1,6 +1,6 @@
 # Provider-Event Lifecycle Design
 
-**Status:** Active — refreshed at canonical main `9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d`; provider-lifecycle implementation remains blocked on Task 1 verification/publication/fleet verification of the implemented schema-ceiling prerequisite and on the migration-45 terminal-recovery prerequisite
+**Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`; provider-lifecycle implementation remains blocked on Task 1 verification/publication/fleet verification of the implemented schema-ceiling prerequisite and on the migration-45 terminal-recovery prerequisite
 
 **Schema allocation:** current canonical schema is migration 44; bounded terminal recovery/canonical `not_sent` is forward migration 45; the provider-event lifecycle ledger is migration 46.
 
@@ -13,7 +13,7 @@ events are logged but have no durable receipt, while empty-output and fallback
 logic cannot distinguish true silence from discarded activity.
 
 This documentation snapshot is based on canonical main
-`9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d`. It includes the schema-history
+`3f560389aa14112ff91350ecfb841e771d99e6d9`. It includes the schema-history
 canonicalization from PR #1768
 (`cf1fc6e3e2d3faa3cae80737466f52d40e34b9bf`, reviewed head
 `1dad6a9d7171060351142f7e4e0f88146a5b8508`) plus migration 44's

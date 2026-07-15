@@ -1,6 +1,6 @@
 # Provider-Event Lifecycle Requirements
 
-**Status:** Active — refreshed at canonical main `9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d`; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification, and provider-lifecycle implementation and activation remain unauthorized
+**Status:** Active — refreshed at canonical main `3f560389aa14112ff91350ecfb841e771d99e6d9`; the schema-ceiling prerequisite is implemented on the current branch but remains unmerged/unpublished pending Task 1 verification, and provider-lifecycle implementation and activation remain unauthorized
 
 **Schema allocation:** current canonical schema is migration 44; bounded terminal recovery/canonical `not_sent` is forward migration 45; the provider-event lifecycle ledger is migration 46.
 
@@ -19,7 +19,7 @@ never coalesced. Every adapter event variant must be exhaustively
 classified as actionable or as a proved non-actionable kind with no state effect.
 
 The current canonical baseline is main
-`9353d3c3d5fd6b8348cc50eb3b9a4d4f6f44c61d`, which understands migrations
+`3f560389aa14112ff91350ecfb841e771d99e6d9`, which understands migrations
 through 44. PR #1768 merged canonical migration-41-through-43 history at
 `cf1fc6e3e2d3faa3cae80737466f52d40e34b9bf`; migration 44 is the
 token-accounting separation introduced by
