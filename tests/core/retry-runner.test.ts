@@ -215,4 +215,62 @@ describe('retryAsync', () => {
     expect(delayMs).toBeGreaterThanOrEqual(20);
     expect(delayMs).toBeLessThanOrEqual(30);
   });
+
+  it('honors a server Retry-After above maxMs up to maxRetryAfterMs (not clamped to maxMs)', async () => {
+    const onRetry = vi.fn();
+    const run = vi.fn()
+      .mockRejectedValueOnce(new Error('rate-limited'))
+      .mockResolvedValueOnce('ok');
+    const pending = retryAsync(run, {
+      retries: 3,
+      maxMs: 30_000,
+      // Server floor 120000 exceeds maxMs (30000) but is within the default
+      // maxRetryAfterMs ceiling (300000) — it must be honored in FULL, never
+      // clamped down to maxMs (which would re-send inside the server's window).
+      getRetryAfterMs: () => 120_000,
+      onRetry,
+    });
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(await pending).toBe('ok');
+    expect(run).toHaveBeenCalledTimes(2);
+    const delayMs = onRetry.mock.calls[0]![0].delayMs;
+    expect(delayMs).toBeGreaterThanOrEqual(120_000);
+    expect(delayMs).toBeLessThanOrEqual(120_000 * 1.25);
+  });
+
+  it('gives up (no sleep) when a server Retry-After exceeds maxRetryAfterMs', async () => {
+    const err = new Error('rate-limited-hard');
+    const onRetry = vi.fn();
+    const run = vi.fn().mockRejectedValue(err);
+    // Server asks for 1h — beyond the default 5min ceiling. The runner must
+    // stop retrying and surface the real error rather than truncate the wait.
+    await expect(
+      retryAsync(run, {
+        retries: 5,
+        getRetryAfterMs: () => 3_600_000,
+        onRetry,
+      }),
+    ).rejects.toBe(err);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    const info = onRetry.mock.calls[0]![0];
+    expect(info.delayMs).toBeNull();
+    expect(info.retryAfterMs).toBe(3_600_000);
+  });
+
+  it('rejects a negative retries count with RangeError (run never called)', async () => {
+    const run = vi.fn().mockResolvedValue('never');
+    await expect(
+      retryAsync(run, { retries: -1, baseMs: 1 }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('rejects a NaN retries count with RangeError (run never called)', async () => {
+    const run = vi.fn().mockResolvedValue('never');
+    await expect(
+      retryAsync(run, { retries: Number.NaN, baseMs: 1 }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(run).not.toHaveBeenCalled();
+  });
 });
