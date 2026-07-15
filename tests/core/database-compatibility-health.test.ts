@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
@@ -383,6 +384,65 @@ describe('database compatibility health drain', () => {
     }
   });
 
+  it('rejects a dangling database symlink through the production early gate', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-dangling-'));
+    const previousConfig = process.env.INSTANCE_CONFIG;
+    const targetPath = join(dir, 'target', 'created.db');
+    const dbPath = join(dir, 'bot.db');
+    const lockPath = join(dir, 'state', 'whatsoup.lock');
+    symlinkSync(targetPath, dbPath);
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate().catch((err: unknown) => err);
+
+      expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
+      expect(failure).toMatchObject({
+        cause: expect.objectContaining({ reason: 'unsafe_database_identity' }),
+      });
+      expect(existsSync(targetPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a missing database beneath a symlinked parent through the production early gate', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-parent-alias-'));
+    const previousConfig = process.env.INSTANCE_CONFIG;
+    const targetDir = join(dir, 'target');
+    const targetPath = join(targetDir, 'created.db');
+    const aliasDir = join(dir, 'alias');
+    const dbPath = join(aliasDir, 'created.db');
+    const lockPath = join(dir, 'state', 'whatsoup.lock');
+    mkdirSync(targetDir);
+    symlinkSync(targetDir, aliasDir);
+    process.env.INSTANCE_CONFIG = JSON.stringify({
+      name: 'test-agent',
+      healthPort: 19090,
+      paths: { dbPath, lockPath },
+    });
+    try {
+      const failure = await runEarlyDatabaseCompatibilityGate().catch((err: unknown) => err);
+
+      expect(failure).toBeInstanceOf(DatabaseCompatibilityPermanentStartupError);
+      expect(failure).toMatchObject({
+        cause: expect.objectContaining({ reason: 'unsafe_database_identity' }),
+      });
+      expect(existsSync(targetPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      if (previousConfig === undefined) delete process.env.INSTANCE_CONFIG;
+      else process.env.INSTANCE_CONFIG = previousConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('acquires the cooperative process lock before the authoritative inspection', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsoup-early-database-lock-order-'));
     const previousConfig = process.env.INSTANCE_CONFIG;
@@ -439,7 +499,7 @@ describe('database compatibility health drain', () => {
     const releaseLock = vi.fn(() => true);
     try {
       const failure = await runEarlyDatabaseCompatibilityGate({
-        databaseExists: () => true,
+        inspectPath: () => ({ canonicalPath: dbPath, device: 1n, inode: 1n, linkCount: 1n }),
         acquireLock: () => lock,
         inspect: () => ({ outcome: 'permanent', error: permanentError }),
         startServer,
@@ -479,7 +539,7 @@ describe('database compatibility health drain', () => {
     const releaseLock = vi.fn(() => true);
     try {
       const failure = await runEarlyDatabaseCompatibilityGate({
-        databaseExists: () => true,
+        inspectPath: () => ({ canonicalPath: dbPath, device: 1n, inode: 1n, linkCount: 1n }),
         acquireLock: () => lock,
         inspect: () => ({ outcome: 'transient', error: transientError }),
         startServer,

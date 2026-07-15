@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -315,7 +315,7 @@ type BootstrapInstanceConfig = {
 };
 
 export type EarlyDatabaseCompatibilityGateDependencies = {
-  databaseExists?: (path: string) => boolean;
+  inspectPath?: typeof inspectDatabasePathBeforeCreate;
   inspect?: typeof inspectExistingDatabaseForBootstrap;
   acquireLock?: (path: string) => ProcessLockHandle;
   releaseLock?: (lock: ProcessLockHandle) => boolean;
@@ -343,8 +343,23 @@ export async function runEarlyDatabaseCompatibilityGate(
     throw new Error('INSTANCE_CONFIG is missing canonical database gate fields');
   }
 
-  const databaseExists = dependencies.databaseExists ?? existsSync;
-  if (!databaseExists(dbPath)) return false;
+  let existingIdentity: ReturnType<typeof inspectDatabasePathBeforeCreate>;
+  try {
+    existingIdentity = (dependencies.inspectPath ?? inspectDatabasePathBeforeCreate)(dbPath);
+  } catch (err) {
+    if (
+      err instanceof DatabaseCompatibilityError
+      && (
+        err.reason === 'invalid_schema'
+        || err.reason === 'unsafe_database_identity'
+        || err.reason === 'database_not_writable'
+      )
+    ) {
+      throw new DatabaseCompatibilityPermanentStartupError(err.message, err);
+    }
+    throw transientBootstrapError(err);
+  }
+  if (!existingIdentity) return false;
 
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   const lock = (dependencies.acquireLock ?? acquireProcessLock)(lockPath);
