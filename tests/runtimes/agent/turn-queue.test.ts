@@ -342,6 +342,51 @@ describe('TurnQueue', () => {
       expect(rejected).toEqual(['overflow']);
     });
 
+    it('threads the distinct depth-cap reject reason to onReject (#1750)', () => {
+      const reasons: Array<{ text: string; reason: string }> = [];
+      const queue = new TurnQueue({
+        maxDepth: 0,
+        onReject: (turn, reason) => reasons.push({ text: turn.text, reason }),
+      });
+
+      expect(queue.enqueue(makeTurn({ text: 'shed' }))).toBe(false);
+      expect(reasons).toEqual([{ text: 'shed', reason: 'queue_full' }]);
+    });
+
+    it('threads the distinct closed-admissions reject reason to onReject (#1750)', () => {
+      const reasons: Array<{ text: string; reason: string }> = [];
+      const queue = new TurnQueue({
+        onReject: (turn, reason) => reasons.push({ text: turn.text, reason }),
+      });
+
+      // closeAndTakePendingTurns() stops accepting admissions.
+      queue.closeAndTakePendingTurns();
+
+      expect(queue.enqueue(makeTurn({ text: 'after-close' }))).toBe(false);
+      expect(reasons).toEqual([{ text: 'after-close', reason: 'queue_closed' }]);
+    });
+
+    it('threads the distinct halted reject reason to onReject (#1750)', async () => {
+      // A halt (deadlock) MUST be distinguishable from a benign closed/shed
+      // reject so alerting can page on it — a copy-paste to 'queue_closed' here
+      // would silently un-page the exact fault #1750 exists to surface.
+      const reasons: Array<{ text: string; reason: string }> = [];
+      const queue = new TurnQueue({
+        onReject: (turn, reason) => reasons.push({ text: turn.text, reason }),
+      });
+      queue.setProcessor(async (turn) => {
+        if (turn.text === 'bad') throw new Error('processor exploded');
+      });
+
+      // No onProcessorError finalizer → the processor throw halts the queue.
+      queue.enqueue(makeTurn({ text: 'bad' }));
+      await expect(queue.idle()).rejects.toThrow('processor exploded');
+      expect(queue.haltedError).toBeInstanceOf(Error);
+
+      expect(queue.enqueue(makeTurn({ text: 'after-halt' }))).toBe(false);
+      expect(reasons).toEqual([{ text: 'after-halt', reason: 'queue_halted' }]);
+    });
+
     it('pendingForChat counts only turns for the matching chat', async () => {
       const queue = new TurnQueue();
 
