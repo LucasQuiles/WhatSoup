@@ -1,15 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 import {
   DatabaseCompatibilityError,
   assertDatabaseIdentity,
   assertSchemaCeiling,
+  createEmptyDatabaseFile,
   databaseRecoveryCompatibilityError,
   databaseWriteCompatibilityError,
   inspectDatabaseIdentity,
+  inspectDatabasePathBeforeCreate,
   installReadOnlyRejectionFence,
   normalizeDatabaseCompatibilityError,
   sameDatabaseIdentity,
@@ -1288,22 +1290,36 @@ export class Database {
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
+    let existedBeforeConstruction = false;
     if (dbPath !== ':memory:') {
-      try {
-        mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
-      } catch (err) {
-        const rejection = databaseWriteCompatibilityError(this.dbPath, err);
-        if (rejection) throw rejection;
-        throw new WhatSoupError(
-          `Cannot create DB directory: ${dirname(dbPath)}`,
-          'DATABASE_ERROR',
-          err,
-        );
+      const absolutePath = resolve(dbPath);
+      this.expectedIdentity = inspectDatabasePathBeforeCreate(absolutePath);
+      existedBeforeConstruction = this.expectedIdentity !== null;
+      if (!this.expectedIdentity) {
+        try {
+          mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
+        } catch (err) {
+          const rejection = databaseWriteCompatibilityError(this.dbPath, err);
+          if (rejection) throw rejection;
+          throw new WhatSoupError(
+            `Cannot create DB directory: ${dirname(absolutePath)}`,
+            'DATABASE_ERROR',
+            err,
+          );
+        }
+        const appearedBeforeCreate = inspectDatabasePathBeforeCreate(absolutePath);
+        if (appearedBeforeCreate) {
+          throw new DatabaseCompatibilityError(
+            'database_identity_changed',
+            `Database appeared before exclusive create at ${absolutePath}`,
+          );
+        }
+        createEmptyDatabaseFile(absolutePath);
+        this.expectedIdentity = inspectDatabaseIdentity(absolutePath);
       }
     }
 
-    if (dbPath !== ':memory:' && existsSync(dbPath)) {
-      this.expectedIdentity = inspectDatabaseIdentity(dbPath);
+    if (existedBeforeConstruction && this.expectedIdentity) {
       let inspectionDb: DatabaseSync;
       try {
         inspectionDb = new DatabaseSync(
@@ -1379,9 +1395,6 @@ export class Database {
       throw new WhatSoupError(`Cannot open ${qualifier} at ${dbPath}`, 'DATABASE_ERROR', err);
     }
 
-    if (dbPath !== ':memory:' && !this.expectedIdentity) {
-      this.expectedIdentity = inspectDatabaseIdentity(dbPath);
-    }
     if (this.expectedIdentity) {
       try {
         this.assertDatabaseIdentity();

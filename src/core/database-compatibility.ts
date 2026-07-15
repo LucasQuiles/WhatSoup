@@ -1,10 +1,13 @@
 import {
+  closeSync,
+  constants,
   lstatSync,
+  openSync,
   realpathSync,
   statSync,
   type BigIntStats,
 } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { WhatSoupError } from '../errors.ts';
@@ -132,6 +135,38 @@ export function databaseWriteCompatibilityError(
   return null;
 }
 
+export function createEmptyDatabaseFile(dbPath: string): void {
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(
+      dbPath,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    closeSync(descriptor);
+    descriptor = null;
+  } catch (err) {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // The original creation/close failure remains authoritative.
+      }
+    }
+    const code = (err as { code?: unknown })?.code;
+    if (code === 'EEXIST' || code === 'ELOOP') {
+      throw new DatabaseCompatibilityError(
+        'database_identity_changed',
+        `Database creation target changed before exclusive create at ${dbPath}`,
+        err,
+      );
+    }
+    const rejection = databaseWriteCompatibilityError(dbPath, err);
+    if (rejection) throw rejection;
+    throw new WhatSoupError(`Cannot create database at ${dbPath}`, 'DATABASE_ERROR', err);
+  }
+}
+
 export function databaseRecoveryCompatibilityError(
   dbPath: string,
   err: unknown,
@@ -203,6 +238,85 @@ export function inspectDatabaseIdentity(dbPath: string): DatabaseIdentity {
     inode: targetInfo.ino,
     linkCount: targetInfo.nlink,
   };
+}
+
+function isMissingPathError(err: unknown): boolean {
+  return (err as { code?: unknown })?.code === 'ENOENT';
+}
+
+/**
+ * Return the identity of an existing database, or prove that a missing target
+ * can be created without following a pathname alias.
+ */
+export function inspectDatabasePathBeforeCreate(dbPath: string): DatabaseIdentity | null {
+  const absolutePath = resolve(dbPath);
+  try {
+    lstatSync(absolutePath);
+    return inspectDatabaseIdentity(absolutePath);
+  } catch (err) {
+    if (!isMissingPathError(err)) {
+      if (err instanceof DatabaseCompatibilityError) throw err;
+      if ((err as { code?: unknown })?.code === 'ENOTDIR') {
+        throw new DatabaseCompatibilityError(
+          'unsafe_database_identity',
+          `Cannot create DB directory safely because a parent is not a directory: ${absolutePath}`,
+          err,
+        );
+      }
+      throw new DatabaseCompatibilityError(
+        'database_identity_changed',
+        `Database creation target could not be inspected at ${absolutePath}`,
+        err,
+      );
+    }
+  }
+
+  let ancestor = dirname(absolutePath);
+  while (true) {
+    let info: ReturnType<typeof lstatSync>;
+    try {
+      info = lstatSync(ancestor);
+    } catch (err) {
+      if (isMissingPathError(err) && dirname(ancestor) !== ancestor) {
+        ancestor = dirname(ancestor);
+        continue;
+      }
+      throw new DatabaseCompatibilityError(
+        'database_identity_changed',
+        `Database parent path could not be inspected at ${ancestor}`,
+        err,
+      );
+    }
+    if (info.isSymbolicLink()) {
+      throw new DatabaseCompatibilityError(
+        'unsafe_database_identity',
+        `Refusing symbolic link in canonical database parent path: ${ancestor}`,
+      );
+    }
+    if (!info.isDirectory()) {
+      throw new DatabaseCompatibilityError(
+        'unsafe_database_identity',
+        `Cannot create DB directory safely because a parent is not a directory: ${ancestor}`,
+      );
+    }
+    let canonicalAncestor: string;
+    try {
+      canonicalAncestor = realpathSync(ancestor);
+    } catch (err) {
+      throw new DatabaseCompatibilityError(
+        'database_identity_changed',
+        `Database parent identity changed while resolving ${ancestor}`,
+        err,
+      );
+    }
+    if (canonicalAncestor !== ancestor) {
+      throw new DatabaseCompatibilityError(
+        'unsafe_database_identity',
+        `Refusing non-canonical database parent path alias: ${ancestor}`,
+      );
+    }
+    return null;
+  }
 }
 
 function invalidSchemaError(

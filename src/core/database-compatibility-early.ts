@@ -13,6 +13,7 @@ import {
   databaseRecoveryCompatibilityError,
   DatabaseCompatibilityError,
   inspectDatabaseIdentity,
+  inspectDatabasePathBeforeCreate,
   sqliteFileUri,
   type DatabaseCompatibilityReason,
 } from './database-compatibility.ts';
@@ -104,12 +105,11 @@ function classifyBootstrapInspectionError(
 export function inspectExistingDatabaseForBootstrap(
   dbPath: string,
 ): DatabaseCompatibilityBootstrapInspection {
-  if (!existsSync(dbPath)) return { outcome: 'ready' };
-
   let db: DatabaseSync | null = null;
   let inspection: DatabaseCompatibilityBootstrapInspection;
   try {
-    const expectedIdentity = inspectDatabaseIdentity(dbPath);
+    const expectedIdentity = inspectDatabasePathBeforeCreate(dbPath);
+    if (!expectedIdentity) return { outcome: 'ready' };
     db = new DatabaseSync(sqliteFileUri(expectedIdentity.canonicalPath, 'ro'), {
       readOnly: true,
       timeout: 5000,

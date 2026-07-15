@@ -5,6 +5,7 @@ import {
   existsSync,
   linkSync,
   readFileSync,
+  mkdirSync,
   mkdtempSync,
   realpathSync,
   renameSync,
@@ -628,6 +629,41 @@ describe('database schema ceiling', () => {
 
     linkSync(dbPath, hardlinkPath);
     expect(() => new Database(hardlinkPath)).toThrow(/hard link|link count|database identity/i);
+  });
+
+  it('rejects a dangling database symlink without creating its target', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-dangling-'));
+    cleanup.push(dir);
+    const targetDir = join(dir, 'target');
+    const targetPath = join(targetDir, 'created.db');
+    const symlinkPath = join(dir, 'bot.db');
+    mkdirSync(targetDir);
+    symlinkSync(targetPath, symlinkPath);
+
+    expect(inspectExistingDatabaseForBootstrap(symlinkPath)).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+    expect(() => new Database(symlinkPath)).toThrow(/symbolic link|canonical database path/i);
+    expect(existsSync(targetPath)).toBe(false);
+  });
+
+  it('rejects a missing database beneath a symlinked parent without creating it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsoup-schema-ceiling-parent-alias-'));
+    cleanup.push(dir);
+    const targetDir = join(dir, 'target');
+    const aliasDir = join(dir, 'alias');
+    const targetPath = join(targetDir, 'created.db');
+    const aliasPath = join(aliasDir, 'created.db');
+    mkdirSync(targetDir);
+    symlinkSync(targetDir, aliasDir);
+
+    expect(inspectExistingDatabaseForBootstrap(aliasPath)).toMatchObject({
+      outcome: 'permanent',
+      error: { reason: 'unsafe_database_identity' },
+    });
+    expect(() => new Database(aliasPath)).toThrow(/symbolic link|canonical database path/i);
+    expect(existsSync(targetPath)).toBe(false);
   });
 
   it('early bootstrap outcome: classifies a symlink database path as permanent', () => {
