@@ -1,8 +1,9 @@
 # Boundary Contract and Feedback Hardening Implementation Notes
 
-**Status:** Active
-**Verification:** Inconclusive — history and contract-audit amendments require a fresh exact-hash closeout; production changes and implementation verification have not started
-**Planning head:** `1a7336984ea5bada47f0820e10c9decd53ad57f3`
+**Status:** Active — BCF-00A recovery amendment; planning closeout and commit identity are external hash-bound state
+**Verification:** Inconclusive — the recovered validator scaffold is uncommitted and no committed-helper verification has run
+**Historical specification baseline:** `1a7336984ea5bada47f0820e10c9decd53ad57f3`
+**Execution planning anchor:** the operator-observed amendment commit frozen as `BCF_VALIDATOR_BASE`; its self-referential Git hash is deliberately not embedded in its own tree
 **Branch:** `experiment/jul16-boundary-core-history`
 **Specification:** `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md`
 **Implementation plan:** `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md`
@@ -13,9 +14,37 @@ This packet defines the evidence and execution ledger for the first approved 202
 tranche. The tranche closes runtime-contract and feedback fail-open behavior before extending
 history, provenance, reachability, supply-chain, hooks, workflows, or external producers.
 
-No production code has changed under this packet. No local hook, GitHub workflow, required check,
+No tracked production code has changed under this packet. A recovered untracked Task 0 validator
+scaffold exists but is not accepted implementation evidence. No local hook, GitHub workflow, required check,
 ruleset, issue, pull request, comment, review, label, merge, workflow run, or external service has
 been created or mutated.
+
+## BCF-00A Recovery Amendment
+
+The previous Codex terminal lane stopped during Task 0 validator construction without a commit.
+Recovery re-proved branch `experiment/jul16-boundary-core-history`, head
+`0f6cc67609024dd2deb343d2d9a4e5f17de5ac48`, a clean tracked diff, and the preserved owner file
+`experiment-results.tsv` with SHA-256
+`f93e0c1b42bc10fc8f8a2488d0efe7a12f671088e00f31bf772161d8bd15e9a3`. The only additional paths are
+the untracked provisional scaffold:
+
+- `scripts/lib/verification/boundary-run-manifest.ts`
+- `scripts/verify-boundary-run.ts`
+- `tests/scripts/verify-boundary-run.test.ts`
+
+The stopped lane reported an advisory scaffold RED and a zero-exit scaffold typecheck. It also
+observed an intermediate one-test GREEN. None can satisfy BCF-00: the helper was uncommitted, the
+complete registered validator suite did not run, and no committed-helper manifest exists.
+
+Recovery identified seven completion-critical ambiguities and closed them in the authoritative
+plan before resuming implementation: declared-output admission ordering; active versus finalized
+`verify`; the exact 33-marker BCF-00 roster; exhaustive fixed-key/canonical wire formats; attempt
+entry/terminal/transition head anchors; nonexistent derived-root symlink/TOCTOU handling; and the
+sole exact bare bootstrap commit. At recovery entry, no fetch, merge, semantic BCF change, staging,
+or bootstrap commit is permitted. Once the amendment has both a fresh fail-closed external
+plan-review receipt and a local commit frozen as operator-observed `BCF_VALIDATOR_BASE`, the next
+permitted action is a fresh advisory BCF-00A RED against the amended contract, followed by its
+three-file implementation.
 
 ## Planning Review Evidence
 

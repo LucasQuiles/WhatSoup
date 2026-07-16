@@ -32,8 +32,11 @@ existing Git helpers, existing atomic private-file writer, and no new runtime de
 
 - Work from the exact repository root recorded by `git rev-parse --show-toplevel`; a command run from
   another directory is not evidence for this plan.
-- The reviewed planning baseline is `1a7336984ea5bada47f0820e10c9decd53ad57f3`. Each implementation
-  task records its own exact pre-test and post-test head. Uncommitted state uses one canonical
+- The historical specification baseline is `1a7336984ea5bada47f0820e10c9decd53ad57f3`.
+  `BCF_VALIDATOR_BASE` is instead the later, operator-observed planning-amendment commit whose tree
+  contains the exact plan/specification/notes bytes used by Task 0; it is frozen from `git rev-parse
+  HEAD` after this packet is committed and is never inferred from the historical hash. Each
+  implementation task records its own exact pre-test and post-test head. Uncommitted state uses one canonical
   `BoundaryWorktreeSnapshot`: HEAD, index tree OID, HEAD-relative tracked binary-patch SHA-256,
   unstaged binary-patch SHA-256, sorted allowed-untracked regular-file path/mode/size/SHA-256 records,
   and sorted preserved owner-path records. Its fixed-key JSON SHA-256 is the diff identity. Bare
@@ -52,7 +55,8 @@ existing Git helpers, existing atomic private-file writer, and no new runtime de
   referenced artifact. Finalization is append-only: changing or replacing a referenced artifact
   invalidates the manifest rather than silently retaining a green verdict.
 - Verdicts are only `Pass`, `Fail`, `Inconclusive`, or `Blocked`. `Pass` requires every named
-  artifact at the same exact head. A reproduced direct falsifier is `Fail`; missing authority is
+  artifact at the exact `entry|terminal|transition` head anchor owned by its closed attempt
+  contract; no caller selects an anchor. A reproduced direct falsifier is `Fail`; missing authority is
   `Blocked`; missing tools, repo context, output, identity, timeout ownership, or complete evidence
   is `Inconclusive`.
 - Preserve failed and superseded receipts under distinct paths. Never overwrite an earlier failure
@@ -1014,13 +1018,196 @@ single-assign it to the proven merge commit; failure/abort leaves `not-observed`
 derives the exact value from its verified predecessor completion receipt/ledger and rejects an
 inconsistent local Git state. No `--reconciled-base` option exists.
 
-`init` uses exclusive directory creation and fails if the path exists. The helper computes the
-canonical worktree snapshot, rejects unexplained untracked paths, and records every preserved owner
-path's type/mode/size/hash without admitting it as a task output. The snapshot excludes only the
-canonical realpaths of the active helper-owned run plus its derived closeout/failure-receipt roots;
-the profile-owned sibling completion-receipt root is excluded under the same rules;
-those paths must already be Git-ignored, remain outside every tracked/allowed-untracked/owner path,
-and have no symlink or ancestor/descendant overlap. Their closed manifest-declared closure is hashed
+#### Closed validator wire/state contract
+
+`RUN_WIRE_SCHEMAS` is a closed helper constant and part of the generated contract snapshot digest.
+It owns every JSON object key, value type, enum, nullability rule, byte bound, canonicalization rule,
+and lock-file grammar below. There are no extension maps or caller-defined metadata keys. Every
+listed key is always present; an inactive conditional field is exactly `null` or `[]` as declared,
+never absent or an empty-string substitute. A schema/version mismatch, unknown or missing key,
+wrong type, duplicate key at any nesting depth, or out-of-bound value exits nonzero before any
+state-bearing write.
+
+The JSON reader first scans the UTF-8 bytes and rejects a BOM, invalid UTF-8, CR, duplicate object
+key, non-JSON number, fractional integer field, `-0`, or trailing bytes before ordinary parsing can
+erase that evidence. All schema keys and enums are ASCII. Canonical JSON recursively orders object
+keys by ascending UTF-8 bytes, emits no insignificant whitespace, preserves declared semantic-array
+order, sorts set-valued arrays by their schema identity tuple, and ends in exactly one LF. Strings
+reject NUL/control bytes except escaped LF in bounded diagnostic text. Timestamps are exactly 24
+ASCII bytes matching a real UTC instant rendered `YYYY-MM-DDTHH:mm:ss.sssZ`. Hashes are lowercase
+64-hex; Git OIDs are lowercase 40-hex; byte/count/deadline fields are nonnegative safe integers.
+Normalized paths are at most 1,024 UTF-8 bytes, argv/environment/diagnostic strings at most 4,096,
+reason/counterevidence text at most 4,096, and tool names/versions at most 256. Existing tighter
+profile limits still win. A SHA lock is exactly `<64-lowerhex>  <locked-basename>\n`; it may name
+only its sibling JSON file and contains no path separator.
+
+The exact schema-1 object key sets are:
+
+| Object | Exact keys |
+|---|---|
+| `RunManifest` | `schemaVersion`, `manifestState`, `run`, `entrySnapshot`, `currentSnapshot`, `attempts`, `artifacts`, `children`, `predecessor`, `entryTestRoster`, `reviews`, `lifecycle`, `documentHashes`, `upstream`, `overallVerdict` |
+| `run` | `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `finalizedAtUtc`, `entryHead`, `terminalHead`, `reconciledBase`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `transitionCount`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots` |
+| `snapshot` | `head`, `indexTreeOid`, `trackedPatchSha256`, `unstagedPatchSha256`, `allowedUntracked`, `preservedOwner`, `digestSha256` |
+| `snapshotPath` | `path`, `type`, `mode`, `bytes`, `sha256` |
+| `attempt` | `id`, `operation`, `headAnchor`, `argv`, `cwd`, `startedAtUtc`, `endedAtUtc`, `expectedExit`, `rawExit`, `rawSignal`, `expectationMet`, `watchdogOwner`, `innerTimeoutOwner`, `deadlineMs`, `killGraceMs`, `preSnapshot`, `postSnapshot`, `stdout`, `stderr`, `declaredOutputs`, `outputAdmissions`, `structuredResult`, `verdict` |
+| `stream` | `path`, `sha256`, `bytes` |
+| `outputAdmission` | `path`, `state`, `role`, `sha256`, `bytes` |
+| `artifact` | `path`, `role`, `producerAttemptId`, `sha256`, `bytes` |
+| `child` | `alias`, `kind`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `snapshotDigestSha256`, `sourceManifestSha256`, `importedFiles`, `treeDigestSha256`, `overallVerdict`, `dedupeKey` |
+| `importedFile` | `path`, `sha256`, `bytes` |
+| `predecessor` | `pin`, `sourceManifestSha256`, `importedFiles`, `treeDigestSha256`, `overallVerdict` |
+| `predecessorPin` | `taskId`, `profileId`, `runId`, `terminalHead`, `manifestSha256`, `completionReceiptSha256`, `ledgerSha256` |
+| `entryTestRoster` | `files`, `digestSha256` |
+| `testRosterFile` | `path`, `state`, `testNames` |
+| `review` | `reviewId`, `alias`, `dedupeKey`, `head`, `snapshotDigestSha256`, `reportPath`, `reportSha256`, `metaPath`, `metaSha256`, `stderrPath`, `stderrSha256`, `findings` |
+| `finding` | `findingId`, `severity`, `requiresFix`, `requiresReproduction`, `evidencePath`, `evidenceSha256`, `disposition`, `resolution`, `reason`, `counterevidenceRefs`, `reproductionAttemptIds`, `counterReproductionAttemptIds`, `fixedAtHead`, `fixReproductionAttemptIds`, `fixReviewId` |
+| `lifecycle` | `status`, `completionCommit`, `finalGate`, `artifactSha256`, `successor`, `supersededBy`, `oracle`, `branchDeletionAuthorized` |
+| `documentHashes` | `spec`, `plan`, `notes`, `helper` |
+| `documentHash` | `path`, `sha256`, `bytes` |
+| `upstream` | `remoteUrl`, `observedOid`, `mergeBase`, `ahead`, `behind`, `remotePaths`, `localPaths`, `observationManifestSha256`, `mergeCommit`, `mergeParents` |
+| `tool` | `name`, `realPath`, `version`, `sha256` |
+| `reservedDerivedRoot` | `kind`, `path`, `parentDevice`, `parentInode`, `state` |
+
+The exact value grammar uses these aliases: `Id` is the operational-ID grammar already declared;
+`Path` is a normalized bounded relative path; `Sha256` and `Oid` are the lowercase hashes above;
+`Time` is the exact UTC timestamp; `Verdict` is `Pass|Fail|Inconclusive|Blocked`; `StatusOrSignal`
+means exactly one of integer `rawExit` and POSIX-name `rawSignal` is non-null. Object/array/scalar
+types are not interchangeable.
+
+- `RunManifest` has integer `schemaVersion: 1`; `manifestState:
+  active|finalized|verified-pass-closeout-rejected`; the named object fields; arrays of their named
+  row type; nullable `predecessor`; and root `overallVerdict: Verdict`.
+- `run` uses `Id` for run/profile, a literal task ID from the profile table, and profile-derived
+  `phase: observation|reconciliation|task01|task02|task03|task04|task05|task06|task07|review|reproduction|docs-a|docs-b|final`.
+  Creation/finalization are `Time`/`null|Time`; entry/helper commits are `Oid`; terminal head is
+  `null|Oid`; reconciled base is `not-observed|Oid`; helper digest is `Sha256`. Path and required-ID
+  fields are sorted unique string arrays; transition count is integer `0|1`; `mayComplete` and
+  `chainAppend` are booleans. Requested tools are sorted unique names; observed tools are sorted
+  `tool[]`; reserved roots are sorted `reservedDerivedRoot[]`.
+- `snapshot` uses `Oid` for head/index tree and `Sha256` for both patch/digest fields. Its two row
+  arrays are sorted by path. `snapshotPath` is `Path`, literal `type: regular`, six-digit ASCII-octal
+  Git mode, nonnegative byte count, and content `Sha256`; non-regular allowed-untracked or preserved
+  owner paths are rejected rather than coerced.
+- `attempt` uses `Id`, closed operation and head-anchor enums, exact string `argv[]`, absolute
+  canonical `cwd`, two `Time` values, normalized expected-exit string, `StatusOrSignal`, boolean
+  `expectationMet`, literal `watchdogOwner: helper-watchdog|null`,
+  `innerTimeoutOwner: gnu-timeout|null`, positive integer deadline/grace, two `snapshot` objects, two
+  `stream` objects, sorted unique `Path[]` declarations, same-order `outputAdmission[]`,
+  `null|stream` structured result, and `Verdict`. Internal checks alone use null watchdog owner;
+  external children require `helper-watchdog`.
+- `stream` and `importedFile` are `Path`, `Sha256`, and nonnegative bytes. `outputAdmission` is
+  `Path`, `state: missing|pending|admitted`, and `null` role/hash/bytes until admitted; admitted rows
+  use the artifact role enum, `Sha256`, and nonnegative bytes. `artifact` uses the same role enum,
+  producer `Id`, `Path`, `Sha256`, and bytes.
+- `child` uses IDs for alias/profile/run, a closed kind/task, two `Oid` heads, snapshot/source/tree
+  `Sha256`, sorted `importedFile[]`, `Verdict`, and bounded unique dedupe key. `predecessor` uses one
+  `predecessorPin`, source/tree hashes, sorted imported files, and `Verdict`; its pin uses closed
+  task/profile/run IDs, terminal `Oid`, and three `Sha256` values. `predecessor` is null exactly when
+  its profile forbids one.
+- `entryTestRoster.files` is path-sorted `testRosterFile[]` plus `Sha256`; each file has `Path`,
+  `state: present|absent`, and a sorted unique bounded full-test-name string array, which is empty
+  exactly when absent.
+- `review` uses IDs/dedupe key, `Oid`, snapshot/report/meta/stderr `Path`/`Sha256` pairs, and
+  finding-ID-sorted `finding[]`. A finding uses bounded finding ID, the closed severity/disposition/
+  resolution enums, two booleans, evidence `Path`/`Sha256`, `null|bounded string` reason, sorted
+  bounded counterevidence strings and attempt IDs, `null|Oid` fixed head, and `null|Id` fix review.
+  Rejected requires nonempty counterevidence and counter-reproduction arrays; fixed requires head,
+  fix-attempt IDs, and fix-review ID; incompatible fields are exactly null/empty arrays.
+- `lifecycle` uses the declared lifecycle/final-gate/oracle enums, `null|Oid` completion,
+  `null|Sha256` artifact, `null|Path` successor/supersession, and literal
+  `branchDeletionAuthorized: false`. Each `documentHashes` field is a `documentHash`; those and
+  `tool` use their listed bounded strings/paths, nonnegative bytes, and hashes.
+- `upstream` uses `not-observed|bounded SSH URL`, `not-observed|Oid` for OID/base/merge commit,
+  `not-observed|nonnegative integer` for counts, sorted unique path arrays, `not-observed|Sha256`
+  observation hash, and semantic-order `Oid[]` merge parents of length zero or two. An observation
+  uses the explicit not-observed scalars/empty parents until set; no null represents unknown.
+- `reservedDerivedRoot` uses `kind: run|completion|closeout|closeout-failure`, absolute canonical
+  path, positive integer parent device/inode, and `state: reserved|created`. Set arrays everywhere
+  sort by path, ID, alias, or tool name; semantic arrays retain the specifically declared order.
+
+The sibling completion and final-closeout objects are equally closed:
+
+| Object | Exact keys |
+|---|---|
+| `CompletionReceipt` | `schemaVersion`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `manifestSha256`, `manifestLockSha256`, `ledgerSha256`, `predecessorReceiptSha256`, `predecessorLedgerSha256`, `reconciledBase`, `upstreamObservedOid`, `corpusDigests`, `oracleDigest`, `lifecycleStatus`, `finalGate`, `overallVerdict` |
+| `ChainLedger` | `schemaVersion`, `rows`, `reconciledBase`, `upstreamObservedOid`, `corpusDigests`, `oracleDigest` |
+| `ChainRow` | `ordinal`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `manifestSha256`, `completionReceiptSha256`, `overallVerdict` |
+| `corpusDigests` | `cases`, `holdout` |
+| `CloseoutCore` | `schemaVersion`, `runId`, `taskId`, `profileId`, `terminalHead`, `snapshotDigestSha256`, `helperCommit`, `helperSha256`, `runManifestSha256`, `runManifestLockSha256`, `finalizeRawExit`, `finalizeRawSignal`, `verifyRawExit`, `verifyRawSignal`, `completionReceiptSha256`, `completionReceiptLockSha256`, `ledgerSha256`, `ledgerLockSha256`, `startedAtUtc`, `endedAtUtc`, `lifecycleStatus`, `requiredAttemptIds`, `requiredChildAliases`, `internalStatus`, `overallVerdict` |
+| `CloseoutInternalStatus` | `stage`, `rawExit`, `rawSignal`, `expectationMet`, `verdict` |
+| `CloseoutNegativeReport` | `schemaVersion`, `runId`, `closeoutCoreSha256`, `cases`, `startedAtUtc`, `endedAtUtc`, `overallVerdict` |
+| `CloseoutNegativeCase` | `ordinal`, `mutationId`, `fixturePath`, `expectedReasonCode`, `rawExit`, `rawSignal`, `expectationMet`, `stdoutSha256`, `stderrSha256`, `treeDigestSha256`, `verdict` |
+| `CloseoutReceipt` | `schemaVersion`, `kind`, `runId`, `taskId`, `profileId`, `terminalHead`, `snapshotDigestSha256`, `helperCommit`, `helperSha256`, `runManifestSha256`, `runManifestLockSha256`, `finalizeRawExit`, `finalizeRawSignal`, `verifyRawExit`, `verifyRawSignal`, `completionReceiptSha256`, `completionReceiptLockSha256`, `ledgerSha256`, `ledgerLockSha256`, `startedAtUtc`, `endedAtUtc`, `lifecycleStatus`, `requiredAttemptIds`, `requiredChildAliases`, `closeoutCoreSha256`, `negativeControlReportSha256`, `failedStage`, `runVerdict`, `rawExit`, `rawSignal`, `reasonCode`, `manifestState`, `overallVerdict` |
+
+Completion/ledger `schemaVersion` is integer `1`. Receipt IDs/tasks/profiles and lifecycle/gate/
+verdict fields use their closed types; heads are `Oid`; manifest/lock/ledger/corpus/oracle values are
+`Sha256`; predecessor receipt/ledger values are null only for the BCF-00 genesis; reconciled/upstream
+values are `Oid`; and `corpusDigests` is exactly two `Sha256` fields. Ledger rows use contiguous
+positive integer ordinals, closed IDs, two heads, three hashes, and `Verdict`; row order is the
+implementation-chain order and is never sorted after append.
+
+Closeout/core/report `schemaVersion` is integer `1`; IDs/tasks/profiles, lifecycle, required arrays,
+and verdicts use their closed types; heads/helper commits are `Oid`; every named digest is `Sha256`;
+times are `Time`; and each raw-exit/raw-signal pair follows `StatusOrSignal` when its stage ran or is
+the exact null/null pair when it did not. `internalStatus` is a fixed ordered array of stage name,
+raw-exit/raw-signal, expectation boolean, and verdict rows owned by the closeout implementation; it
+is not caller metadata. Negative cases have contiguous fixed positive ordinals, closed mutation and
+reason IDs, confined fixture `Path`, `StatusOrSignal`, boolean expectation, three `Sha256` values,
+and `Verdict`.
+
+`kind` is `accepted|rejected`; both variants use that same key set and profile-derived disjoint
+paths. Accepted requires every identity/digest/status field, `failedStage: null`, `reasonCode: null`,
+`manifestState: finalized`, `runVerdict: Pass`, `rawExit: 0`, `rawSignal: null`, and
+`overallVerdict: Pass`. Rejected requires `failedStage:
+finalize|verify|verdict|negative-control|completion`, a bounded closed `reasonCode`, explicit
+`manifestState: not-produced|produced-unverified|verified-nonpass|verified-pass-closeout-rejected`,
+and non-pass `overallVerdict`; a digest/status for a stage never reached is null, while every value
+for a reached/produced stage is non-null. `CloseoutNegativeCase` rows use the fixed matrix ordinal,
+not caller order. Receipt, ledger, manifest, core, and negative-report locks use the exact lock
+grammar above. Tests snapshot every exact key set and canonical byte string, then exercise one nearest
+invalid and one valid neighbor for duplicate keys, unknown/missing keys, nullability, ordering,
+timestamp grammar, numeric grammar, string/path bounds, lock basenames, and one-byte mutation.
+
+The manifest state machine is also closed. `init` exclusively creates an `active` manifest with no
+manifest lock or completion bundle. Read-only `verify` detects state from canonical manifest bytes;
+it has no caller-selectable active/finalized mode. For `active`, it checks the active schema,
+document/helper/current-snapshot hashes, admitted closure, and the required absence of every final
+lock/bundle; success reports `verificationScope: active` and remains non-promotable Inconclusive.
+For `finalized` or `verified-pass-closeout-rejected`, it requires and recomputes the manifest lock,
+completion receipt/lock, ledger/lock, recursive imports, and exact terminal snapshot. An active
+manifest with a final file, a finalized manifest missing one, or a caller-supplied state selector is
+non-pass. `--expect-current-snapshot` adds only the live snapshot equality assertion.
+
+Head ownership is profile- and attempt-owned. `entrySnapshot` never changes;
+`currentSnapshot == entrySnapshot` at init. Every `RUN_ATTEMPT_CONTRACTS` entry has exact
+`headAnchor: entry|terminal|transition`. Observation and no-transition profiles use `entry` and must
+finish with equal entry/terminal heads. Code/docs profiles run all non-transition attempts at
+`entry`; their commit attempt uses `transition` and atomically establishes `terminal`/current state.
+Reconciliation uses `transition` for the merge and `terminal` for every post-merge, predecessor, and
+readiness attempt. Lifecycle completion, finalization, verification, and every artifact admission
+bind the owning attempt's anchor; the transition record owns both pre-entry and post-terminal
+snapshots. A globally same-head shortcut, caller-selected anchor, or artifact at the wrong anchor is
+non-pass.
+
+`init` uses exclusive directory creation and fails if the path exists. Before any leaf exists, the
+helper resolves the evidence root strictly, requires it to be an existing real directory outside
+the tracked/allowed-untracked/preserved-owner closures, and walks each fixed phase parent one segment
+at a time with `lstat`; no ancestor may be a symlink. It records each parent device/inode. A derived
+run/completion/closeout/failure leaf is computed lexically below that canonical parent, must be
+`ENOENT`, and is reserved in the manifest. Immediately before creation the helper repeats every
+ancestor check and parent device/inode comparison, then calls one-segment, non-recursive exclusive
+`mkdir`, resolves the new leaf strictly, and proves its realpath is the expected descendant and its
+parent identity is unchanged. On mismatch it removes only a still-empty leaf whose device/inode it
+created and recorded; it never removes or adopts a foreign path. Completion/closeout/failure leaves
+remain reserved-and-absent until their owning operation repeats the same algorithm. Tests replace an
+ancestor, race the parent, precreate the leaf, substitute a symlink, and use a valid fresh sibling.
+
+The helper then computes the canonical worktree snapshot, rejects unexplained untracked paths, and
+records every preserved owner path's type/mode/size/hash without admitting it as a task output. The
+snapshot excludes only the strictly resolved active helper-owned run and its reserved derived roots;
+the profile-owned sibling completion-receipt root is excluded under the same rules. Those paths must
+already be Git-ignored and have no symlink or ancestor/descendant overlap with any tracked,
+allowed-untracked, or preserved-owner path. Their closed manifest-declared closure is hashed
 separately. Every other ignored or untracked path remains in the worktree snapshot, so recorder
 writes cannot create self-reference and the exclusion cannot hide task output. `record-command` owns direct
 stdout/stderr files, exit/signal/start/end/argv/cwd, and the pre/post snapshot; it never uses a
@@ -1029,9 +1216,17 @@ closed repository-relative declarations: an allowed path may change, an allowed-
 file may be created, and a preserved owner path must not change. Repeatable `record-command
 --output-path` declarations instead name normalized run-relative non-symlink regular files below the
 run and are frozen before the child process starts. Empty, absolute, escaping, reserved, or duplicate
-declarations exit 2. An expectation-met attempt must create and register every declared output; an
-unsuccessful attempt may omit one, but every output it did create must still be registered and
-hashed. Every operational profile, run, attempt, and child-alias ID uses canonical grammar
+declarations exit 2. After execution, each declared output is recorded as `missing` or `pending`;
+stdout/stderr and a structured-result file are helper-owned logs, not implicit artifact admissions.
+An expectation-met child with any `missing|pending` declared output retains direct status and
+`expectationMet: true` but its attempt verdict remains Inconclusive. An unsuccessful child may leave
+an output `missing`, but every output it did create is `pending` and must still be admitted.
+`record-artifact` is the only operation that promotes one matching pending output to `admitted`; the
+last required admission atomically promotes the attempt to Pass only when its exit/result predicates
+already pass. Finalize rejects every `pending` output and every existing unregistered file. It may
+preserve `missing` only on an expectation-unmet non-pass attempt; `missing` on an expectation-met
+attempt or in any overall Pass is non-pass.
+Every operational profile, run, attempt, and child-alias ID uses canonical grammar
 `[a-z][a-z0-9-]{0,63}`; empty, control-bearing, path-like, overlength, duplicate, or case-variant IDs
 exit 2 before mutation. Task IDs come only from the closed profile table, artifact identity is its
 normalized relative path, and review finding IDs retain their separately validated contract grammar.
@@ -1039,7 +1234,20 @@ normalized relative path, and review finding IDs retain their separately validat
 comma-separated set of decimal statuses in `0..255`; omission means `0`, and the observed direct
 status must satisfy the declaration without changing the recorded raw status.
 
-`record-git-transition` is the only operation allowed to move the run's Git head. The selected
+After the validator exists, `record-git-transition` is the only operation allowed to move a run's
+Git head. The sole pre-run exception is the BCF-00A bootstrap commit in Task 0 Step 2. Its parent must
+be exact `BCF_VALIDATOR_BASE`; its staged set is exactly
+`scripts/lib/verification/boundary-run-manifest.ts`, `scripts/verify-boundary-run.ts`, and
+`tests/scripts/verify-boundary-run.test.ts`; and its literal subject is
+`feat(quality): add boundary run validator`. Hooks remain enabled; amend, rewrite, bypass flags,
+extra parents, or any other Git mutation are forbidden. Immediately before the bare commit, the
+lead freezes the index tree, full status, and preserved-owner snapshot; afterward it requires one
+parent equal the base, commit tree equal the frozen index tree, no remaining delta on the three
+paths, and byte-identical owner state. The direct receipt is advisory bootstrap evidence only. A
+failed commit or failed postcondition stops without retrying or altering that index; Step 3 must
+re-prove the immutable commit/helper identity before any accepted run or fetch.
+
+For every subsequent mutation, the selected
 profile authorizes exactly one closed transition kind `merge` or `commit`; all other profiles reject
 it. It verifies the current head and full snapshot before mutation, owns the direct Git child, and
 captures stdout/stderr/status/signal plus pre/post index, tree, parent, and worktree identities. For
@@ -1055,15 +1263,15 @@ foreign parents, amend/rewrite, hook bypass, index drift, extra paths, incomplet
 transition exit nonzero. This operation replaces bare Git mutation for the Task 0 merge, every
 BCF-01–07 code commit, and the Task 8 documentation commit.
 
-`finalize` requires every admitted artifact, recursively
+`finalize` requires every declared output admitted and every admitted artifact hash-current, recursively
 validates imported child runs, review joins, and lifecycle records, writes all hashes, marks the run
-immutable, and fails if the snapshot changed outside the task allowlist. `verify` recomputes
-document/helper/artifact/child/predecessor/snapshot hashes and the derived sibling completion bundle.
+immutable, and fails if the snapshot changed outside the task allowlist. `verify` follows the
+active/finalized auto-detection contract above and recomputes the closure appropriate to that state.
 After the manifest/lock are durable, `finalize` exclusively writes the closed completion receipt and
 ledger bundle described above; bundle creation failure leaves the manifest preserved but the run
 Inconclusive and unusable as a predecessor. A retry uses a new run rather than overwriting either
 root. At finalization it also computes immutable
-`run.overallVerdict` from the closed lifecycle state and the exact required attempt and child sets
+root `overallVerdict` from the closed lifecycle state and the exact required attempt and child sets
 owned by the selected `RUN_CONTRACT_PROFILES` entry; callers cannot add, remove, or replace those
 sets. A required attempt must exist with `expectationMet: true` and
 verdict `Pass` for an overall Pass. Every admitted child is aggregated, and every profile-required
@@ -1101,8 +1309,10 @@ Inconclusive; no manual receipt substitutes for this protocol.
 run-relative regular non-symlink file below the run, one existing producer-attempt ID, and one closed
 role `input|output|receipt|review|lifecycle|oracle|scope|measurement`. It rejects the manifest/lock
 files, path escape, duplicate logical paths, producer mismatch, unknown roles, and any file outside
-the producer attempt's declared output allowlist. Registration records path/role/producer/hash/
-bytes; finalization recomputes them and rejects automatic directory discovery or unregistered files
+the producer attempt's declared output allowlist or not currently `pending`. Registration records
+path/role/producer/hash/bytes, atomically changes that output admission to `admitted`, and applies the
+attempt-promotion rule above; it never manufactures or overwrites the producer's status. Finalization
+recomputes every admission and rejects automatic directory discovery or unregistered files
 referenced by a verdict.
 `record-child-run` is the only cross-run admission path. It accepts a unique alias matching
 `[a-z][a-z0-9-]{0,63}`, a closed kind
@@ -1212,7 +1422,7 @@ normalized argv template, closed internal-check name, or transition kind, `expec
 `innerTimeoutOwner: null|gnu-timeout`, exact `deadlineMs`/`killGraceMs`, and sorted run-relative
 `outputPaths`, optional prior-attempt `stdinSource`, optional closed `stdoutPredicate`, optional
 helper-owned structured-result path and closed `resultPredicate`, plus a closed environment
-allowlist. Transition entries additionally own the exact message subject (commit),
+allowlist, and exact `headAnchor: entry|terminal|transition`. Transition entries additionally own the exact message subject (commit),
 parent relation, and staged/merge-path allowlist source. The argv templates are the exact direct command arrays in Tasks 0–8; one child
 process equals one attempt. The four Task 2 inventory commands, five documentation/index commands,
 three evaluator invocations, two typechecks, and every other displayed multi-command block therefore
@@ -1291,7 +1501,7 @@ or stashing it; the clean entry and exact A→B handoff neighbors pass.
 
 Required IDs are reserved. Before spawn, `record-command` must load the selected entry and compare
 operation, normalized executable/argv, expected-exit declaration, watchdog/inner-timeout owners,
-deadlines, and output paths
+deadlines, head anchor, and output paths
 byte-for-byte; declared stdin provenance and stdout predicates are helper-owned and cannot be
 supplied at invocation. Extra environment assignments, unlisted shell wrappers, aliases, wildcards, pipes, redirects,
 or arguments exit 2. `record-internal-check --run-dir <run> --attempt <id>` accepts no arbitrary
@@ -1331,6 +1541,42 @@ range expands to every integer in the inclusive range with no gaps. The structur
 contain each RED marker exactly once in the named file set. GREEN removes the filter and requires all
 U/S/N markers plus every other selected test to pass. Mutable prose after a marker is not identity.
 
+BCF-00 uses one exact bootstrap marker and sixteen exact unsafe/nearest-valid pairs. The constant
+stores the 33 fully expanded literal IDs—`[BCF00-B01]`, `[BCF00-U01]` through `[BCF00-U16]`, and
+`[BCF00-N01]` through `[BCF00-N16]`—not ranges or a prefix predicate. Each marker occurs exactly
+once in `tests/scripts/verify-boundary-run.test.ts`; no unregistered `[BCF00-*]` marker is allowed.
+`B01` is the advisory scaffold case: before implementation it must reach the exported validator and
+fail only with `boundary run validator not implemented`; in every committed/post-merge suite it
+must accept that same complete valid snapshot and pass. Each U/N test owns exactly the assertions in
+its row:
+
+| Pair | Exact unsafe rejection / nearest-valid acceptance |
+|---|---|
+| `U01` / `N01` | staged-, unstaged-, mode-, allowed-untracked-, unexpected-untracked-, and preserved-owner-blind snapshot / complete canonical snapshot with unchanged owner |
+| `U02` / `N02` | unknown, duplicate, path-like, control-bearing, case-variant, or overlength CLI/operational ID / one closed subcommand with canonical unique IDs |
+| `U03` / `N03` | absolute/escaping/overlapping derived root, precreated leaf, symlink ancestor, or parent device/inode race / fresh exclusively created confined sibling |
+| `U04` / `N04` | rewritten raw exit, signal satisfying numeric exit, missing status, wrong watchdog/inner owner, or changed deadline / direct expected status with exact owners and deadline |
+| `U05` / `N05` | undeclared, missing, pending, duplicate, producer/role-mismatched, or post-admission-mutated output / declared pending file admitted once by its producer and hash-current |
+| `U06` / `N06` | wrong task/profile, omitted/extra required set, wrong argv/environment/tool capability, or operation-ID substitution / exact generated profile and attempt contract |
+| `U07` / `N07` | missing/zero/skipped/todo/renamed test, collection/import/unhandled error, wrong RED sentinel, or weakened roster / exact nonzero structured roster and declared result predicate |
+| `U08` / `N08` | missing/foreign/spliced predecessor, receipt/ledger mismatch, changed inherited oracle, or duplicate/reordered/forked row / exact immutable predecessor pin and authorized append |
+| `U09` / `N09` | child alias/kind/task/profile/head/run/digest mismatch, cycle/depth escape, path collision, or imported-byte mutation / one profile-pinned recursively verified import |
+| `U10` / `N10` | duplicate finding/review, invalid severity/disposition/resolution fields, missing reproduction, unsupported rejection, or wrong-head fix / unique finding with disposition-valid exact-head proof |
+| `U11` / `N11` | caller-substituted upstream field, repeated assignment, wrong transition parent/tree/index/path, incomplete merge abort, or second transition / profile-owned upstream derivation and sole exact transition |
+| `U12` / `N12` | invalid lifecycle, wrong terminal state, active/finalized file mixing, snapshot drift, or incomplete required aggregation / coherent profile-terminal lifecycle and auto-detected verification state |
+| `U13` / `N13` | duplicate/unknown/missing schema key, invalid UTF-8/BOM/CR/number/timestamp/nullability/order/bound, or malformed lock / exact canonical JSON and sibling lock bytes |
+| `U14` / `N14` | manifest/completion/ledger/core/report/receipt substitution, accepted/rejected path collision, reused root, or partial publication / exclusive hash-joined bundle at its derived path |
+| `U15` / `N15` | timeout/signal/surviving parent-child-group, wrong wrapper deadline, or masked closeout/verify-closeout status / bounded process group fully reaped with direct status |
+| `U16` / `N16` | finalized-byte mutation, helper/document hash drift, reserved-root TOCTOU, owner-path mutation, or retry overwrite / immutable closure with stable ancestors/owner and new-run retry |
+
+Each semicolon-free comma item above is a required subcase inside its named test; the test reports
+which fixed subcase failed but retains the marker as its sole identity. A generated snapshot asserts
+the literal 33-ID array, the exact row-to-subcase arrays, uniqueness, and bidirectional coverage.
+The postcommit and postmerge validator suites select the file directly, require all 33 markers to
+pass, require nonzero collected tests and no skip/todo/collection/unhandled error, and reject any
+additional or missing contract marker. Thus a generic “all BCF00” name match cannot hide an omitted
+negative or neighbor.
+
 | RED / GREEN attempt | Exact test file set | Exact unsafe/safe marker roster and ordered case classes |
 |---|---|---|
 | `parser-red` / `parser-green` | `semantic-quality-check.test.ts` | `[BCF01-U01–U06]`: mode case, missing value, duplicate mode, duplicate head, duplicate no-receipt, duplicate target-ref; `[BCF01-S01]` preserves a current valid no-op invocation; `[BCF01-N01–N06]` are lowercase valid mode, present value, and one occurrence of each singleton including one full target ref |
@@ -1353,9 +1599,9 @@ production exception, or wrong sentinel invalidates the attempt with the diagnos
 
 The structured-result requirement applies to every required Vitest attempt, not only RED/GREEN.
 `validator-suite-postcommit` and `postmerge-validator-suite` select only
-`tests/scripts/verify-boundary-run.test.ts` and require the full `[BCF00-*]` contract-marker roster,
-including every artifact/foreign-head/review/transition/watchdog/child-depth/closeout negative and
-nearest-valid neighbor described in Task 0. `predecessor-focused` instead selects exactly the six
+`tests/scripts/verify-boundary-run.test.ts` and require the exact literal 33-marker BCF-00 registry
+above plus every unmarked pre-existing test in the frozen entry roster. `predecessor-focused`
+instead selects exactly the six
 pre-existing files displayed in Task 0 Step 5, requires their post-reconciliation entry rosters with
 nonzero tests and no skip/todo/error/failure, and requires no future `[BCF01-*]` marker or Task 2 file.
 The successful merge transition captures that six-file roster under its watchdog as an immutable
@@ -1524,16 +1770,13 @@ prepared directory containing `completion/` with the BCF-08C ledger/receipt/lock
 `closeout_receipt.json`/`closeout_receipt.sha256`, then atomically renames that one directory to the
 derived accepted closeout path. No partial accepted completion/closeout state is observable.
 
-The receipt is a discriminated union. `kind: accepted` requires schema/version, run/task/profile ID,
-exact head and clean diff digest, helper commit/hash, final manifest/lock hashes, finalize and verify
-raw statuses, BCF-08C completion-receipt/lock and chain-ledger/lock hashes, start/end UTC,
-lifecycle/required attempt/child inputs, `closeoutCoreSha256`, `negativeControlReportSha256`, and
-computed verdict `Pass`.
-`kind: rejected` additionally requires `failedStage:
-finalize|verify|verdict|negative-control|completion`, a computed non-pass
-closeout verdict, distinct `runVerdict`, raw status/signal, bounded reason code, and explicit manifest
-state `not-produced|produced-unverified|verified-nonpass|verified-pass-closeout-rejected`;
-manifest/lock hashes are present for every produced state. `failedStage: negative-control|completion`
+The receipt is the fixed-key discriminated union in `RUN_WIRE_SCHEMAS`; accepted and rejected use
+the same keys with its exact nullability rules. `kind: accepted` requires every declared
+run/task/profile/head/snapshot/helper/manifest/status/completion/ledger/time/lifecycle/required-set/
+core/report identity and computed verdict `Pass`. `kind: rejected` requires the declared
+`failedStage`, non-pass closeout verdict, distinct `runVerdict`, direct raw status/signal, bounded
+closed reason code, and explicit manifest state; manifest/lock hashes are present for every produced
+state and not-yet-reached fields are exactly null. `failedStage: negative-control|completion`
 after a verified Pass manifest requires `runVerdict: Pass`, `manifestState:
 verified-pass-closeout-rejected`, no published BCF-08C completion bundle, and closeout verdict
 `Fail` for a deterministic mutation-acceptance defect or `Inconclusive` for unavailable/failed
@@ -1977,8 +2220,10 @@ reproduce every decisive finding rather than accepting worker output. Replay art
 
 - [ ] **Step 1: Freeze the bootstrap boundary without changing remote or worktree state**
 
-Require the planning packet to be committed and the only unrelated state to be the preflighted
-owner paths. Set `BCF_VALIDATOR_BASE` to that exact commit. Before the recorder exists, run only
+Require this amended planning packet to be committed and the only unrelated state to be the
+preflighted owner paths. Set `BCF_VALIDATOR_BASE=$(git rev-parse HEAD)` to that exact amendment
+commit; record its plan/specification/notes blob hashes in the advisory bootstrap receipt and reject
+the historical specification baseline as a substitute. Before the recorder exists, run only
 read-only local identity commands through the lead's direct execution surface:
 
 ```bash
@@ -2004,35 +2249,31 @@ bootstrap TDD evidence when the test reaches the exported validator and fails be
 staged/unstaged/allowed-untracked snapshot is rejected by that explicit result. Missing module,
 syntax/type error, zero tests, or unrelated failure is Inconclusive.
 
-Implement the closed contracts below, run the focused suite and `typecheck:scripts`, inspect the
-three-file diff, and commit exactly those files. Set `BCF_VALIDATOR_COMMIT` to that commit. Because
+Implement the closed contracts below, including the exact `RUN_WIRE_SCHEMAS` and 33-marker BCF-00
+registry, run the complete focused suite and `typecheck:scripts`, inspect the three-file diff, then
+freeze the index tree/full status/owner snapshot and perform the sole bare commit exactly as follows:
+
+```bash
+git add scripts/lib/verification/boundary-run-manifest.ts \
+  scripts/verify-boundary-run.ts \
+  tests/scripts/verify-boundary-run.test.ts
+git commit -m "feat(quality): add boundary run validator"
+```
+
+Apply every bootstrap parent/tree/index/owner postcondition from Mandatory task-run protocol and set
+`BCF_VALIDATOR_COMMIT` to that commit. Any different subject, staged path, parent, tree, hook mode, or
+remaining allowed-path delta stops Task 0. Because
 the recorder cannot attest its own creation, no completion claim rests on the pre-commit RED/GREEN
 logs; Step 3 re-executes all decisive positive and negative controls from the immutable committed
 helper before any remote mutation.
 
-Implement closed schema 1 roots for `run`, `snapshot`, `attempts`, `artifacts`, `children`,
-`predecessor`, `entryTestRoster`, `reviews`, `lifecycle`, `documentHashes`, and `upstream`, plus
-separate closed completion-receipt/ledger and closeout-receipt schemas. The `predecessor` root is
-null only for observation and otherwise stores the immutable pin plus imported closure hashes. The
-snapshot fields are exactly those in Shared Evidence Contract. Attempts own
-argv/cwd/time, normalized expected-exit declaration, direct raw
-exit/signal, `expectationMet`, external-child watchdog owner `helper-watchdog`, optional inner timeout
-owner `null|gnu-timeout`, exact outer deadline/kill grace, pre/post snapshot, stdout/stderr
-hashes, and verdict `Pass|Fail|Inconclusive|Blocked`. A signal never satisfies an expected numeric
-exit. Artifacts are unique relative regular-file path/role/producer-attempt/hash/bytes records.
-Reviews own unique dedupe key, exact reviewer snapshot, report/meta/stderr hashes, and closed finding
-rows. Each finding row contains stable finding ID, closed severity, `requiresFix`,
-`requiresReproduction`, report evidence path/hash, disposition `accepted|rejected|deferred`,
-resolution `open|fixed|not-applicable`, bounded reason/counterevidence, and reproduction attempt IDs.
-`fixed` additionally requires `fixedAtHead`, `fixReproductionAttemptIds`, and the later imported
-review/fix-proof row ID; `rejected` requires nonempty `counterevidenceRefs` and
-`counterReproductionAttemptIds`; those fields are forbidden for incompatible dispositions.
-Every `requiresReproduction: true` row requires at least one joined lead attempt with matching
-snapshot, direct status, and expectation; no review-level success can stand in for a finding join.
-Lifecycle rows require status `pending|active|completed|deferred|closed|blocked`, nullable 40-hex
-completion commit, final gate `not-run|pass|fail|inconclusive|blocked`, artifact hash, successor/superseded-by
-path or null, oracle `not-applicable|current|superseded-invalid-oracle`, and
-`branchDeletionAuthorized: false`.
+Implement exactly the closed schema-1 roots, nested key sets, canonical bytes, bounds, locks,
+nullability, state machine, head anchors, output-admission transitions, and derived-root algorithm in
+Mandatory task-run protocol. For finding conditions, compatible proof fields are nonempty and exact;
+incompatible proof fields remain present as `null` or `[]` according to `RUN_WIRE_SCHEMAS`. Every
+`requiresReproduction: true` row requires at least one joined lead attempt with matching snapshot,
+direct status, and expectation; no review-level success can stand in for a finding join. Do not add
+an implementation-selected key, marker, state, anchor, bootstrap subject, or path rule.
 
 The CLI has only `init`, `record-command`, `record-internal-check`, `record-git-transition`,
 `record-artifact`, `record-child-run`, `record-review`, `set-upstream`, `set-lifecycle`, `finalize`,
@@ -4236,7 +4477,9 @@ Expected: the absolute worktree path matches the Shared Evidence Contract; branc
 `experiment/jul16-boundary-core-history`; origin is the SSH URL for `LucasQuiles/WhatSoup`; pinned
 versions are Node `24.15.0` and npm `11.12.1`; no unexplained modified/staged path exists. A newer
 planning/docs commit is acceptable only after `git show --stat` proves it contains this approved
-packet and the implementation notes record its exact head.
+packet, the implementation notes identify it as the operator-observed `BCF_VALIDATOR_BASE`, and a
+local bootstrap receipt records its exact 40-hex head plus plan/specification/notes blob hashes. The
+commit hash is not embedded in its own tree because that would be self-referential.
 
 The plan-review evidence/tool/temp roots are local-only values. Planning closeout writes their
 locations to one ignored, run-scoped
