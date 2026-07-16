@@ -138,6 +138,7 @@ export const TYPING_REFRESH_MS = 8_000;
  */
 export const TYPING_MAX_MS = 300_000; // 5 min
 export const SEND_TIMEOUT_MS = 15_000;
+const OUTBOUND_SHUTDOWN_DEADLINE = Symbol('outbound_shutdown_deadline');
 /** Delay before flushing aggregated text — batches streaming provider fragments. */
 export const TEXT_AGGREGATE_DELAY_MS = 2_000;
 /** Suppress repeated terminal/error text from respawn loops without affecting normal repeated assistant output. */
@@ -278,6 +279,8 @@ export interface IOutboundQueue {
   setPollPending(pending: boolean): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
+  /** Stop waiting on transport so durable finalization owns the shutdown budget. */
+  preemptForShutdown?(deadlineAt: number): void;
   abortTurn(options?: { preserveEvidence?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
@@ -382,6 +385,10 @@ export class OutboundQueue implements IOutboundQueue {
   private chain: Promise<void> = Promise.resolve();
   /** Sticky drain failure. A poisoned queue is never retried in-place. */
   private drainFailure: { readonly error: unknown } | undefined;
+  /** One shared signal that can preempt an already-running send attempt at shutdown. */
+  private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
+  private resolveShutdownDeadlineSignal: (() => void) | null = null;
+  private shutdownDeadlineReached = false;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -409,6 +416,9 @@ export class OutboundQueue implements IOutboundQueue {
     this.messenger = messenger;
     this.deliveryJid = deliveryJid;
     this.conversationKey = options?.conversationKey ?? toConversationKey(deliveryJid);
+    this.shutdownDeadlineSignal = new Promise((resolve) => {
+      this.resolveShutdownDeadlineSignal = () => resolve(OUTBOUND_SHUTDOWN_DEADLINE);
+    });
     // QR-069: a replacement queue (provider fallback/respawn, /new, resume) for
     // the same chat INHERITS the prior queue's token so its first reply is NOT
     // flood-suppressed by the predecessor's still-active group cooldown. Falls
@@ -969,6 +979,17 @@ export class OutboundQueue implements IOutboundQueue {
     this.pollPending = pending;
   }
 
+  preemptForShutdown(deadlineAt: number): void {
+    if (!Number.isFinite(deadlineAt)) {
+      throw new Error('Outbound shutdown deadline must be finite');
+    }
+    if (this.shutdownDeadlineReached) return;
+    this.shutdownDeadlineReached = true;
+    const resolve = this.resolveShutdownDeadlineSignal;
+    this.resolveShutdownDeadlineSignal = null;
+    resolve?.();
+  }
+
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
     this.lastActivity = Date.now();
@@ -1282,7 +1303,7 @@ export class OutboundQueue implements IOutboundQueue {
     const elapsed = now - this.lastSentAt;
     if (elapsed < MIN_SEND_GAP_MS && this.lastSentAt !== 0) {
       const wait = MIN_SEND_GAP_MS - elapsed;
-      await new Promise<void>((resolve) => setTimeout(resolve, wait));
+      await this.waitForDelayOrShutdown(wait);
     }
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
@@ -1321,13 +1342,20 @@ export class OutboundQueue implements IOutboundQueue {
     const stableMessageId = crypto.randomUUID().replace(/-/g, '').toUpperCase();
 
     let lastErr: unknown;
+    let shutdownDeadlineExpired = false;
+    let hasAmbiguousAttempt = false;
     for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
+      if (this.shutdownDeadlineReached) {
+        shutdownDeadlineExpired = true;
+        break;
+      }
       try {
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        let receipt;
+        let receiptOrDeadline;
         try {
-          receipt = await Promise.race([
+          receiptOrDeadline = await Promise.race([
             this.messenger.sendMessage(chunk.chatJid, text, { messageId: stableMessageId }),
+            this.shutdownDeadlineSignal,
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
                 () => reject(new Error('SEND_TIMEOUT')),
@@ -1338,22 +1366,48 @@ export class OutboundQueue implements IOutboundQueue {
         } finally {
           clearTimeout(timeoutHandle);
         }
+        if (receiptOrDeadline === OUTBOUND_SHUTDOWN_DEADLINE) {
+          shutdownDeadlineExpired = true;
+          hasAmbiguousAttempt = true;
+          break;
+        }
         if (opId !== undefined && this.durability) {
-          this.durability.markSubmitted(opId, receipt.waMessageId);
+          this.durability.markSubmitted(opId, receiptOrDeadline.waMessageId);
         }
         this.lastSubmittedTextDedupeKey = textDedupeKey;
         return;
       } catch (err) {
         lastErr = err;
+        if (!isOutboundGovernorShed(err)) hasAmbiguousAttempt = true;
         if (attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1) {
           const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
           const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
           const retryAfterMs = OutboundQueue.retryAfterMs(err);
           const delayMs = retryAfterMs ?? jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS);
           log.warn({ chatJid: chunk.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }), ...(retryAfterMs !== undefined && { retryAfterMs }) }, 'outbound send failed — retrying');
-          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          if (await this.waitForDelayOrShutdown(delayMs)) {
+            shutdownDeadlineExpired = true;
+            break;
+          }
         }
       }
+    }
+    if (shutdownDeadlineExpired) {
+      const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
+      log.warn({
+        chatJid: chunk.chatJid,
+        textPreview: truncated,
+        textLength: text.length,
+        ambiguous: hasAmbiguousAttempt,
+      }, 'outbound send stopped at runtime shutdown deadline');
+      if (opId !== undefined && this.durability) {
+        if (hasAmbiguousAttempt) {
+          this.durability.markMaybeSent(opId, 'shutdown_deadline', stableMessageId);
+        } else {
+          this.durability.markFailedPermanent(opId, 'shutdown_before_send');
+        }
+      }
+      return;
     }
     // All attempts exhausted — log and give up (do NOT re-throw, queue must keep draining)
     const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
@@ -1376,6 +1430,21 @@ export class OutboundQueue implements IOutboundQueue {
       this.messenger.sendMessage(chunk.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
       new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
     ]).catch(() => { /* best effort only */ });
+  }
+
+  private async waitForDelayOrShutdown(delayMs: number): Promise<boolean> {
+    if (this.shutdownDeadlineReached) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), delayMs);
+        }),
+        this.shutdownDeadlineSignal.then(() => true as const),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private static retryAfterMs(err: unknown): number | undefined {
