@@ -62,6 +62,12 @@ function ceilingBumpMessage(measurement: FileSizeMeasurement, actualLines: numbe
 }
 
 const EXPECTED_FILE_SIZE_WARNING_FILES = [
+  // The q-partition-recovery-bridge merge re-added migratedSchemaSnapshot to
+  // this core database module, taking it to 2069 lines — just over the
+  // 2000-line arch.file-size warn budget. Grandfathered per the project norm
+  // for large core files (cf. durability.ts below); a database.ts slice is a
+  // separate follow-up.
+  'src/core/database.ts',
   // #1749 recovery-owner reclaim added the bucket-4 sweep query + reclaim
   // wiring to this cohesive core durability engine, taking it just over the
   // 2000-line arch.file-size warn budget (~2076). Grandfathered per the project

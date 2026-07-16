@@ -1568,7 +1568,16 @@ describe('Database compatibility provider rejection', () => {
     vi.useFakeTimers();
     const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
     const error = rejection();
+    // Sequence: [0] processMessage()'s pre-turn compat gate (runtime.ts entry
+    // check, shared by every test in this describe block — see the sibling
+    // tests above), then per primary attempt a before-check + finally-check
+    // pair from withDatabaseCompatibility (database-compatibility.ts). Two
+    // primary attempts (initial + retry) means 1 + 2*2 = 5 assert calls before
+    // the terminal rejection latches from the SECOND attempt's finally-check —
+    // i.e. after both primary attempts have genuinely run, not from a
+    // before-check that preempts the second attempt's generate() call.
     vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
       .mockImplementationOnce(() => undefined)
       .mockImplementationOnce(() => undefined)
       .mockImplementationOnce(() => undefined)
@@ -1579,7 +1588,7 @@ describe('Database compatibility provider rejection', () => {
     await vi.runAllTimersAsync();
     await completion;
 
-    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(4);
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(5);
     expect(primary.generate).toHaveBeenCalledTimes(2);
     expect(fallback.generate).not.toHaveBeenCalled();
     expect(mockEmitAlert).not.toHaveBeenCalled();

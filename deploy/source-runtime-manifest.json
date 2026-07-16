@@ -21,6 +21,15 @@
       "importGraph": true
     },
     {
+      "path": "src/database-compatibility-bootstrap.ts",
+      "sha256": "5c20e02ce99fc8d9a31ec923c0286e26f08dc983be4d681684774f0afa7b0f61",
+      "mustContain": [
+        "databaseCompatibilityBootstrap",
+        "checkLoadedInstanceDatabase"
+      ],
+      "importGraph": true
+    },
+    {
       "path": "src/transport/factory.ts",
       "sha256": "e4f81559c617d07dd9c4c7698bb9c5ca66371207aabe7dbd8a1cc9b7c1be2cc0",
       "mustContain": [
