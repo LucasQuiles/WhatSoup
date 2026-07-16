@@ -525,3 +525,30 @@ describe('createCapabilityGrantManager — stop', () => {
     vi.useRealTimers();
   });
 });
+
+// ─── command serialization (TOCTOU guard) ──────────────────────────────────
+
+describe('createCapabilityGrantManager — command serialization', () => {
+  it('serializes concurrent arm() calls so read-modify-write cannot interleave', async () => {
+    const { manager, policy, store } = makeManager();
+    // Fire two arms concurrently. Without serialization both read the empty
+    // initial state, neither supersedes, and the allow set ends with BOTH groups'
+    // caps while the record names only one — an untracked (unrevertable) grant.
+    const [r1, r2] = await Promise.all([
+      manager.arm('camera', 60_000, ownerAuth),
+      manager.arm('writes', 60_000, ownerAuth),
+    ]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+
+    const finalGroup = store.record?.group;
+    expect(finalGroup === 'camera' || finalGroup === 'writes').toBe(true);
+    const winCaps = finalGroup === 'camera' ? ['camera.snap', 'camera.clip'] : ['contacts.add', 'sms.send'];
+    const loseCaps = finalGroup === 'camera' ? ['contacts.add', 'sms.send'] : ['camera.snap', 'camera.clip'];
+    // Internally consistent: the winner's caps are allowed and the loser's were
+    // reverted by the supersede — never a merged/interleaved mix.
+    for (const c of winCaps) expect(policy.allow.has(c)).toBe(true);
+    for (const c of loseCaps) expect(policy.allow.has(c)).toBe(false);
+    manager.stop();
+  });
+});

@@ -250,6 +250,17 @@ export function createCapabilityGrantManager(
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
+  // Serialize every mutating command (arm/disarm/reconcile) and the expiry tick
+  // through one chain, so the manager's own read→mutate→write of the policy+store
+  // cannot interleave with a concurrent command (TOCTOU). Internal reverts use the
+  // private disarmInternal (never the public disarm), so there is no re-entrancy.
+  let commandChain: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = commandChain.then(fn, fn);
+    commandChain = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
   const resolveGroup = (group: GrantGroup): readonly string[] | null => {
     const def = options.groups[group];
     if (!def) return null;
@@ -302,12 +313,12 @@ export function createCapabilityGrantManager(
     return result;
   };
 
-  const tick = async () => {
+  const tick = async () => serialize(async () => {
     const record = await options.store.read();
     if (!record || record.expiresAtMs === null) return;
     if (!isExpired(record, now())) return;
     await disarmInternal('expired');
-  };
+  });
 
   const startPolling = () => {
     if (pollTimer !== null) return;
@@ -462,5 +473,13 @@ export function createCapabilityGrantManager(
     running = false;
   };
 
-  return { arm, disarm, status, reconcile, stop };
+  return {
+    // Mutating commands run through the serialize chain (TOCTOU guard); status is
+    // read-only and stop is synchronous, so neither needs to queue.
+    arm: (group, durationMs, auth) => serialize(() => arm(group, durationMs, auth)),
+    disarm: (auth) => serialize(() => disarm(auth)),
+    status,
+    reconcile: () => serialize(() => reconcile()),
+    stop,
+  };
 }
