@@ -1203,6 +1203,7 @@ finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
   const session = mapKey === undefined
     ? this.host.session
     : this.host.chatSessions.get(mapKey) ?? null;
+  queue.abortTurn({ preserveEvidence: true });
   void this.finalizeRuntimeTurnContext({
     context,
     queue,
@@ -1239,6 +1240,7 @@ async finalizePerChatProcessorError(
   if (!queue) {
     throw new Error(`Per-chat processor failure has no outbound queue for "${mapKey}"`, { cause: error });
   }
+  queue.abortTurn({ preserveEvidence: true });
   const result = await this.finalizeRuntimeTurnContext({
     context,
     queue,
@@ -1293,6 +1295,7 @@ async finalizeSharedProcessorError(
   if (!queue) {
     throw new Error('Shared processor failure has no outbound queue', { cause: error });
   }
+  queue.abortTurn({ preserveEvidence: true });
   const result = await this.finalizeRuntimeTurnContext({
     context,
     queue,

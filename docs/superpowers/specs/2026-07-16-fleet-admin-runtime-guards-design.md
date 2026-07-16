@@ -87,18 +87,18 @@ This signal informs conversational behavior only. MCP/tool authorization continu
 
 Shared and per-chat sessions must compute the classification per executing turn. It must not be stored as mutable session-global state that can bleed from an administrator's turn into another sender's turn.
 
-### 3. Same-turn final-payload suppression
+### 3. Same-turn answer arbitration
 
-Track normalized assistant payloads within the current inbound turn. When a provider `result` arrives after streamed assistant output:
+Track one answer channel within the current admitted inbound turn. Provider streaming remains buffered, with typing presence as the liveness signal, until the turn terminalizes or an MCP `send_message` reply claims that channel:
 
-- suppress the result payload only when its normalized visible text exactly matches text already queued for that turn;
-- record a structured `duplicate_final_payload_suppressed` event with instance, turn identity, source paths, and hashes only;
-- do not create a second outbound operation; and
-- continue normal result accounting and terminalization.
+- an MCP reply replaces provider narration that has not yet been durably queued;
+- a distinct provider result replaces still-buffered narration and becomes the single answer;
+- an identical provider result leaves the normalized buffered answer to be emitted once;
+- fallback continuation discards the failed attempt's buffered narration and reopens arbitration under the same turn evidence;
+- after either provider or tool output is durably queued, later answer paths are suppressed; and
+- result accounting and terminalization continue even when a later payload is suppressed.
 
-Normalization is deliberately conservative: newline normalization and outer whitespace only. Two distinct messages, messages from different inbound turns, tool-status messages, polls, media, and fallback notices are never collapsed by this rule.
-
-Two distinct replies for one turn remain a lifecycle error, not a dedupe success. The finalization contract records the extra output and the verification probe fails the instance so the upstream cause remains visible.
+Observed provider text is not treated as delivered until the queue commits the selected answer. Replay eligibility and voice synthesis consume the committed/selected answer rather than discarded narration. Normalization remains conservative: newline normalization and outer whitespace only. Messages from different inbound turns, tool-status messages, polls, media, and fallback notices are not collapsed by the answer rule. If a distinct answer was already delivered before arbitration could act, that remains a lifecycle error: the finalization contract records the extra output and the verification probe fails the instance rather than hiding it.
 
 ### 4. Durable terminal-proof invariant
 
@@ -153,17 +153,20 @@ The verifier emits machine-readable JSON suitable for the fleet sheet and a conc
 1. WhatsApp transport receives an inbound event and resolves its canonical conversation and actor.
 2. Runtime derives the actor access enum from authoritative configuration and identity mapping.
 3. Session receives the user text plus a non-user-authored access envelope.
-4. Streamed output is recorded in the current-turn payload tracker and queued durably.
-5. Provider result passes through exact same-turn suppression.
-6. Turn finalization accepts success only after terminal echoed delivery proof is linked.
+4. Streamed answer output is held in the current-turn payload tracker while typing presence supplies liveness.
+5. An MCP reply or provider result claims the answer channel; only the selected payload is queued durably.
+6. Failure finalization discards unsent narration while preserving already-created evidence; successful finalization accepts only terminal echoed delivery proof.
 7. Health and fleet verification consume the terminal record, process revision, and canary evidence.
 
 ## Failure behavior
 
 - Missing/unreadable instructions: config write or restart is rejected; a running healthy process is left untouched.
 - Unknown actor: prompt classification and tool authorization both fail closed.
-- Duplicate exact final payload: second send suppressed, structured evidence retained.
-- Distinct second payload: not suppressed; turn and canary are marked failed for investigation.
+- Duplicate exact final payload: one selected payload is sent and structured evidence is retained.
+- Distinct buffered narration and result: the result replaces narration before durable queueing.
+- Distinct already-committed second payload: suppressed when the queue still owns it; otherwise the turn and canary are marked failed for investigation.
+- Provider fallback: the failed attempt's unsent narration is discarded and the same logical turn reopens one answer channel.
+- Processor failure: deferred narration is aborted before evidence collection, so the failed turn cannot poison the reusable queue.
 - Missing terminal proof: inbound turn remains recoverable/degraded, never reported as a successful reply.
 - Safe nonterminal outbound work: restart blocked with counts only.
 - Probe transport/identity mismatch: result is inconclusive, never converted to zero responses.
@@ -193,7 +196,11 @@ The verifier emits machine-readable JSON suitable for the fleet sheet and a conc
 
 - streamed text plus identical result yields one outbound operation;
 - whitespace/newline-equivalent identical result yields one operation;
-- distinct result remains visible and fails the multi-reply invariant;
+- distinct result replaces buffered narration and yields one operation;
+- an MCP reply replaces unsent provider narration, while a repeated MCP/provider answer is suppressed;
+- fallback continuation reopens arbitration under the same logical turn and emits only its selected answer;
+- selected terminal text, not discarded narration, owns voice-reply content;
+- processor failure aborts deferred narration while retaining existing durable evidence;
 - different turns may intentionally send identical text;
 - one terminal echoed operation finalizes `response_echoed`;
 - zero-linked, nonterminal-linked, and processing-after-echo cases fail closed; and

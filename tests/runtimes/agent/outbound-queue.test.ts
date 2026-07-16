@@ -1785,6 +1785,23 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('keeps an active-turn terminal answer after minimal-mode status output', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(40);
+    queue.beginTurnEvidence('turn-minimal-status');
+
+    queue.enqueueText('Still working.', 'status');
+    queue.endTurn();
+    queue.enqueueResultText('Final answer.');
+    await vi.runAllTimersAsync();
+    await queue.flushTurnEvidence('turn-minimal-status');
+
+    expect(calls).toEqual(['Still working.', 'Final answer.']);
+  });
+
   it('suppresses an identical terminal result already streamed in the same turn', async () => {
     mockLog.info.mockClear();
     const { messenger, calls } = makeMessenger();
@@ -1873,7 +1890,7 @@ describe('OutboundQueue', () => {
     expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('keeps provider output when it claims the answer before a tool send', async () => {
+  it('lets a tool reply replace provider narration that is still buffered', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(makeDurabilityStub());
@@ -1881,15 +1898,76 @@ describe('OutboundQueue', () => {
     queue.beginTurnEvidence('turn-provider-reply');
 
     queue.enqueueStreamingText('Provider answer.');
-    expect(queue.enqueueToolReplyText('Late tool answer.')).toEqual({
-      disposition: 'suppressed',
-      reason: 'answer_already_claimed',
-    });
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + 1);
+    expect(calls).toEqual([]);
+    await queue.flush();
+    expect(calls).toEqual([]);
+    expect(queue.enqueueToolReplyText('Tool answer.')).toEqual({ disposition: 'queued' });
     queue.endTurn();
     await vi.runAllTimersAsync();
     await queue.flushTurnEvidence('turn-provider-reply');
 
-    expect(calls).toEqual(['Provider answer.']);
+    expect(calls).toEqual(['Tool answer.']);
+  });
+
+  it('replaces buffered active-turn narration with a distinct terminal result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(47);
+    queue.beginTurnEvidence('turn-terminal-reply');
+
+    queue.enqueueStreamingText('I will look that up.');
+    queue.enqueueStreamingText('Still checking.');
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + 1);
+    expect(calls).toEqual([]);
+
+    queue.endTurn();
+    queue.enqueueResultText('Final answer.');
+    await vi.runAllTimersAsync();
+    await queue.flushTurnEvidence('turn-terminal-reply');
+
+    expect(calls).toEqual(['Final answer.']);
+  });
+
+  it('delivers buffered active-turn streaming once when the terminal result is identical', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(48);
+    queue.beginTurnEvidence('turn-identical-reply');
+
+    queue.enqueueStreamingText('Final answer.');
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + 1);
+    expect(calls).toEqual([]);
+
+    queue.endTurn();
+    queue.enqueueResultText('Final answer.');
+    await vi.runAllTimersAsync();
+    await queue.flushTurnEvidence('turn-identical-reply');
+
+    expect(calls).toEqual(['Final answer.']);
+  });
+
+  it('reopens answer arbitration for a fallback continuation under the same turn evidence', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(49);
+    queue.beginTurnEvidence('turn-fallback-reply');
+
+    queue.enqueueStreamingText('Primary narration.');
+    queue.endTurn();
+    (queue as unknown as {
+      resumeTurnAnswerArbitration(turnId: string): void;
+    }).resumeTurnAnswerArbitration('turn-fallback-reply');
+    queue.enqueueStreamingText('Fallback narration.');
+    queue.endTurn();
+    queue.enqueueResultText('Fallback final answer.');
+    await vi.runAllTimersAsync();
+    await queue.flushTurnEvidence('turn-fallback-reply');
+
+    expect(calls).toEqual(['Fallback final answer.']);
   });
 
   it('allows the same answer in a later inbound turn', async () => {
@@ -2512,6 +2590,20 @@ describe('OutboundQueue', () => {
     await queue.shutdown();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('shutdown discards incomplete active-turn narration without retaining pending work', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(17);
+    queue.beginTurnEvidence('turn-shutdown-incomplete');
+
+    queue.enqueueStreamingText('Unfinished provider narration.');
+    await queue.shutdown();
+
+    expect(calls).toEqual([]);
+    expect(queue.hasPendingWork()).toBe(false);
   });
 
   // ─── hasPendingWork: various state combinations ───────────────────────────

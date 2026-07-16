@@ -133,6 +133,9 @@ function evidenceQueue(): IOutboundQueue {
       statusOpIds: [],
     })),
     setInboundSeq: vi.fn(),
+    abortTurn: vi.fn(),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
     clearLastOpId: vi.fn(),
   } as unknown as IOutboundQueue;
 }
@@ -168,7 +171,8 @@ describe('runtime terminal transaction reachability', () => {
       const seq = journal(durability, 'wamid-turn-processor-throw');
       const runtimeContext = context('per_chat', seq, 'turn-processor-throw');
       const mapKey = runtimeContext.identity.conversationKey;
-      state.chatQueues.set(mapKey, evidenceQueue());
+      const queue = evidenceQueue();
+      state.chatQueues.set(mapKey, queue);
       state.perChatRuntimeTurnContexts.set(mapKey, [runtimeContext]);
       state.perChatInboundSeqQueue.set(mapKey, [seq]);
 
@@ -177,6 +181,8 @@ describe('runtime terminal transaction reachability', () => {
         turn(runtimeContext),
         new Error('processor exploded'),
       );
+
+      expect(queue.abortTurn).toHaveBeenCalledWith({ preserveEvidence: true });
 
       expect(durability.getTurnTerminal(seq, 'turn-processor-throw', 1)).toMatchObject({
         attempt_kind: 'failed',

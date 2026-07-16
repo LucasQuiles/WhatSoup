@@ -39,6 +39,7 @@ export interface RuntimeState {
   chatSessions: Map<string, ReturnType<typeof sessionStub>>;
   perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
   pendingTurnText: Map<string, string>;
+  perChatTurnText: Map<string, string>;
   runtimeTurnAfterTerminal: Map<string, (result: unknown) => void | Promise<void>>;
   scheduleFallbackReplay(args: {
     activation: {
@@ -292,6 +293,8 @@ export function queueStub(chatJid: string): IOutboundQueue {
     setInboundSeq: vi.fn(),
     getLastOpId: vi.fn(() => undefined),
     clearLastOpId: vi.fn(),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
     markLastTerminal: vi.fn(),
     setDurability: vi.fn(),
     endTurn: vi.fn(),

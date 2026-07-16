@@ -6295,13 +6295,10 @@ export class AgentRuntime implements Runtime {
           normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
-          if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
+          if (queue.hasCommittedAnswer() && mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
             this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
           }
-          // Reply-guarantee: visible output reached the user, so reset the
-          // silence window for this chat. The "still working" fallback then
-          // only fires after a full window of TRUE silence, not while a long
-          // turn is actively streaming replies.
+          // Buffered narration still counts as activity for the silence watchdog.
           this.replyGuarantee?.notifyActivity(queue.targetChatJid);
           // Accumulate assistant text for voice reply (SP4)
           if (mapKey !== undefined) {
@@ -9805,18 +9802,17 @@ export class AgentRuntime implements Runtime {
     oldSession: SessionManager | null;
     hadToolActivity?: boolean;
   }): boolean {
-    // QR-103: never replay a turn that ALREADY delivered a visible reply — the
-    // fallback replay would send a SECOND full answer (user gets both the primary
-    // streamed reply AND the backup reply). The sibling recordFallbackTurnOutcome
-    // already treats hadVisibleOutput||hadToolWork as a delivered reply; mirror
-    // that here. Derived from the same per-turn state the streaming path sets
-    // (reset at turn start, so never stale): per_chat reads its accumulated
-    // perChatTurnText[mapKey], singleton/shared reads turnHadVisibleOutput. Uses
-    // the streamed reply text, NOT the terminal result text (which is the failure
-    // string that was just classified) — so a genuinely silent turn still replays.
-    const hadVisibleOutput = args.mapKey !== undefined
+    // Buffered narration is only observed text; only a committed answer blocks replay.
+    const runtimeContext = args.mapKey !== undefined
+      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
+      : this.currentRuntimeTurnContext;
+    const activeQueue = args.mapKey !== undefined
+      ? this.chatQueues.get(args.mapKey)
+      : this.getActiveQueue();
+    const legacyVisibleOutput = args.mapKey !== undefined
       ? ((this.perChatTurnText.get(args.mapKey)?.trim() ?? '') !== '')
       : this.turnHadVisibleOutput;
+    const hadVisibleOutput = runtimeContext && activeQueue ? activeQueue.hasCommittedAnswer() : legacyVisibleOutput;
     if (
       args.activation.extended
       || args.activation.keyPresent === false
@@ -9830,16 +9826,22 @@ export class AgentRuntime implements Runtime {
     const actorJid = args.mapKey !== undefined
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
-
-    const runtimeContext = args.mapKey !== undefined
-      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
-      : this.currentRuntimeTurnContext;
     if (runtimeContext) {
+      if (!activeQueue) return false;
       const scopeRef = args.mapKey === undefined
         ? undefined
         : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
           ?? { value: args.mapKey };
       if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      try {
+        activeQueue.resumeTurnAnswerArbitration(runtimeContext.identity.logicalTurnId);
+      } catch (err) {
+        this.runtimeTurnCoordinator.cancelRuntimeTurnContinuation(runtimeContext);
+        log.error({ err, logicalTurnId: runtimeContext.identity.logicalTurnId }, 'failed to reopen fallback answer arbitration');
+        return false;
+      }
+      if (args.mapKey === undefined) this.currentTurnAssistantText = '';
+      else this.perChatTurnText.set(args.mapKey, '');
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(runtimeContext, (result) => {
         if (result.terminal.attemptOutcome.kind !== 'completed') return;
         this.fallbackMetrics.recordReplay();
@@ -11306,13 +11308,11 @@ export class AgentRuntime implements Runtime {
           normalizedText = gatedText;
           if (!normalizedText) break;
           queue.enqueueStreamingText(normalizedText);
-          this.turnHadVisibleOutput = true;
-          if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0) {
+          this.turnHadVisibleOutput ||= queue.hasCommittedAnswer();
+          if (queue.hasCommittedAnswer() && this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0) {
             this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
           }
-          // Reply-guarantee: visible output reached the user — reset the silence
-          // window so the "still working" fallback only fires after a full window
-          // of TRUE silence, not while a long turn is actively streaming replies.
+          // Buffered narration still counts as activity for the silence watchdog.
           this.replyGuarantee?.notifyActivity(queue.targetChatJid);
           // Accumulate text for voice reply (SP4)
           this.currentTurnAssistantText += normalizedText;

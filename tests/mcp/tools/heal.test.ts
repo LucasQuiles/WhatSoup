@@ -50,6 +50,8 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     beginTurnEvidence: vi.fn(),
+    hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId, answerOpIds: [], lifecycleOpIds: [], statusOpIds: [],
     })),

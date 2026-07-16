@@ -269,6 +269,10 @@ export interface IOutboundQueue {
   enqueueToolReplyText?(text: string): TurnReplySinkResult;
   /** Whether the current admitted turn's answer channel belongs to an MCP reply. */
   hasToolReplyClaimed?(): boolean;
+  /** Whether the active admitted turn has durably queued an answer payload. */
+  hasCommittedAnswer(): boolean;
+  /** Reopen the same admitted turn's answer channel for a provider fallback continuation. */
+  resumeTurnAnswerArbitration(turnId: string): void;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -542,6 +546,22 @@ export class OutboundQueue implements IOutboundQueue {
     };
   }
 
+  hasCommittedAnswer(): boolean {
+    return this.activeTurnEvidence ? this.turnAnswerCommitted : this.turnHasVisibleText;
+  }
+
+  resumeTurnAnswerArbitration(turnId: string): void {
+    if (this.activeTurnEvidence?.turnId !== turnId) {
+      throw new Error(`No active turn evidence belongs to ${turnId}`);
+    }
+    if (this.turnAnswerCommitted) {
+      throw new Error(`Turn ${turnId} already committed an answer`);
+    }
+    this.discardBufferedAnswerText();
+    this.turnAnswerOwner = null;
+    this.activeTurnEnded = false;
+  }
+
   async flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence> {
     const inFlight = this.turnEvidenceFlush;
     if (inFlight) {
@@ -672,6 +692,8 @@ export class OutboundQueue implements IOutboundQueue {
   /** Track whether the current turn has already sent visible text to the user. */
   private turnHasVisibleText = false;
   private turnAnswerOwner: 'provider' | 'tool' | null = null;
+  private turnAnswerCommitted = false;
+  private activeTurnEnded = false;
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
   private streamBufferParts: BufferedStreamPart[] = [];
@@ -682,9 +704,12 @@ export class OutboundQueue implements IOutboundQueue {
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
     if (role === 'answer' && !this.claimProviderAnswer()) return;
+    if (role === 'answer' && this.activeTurnEvidence && !this.turnAnswerCommitted) {
+      this.discardBufferedAnswerText();
+    }
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
-    this.flushStreamBuffer();
+    this.flushStreamBuffer(!this.isDeferringActiveAnswer());
     this.turnHasVisibleText = true;
     this.enqueuePreparedText(text, attribution);
   }
@@ -693,6 +718,9 @@ export class OutboundQueue implements IOutboundQueue {
     text: string,
     attribution: OutboundAttribution,
   ): void {
+    if (attribution.role === 'answer' && this.activeTurnEvidence) {
+      this.turnAnswerCommitted = true;
+    }
     // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
     // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
     // mirrors the chat runtime's redactInternalArtifacts on the response. Applied
@@ -717,23 +745,28 @@ export class OutboundQueue implements IOutboundQueue {
     if (!text) return;
     if (role === 'answer' && !this.claimProviderAnswer()) return;
     if (role === 'answer') this.activeStreamedAnswerText += text;
-    this.turnHasVisibleText = true;
     this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
     this.startTyping();
+    if (role === 'answer' && this.isDeferringActiveAnswer()) return;
+    this.turnHasVisibleText = true;
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
-      this.flushStreamBuffer();
+      this.flushStreamBuffer(!this.isDeferringActiveAnswer());
     }, this.textAggregateDelayMs);
   }
 
   /** Flush the streaming text buffer into the send queue. */
-  private flushStreamBuffer(): void {
+  private flushStreamBuffer(includeDeferredAnswers = true): void {
     if (this.streamTimer) {
       clearTimeout(this.streamTimer);
       this.streamTimer = null;
     }
-    const parts = this.streamBufferParts;
-    this.streamBufferParts = [];
+    const parts = includeDeferredAnswers
+      ? this.streamBufferParts
+      : this.streamBufferParts.filter((part) => part.role !== 'answer');
+    this.streamBufferParts = includeDeferredAnswers
+      ? []
+      : this.streamBufferParts.filter((part) => part.role === 'answer');
     let group: BufferedStreamPart[] = [];
     const flushGroup = (): void => {
       if (group.length === 0) return;
@@ -743,6 +776,7 @@ export class OutboundQueue implements IOutboundQueue {
         if (attribution.role === 'answer') {
           this.activeStreamedAnswerPayloadHashes.add(this.sameTurnFinalPayloadHash(text));
         }
+        this.turnHasVisibleText = true;
         this.enqueuePreparedText(text, attribution);
       }
       group = [];
@@ -767,7 +801,13 @@ export class OutboundQueue implements IOutboundQueue {
     if (!text || text.trim() === '') return;
     if (role === 'answer' && !this.claimProviderAnswer()) return;
     if (role === 'answer' && this.suppressDuplicateSameTurnFinalPayload(text)) return;
-    if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
+    if (role === 'answer' && this.activeTurnEvidence && !this.turnAnswerCommitted) {
+      this.discardBufferedAnswerText();
+    }
+    const minimalModeAnswerAlreadyCommitted = this.activeTurnEvidence
+      ? this.turnAnswerCommitted
+      : this.turnHasVisibleText;
+    if (this.toolUpdateMode === 'minimal' && minimalModeAnswerAlreadyCommitted) {
       // Suppress — the user already got the real response during the turn
       return;
     }
@@ -776,9 +816,15 @@ export class OutboundQueue implements IOutboundQueue {
 
   enqueueToolReplyText(text: string): TurnReplySinkResult {
     if (!this.activeTurnEvidence) return { disposition: 'inactive' };
-    if (!text || text.trim() === '' || this.turnAnswerOwner !== null) {
+    if (
+      !text
+      || text.trim() === ''
+      || this.turnAnswerOwner === 'tool'
+      || this.turnAnswerCommitted
+    ) {
       return { disposition: 'suppressed', reason: 'answer_already_claimed' };
     }
+    this.discardBufferedAnswerText();
     this.turnAnswerOwner = 'tool';
     const attribution = this.snapshotAttribution('answer');
     this.flushStreamBuffer();
@@ -1007,7 +1053,7 @@ export class OutboundQueue implements IOutboundQueue {
    * Ensures any in-progress text messages are delivered before the poll arrives.
    */
   async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
-    this.flushStreamBuffer();
+    this.flushStreamBuffer(!this.isDeferringActiveAnswer());
     this.flushToolBuffer();
     await this.chain;
     this.assertDrainComplete();
@@ -1036,7 +1082,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
     this.lastActivity = Date.now();
-    this.flushStreamBuffer();
+    this.flushStreamBuffer(!this.isDeferringActiveAnswer());
     this.flushToolBuffer();
     this.throwDrainFailure();
     // Wait for the current chain to drain
@@ -1052,6 +1098,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush pending messages and clear all timers. */
   async shutdown(): Promise<void> {
     await this.flush();
+    this.discardBufferedAnswerText();
     this.activeTurnEvidence = undefined;
     this.completedTurnEvidence = undefined;
     if (this.toolTimer !== null) {
@@ -1155,17 +1202,15 @@ export class OutboundQueue implements IOutboundQueue {
 
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
-   * received, so any buffered streaming fragments are delivered and the typing
-   * indicator is cleared, even on early-return branches of the runtime result
-   * handler that never reach flush(). Idempotent.
+   * received, so the typing indicator is cleared even on early-return branches
+   * of the runtime result handler that never reach flush(). Idempotent.
    *
-   * Ordering: flush stream buffer first so buffered text is delivered as part of
-   * this turn rather than firing 2s later into an idle persistent session.
-   * Then stop typing. The subsequent queue.flush() on the normal path is a no-op
-   * for both (buffer already empty, typing already stopped).
+   * Active-turn answer fragments stay buffered for result arbitration. Legacy
+   * callers without turn evidence retain the historical end-of-turn flush.
    */
   endTurn(): void {
-    this.flushStreamBuffer();
+    this.activeTurnEnded = true;
+    this.flushStreamBuffer(this.activeTurnEvidence === undefined);
     this.captureCompletedStreamedAnswerPayloads();
     this.stopTyping();
     // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
@@ -1193,7 +1238,7 @@ export class OutboundQueue implements IOutboundQueue {
       this.startTyping(); // keep the liveness signal, drop the narration
       if (!this.statusCapNoticeSent) {
         this.statusCapNoticeSent = true;
-        this.flushStreamBuffer();
+        this.flushStreamBuffer(!this.isDeferringActiveAnswer());
         this.turnHasVisibleText = true;
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
@@ -1231,7 +1276,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     for (const batch of batches) {
       if (this.statusBudgetExhausted(batch.attribution)) continue;
-      this.flushStreamBuffer();
+      this.flushStreamBuffer(!this.isDeferringActiveAnswer());
       this.turnHasVisibleText = true;
       this.enqueuePreparedText(this.renderToolUpdates(batch.updates), batch.attribution);
     }
@@ -1554,6 +1599,8 @@ export class OutboundQueue implements IOutboundQueue {
 
   private resetSameTurnFinalPayloadTracking(): void {
     this.turnAnswerOwner = null;
+    this.turnAnswerCommitted = false;
+    this.activeTurnEnded = false;
     this.activeStreamedAnswerPayloadHashes.clear();
     this.activeStreamedAnswerText = '';
     this.completedStreamedAnswerPayloadHashes.clear();
@@ -1565,7 +1612,24 @@ export class OutboundQueue implements IOutboundQueue {
     if (!this.activeTurnEvidence) return true;
     if (this.turnAnswerOwner === 'tool') return false;
     this.turnAnswerOwner ??= 'provider';
-    return true;
+    return !this.turnAnswerCommitted;
+  }
+
+  private isDeferringActiveAnswer(): boolean {
+    return this.activeTurnEvidence !== undefined && !this.activeTurnEnded;
+  }
+
+  private discardBufferedAnswerText(): void {
+    this.streamBufferParts = this.streamBufferParts.filter((part) => part.role !== 'answer');
+    this.activeStreamedAnswerPayloadHashes.clear();
+    this.activeStreamedAnswerText = '';
+    this.completedStreamedAnswerPayloadHashes.clear();
+    this.completedStreamedTurnId = undefined;
+    this.completedStreamSnapshotReady = false;
+    if (this.streamBufferParts.length === 0 && this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
   }
 
   private sameTurnFinalPayloadHash(text: string): string {

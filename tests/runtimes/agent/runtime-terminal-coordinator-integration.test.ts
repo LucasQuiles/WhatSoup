@@ -520,6 +520,7 @@ describe('runtime terminal coordinator integration', () => {
       state.perChatRuntimeTurnContexts.set(mapKey, [runtimeContext]);
       state.perChatInboundSeqQueue.set(mapKey, [44]);
       state.pendingTurnText.set(mapKey, runtimeContext.replay.text);
+      state.perChatTurnText.set(mapKey, 'Primary narration that was only buffered.');
       const replay = vi.spyOn(state, 'replayTurnOnFallback').mockResolvedValue(undefined);
 
       expect(state.scheduleFallbackReplay({
@@ -530,6 +531,9 @@ describe('runtime terminal coordinator integration', () => {
         hadToolActivity: false,
       })).toBe(true);
       expect(replay).toHaveBeenCalledOnce();
+      expect(queue.resumeTurnAnswerArbitration).toHaveBeenCalledWith(
+        runtimeContext.identity.logicalTurnId,
+      );
 
       state.handleEventWithContext(
         { type: 'result', text: 'primary terminal failure', isError: true },
@@ -1108,7 +1112,7 @@ describe('runtime terminal coordinator integration', () => {
     }
   });
 
-  it('marks replay unsafe as soon as partial assistant output is accepted', () => {
+  it('keeps replay safe while partial assistant output remains buffered', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -1131,7 +1135,7 @@ describe('runtime terminal coordinator integration', () => {
       );
 
       expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer');
-      expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
+      expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(true);
       expect(runtimeContext.replay.replaySafe).toBe(true);
     } finally {
       db.close();

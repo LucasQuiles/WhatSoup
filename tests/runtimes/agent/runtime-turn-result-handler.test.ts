@@ -264,6 +264,91 @@ describe('runtime result terminal provider notices', () => {
   }
 });
 
+describe('selected answer bookkeeping', () => {
+  it('uses the scoped terminal result instead of discarded streamed narration for voice', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const host = harness.host as unknown as {
+      perChatTurnText: Map<string, string>;
+      runtimeTurnCoordinator: {
+        attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+      };
+    };
+    host.runtimeTurnCoordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    host.perChatTurnText.set('15550190050', 'Discarded narration.');
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'Selected final answer.', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        voice: expect.objectContaining({ responseText: 'Selected final answer.' }),
+      }),
+    );
+  });
+
+  it('uses the global terminal result instead of discarded streamed narration for voice', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const host = harness.host as unknown as {
+      currentTurnAssistantText: string;
+      turnHadVisibleOutput: boolean;
+      runtimeTurnCoordinator: {
+        attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+      };
+    };
+    host.runtimeTurnCoordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    host.currentTurnAssistantText = 'Discarded narration.';
+    host.turnHadVisibleOutput = true;
+
+    handleGlobalRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'Selected final answer.', isError: false },
+      queue: harness.queue,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        voice: expect.objectContaining({ responseText: 'Selected final answer.' }),
+      }),
+    );
+  });
+
+  it('omits discarded global narration from voice when an MCP tool owns the answer', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const host = harness.host as unknown as {
+      currentTurnAssistantText: string;
+      singleTurnHadToolActivity: boolean;
+      runtimeTurnCoordinator: {
+        attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+      };
+    };
+    host.runtimeTurnCoordinator.attemptOutcomeForResult.mockReturnValue({ kind: 'completed' });
+    host.currentTurnAssistantText = 'Discarded narration.';
+    host.singleTurnHadToolActivity = true;
+    (harness.queue as unknown as { hasToolReplyClaimed(): boolean }).hasToolReplyClaimed = vi.fn(() => true);
+
+    handleGlobalRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        voice: expect.objectContaining({ responseText: '' }),
+      }),
+    );
+  });
+});
+
 describe('journaled result without runtime turn context (invariant-violation path)', () => {
   it('releases the per-chat replay latch when a journaled completed result has no runtime turn context', () => {
     const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });

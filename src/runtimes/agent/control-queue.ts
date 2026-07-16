@@ -147,6 +147,16 @@ export class ControlQueue implements IOutboundQueue {
     this.activeTurnId = turnId;
   }
 
+  hasCommittedAnswer(): boolean {
+    return false;
+  }
+
+  resumeTurnAnswerArbitration(turnId: string): void {
+    if (this.activeTurnId !== turnId) {
+      throw new Error(`No active turn evidence belongs to ${turnId}`);
+    }
+  }
+
   async flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence> {
     if (this.activeTurnId === undefined) {
       if (this.completedTurnEvidence?.turnId === turnId) {

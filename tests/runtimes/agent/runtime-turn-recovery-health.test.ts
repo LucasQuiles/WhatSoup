@@ -125,6 +125,7 @@ function installTurn(
   );
   const runtimeContext = context(seq, logicalTurnId);
   const queue = {
+    abortTurn: vi.fn(),
     flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [],

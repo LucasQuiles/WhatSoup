@@ -490,7 +490,7 @@ if (event.text && !hasPendingPoll) {
       host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
       // Accumulate result text for voice reply (SP4)
       if (mapKey !== undefined) {
-        host.perChatTurnText.set(mapKey, (host.perChatTurnText.get(mapKey) ?? '') + event.text);
+        host.perChatTurnText.set(mapKey, event.text);
       }
     }
   }
@@ -1030,19 +1030,22 @@ if (event.text) {
       host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
       host.turnHadVisibleOutput = true;
       // Accumulate result text for voice reply (SP4)
-      host.currentTurnAssistantText += event.text;
+      host.currentTurnAssistantText = queue.hasToolReplyClaimed?.() ? '' : event.text;
     }
   }
 }
 host.currentTurnAssistantItemText.clear();
 const rowId = host.session?.getDbRowId() ?? null;
 const hadSuppressedReplySatisfaction = host.turnHadSuppressedReplySatisfaction;
+const selectedProviderText = !queue.hasToolReplyClaimed?.()
+  && host.currentTurnAssistantText.trim() !== '';
+const hadVisibleOutput = host.turnHadVisibleOutput || selectedProviderText;
 host.turnHadSuppressedReplySatisfaction = false;
 let armedFallbackNow = false;
 if (!wasSilentCompact && !isSystemResult) {
   host.recordFallbackTurnOutcome(
     queue,
-    host.turnHadVisibleOutput || hadSuppressedReplySatisfaction,
+    hadVisibleOutput || hadSuppressedReplySatisfaction,
     turnHadToolWork,
     host.session,
   );
@@ -1050,7 +1053,7 @@ if (!wasSilentCompact && !isSystemResult) {
   // standalone rather than deferring it to the next reply.
   host.flushPendingHandoffNotice(queue);
   if (!turnCapabilityFailureRecorded) {
-    if (host.turnHadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
+    if (hadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
       host.recordTurnCapabilitySuccess(true);
     } else {
       host.recordTurnCapabilityFailure(true, 'empty-output');
@@ -1074,7 +1077,7 @@ host.singleTurnHadToolActivity = false;
 // If nothing visible was emitted this turn, send an explicit fallback —
 // unless we just armed the provider fallback (its activation notice has
 // already informed the user and the turn is being replayed on the backup).
-if (!host.turnHadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentCompact && !armedFallbackNow) {
+if (!hadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentCompact && !armedFallbackNow) {
   queue.enqueueText('_(no response)_');
 }
 host.turnHadVisibleOutput = false;
@@ -1111,7 +1114,9 @@ if (wasSilentCompact || hadCompactBoundary) {
   // Capture voice reply context before flush (SP4)
   const chatJidForVoice = host.shared ? host.currentTurnChatJid : host.activeChatJid;
   const inboundContentType = host.currentTurnInboundContentType;
-  const responseText = wasSilentCompact ? '' : host.currentTurnAssistantText;
+  const responseText = wasSilentCompact || queue.hasToolReplyClaimed?.()
+    ? ''
+    : host.currentTurnAssistantText;
   // Reset per-turn voice state
   host.currentTurnInboundContentType = null;
   host.currentTurnAssistantText = '';

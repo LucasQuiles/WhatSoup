@@ -87,8 +87,8 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
-    beginTurnEvidence: vi.fn(),
-    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+    beginTurnEvidence: vi.fn(), hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(), flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [] as number[],
       lifecycleOpIds: [] as number[],
@@ -763,8 +763,8 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
-    beginTurnEvidence: vi.fn(),
-    flushTurnEvidence: vi.fn(async (turnId: string) => ({
+    beginTurnEvidence: vi.fn(), hasCommittedAnswer: vi.fn(() => false),
+    resumeTurnAnswerArbitration: vi.fn(), flushTurnEvidence: vi.fn(async (turnId: string) => ({
       turnId,
       answerOpIds: [] as number[],
       lifecycleOpIds: [] as number[],
