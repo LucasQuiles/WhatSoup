@@ -87,6 +87,53 @@
         "deltaKind": "fixture-hygiene",
         "productionOwner": null
       }
+    },
+    {
+      "kind": "pull-request",
+      "number": 1900,
+      "state": "merged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1900",
+      "baseOid": "ffffffffffffffffffffffffffffffffffffffff",
+      "headOid": "1111111111111111111111111111111111111111",
+      "patchIdStable": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "pathBlobSet": [
+        {
+          "status": "modified",
+          "path": "src/lib/shared-refactor.ts",
+          "blobOid": "cccccccccccccccccccccccccccccccccccccccc"
+        },
+        {
+          "status": "modified",
+          "path": "tests/lib/shared-refactor.test.ts",
+          "blobOid": "dddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "pull-request",
+      "number": 1901,
+      "state": "closed-unmerged",
+      "url": "https://github.com/LucasQuiles/WhatSoup/pull/1901",
+      "baseOid": "4444444444444444444444444444444444444444",
+      "headOid": "5555555555555555555555555555555555555555",
+      "patchIdStable": "3333333333333333333333333333333333333333",
+      "pathBlobSet": [
+        {
+          "status": "added",
+          "path": "examples/shared-refactor.ts",
+          "blobOid": "2222222222222222222222222222222222222222"
+        }
+      ],
+      "disposition": null
+    },
+    {
+      "kind": "issue",
+      "number": 1783,
+      "state": "open",
+      "url": "https://github.com/LucasQuiles/WhatSoup/issues/1783",
+      "taskFingerprintSha256": "ca2a383af7f56efc1da64477e626cffd5939b1bb0f7c6b653c6c96c0f5d22706",
+      "disposition": null
     }
   ]
 }
