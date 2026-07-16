@@ -268,6 +268,13 @@ Planning-packet verification observed:
 The failed attempts remain part of the evidence trail. Their later passing controls do not turn the
 failed invocations into clean results.
 
+The 2026-07-16 validator revival also found that `record-review --review-path` had no frozen input
+keyset or source-versus-parent semantics, and finding-specific reproduction IDs were not bound to
+literal commands. The plan now defines canonical source `reviewInput` rows, profile-owned review
+aliases/dedupe keys, imported-manifest parent binding, review evidence closure, exact
+`reproductionContract` rows, and the sole constrained dynamic-attempt lane in `bcf-reproduction`.
+No implementation was invented before that contract was written and re-reviewed.
+
 The complete branch gate must run under the installed GNU process-group timeout with strict
 `loadgate` admission inside the deadline. Timeout status 124/137, load-admission status 75, a signal,
 missing output, or any masked pipeline is inconclusive, not clean.

@@ -1076,8 +1076,10 @@ The exact schema-1 object key sets are:
 | `predecessorPin` | `taskId`, `profileId`, `runId`, `terminalHead`, `manifestSha256`, `completionReceiptSha256`, `ledgerSha256` |
 | `entryTestRoster` | `files`, `digestSha256` |
 | `testRosterFile` | `path`, `state`, `testNames` |
-| `review` | `reviewId`, `alias`, `dedupeKey`, `head`, `snapshotDigestSha256`, `reportPath`, `reportSha256`, `metaPath`, `metaSha256`, `stderrPath`, `stderrSha256`, `findings` |
+| `reviewInput` | `schemaVersion`, `reviewId`, `dedupeKey`, `head`, `snapshotDigestSha256`, `reportPath`, `reportSha256`, `metaPath`, `metaSha256`, `stderrPath`, `stderrSha256`, `findings`, `reproductionContracts` |
+| `review` | `reviewId`, `alias`, `dedupeKey`, `head`, `snapshotDigestSha256`, `reportPath`, `reportSha256`, `metaPath`, `metaSha256`, `stderrPath`, `stderrSha256`, `findings`, `reproductionContracts` |
 | `finding` | `findingId`, `severity`, `requiresFix`, `requiresReproduction`, `evidencePath`, `evidenceSha256`, `disposition`, `resolution`, `reason`, `counterevidenceRefs`, `reproductionAttemptIds`, `counterReproductionAttemptIds`, `fixedAtHead`, `fixReproductionAttemptIds`, `fixReviewId` |
+| `reproductionContract` | `attemptId`, `argv`, `expectedExit`, `toolName`, `deadlineMs`, `killGraceMs` |
 | `lifecycle` | `status`, `completionCommit`, `finalGate`, `artifactSha256`, `successor`, `supersededBy`, `oracle`, `branchDeletionAuthorized` |
 | `documentHashes` | `spec`, `plan`, `notes`, `helper` |
 | `documentHash` | `path`, `sha256`, `bytes` |
@@ -1130,12 +1132,18 @@ types are not interchangeable.
 - `entryTestRoster.files` is path-sorted `testRosterFile[]` plus `Sha256`; each file has `Path`,
   `state: present|absent`, and a sorted unique bounded full-test-name string array, which is empty
   exactly when absent.
-- `review` uses IDs/dedupe key, `Oid`, snapshot/report/meta/stderr `Path`/`Sha256` pairs, and
-  finding-ID-sorted `finding[]`. A finding uses bounded finding ID, the closed severity/disposition/
+- `reviewInput` has integer `schemaVersion: 1`; otherwise it is the exact `review` object without the
+  helper-owned `alias`. `review` uses IDs/dedupe key, `Oid`, snapshot/report/meta/stderr
+  `Path`/`Sha256` pairs, finding-ID-sorted `finding[]`, and attempt-ID-sorted
+  `reproductionContract[]`. A reproduction contract uses `Id`, a nonempty bounded literal argv,
+  normalized expected-exit, a tool name already frozen by the reproduction profile, and the exact
+  900,000 ms/30,000 ms deadline/grace. A finding uses bounded finding ID, the closed severity/disposition/
   resolution enums, two booleans, evidence `Path`/`Sha256`, `null|bounded string` reason, sorted
   bounded counterevidence strings and attempt IDs, `null|Oid` fixed head, and `null|Id` fix review.
   Rejected requires nonempty counterevidence and counter-reproduction arrays; fixed requires head,
-  fix-attempt IDs, and fix-review ID; incompatible fields are exactly null/empty arrays.
+  fix-attempt IDs, and fix-review ID; incompatible fields are exactly null/empty arrays. Every
+  reproduction/counter/fix attempt ID occurs in exactly one reproduction contract, every contract is
+  referenced, and the same attempt ID cannot carry two argv/status contracts across reviews.
 - `lifecycle` uses the declared lifecycle/final-gate/oracle enums, `null|Oid` completion,
   `null|Sha256` artifact, `null|Path` successor/supersession, and literal
   `branchDeletionAuthorized: false`. Each `documentHashes` field is a `documentHash`; those and
@@ -1355,10 +1363,33 @@ profile-owned depth-three BCF-08 closeout chain defined below, hash/path mismatc
 whose task/head/run ID/manifest digest does not exactly equal the required `--expect-task`,
 `--expect-head`, `--expect-run-id`, and `--expect-manifest-sha256` declarations. The expected digest
 is compared before import and again against the copied lock; the source cannot self-select its
-parent identity. `record-review` binds each
-finding row to one imported `review` alias and its source manifest hash; docs and reproduction joins
-use their corresponding imported aliases. Finalize and verify recursively recompute the imported
-closure and never rediscover files by directory walk.
+parent identity.
+
+`record-review` has two closed modes; no mode is inferred from a caller flag. In a source review
+profile (`bcf-review-contract|bcf-review-redaction|bcf-review-integration`), `--alias` must be the
+profile-owned alias `review-contract|review-redaction|review-integration`, and `--review-path` is a
+run-relative canonical `reviewInput` JSON file inside the active run. The profile also owns the
+dedupe key respectively `contract-cli-review|redaction-async-review|integration-blast-review`.
+The helper requires the input head/snapshot to equal the run entry, verifies the exact bytes/hashes
+of report, meta, stderr, and every finding evidence path under the run root, rejects symlinks or
+unreferenced reproduction contracts, and stores the alias-added `review` row. This source-mode check
+validates reproduction declarations but does not pretend the later lead attempts already ran.
+`review-schema-check` revalidates that stored row and closure; child import includes every stored
+review report/meta/stderr/evidence path in addition to the manifest-declared attempt/artifact closure.
+
+In a parent profile with imported review children, `--alias` must name one exact imported review
+child and `--review-path` must be the literal imported path
+`children/<alias>/run_manifest.json`. The helper requires that child manifest to contain exactly one
+source-mode review whose alias/dedupe/head/snapshot equal the child contract, prefixes its evidence
+paths with `children/<alias>/`, and stores that bound row in the parent. It then loads proof attempts
+only from the already imported `lead-reproduction` child. Each proof must have the same ID, literal
+argv, expected exit, frozen tool, 900,000 ms/30,000 ms deadline/grace, exact review head/snapshot,
+direct exit-or-signal, `expectationMet: true`, and `Pass` as its unique reproduction contract.
+Missing, extra, reused, harmless-command-substituted, foreign-head, stale-snapshot, or non-pass proof
+is Inconclusive. Parent finalization requires all three role rows and runs the complete finding join;
+source review finalization requires schema/closure validity but never upgrades an unexecuted proof.
+Docs and reproduction joins use their corresponding imported aliases. Finalize and verify recursively
+recompute the imported closure and never rediscover files by directory walk.
 
 `RUN_CONTRACT_PROFILES` is a closed helper constant and the runtime SSOT for completion-critical
 attempts, child joins, transition authority, and whether a run may complete its task. `init` accepts
@@ -1554,8 +1585,12 @@ malformed result, zero tests, or missing marker is Inconclusive evidence; a diff
 assertion/regression or failed preserved-safe control is Fail. Both non-pass classes stop promotion,
 but retain the correct diagnosis and correction. The Task 0
 bootstrap RED remains advisory and cannot satisfy any completion profile until the committed helper
-enforces this predicate. Generic non-required attempts remain recordable for diagnostics but never contribute
-to `overallVerdict`. A generated snapshot test asserts the complete profile/attempt-contract digest
+enforces this predicate. Generic non-required attempts are accepted only by `bcf-reproduction`, only
+with a tool already frozen at init, entry head/snapshot, null inner-timeout owner, no output path,
+and the fixed 900,000 ms/30,000 ms watchdog bounds. They never directly contribute to
+`overallVerdict`; they contribute indirectly only when a parent `record-review` matches their exact
+ID/argv/status/tool/bounds to one immutable reproduction contract. All other profiles reject a
+non-required attempt before spawn. A generated snapshot test asserts the complete profile/attempt-contract digest
 and exact coverage in both directions, then proves `final-branch-gate -- true`, wrong evaluator
 corpus, collapsed inventory/docs commands, missing output declaration, wrong timeout owner, and a
 transition ID sent through `record-command` are rejected before child execution. It also proves a
@@ -4370,8 +4405,9 @@ path allowlist and only the final run's ignored artifact paths allowed. Select p
 and assert the helper-frozen attempts/children exactly match its `RUN_CONTRACT_PROFILES` row; a retry
 uses a new run rather than changing that set. Use `record-child-run` to
 verify and import the finalized B docs run, three review runs, and lead reproduction run under unique
-closed-kind aliases before `record-review` binds any finding. For each finding, validate its stable
-ID/report evidence/reproduction attempts and imported source-manifest hash. Prove the code diff from
+closed-kind aliases before parent-mode `record-review` calls bind the three imported child manifests.
+For each finding, validate its stable ID/report evidence, literal reproduction-command contract,
+exact lead attempt, and imported source-manifest hash. Prove the code diff from
 the reviewer snapshot to `BCF_DOCS_COMMIT` is empty and the only intervening paths are the Step 5
 documentation allowlist. The final run must prove that each direct review/reproduction manifest
 digest equals its counterpart recursively imported through `docs` → `docs-precommit`; pairwise
