@@ -1016,6 +1016,17 @@ canonical `run.requiredChildPins` array, sorted by alias, and requires its alias
 `alias`, `head`, `runId`, and `manifestSha256`; no sidecar, environment value, or later import option
 may replace or edit the manifest-bound pins.
 
+Canonical active-manifest storage is not the immutability boundary. During the same exclusive init
+operation, the helper also exclusively writes canonical `run_init.json` and its exact
+`run_init.sha256` lock before returning success. `RunInitAnchor` freezes the init-owned projection:
+run/task/profile/phase/creation time, entry head/snapshot digest, helper identity, all path sets,
+required attempt/child sets and child pins, completion flags, tool capability rows, reserved roots,
+entry-test-roster digest, and the canonical document-hash digest. Every later operation and both
+active/finalized verification modes recompute that projection from the manifest and require exact
+anchor bytes plus lock. Neither file is ever rewritten. A caller that consistently substitutes the
+pin array, imported child, expected CLI fields, and predecessor row still fails the init-anchor
+comparison; redundant mutable fields or file permissions are not accepted as an immutability proof.
+
 `reconciledBase` is never caller-supplied. Observation and reconciliation init store the explicit
 state `not-observed`. Only reconciliation's successful helper-owned merge transition may atomically
 single-assign it to the proven merge commit; failure/abort leaves `not-observed`. Every later profile
@@ -1050,6 +1061,7 @@ The exact schema-1 object key sets are:
 | Object | Exact keys |
 |---|---|
 | `RunManifest` | `schemaVersion`, `manifestState`, `run`, `entrySnapshot`, `currentSnapshot`, `attempts`, `artifacts`, `children`, `predecessor`, `entryTestRoster`, `reviews`, `lifecycle`, `documentHashes`, `upstream`, `overallVerdict` |
+| `RunInitAnchor` | `schemaVersion`, `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `entryHead`, `entrySnapshotDigestSha256`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots`, `entryTestRosterDigestSha256`, `documentHashesDigestSha256` |
 | `run` | `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `finalizedAtUtc`, `entryHead`, `terminalHead`, `reconciledBase`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `transitionCount`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots` |
 | `snapshot` | `head`, `indexTreeOid`, `trackedPatchSha256`, `unstagedPatchSha256`, `allowedUntracked`, `preservedOwner`, `digestSha256` |
 | `snapshotPath` | `path`, `type`, `mode`, `bytes`, `sha256` |
@@ -1082,6 +1094,10 @@ types are not interchangeable.
 - `RunManifest` has integer `schemaVersion: 1`; `manifestState:
   active|finalized|verified-pass-closeout-rejected`; the named object fields; arrays of their named
   row type; nullable `predecessor`; and root `overallVerdict: Verdict`.
+- `RunInitAnchor` has integer `schemaVersion: 1`, exact copies of the named init-owned scalar and
+  set-valued fields, the same closed child-pin/tool/reserved-root row types, and three `Sha256`
+  projection digests. Its path arrays and row arrays use the same canonical order as the manifest.
+  Its lock is exactly `<sha256>  run_init.json\n`.
 - `run` uses `Id` for run/profile, a literal task ID from the profile table, and profile-derived
   `phase: observation|reconciliation|task01|task02|task03|task04|task05|task06|task07|review|reproduction|docs-a|docs-b|final`.
   Creation/finalization are `Time`/`null|Time`; entry/helper commits are `Oid`; terminal head is
@@ -1176,8 +1192,9 @@ grammar above. Tests snapshot every exact key set and canonical byte string, the
 invalid and one valid neighbor for duplicate keys, unknown/missing keys, nullability, ordering,
 timestamp grammar, numeric grammar, string/path bounds, lock basenames, and one-byte mutation.
 
-The manifest state machine is also closed. `init` exclusively creates an `active` manifest with no
-manifest lock or completion bundle. Read-only `verify` detects state from canonical manifest bytes;
+The manifest state machine is also closed. `init` exclusively creates an `active` manifest plus the
+immutable init anchor/lock, with no final manifest lock or completion bundle. Read-only `verify`
+detects state from canonical manifest bytes and first verifies the init anchor/lock;
 it has no caller-selectable active/finalized mode. For `active`, it checks the active schema,
 document/helper/current-snapshot hashes, admitted closure, and the required absence of every final
 lock/bundle; success reports `verificationScope: active` and remains non-promotable Inconclusive.
@@ -1326,8 +1343,9 @@ referenced by a verdict.
 `[a-z][a-z0-9-]{0,63}`, a closed kind
 `observation|docs|review|reproduction|predecessor`, and a finalized
 helper-owned child run. It first executes the same read-only verification as `verify`, then imports
-only the child manifest, lock, and manifest-declared artifact closure into an exclusively created
-`children/<alias>/` directory. The join record stores kind, child task/run ID, child head/snapshot,
+only the child manifest/final lock, immutable init anchor/lock, and manifest-declared attempt,
+artifact, predecessor, and recursive-child closure into an exclusively created `children/<alias>/`
+directory. The join record stores kind, child task/run ID, child head/snapshot,
 source manifest hash, sorted imported relative-path/hash/byte rows, and a canonical tree digest;
 source paths are never authoritative. It rejects mutable/unfinalized children, unknown files
 referenced by a verdict, alias reuse, cycles, any nested depth above two except the one exact
