@@ -22,6 +22,12 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type {
+  MarkSystemTurnInput,
+  PendingSystemTurnSnapshot,
+  SystemTurnLeaseToken,
+  SystemTurnPurpose,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
@@ -52,6 +58,8 @@ const {
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
+    waitForProviderTurnToTerminalize: vi.fn(async () => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
@@ -247,8 +255,14 @@ type CrashInfo = {
 
 type PollRuntimeState = {
   pendingPolls: { questions: Map<string, PendingPollQuestion> };
+  pendingSystemResults: {
+    mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+    peek(scopeKey: string): PendingSystemTurnSnapshot | null;
+  };
   chatSessions: Map<string, typeof mockSession>;
   chatQueues: Map<string, IOutboundQueue>;
+  sessionEventToolScopes: WeakMap<object, string>;
+  handleEventPerChat(sourceSession: object, event: AgentEvent, toolScopeKey: string): void;
   handlePendingPollSoftExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePendingPollHardExpiry: (mapKey: string, expected: PendingPollQuestion) => void;
   handlePerChatCrash: (mapKey: string, chatJid?: string, info?: CrashInfo) => void;
@@ -289,9 +303,28 @@ function vote(voterJid: string, option: string, isAdmin: boolean, ts: number): P
 }
 
 function setOwnedTestSession(runtime: AgentRuntime, mapKey: string): void {
-  (runtime as unknown as {
+  const state = runtime as unknown as {
     setOwnedPerChatSession: (key: string, value: typeof mockSession) => void;
-  }).setOwnedPerChatSession(mapKey, mockSession);
+    sessionEventToolScopes: WeakMap<object, string>;
+  };
+  state.setOwnedPerChatSession(mapKey, mockSession);
+  state.sessionEventToolScopes.set(mockSession, `${mapKey}#test`);
+}
+
+function admitPendingSystemResult(
+  state: PollRuntimeState,
+  mapKey: string,
+  expectedPurpose: SystemTurnPurpose,
+): void {
+  const pending = state.pendingSystemResults.peek(mapKey);
+  expect(pending).toEqual(expect.objectContaining({
+    purpose: expectedPurpose,
+    blocking: true,
+  }));
+  const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+  if (!toolScopeKey) throw new Error(`missing tool scope for ${mapKey}`);
+  state.handleEventPerChat(mockSession, { type: 'result', text: null }, toolScopeKey);
+  expect(state.pendingSystemResults.peek(mapKey)).toBeNull();
 }
 
 function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
@@ -435,6 +468,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
       setOwnedTestSession(runtime, groupJid);
       state.chatQueues.set(groupJid, mockQueue);
+      const mark = vi.spyOn(state.pendingSystemResults, 'mark');
 
       const votes = new Map<string, PollVote>([
         ['1555006@s.whatsapp.net', vote('1555006@s.whatsapp.net', 'No', false, 100)],
@@ -456,6 +490,14 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.waitFor(() => {
         expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('No'));
       });
+      expect(mark).toHaveBeenCalledWith(expect.objectContaining({
+        scopeKey: groupJid,
+        purpose: 'poll_answer_continuation',
+        timeoutMs: 240_000,
+        onTimeout: expect.any(Function),
+      }));
+      admitPendingSystemResult(state, groupJid, 'poll_answer_continuation');
+      expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
       expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
 
@@ -585,6 +627,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const state = runtime as unknown as PollRuntimeState;
       const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
+      const mark = vi.spyOn(state.pendingSystemResults, 'mark');
 
       // Session reports inactive at crash time, then active after spawnSession.
       mockSession.getStatus
@@ -614,6 +657,13 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           expect.stringContaining('session resumed after crash'),
         );
       });
+      expect(mark).toHaveBeenCalledWith(expect.objectContaining({
+        scopeKey: mapKey,
+        purpose: 'respawn_continuation',
+        timeoutMs: 240_000,
+        onTimeout: expect.any(Function),
+      }));
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       // success path clears the prior respawn-failed alert
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
@@ -625,6 +675,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const state = runtime as unknown as PollRuntimeState;
       const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
+      const mark = vi.spyOn(state.pendingSystemResults, 'mark');
 
       mockGetMessagesSince.mockReturnValue([
         { timestamp: Math.floor(Date.now() / 1000), senderName: 'Tester', senderJid: dmJid, content: 'are you back?' },
@@ -646,6 +697,29 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
           expect.stringContaining('Recent chat context'),
         );
       });
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+      );
+      expect(mark).toHaveBeenCalledWith(expect.objectContaining({
+        scopeKey: mapKey,
+        purpose: 'respawn_context',
+        timeoutMs: 240_000,
+        onTimeout: expect.any(Function),
+      }));
+      admitPendingSystemResult(state, mapKey, 'respawn_context');
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(
+          expect.stringContaining('session resumed after crash'),
+        );
+      });
+      expect(mark).toHaveBeenCalledWith(expect.objectContaining({
+        scopeKey: mapKey,
+        purpose: 'respawn_continuation',
+        timeoutMs: 240_000,
+        onTimeout: expect.any(Function),
+      }));
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
       expect(mockSession.sendTurn).toHaveBeenCalledWith(
         expect.stringContaining('session resumed after crash'),
       );

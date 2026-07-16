@@ -1,46 +1,264 @@
 /**
- * Branch-coverage tests for src/runtimes/agent/pending-system-result-tracker.ts.
- *
- * The class is exercised at the happy-path level by tests/runtimes/agent/
- * runtime.test.ts (system-result suppression, GLOBAL-scope shared-mode path,
- * unmark-on-send-failure, cleanup). This file targets every branch in the
- * tracker in isolation so the per-file coverage for
- * pending-system-result-tracker.ts reads 100%.
- *
- * Branches covered (16 total):
- *
- *   mark(scopeKey)
- *     - `scopeKey === undefined` early-return (TRUE)              ← leaf line 21
- *     - `scopeKey === undefined` falls through (FALSE)             ← leaf line 21
- *     - `counts.get(scopeKey) ?? 0` falsy branch (first mark)      ← leaf line 21
- *     - `counts.get(scopeKey) ?? 0` truthy branch (second mark)    ← leaf line 21
- *
- *   unmark(scopeKey)
- *     - `scopeKey === undefined` early-return (TRUE)              ← leaf line 22
- *     - `scopeKey === undefined` falls through (FALSE)             ← leaf line 22
- *     - `counts.get(scopeKey) ?? 0` falsy branch (unknown scope)   ← leaf line 22
- *     - `pending > 0` TRUE (decrements)                           ← leaf line 22
- *     - `pending > 0` FALSE (floor at 0; stays 0)                 ← leaf line 22
- *
- *   count(scopeKey)
- *     - existing key returns stored value (truthy branch)         ← leaf line 23
- *     - absent key returns 0 (falsy branch)                       ← leaf line 23
- *
- *   consumeIfPending(scopeKey)
- *     - `counts.get(scopeKey) ?? 0` falsy branch (absent)         ← leaf line 24
- *     - `pending > 0` TRUE (consumes one, returns true)           ← leaf line 24
- *     - `pending > 0` FALSE (count 0 or drained, returns false)   ← leaf line 24
- *
- * The tracker has no I/O, no timers, no side effects outside its own
- * `counts` map — every assertion is made against the public readonly
- * `counts` map (`.get`, `.has`, `.size`) or the method's concrete return
- * value, per the test-integrity rules (no `.toBeUndefined()` / `.toBeNull()`
- * / `.toBeTruthy()` / `.not.toThrow()` as the lone terminal assertion).
+ * Focused invariants for exact system-turn ownership, FIFO classification,
+ * dispatch barriers, LID rekeys, and fail-closed wall deadlines.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { PendingSystemResultTracker } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 describe('PendingSystemResultTracker', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('holds an expired lease until its exact teardown succeeds after a rekey', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'lid#1' };
+    let finishTeardown: ((succeeded: boolean) => void) | undefined;
+    const onTimeout = vi.fn(() => new Promise<boolean>((resolve) => {
+      finishTeardown = resolve;
+    }));
+    const lease = tracker.mark({
+      scopeKey: '15550000001@lid',
+      purpose: 'fresh_session_context',
+      owner,
+      timeoutMs: 1_000,
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(600);
+    tracker.rekeyScope('15550000001@lid', '15550000001@s.whatsapp.net');
+    expect(tracker.peek('15550000001@s.whatsapp.net')?.lease.id).toBe(lease.id);
+
+    await vi.advanceTimersByTimeAsync(399);
+    expect(onTimeout).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledExactlyOnceWith(lease);
+    expect(tracker.count('15550000001@s.whatsapp.net')).toBe(1);
+    expect(tracker.blockingCount('15550000001@s.whatsapp.net')).toBe(1);
+
+    finishTeardown?.(true);
+    await vi.runAllTimersAsync();
+
+    expect(tracker.count('15550000001@s.whatsapp.net')).toBe(0);
+    expect(tracker.blockingCount('15550000001@s.whatsapp.net')).toBe(0);
+  });
+
+  it('keeps an expired lease classified and blocking when teardown is not proven', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'respawn_context',
+      owner,
+      timeoutMs: 25,
+      onTimeout: async () => false,
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(tracker.peek('chat-a')?.lease.id).toBe(lease.id);
+    expect(tracker.count('chat-a')).toBe(1);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+  });
+
+  it('keeps an expired lease classified and blocking when teardown rejects', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'respawn_context',
+      owner,
+      timeoutMs: 25,
+      onTimeout: async () => { throw new Error('shutdown failed'); },
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(tracker.peek('chat-a')?.lease.id).toBe(lease.id);
+    expect(tracker.count('chat-a')).toBe(1);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+  });
+
+  it('clears exact deadline timers on result, cancellation, scope clear, and full clear', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat#1' };
+    const onTimeout = vi.fn(async () => true);
+    const consumed = tracker.mark({
+      scopeKey: 'consumed', purpose: 'fresh_session_context', owner,
+      timeoutMs: 50, onTimeout,
+    });
+    const cancelled = tracker.mark({
+      scopeKey: 'cancelled', purpose: 'fresh_session_context', owner,
+      timeoutMs: 50, onTimeout,
+    });
+    tracker.mark({
+      scopeKey: 'scope-cleared', purpose: 'fresh_session_context', owner,
+      timeoutMs: 50, onTimeout,
+    });
+    tracker.mark({
+      scopeKey: 'all-cleared', purpose: 'fresh_session_context', owner,
+      timeoutMs: 50, onTimeout,
+    });
+
+    expect(tracker.consumeResult(consumed)?.lease.id).toBe(consumed.id);
+    expect(tracker.cancel(cancelled)).toBe(true);
+    tracker.clearScope('scope-cleared');
+    tracker.clear();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(onTimeout).toHaveBeenCalledTimes(0);
+    expect(tracker.counts.size).toBe(0);
+  });
+
+  it('publishes an immutable exact owner and route with each production lease', () => {
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 3, toolScopeKey: 'chat-a#3' };
+    const lease = tracker.mark({
+      scopeKey: 'chat-a',
+      purpose: 'fresh_session_context',
+      owner,
+      routeChatJid: '15550000001@s.whatsapp.net',
+    });
+    owner.generation = 9;
+
+    expect(tracker.peek('chat-a')).toEqual({
+      lease,
+      purpose: 'fresh_session_context',
+      owner: { managerId: 'manager-a', generation: 3, toolScopeKey: 'chat-a#3' },
+      routeChatJid: '15550000001@s.whatsapp.net',
+      blocking: true,
+    });
+  });
+
+  it('does not consume a non-head lease or mutate FIFO order', () => {
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const first = tracker.mark({
+      scopeKey: 'chat-a', purpose: 'fresh_session_context', owner,
+    });
+    const second = tracker.mark({
+      scopeKey: 'chat-a', purpose: 'poll_answer_continuation', owner,
+    });
+
+    expect(tracker.consumeResult(second)).toBeNull();
+    expect(tracker.count('chat-a')).toBe(2);
+    expect(tracker.peek('chat-a')?.lease).toEqual(first);
+    expect(tracker.consumeResult(first)?.purpose).toBe('fresh_session_context');
+    expect(tracker.peek('chat-a')?.lease).toEqual(second);
+  });
+
+  it('lets an exact system lease wait for prior blockers but not for itself', async () => {
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-a#1' };
+    const first = tracker.mark({
+      scopeKey: 'chat-a', purpose: 'fresh_session_context', owner,
+    });
+    const second = tracker.mark({
+      scopeKey: 'chat-a', purpose: 'poll_answer_continuation', owner,
+    });
+    let dispatched = false;
+    const waiting = tracker.waitUntilDispatchable('chat-a', second).then(() => {
+      dispatched = true;
+    });
+    await Promise.resolve();
+    expect(dispatched).toBe(false);
+
+    expect(tracker.consumeResult(first)?.lease).toEqual(first);
+    await waiting;
+    expect(dispatched).toBe(true);
+    expect(tracker.blockingCount('chat-a')).toBe(1);
+    expect(tracker.peek('chat-a')?.lease).toEqual(second);
+  });
+
+  it('rekeys a live FIFO without invalidating exact tokens held by senders', async () => {
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'lid#1' };
+    const first = tracker.mark({
+      scopeKey: '15550000001@lid', purpose: 'fresh_session_context', owner,
+    });
+    const second = tracker.mark({
+      scopeKey: '15550000001@lid', purpose: 'poll_answer_continuation', owner,
+    });
+
+    tracker.rekeyScope('15550000001@lid', '15550000001@s.whatsapp.net');
+
+    expect(tracker.count('15550000001@lid')).toBe(0);
+    expect(tracker.count('15550000001@s.whatsapp.net')).toBe(2);
+    expect(tracker.consumeResult(first)?.purpose).toBe('fresh_session_context');
+    expect(tracker.cancel(second)).toBe(true);
+    expect(tracker.count('15550000001@s.whatsapp.net')).toBe(0);
+    await expect(tracker.waitForDrain('15550000001@s.whatsapp.net')).resolves.toBeUndefined();
+  });
+
+  it('retains and consumes typed system-turn purposes in FIFO order', () => {
+    const tracker = new PendingSystemResultTracker();
+
+    tracker.mark('typed', 'fresh_session_context');
+    tracker.mark('typed', 'respawn_continuation');
+
+    expect(tracker.peekPurpose('typed')).toBe('fresh_session_context');
+    expect(tracker.consumePurposeIfPending('typed')).toBe('fresh_session_context');
+    expect(tracker.peekPurpose('typed')).toBe('respawn_continuation');
+    expect(tracker.consumePurposeIfPending('typed')).toBe('respawn_continuation');
+    expect(tracker.peekPurpose('typed')).toBeNull();
+  });
+
+  it('retains an expired purpose ahead of a newer lease until teardown succeeds', async () => {
+    vi.useFakeTimers();
+    const tracker = new PendingSystemResultTracker();
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'typed#1' };
+    let finishTeardown: ((succeeded: boolean) => void) | undefined;
+    tracker.mark({
+      scopeKey: 'typed-timeout',
+      purpose: 'auto_compact_silent',
+      owner,
+      timeoutMs: 10,
+      onTimeout: () => new Promise<boolean>((resolve) => { finishTeardown = resolve; }),
+    });
+    tracker.mark({
+      scopeKey: 'typed-timeout', purpose: 'poll_answer_continuation', owner,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(tracker.peekPurpose('typed-timeout')).toBe('auto_compact_silent');
+    expect(tracker.count('typed-timeout')).toBe(2);
+    expect(tracker.blockingCount('typed-timeout')).toBe(2);
+
+    finishTeardown?.(true);
+    await vi.runAllTimersAsync();
+
+    expect(tracker.count('typed-timeout')).toBe(1);
+    expect(tracker.peekPurpose('typed-timeout')).toBe('poll_answer_continuation');
+    expect(tracker.consumePurposeIfPending('typed-timeout')).toBe('poll_answer_continuation');
+    expect(tracker.count('typed-timeout')).toBe(0);
+  });
+
+  it('failed-send reversal removes the newest purpose without erasing an older lease', () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.mark('typed-unmark', 'fresh_session_context');
+    const failed = tracker.mark('typed-unmark', 'respawn_continuation')!;
+
+    expect(tracker.cancel(failed)).toBe(true);
+
+    expect(tracker.count('typed-unmark')).toBe(1);
+    expect(tracker.blockingCount('typed-unmark')).toBe(1);
+    expect(tracker.peekPurpose('typed-unmark')).toBe('fresh_session_context');
+  });
+
+  it('does not infer a typed owner from direct compatibility-counter mutation', () => {
+    const tracker = new PendingSystemResultTracker();
+    tracker.counts.set('legacy-only', 1);
+
+    expect(tracker.peekPurpose('legacy-only')).toBeNull();
+    expect(tracker.consumePurposeIfPending('legacy-only')).toBeNull();
+    expect(tracker.count('legacy-only')).toBe(1);
+  });
+
   // ─── mark ──────────────────────────────────────────────────────────────────
 
   it('mark(undefined) is a no-op: the undefined early-return fires and counts stays empty', () => {
@@ -88,50 +306,48 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.count('chat-1')).toBe(2);
   });
 
-  // ─── unmark ────────────────────────────────────────────────────────────────
+  // ─── cancel ────────────────────────────────────────────────────────────────
 
-  it('unmark(undefined) is a no-op: the undefined early-return fires and counts stays empty', () => {
+  it('cancel(undefined) is a no-op and leaves counts empty', () => {
     const tracker = new PendingSystemResultTracker();
 
-    tracker.unmark(undefined);
+    expect(tracker.cancel(undefined)).toBe(false);
 
     expect(tracker.counts.size).toBe(0);
     expect(tracker.counts.has('a')).toBe(false);
     expect(tracker.count('a')).toBe(0);
   });
 
-  it("unmark('a') on a never-marked scope stays 0 (?? 0 falsy + pending > 0 FALSE)", () => {
+  it('cancelling an already consumed token is idempotent', () => {
     const tracker = new PendingSystemResultTracker();
+    const lease = tracker.mark('consumed')!;
+    tracker.consumeIfPending('consumed');
 
-    tracker.unmark('never-marked');
+    expect(tracker.cancel(lease)).toBe(false);
 
-    // The key was absent (?? 0 → pending = 0), so pending > 0 is FALSE and
-    // no entry is created.
-    expect(tracker.counts.has('never-marked')).toBe(false);
-    expect(tracker.counts.size).toBe(0);
-    expect(tracker.count('never-marked')).toBe(0);
+    expect(tracker.count('consumed')).toBe(0);
   });
 
-  it("unmark('a') with a live count decrements to 0 (pending > 0 TRUE)", () => {
+  it('cancels an exact live token without removing its sibling', () => {
     const tracker = new PendingSystemResultTracker();
-    tracker.mark('a'); // count → 1
-    tracker.mark('a'); // count → 2
+    const first = tracker.mark('a', 'fresh_session_context')!;
+    tracker.mark('a', 'respawn_continuation');
 
-    tracker.unmark('a'); // pending = 2 > 0 → set to 1.
+    expect(tracker.cancel(first)).toBe(true);
 
     expect(tracker.counts.get('a')).toBe(1);
     expect(tracker.count('a')).toBe(1);
+    expect(tracker.peekPurpose('a')).toBe('respawn_continuation');
   });
 
-  it("unmark('a') from 1 down to 0 then unmark again stays at 0 (pending > 0 FALSE → floor)", () => {
+  it('cancels a token once and never decrements below zero', () => {
     const tracker = new PendingSystemResultTracker();
-    tracker.mark('a'); // count → 1
+    const lease = tracker.mark('a')!;
 
-    tracker.unmark('a'); // pending = 1 > 0 → set to 0.
+    expect(tracker.cancel(lease)).toBe(true);
     expect(tracker.count('a')).toBe(0);
 
-    tracker.unmark('a'); // pending = 0, NOT > 0 → no decrement (floor).
-    // The key remains (set during the first unmark) but its value is 0.
+    expect(tracker.cancel(lease)).toBe(false);
     expect(tracker.counts.get('a')).toBe(0);
     expect(tracker.count('a')).toBe(0);
   });
@@ -231,10 +447,10 @@ describe('PendingSystemResultTracker', () => {
 
   it('releases a system-result waiter when the send fails and its mark is reversed', async () => {
     const tracker = new PendingSystemResultTracker();
-    tracker.mark('chat-b');
+    const lease = tracker.mark('chat-b')!;
 
     const waiting = tracker.waitForDrain('chat-b');
-    tracker.unmark('chat-b');
+    tracker.cancel(lease);
 
     await expect(waiting).resolves.toBeUndefined();
     expect(tracker.count('chat-b')).toBe(0);
@@ -256,26 +472,54 @@ describe('PendingSystemResultTracker', () => {
     expect(tracker.count('chat-c')).toBe(1);
   });
 
-  it('releases dispatch blocking while retaining a timed-out result for classification', async () => {
+  it('releases a waiter only after successful deadline teardown removes classification', async () => {
+    vi.useFakeTimers();
     const tracker = new PendingSystemResultTracker();
-    tracker.mark('chat-timeout');
+    const owner = { managerId: 'manager-a', generation: 1, toolScopeKey: 'chat-timeout#1' };
+    let finishTeardown: ((succeeded: boolean) => void) | undefined;
+    tracker.mark({
+      scopeKey: 'chat-timeout',
+      purpose: 'fresh_session_context',
+      owner,
+      timeoutMs: 10,
+      onTimeout: () => new Promise<boolean>((resolve) => { finishTeardown = resolve; }),
+    });
 
     let released = false;
     const waiting = tracker.waitForDrain('chat-timeout').then(() => { released = true; });
-    tracker.releaseBlockingMark('chat-timeout');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(released).toBe(false);
+    expect(tracker.count('chat-timeout')).toBe(1);
+
+    finishTeardown?.(true);
+    await vi.runAllTimersAsync();
     await waiting;
 
     expect(released).toBe(true);
     expect(tracker.blockingCount('chat-timeout')).toBe(0);
-    expect(tracker.count('chat-timeout')).toBe(1);
-    expect(tracker.consumeIfPending('chat-timeout')).toBe(true);
     expect(tracker.count('chat-timeout')).toBe(0);
   });
 
-  it('consumes a released FIFO result without releasing a later blocking system turn', async () => {
+  it('waits for exact FIFO emptiness when a live lease is rekeyed', async () => {
+    const tracker = new PendingSystemResultTracker();
+    const lease = tracker.mark('15550000001@lid')!;
+
+    let empty = false;
+    const waiting = tracker.waitUntilEmpty('15550000001@lid').then(() => { empty = true; });
+    await Promise.resolve();
+    expect(empty).toBe(false);
+
+    tracker.rekeyScope('15550000001@lid', '15550000001@s.whatsapp.net');
+    expect(tracker.cancel(lease)).toBe(true);
+
+    await waiting;
+    expect(empty).toBe(true);
+    expect(tracker.count('15550000001@s.whatsapp.net')).toBe(0);
+  });
+
+  it('consumes one FIFO result without releasing a later blocking system turn', async () => {
     const tracker = new PendingSystemResultTracker();
     tracker.mark('chat-fifo');
-    tracker.releaseBlockingMark('chat-fifo');
     tracker.mark('chat-fifo');
 
     let released = false;
@@ -292,13 +536,12 @@ describe('PendingSystemResultTracker', () => {
     expect(released).toBe(true);
   });
 
-  it('cancels a released send without unblocking a newer system turn', async () => {
+  it('cancels one exact send without unblocking a newer system turn', async () => {
     const tracker = new PendingSystemResultTracker();
-    tracker.mark('chat-timeout-reject');
-    tracker.releaseBlockingMark('chat-timeout-reject');
+    const releasedLease = tracker.mark('chat-timeout-reject')!;
     tracker.mark('chat-timeout-reject');
 
-    expect(tracker.unmarkReleased('chat-timeout-reject')).toBe(true);
+    expect(tracker.cancel(releasedLease)).toBe(true);
     expect(tracker.count('chat-timeout-reject')).toBe(1);
     expect(tracker.blockingCount('chat-timeout-reject')).toBe(1);
 

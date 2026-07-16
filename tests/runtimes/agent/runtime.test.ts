@@ -5,6 +5,12 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
+import type {
+  MarkSystemTurnInput,
+  PendingSystemTurnSnapshot,
+  SystemTurnLeaseToken,
+  SystemTurnPurpose,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
@@ -49,7 +55,9 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
+    waitForProviderTurnToTerminalize: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
@@ -600,6 +608,52 @@ async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promis
   await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 }
 
+type ProviderOwnerView = {
+  currentRuntimeTurnContext: unknown | null;
+  perChatRuntimeTurnContexts: Map<string, unknown[]>;
+  legacyProviderTurnOwners: Map<string, unknown>;
+};
+
+function hasPublishedProviderOwner(runtime: AgentRuntime, scopeKey: string): boolean {
+  const state = runtime as unknown as ProviderOwnerView;
+  if (scopeKey === '__global__') {
+    return state.currentRuntimeTurnContext !== null
+      || state.legacyProviderTurnOwners.has(scopeKey);
+  }
+  return (state.perChatRuntimeTurnContexts.get(scopeKey)?.length ?? 0) > 0
+    || state.legacyProviderTurnOwners.has(scopeKey);
+}
+
+async function waitForProviderDispatch(
+  runtime: AgentRuntime,
+  scopeKey = '__global__',
+): Promise<void> {
+  await vi.waitFor(() => {
+    const state = runtime as unknown as ProviderOwnerView;
+    const diagnostic = runtime as unknown as {
+      chatSessions: Map<string, unknown>;
+      perChatTurnQueues: Map<string, { activeTurn: unknown }>;
+    };
+    expect(
+      hasPublishedProviderOwner(runtime, scopeKey),
+      `provider owner was not published for ${scopeKey}; runtime scopes=${[
+        ...state.perChatRuntimeTurnContexts.keys(),
+      ].join(',')}; legacy scopes=${[...state.legacyProviderTurnOwners.keys()].join(',')}; sessions=${[
+        ...diagnostic.chatSessions.keys(),
+      ].join(',')}; turn queues=${[...diagnostic.perChatTurnQueues.entries()].map(([key, queue]) => `${key}:${queue.activeTurn === null ? 'idle' : 'active'}`).join(',')}; sends=${mockSession.sendTurn.mock.calls.length}; errors=${mockRuntimeLogger.error.mock.calls.map((call) => String((call[0] as { err?: unknown })?.err ?? call[1])).join('|')}`,
+    ).toBe(true);
+  });
+}
+
+async function sendAndAwaitProviderDispatch(
+  runtime: AgentRuntime,
+  msg: IncomingMessage,
+  scopeKey = '__global__',
+): Promise<void> {
+  await runtime.handleMessage(msg);
+  await waitForProviderDispatch(runtime, scopeKey);
+}
+
 /**
  * Like sendAndDrain, but also waits for the TurnQueue to fully drain.
  * Required for shared-mode tests where turns are processed asynchronously
@@ -617,6 +671,7 @@ function attachRuntimeFaultMarkerSpies(runtime: AgentRuntime): {
     markContinuityCandidateIfNoTerminalOutbound: ReturnType<typeof vi.fn>;
     markInboundFailed: ReturnType<typeof vi.fn>;
     upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+    getResumableCheckpoints: ReturnType<typeof vi.fn>;
     getOutboundDeliverySnapshot: ReturnType<typeof vi.fn>;
     finalizeTurnTerminal: ReturnType<typeof vi.fn>;
   };
@@ -632,12 +687,14 @@ function attachRuntimeFaultMarkerSpies(runtime: AgentRuntime): {
     markContinuityCandidateIfNoTerminalOutbound: vi.fn(() => true),
     markInboundFailed: vi.fn(),
     upsertSessionCheckpoint: vi.fn(),
+    getResumableCheckpoints: vi.fn(() => []),
     ...makeTerminalDurabilityMock(),
   };
   const replyGuarantee = {
     arm: vi.fn(),
     disarm: vi.fn(),
     isArmed: vi.fn(() => true),
+    notifyActivity: vi.fn(),
     shutdown: vi.fn(),
   };
   (runtime as unknown as { durability: unknown }).durability = durability;
@@ -842,10 +899,134 @@ function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeSta
   return runtime as unknown as PerChatCleanupRuntimeState;
 }
 
-function setOwnedTestSession(runtime: AgentRuntime, mapKey: string, session: unknown): void {
-  (runtime as unknown as {
+function setOwnedTestSession(
+  runtime: AgentRuntime,
+  mapKey: string,
+  session: object,
+  toolScopeKey = `${mapKey}#test`,
+): string {
+  const state = runtime as unknown as {
     setOwnedPerChatSession: (key: string, value: unknown) => void;
-  }).setOwnedPerChatSession(mapKey, session);
+    sessionEventToolScopes: WeakMap<object, string>;
+  };
+  state.setOwnedPerChatSession(mapKey, session);
+  state.sessionEventToolScopes.set(session, toolScopeKey);
+  return toolScopeKey;
+}
+
+type PendingSystemResultTrackerView = {
+  mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+  cancel(lease: SystemTurnLeaseToken | null | undefined): boolean;
+  peek(scopeKey: string): PendingSystemTurnSnapshot | null;
+  count(scopeKey: string): number;
+  blockingCount(scopeKey: string): number;
+};
+
+function pendingSystemResults(runtime: AgentRuntime): PendingSystemResultTrackerView {
+  return (runtime as unknown as {
+    pendingSystemResults: PendingSystemResultTrackerView;
+  }).pendingSystemResults;
+}
+
+function markOwnedSystemTurn(
+  runtime: AgentRuntime,
+  sourceSession: object,
+  scopeKey: string,
+  purpose: SystemTurnPurpose,
+  routeChatJid?: string,
+): SystemTurnLeaseToken {
+  const state = runtime as unknown as {
+    captureSystemTurnOwner(
+      session: object,
+      key: string,
+    ): MarkSystemTurnInput['owner'];
+  };
+  return pendingSystemResults(runtime).mark({
+    scopeKey,
+    purpose,
+    owner: state.captureSystemTurnOwner(sourceSession, scopeKey),
+    ...(routeChatJid !== undefined ? { routeChatJid } : {}),
+  });
+}
+
+function publishSingletonTestOwner(
+  runtime: AgentRuntime,
+  sourceSession: object,
+  routeChatJid: string,
+): void {
+  const state = runtime as unknown as {
+    session: object | null;
+    managerIdFor(session: object): string;
+    sessionEventToolScopes: WeakMap<object, string>;
+    publishLegacyProviderTurn(
+      session: object,
+      scopeKey: string,
+      routeChatJid: string,
+    ): unknown;
+  };
+  state.session = sourceSession;
+  state.managerIdFor(sourceSession);
+  state.sessionEventToolScopes.set(sourceSession, '__global__');
+  state.publishLegacyProviderTurn(sourceSession, '__global__', routeChatJid);
+}
+
+function handlePerChatProviderEvent(
+  runtime: AgentRuntime,
+  sourceSession: object,
+  event: AgentEvent,
+): void {
+  const state = runtime as unknown as {
+    sessionEventToolScopes: WeakMap<object, string>;
+    handleEventPerChat(session: object, event: AgentEvent, toolScopeKey: string): void;
+  };
+  const toolScopeKey = state.sessionEventToolScopes.get(sourceSession);
+  if (!toolScopeKey) throw new Error('test source session has no registered tool scope');
+  state.handleEventPerChat(sourceSession, event, toolScopeKey);
+}
+
+/**
+ * Exercise downstream event behavior without claiming provider admission.
+ * Admission/source-binding tests must use the captured provider callback or
+ * the private source-bound handleEvent/handleEventPerChat entry points instead.
+ */
+function handleEventDownstreamWithoutAdmission(
+  runtime: AgentRuntime,
+  event: AgentEvent,
+  options: {
+    queue?: IOutboundQueue;
+    session?: object | null;
+    conversationKey?: string;
+    inboundSeq?: number;
+    mapKey?: string;
+    toolScopeKey?: string;
+    isSystemResult?: boolean;
+    systemTurnPurpose?: SystemTurnPurpose | null;
+  } = {},
+): void {
+  const queue = options.queue ?? mockQueue;
+  (runtime as unknown as {
+    handleEventWithContext(
+      event: AgentEvent,
+      queue: IOutboundQueue,
+      session: object | null,
+      conversationKey?: string,
+      inboundSeq?: number,
+      mapKey?: string,
+      toolScopeKey?: string,
+      isSystemResult?: boolean,
+      systemTurnPurpose?: SystemTurnPurpose | null,
+    ): void;
+  }).handleEventWithContext(
+    event,
+    queue,
+    options.session === undefined ? mockSession : options.session,
+    options.conversationKey,
+    options.inboundSeq,
+    options.mapKey,
+    options.toolScopeKey,
+    options.isSystemResult,
+    options.systemTurnPurpose,
+  );
 }
 
 function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
@@ -893,10 +1074,22 @@ describe('AgentRuntime', () => {
     capturedNotifyUserRef.current = null;
     capturedOnResumeFailedRef.current = null;
     capturedSessionManagerOptsRef.current = null;
-    mockSession.spawnSession.mockResolvedValue(undefined);
-    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
-    mockSession.sendTurn.mockResolvedValue(undefined);
-    mockSession.getDbRowId.mockReturnValue(null);
+    // Reset implementations as well as call history. A fail-fast test can leave
+    // a mockRejectedValueOnce queued; allowing that to bleed into the next test
+    // makes the suite order-dependent and obscures the real terminal owner.
+    mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
+    mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
+    mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    mockSession.getDbRowId.mockReset().mockReturnValue(null);
+    mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
+      turnId,
+      answerOpIds: [],
+      lifecycleOpIds: [],
+      statusOpIds: [],
+    }));
+    mockQueue.abortTurn.mockReset();
     mockGetActiveSession.mockReturnValue(null);
     mockGetResumableSessionForChat.mockReturnValue(null);
     mockGetSessionTokenSnapshot.mockReturnValue(null);
@@ -941,6 +1134,7 @@ describe('AgentRuntime', () => {
     mockConfig.textAggregateDelayMs = 2_000;
     mockConfig.startupNotifications = true;
     mockConfig.proactiveResumeOnStartup = true;
+    delete (mockConfig as Record<string, unknown>).pollResolution;
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
     mockPrepareContentForAgent.mockImplementation((...args: unknown[]) => actualPrepareContentForAgentRef.current!(...args));
@@ -1189,7 +1383,7 @@ describe('AgentRuntime', () => {
       });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
     await Promise.resolve();
 
@@ -1227,7 +1421,7 @@ describe('AgentRuntime', () => {
     });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
     await Promise.resolve();
 
@@ -1239,6 +1433,10 @@ describe('AgentRuntime', () => {
     expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
 
     mockSession.sendTurn.mockClear();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({
+      messageId: 'msg-compact-retry',
+      content: 'retry after incomplete compact',
+    }));
     await emitAgentResult(200);
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
@@ -1267,7 +1465,7 @@ describe('AgentRuntime', () => {
     });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 5_000_000, outputTokens: 1000 });
     await Promise.resolve();
 
@@ -1371,7 +1569,7 @@ describe('AgentRuntime', () => {
     });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 100, outputTokens: 0 });
     await Promise.resolve();
 
@@ -1398,9 +1596,11 @@ describe('AgentRuntime', () => {
       lastCompactInputTokens: 100, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
 
+    publishSingletonTestOwner(runtime, mockSession, 'test@s.whatsapp.net');
+
     (runtime as unknown as {
       maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
-    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+    }).maybeStartAutoCompact(mockSession);
 
     // Gated out: no /compact sent, and the counter is NOT advanced (no false success).
     expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
@@ -1422,9 +1622,11 @@ describe('AgentRuntime', () => {
       lastCompactInputTokens: 100, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
 
+    publishSingletonTestOwner(runtime, mockSession, 'test@s.whatsapp.net');
+
     (runtime as unknown as {
       maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
-    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+    }).maybeStartAutoCompact(mockSession);
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
@@ -1453,9 +1655,11 @@ describe('AgentRuntime', () => {
       lastCompactInputTokens: 5, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
     });
 
+    publishSingletonTestOwner(runtime, mockSession, 'test@s.whatsapp.net');
+
     (runtime as unknown as {
       maybeStartAutoCompact: (s: typeof mockSession, k?: string) => void;
-    }).maybeStartAutoCompact(mockSession, 'test@s.whatsapp.net');
+    }).maybeStartAutoCompact(mockSession);
 
     // Combined delta: (55 + 9_950) - (5 + 0) = 9_995 >= 9_990 → fires.
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
@@ -1493,7 +1697,7 @@ describe('AgentRuntime', () => {
       });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
     await Promise.resolve();
 
@@ -1518,7 +1722,6 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
     const state = runtime as unknown as {
       autoCompact: AutoCompactView;
-      pendingSystemResults: { counts: Map<string, number> };
     };
     const globalScope = '__global__';
     mockActiveAgentSession();
@@ -1528,7 +1731,7 @@ describe('AgentRuntime', () => {
       .mockRejectedValueOnce(new Error('compact stdin closed'));
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
     await emitAgentResult(150);
 
     expect(mockSession.sendTurn).toHaveBeenNthCalledWith(2, '/compact');
@@ -1543,12 +1746,16 @@ describe('AgentRuntime', () => {
       }),
       'auto compact send failed',
     );
-    expect(state.pendingSystemResults.counts.get(globalScope) ?? 0).toBe(0);
+    expect(pendingSystemResults(runtime).count(globalScope)).toBe(0);
     expect(state.autoCompact.waiters.has(globalScope)).toBe(false);
     expect(state.autoCompact.silentCompactScopes.has(globalScope)).toBe(false);
 
     mockSession.sendTurn.mockClear();
     mockSession.sendTurn.mockResolvedValue(undefined);
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({
+      messageId: 'msg-after-compact-send-failure',
+      content: 'retry compact after send failure',
+    }));
     await emitAgentResult(200);
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
@@ -1582,7 +1789,7 @@ describe('AgentRuntime', () => {
       });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
       capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
       await Promise.resolve();
 
@@ -1594,6 +1801,10 @@ describe('AgentRuntime', () => {
       // A subsequent result event would normally trigger maybeStartAutoCompact again.
       // While the post-timeout backoff is active, /compact must NOT be re-sent.
       mockSession.sendTurn.mockClear();
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-compact-timeout-cooldown',
+        content: 'turn during compact cooldown',
+      }));
       capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
       await Promise.resolve();
 
@@ -1604,6 +1815,10 @@ describe('AgentRuntime', () => {
       // degrading for a long window.
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 100);
       mockSession.sendTurn.mockClear();
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-compact-timeout-retry',
+        content: 'turn after compact cooldown',
+      }));
       capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
       await Promise.resolve();
 
@@ -1613,47 +1828,140 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('releases the next user send after auto-compact timeout but classifies the late compact result as system', async () => {
+  it('quarantines a timed-out auto-compact source before admitting and finalizing the next user turn', async () => {
     vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
     try {
-      const db = makeDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
-      const state = runtime as unknown as {
-        pendingSystemResults: { counts: Map<string, number> };
-        postTurnGate: Set<string>;
-      };
       const globalScope = '__global__';
+      const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+      const tracker = pendingSystemResults(runtime);
+      const cancelSpy = vi.spyOn(tracker, 'cancel');
+      mockQueue.flushTurnEvidence.mockImplementation(async (turnId: string) => ({
+        turnId,
+        answerOpIds: [9001],
+        lifecycleOpIds: [],
+        statusOpIds: [],
+      }));
+      durability.getOutboundDeliverySnapshot.mockImplementation((opId, expected) => ({
+        opId,
+        ...expected,
+        status: 'echoed',
+      }));
       mockActiveAgentSession();
       mockTokenSnapshot(250, 100);
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
-      await emitAgentResult(150);
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'trigger compact', inboundSeq: 501 }),
+      );
+      await emitAgentResult(150, 'initial reply');
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact'));
+      await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(
+        expect.objectContaining({ terminal: expect.objectContaining({ inboundSeq: 501 }) }),
+      ));
 
-      const followUp = sendAndDrain(runtime, makeMsg({ content: 'follow-up after timeout' }));
+      const compactTurn = tracker.peek(globalScope);
+      expect(compactTurn).toMatchObject({
+        purpose: 'auto_compact_silent',
+        blocking: true,
+      });
+      const compactLease = compactTurn!.lease;
+      durability.finalizeTurnTerminal.mockClear();
+
+      const followUpDispatch = sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'user turn after compact timeout', inboundSeq: 502 }),
+      );
       await Promise.resolve();
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('follow-up after timeout');
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('user turn after compact timeout');
 
       await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
-      await Promise.resolve();
-      const releasedAtTimeout = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).some(
-        ([text]) => text === 'follow-up after timeout',
+      await followUpDispatch;
+
+      const followUpIndex = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).findIndex(
+        ([text]) => text === 'user turn after compact timeout',
       );
-      if (!releasedAtTimeout) {
-        capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
-      }
-      await followUp;
+      const followUpOrder = mockSession.sendTurn.mock.invocationCallOrder[followUpIndex]
+        ?? Number.MAX_SAFE_INTEGER;
+      const shutdownOrder = mockSession.shutdown.mock.invocationCallOrder[0]
+        ?? Number.MAX_SAFE_INTEGER;
+      const cancelCallIndex = cancelSpy.mock.calls.findIndex(([lease]) => lease?.id === compactLease.id);
+      const cancelOrder = cancelSpy.mock.invocationCallOrder[cancelCallIndex]
+        ?? Number.MAX_SAFE_INTEGER;
 
-      expect(releasedAtTimeout).toBe(true);
-      expect(state.pendingSystemResults.counts.get(globalScope)).toBe(1);
+      expect.soft(mockSession.shutdown).toHaveBeenCalledOnce();
+      expect.soft(cancelSpy).toHaveBeenCalledWith(compactLease);
+      expect.soft(shutdownOrder).toBeLessThan(cancelOrder);
+      expect.soft(cancelOrder).toBeLessThan(followUpOrder);
+      expect.soft(tracker.peek(globalScope)).toBeNull();
+      expect.soft(tracker.blockingCount(globalScope)).toBe(0);
 
-      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
-      await Promise.resolve();
+      mockTokenSnapshot(260, 260);
+      capturedOnEventRef.current?.({
+        type: 'result',
+        text: 'follow-up complete',
+        inputTokens: 10,
+        outputTokens: 1,
+      });
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 
-      expect(state.pendingSystemResults.counts.get(globalScope) ?? 0).toBe(0);
-      expect(state.postTurnGate.has(globalScope)).toBe(false);
+      expect.soft(durability.finalizeTurnTerminal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          terminal: expect.objectContaining({
+            inboundSeq: 502,
+            attemptKind: 'completed',
+            inboundDisposition: 'finalized_replied',
+          }),
+        }),
+      );
+      expect.soft(tracker.count(globalScope)).toBe(0);
+      expect.soft(mockMarkSessionCompacted).not.toHaveBeenCalled();
+    } finally {
+      await runtime.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies an activity-independent wall deadline to fresh-context system turns', async () => {
+    vi.useFakeTimers();
+    let proveShutdown!: () => void;
+    mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      proveShutdown = resolve;
+    }));
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test');
+    try {
+      await runtime.start();
+      const state = runtime as unknown as {
+        session: typeof mockSession | null;
+        managerIdFor(session: typeof mockSession): string;
+        sessionEventToolScopes: WeakMap<typeof mockSession, string>;
+        markSystemTurn(
+          session: typeof mockSession,
+          scopeKey: string,
+          purpose: 'fresh_session_context',
+          routeChatJid: string,
+        ): { id: number; scopeKey: string };
+      };
+      state.session = mockSession;
+      state.managerIdFor(mockSession);
+      state.sessionEventToolScopes.set(mockSession, '__global__');
+      state.markSystemTurn(
+        mockSession,
+        '__global__',
+        'fresh_session_context',
+        '15550001111@s.whatsapp.net',
+      );
+
+      await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+
+      expect(mockSession.shutdown).toHaveBeenCalledOnce();
+      expect(pendingSystemResults(runtime).count('__global__')).toBe(1);
+
+      proveShutdown();
+      await vi.waitFor(() => expect(pendingSystemResults(runtime).count('__global__')).toBe(0));
     } finally {
       vi.useRealTimers();
     }
@@ -1669,7 +1977,7 @@ describe('AgentRuntime', () => {
       mockTokenSnapshot(250, 100);
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
       await emitAgentResult(150);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
 
@@ -1677,6 +1985,10 @@ describe('AgentRuntime', () => {
 
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(600, 250);
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-single-rapid-rearm',
+        content: 'rapid follow-up',
+      }));
       await emitAgentResult(350);
 
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
@@ -1698,7 +2010,11 @@ describe('AgentRuntime', () => {
       mockTokenSnapshot(250, 100);
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ chatJid: 'chat-a@s.whatsapp.net', senderJid: 'chat-a@s.whatsapp.net', content: 'hello' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ chatJid: 'chat-a@s.whatsapp.net', senderJid: 'chat-a@s.whatsapp.net', content: 'hello' }),
+        'chat-a@s.whatsapp.net',
+      );
       await emitAgentResult(150);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
 
@@ -1706,6 +2022,16 @@ describe('AgentRuntime', () => {
 
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(600, 250);
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({
+          messageId: 'msg-per-chat-rapid-rearm',
+          chatJid: 'chat-a@s.whatsapp.net',
+          senderJid: 'chat-a@s.whatsapp.net',
+          content: 'rapid follow-up',
+        }),
+        'chat-a@s.whatsapp.net',
+      );
       await emitAgentResult(350);
 
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
@@ -1723,12 +2049,21 @@ describe('AgentRuntime', () => {
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      let userTurn = 0;
+
+      const emitUserResult = async (inputTokens: number) => {
+        userTurn += 1;
+        await sendAndAwaitProviderDispatch(runtime, makeMsg({
+          messageId: `msg-escalation-${userTurn}`,
+          content: `escalation turn ${userTurn}`,
+        }));
+        await emitAgentResult(inputTokens);
+      };
 
       const triggerCompact = async (totalInputTokens: number, lastCompactInputTokens: number) => {
         mockSession.sendTurn.mockClear();
         mockTokenSnapshot(totalInputTokens, lastCompactInputTokens);
-        await emitAgentResult(totalInputTokens - lastCompactInputTokens);
+        await emitUserResult(totalInputTokens - lastCompactInputTokens);
         expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
         await emitSuccessfulCompactResult();
       };
@@ -1736,7 +2071,7 @@ describe('AgentRuntime', () => {
       const triggerRapidRearm = async (totalInputTokens: number, lastCompactInputTokens: number) => {
         mockSession.sendTurn.mockClear();
         mockTokenSnapshot(totalInputTokens, lastCompactInputTokens);
-        await emitAgentResult(totalInputTokens - lastCompactInputTokens);
+        await emitUserResult(totalInputTokens - lastCompactInputTokens);
         expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
       };
 
@@ -1748,7 +2083,7 @@ describe('AgentRuntime', () => {
       await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(650, 250);
-      await emitAgentResult(400);
+      await emitUserResult(400);
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
 
       await vi.advanceTimersByTimeAsync(9 * 60 * 1000 + 100);
@@ -1760,7 +2095,7 @@ describe('AgentRuntime', () => {
       await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(1_200, 700);
-      await emitAgentResult(500);
+      await emitUserResult(500);
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
 
       await vi.advanceTimersByTimeAsync(14 * 60 * 1000 + 100);
@@ -1772,7 +2107,7 @@ describe('AgentRuntime', () => {
       await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(1_800, 1_300);
-      await emitAgentResult(500);
+      await emitUserResult(500);
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
     } finally {
       vi.useRealTimers();
@@ -1788,42 +2123,50 @@ describe('AgentRuntime', () => {
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      let userTurn = 0;
+      const emitUserResult = async (inputTokens: number) => {
+        userTurn += 1;
+        await sendAndAwaitProviderDispatch(runtime, makeMsg({
+          messageId: `msg-recovery-${userTurn}`,
+          content: `recovery turn ${userTurn}`,
+        }));
+        await emitAgentResult(inputTokens);
+      };
 
       mockTokenSnapshot(250, 100);
-      await emitAgentResult(150);
+      await emitUserResult(150);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
       await emitSuccessfulCompactResult();
 
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(600, 250);
-      await emitAgentResult(350);
+      await emitUserResult(350);
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
       expect(runtime.getHealthSnapshot().details.autoCompactConsecutiveRapidRearmsMax).toBe(1);
 
       await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 100);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(700, 250);
-      await emitAgentResult(450);
+      await emitUserResult(450);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
       await emitSuccessfulCompactResult();
 
       await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(900, 700);
-      await emitAgentResult(200);
+      await emitUserResult(200);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
       await emitSuccessfulCompactResult();
 
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(1_200, 900);
-      await emitAgentResult(300);
+      await emitUserResult(300);
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
 
       await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
       mockSession.sendTurn.mockClear();
       mockTokenSnapshot(1_300, 900);
-      await emitAgentResult(400);
+      await emitUserResult(400);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
     } finally {
       vi.useRealTimers();
@@ -1839,7 +2182,7 @@ describe('AgentRuntime', () => {
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
       mockTokenSnapshot(250, 100);
       await emitAgentResult(150);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
@@ -1847,11 +2190,18 @@ describe('AgentRuntime', () => {
       await emitSuccessfulCompactResult(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
 
-      await sendAndDrain(runtime, makeMsg({ content: 'large follow-up' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-large-follow-up',
+        content: 'large follow-up',
+      }));
       await emitAgentResult(250, 'ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
       expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
 
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-second-follow-up',
+        content: 'second follow-up',
+      }));
       await emitAgentResult(250, 'still ok');
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
     } finally {
@@ -1868,7 +2218,7 @@ describe('AgentRuntime', () => {
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
       mockTokenSnapshot(250, 100);
       await emitAgentResult(150);
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
@@ -1876,7 +2226,10 @@ describe('AgentRuntime', () => {
       await emitSuccessfulCompactResult();
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
 
-      await sendAndDrain(runtime, makeMsg({ content: 'large codex follow-up' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-large-codex-follow-up',
+        content: 'large codex follow-up',
+      }));
       await emitTokenUsage(250);
       await emitAgentResultWithoutTokens('ok');
 
@@ -1894,26 +2247,36 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
       const state = runtime as unknown as {
-        pendingSystemResults: { counts: Map<string, number> };
         autoCompact: AutoCompactView;
       };
       const globalKey = '__global__';
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }));
       mockTokenSnapshot(250, 100);
       await emitAgentResult(150);
       await emitSuccessfulCompactResult();
 
-      state.pendingSystemResults.counts.set(globalKey, 1);
+      const lease = markOwnedSystemTurn(
+        runtime,
+        mockSession,
+        globalKey,
+        'manual_compact_silent',
+        'test@s.whatsapp.net',
+      );
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(true);
 
-      state.pendingSystemResults.counts.delete(globalKey);
+      pendingSystemResults(runtime).cancel(lease);
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({
+        messageId: 'msg-single-token-measurement',
+        content: 'real user turn after compact',
+      }));
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+      await emitAgentResultWithoutTokens('done');
     } finally {
       vi.useRealTimers();
     }
@@ -1930,25 +2293,45 @@ describe('AgentRuntime', () => {
       });
       const chatJid = 'chat-a@s.whatsapp.net';
       const state = runtime as unknown as {
-        pendingSystemResults: { counts: Map<string, number> };
         autoCompact: AutoCompactView;
       };
       mockActiveAgentSession();
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }),
+        chatJid,
+      );
       mockTokenSnapshot(250, 100);
       await emitAgentResult(150);
       await emitSuccessfulCompactResult();
 
-      state.pendingSystemResults.counts.set(chatJid, 1);
+      const lease = markOwnedSystemTurn(
+        runtime,
+        mockSession,
+        chatJid,
+        'manual_compact_silent',
+        chatJid,
+      );
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(chatJid)).toBe(true);
 
-      state.pendingSystemResults.counts.delete(chatJid);
+      pendingSystemResults(runtime).cancel(lease);
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({
+          messageId: 'msg-per-chat-token-measurement',
+          chatJid,
+          senderJid: chatJid,
+          content: 'real user turn after compact',
+        }),
+        chatJid,
+      );
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+      await emitAgentResultWithoutTokens('done');
     } finally {
       vi.useRealTimers();
     }
@@ -1960,12 +2343,15 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
       whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
     });
+
+    await emitAgentResultWithoutTokens('done');
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   });
 
   it('cleans up partial global MCP socket resources when startup fails', async () => {
@@ -2817,7 +3203,6 @@ describe('AgentRuntime', () => {
         chatSessions: Map<string, typeof staleSession>;
         chatQueues: Map<string, IOutboundQueue>;
         injectMissedMessages: ReturnType<typeof vi.fn>;
-        pendingSystemResults: { counts: Map<string, number> };
         handlePerChatCrash: (
           mapKey: string,
           chatJid?: string,
@@ -2844,7 +3229,7 @@ describe('AgentRuntime', () => {
       expect(staleSession.sendTurn).not.toHaveBeenCalled();
       expect(state.injectMissedMessages).not.toHaveBeenCalled();
       expect(replacementSession.getStatus).not.toHaveBeenCalled();
-      expect(state.pendingSystemResults.counts.get('chat-replaced') ?? 0).toBe(0);
+      expect(pendingSystemResults(runtime).count('chat-replaced')).toBe(0);
       expect(mockRuntimeLogger.info).not.toHaveBeenCalledWith(
         expect.objectContaining({ mapKey: 'chat-replaced', sessionId: 'stale-sess' }),
         'auto-respawn: attempting resume',
@@ -2855,7 +3240,7 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('auto-respawn unmarks only the failed continuation after injecting missed messages', async () => {
+  it('auto-respawn waits for injected context to terminalize before quarantining a failed continuation', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -2885,13 +3270,13 @@ describe('AgentRuntime', () => {
             startedAt: new Date().toISOString(),
             messageCount: 1,
             lastMessageAt: null,
+            turnInFlight: true,
           }),
       };
       const state = runtime as unknown as {
         chatSessions: Map<string, typeof session>;
         chatQueues: Map<string, IOutboundQueue>;
         injectMissedMessages: ReturnType<typeof vi.fn>;
-        pendingSystemResults: { counts: Map<string, number> };
         handlePerChatCrash: (
           mapKey: string,
           chatJid?: string,
@@ -2903,7 +3288,7 @@ describe('AgentRuntime', () => {
       state.chatQueues.set('chat-auto', queue);
       let missedContextMarkedBeforeInjection = false;
       state.injectMissedMessages = vi.fn(async () => {
-        missedContextMarkedBeforeInjection = (state.pendingSystemResults.counts.get('chat-auto') ?? 0) === 1;
+        missedContextMarkedBeforeInjection = pendingSystemResults(runtime).count('chat-auto') === 1;
         return true;
       });
 
@@ -2923,18 +3308,105 @@ describe('AgentRuntime', () => {
         Math.floor(new Date('2026-06-10T10:00:00Z').getTime() / 1000),
       );
       expect(missedContextMarkedBeforeInjection).toBe(true);
-      expect(session.sendTurn).toHaveBeenCalledWith(
-        expect.stringContaining('session resumed after crash'),
-      );
+      expect(session.sendTurn).not.toHaveBeenCalled();
+      expect(pendingSystemResults(runtime).count('chat-auto')).toBe(1);
+
+      handlePerChatProviderEvent(runtime, session, { type: 'result', text: null });
+      await vi.waitFor(() => {
+        expect(session.sendTurn).toHaveBeenCalledWith(
+          expect.stringContaining('session resumed after crash'),
+        );
+      });
       expect(session.sendTurn).toHaveBeenCalledWith(
         expect.stringContaining('continue where you left off'),
       );
-      expect(state.pendingSystemResults.counts.get('chat-auto') ?? 0).toBe(1);
+      await vi.waitFor(() => expect(pendingSystemResults(runtime).count('chat-auto')).toBe(0));
+      expect(session.shutdown).toHaveBeenCalled();
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({
           err: expect.any(Error),
           mapKey: 'chat-auto',
         }),
+        'failed to send continuation turn after auto-respawn',
+      );
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('auto-respawn cancels its context lease when missed-message injection throws', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const mapKey = 'chat-auto-inject-error';
+      const chatJid = 'chat-auto-inject-error@s.whatsapp.net';
+      const queue = makeQueueMock(chatJid);
+      const injectionError = new Error('missed-message lookup failed');
+      const session = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        sendTurn: vi.fn(),
+        getStatus: vi
+          .fn()
+          .mockReturnValueOnce({
+            active: false,
+            pid: null,
+            sessionId: 'sess-auto-inject-error',
+            startedAt: null,
+            messageCount: 0,
+            lastMessageAt: null,
+          })
+          .mockReturnValue({
+            active: true,
+            pid: 123,
+            sessionId: 'sess-auto-inject-error',
+            startedAt: new Date().toISOString(),
+            messageCount: 1,
+            lastMessageAt: null,
+          }),
+      };
+      const state = runtime as unknown as {
+        chatQueues: Map<string, IOutboundQueue>;
+        injectMissedMessages: ReturnType<typeof vi.fn>;
+        handlePerChatCrash: (
+          key: string,
+          deliveryJid?: string,
+          info?: {
+            exitCode: number | null;
+            signal: NodeJS.Signals | null;
+            sessionId: string | null;
+            dbRowId: number | null;
+          },
+        ) => void;
+      };
+
+      setOwnedTestSession(runtime, mapKey, session);
+      state.chatQueues.set(mapKey, queue);
+      state.injectMissedMessages = vi.fn(async () => {
+        expect(pendingSystemResults(runtime).count(mapKey)).toBe(1);
+        throw injectionError;
+      });
+
+      state.handlePerChatCrash(mapKey, chatJid, {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-auto-inject-error',
+        dbRowId: 42,
+        ...currentCrashIdentity(runtime, mapKey),
+      });
+
+      await vi.advanceTimersByTimeAsync(2_500);
+
+      expect(state.injectMissedMessages).toHaveBeenCalledOnce();
+      expect(session.sendTurn).not.toHaveBeenCalled();
+      expect(pendingSystemResults(runtime).count(mapKey)).toBe(0);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: injectionError, mapKey }),
         'failed to send continuation turn after auto-respawn',
       );
     } finally {
@@ -3403,6 +3875,76 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('keeps one coherent auto-compact lease and waiter when an in-flight LID scope is rekeyed', async () => {
+    const conversationKey = '15550007777';
+    const lidKey = `${conversationKey}@lid`;
+    const canonicalJid = `${conversationKey}@s.whatsapp.net`;
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      autoCompactInputTokens: 100,
+    });
+    const state = runtime as unknown as {
+      autoCompact: AutoCompactView;
+      chatSessions: Map<string, typeof mockSession>;
+      chatQueues: Map<string, IOutboundQueue>;
+      maybeStartAutoCompact(session: typeof mockSession, mapKey: string): void;
+      handleEventPerChat(
+        sourceSession: typeof mockSession,
+        event: AgentEvent,
+        toolScopeKey: string,
+      ): void;
+    };
+    const tracker = pendingSystemResults(runtime);
+    mockActiveAgentSession();
+    mockTokenSnapshot(250, 100);
+    const toolScopeKey = setOwnedTestSession(runtime, lidKey, mockSession);
+    state.chatQueues.set(lidKey, makeQueueMock(lidKey));
+
+    try {
+      state.maybeStartAutoCompact(mockSession, lidKey);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      expect(tracker.peek(lidKey)).toMatchObject({
+        purpose: 'auto_compact_silent',
+        blocking: true,
+      });
+      expect(state.autoCompact.waiters.has(lidKey)).toBe(true);
+
+      runtime.handleJidAliasChanged(conversationKey, canonicalJid);
+
+      const keys = [lidKey, canonicalJid];
+      const leaseKeys = keys.filter((key) => tracker.count(key) > 0);
+      const waiterKeys = keys.filter((key) => state.autoCompact.waiters.has(key));
+      expect.soft(leaseKeys).toHaveLength(1);
+      expect.soft(waiterKeys).toEqual(leaseKeys);
+      expect.soft(tracker.peek(leaseKeys[0] ?? '')).toMatchObject({
+        purpose: 'auto_compact_silent',
+        blocking: true,
+      });
+
+      state.handleEventPerChat(mockSession, { type: 'compact_boundary' }, toolScopeKey);
+      state.handleEventPerChat(
+        mockSession,
+        { type: 'result', text: null, inputTokens: 10, outputTokens: 1 },
+        toolScopeKey,
+      );
+      await Promise.resolve();
+
+      expect.soft(tracker.blockingCount(lidKey)).toBe(0);
+      expect.soft(tracker.blockingCount(canonicalJid)).toBe(0);
+      expect.soft(tracker.count(lidKey)).toBe(0);
+      expect.soft(tracker.count(canonicalJid)).toBe(0);
+      expect.soft(state.autoCompact.waiters.has(lidKey)).toBe(false);
+      expect.soft(state.autoCompact.waiters.has(canonicalJid)).toBe(false);
+      expect.soft(state.chatSessions.has(lidKey)).toBe(false);
+      expect.soft(state.chatSessions.get(canonicalJid)).toBe(mockSession);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it('pending AskUser poll votes remain correlated after LID remap', async () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
     const lidKey = '15550004444@lid';
@@ -3422,7 +3964,8 @@ describe('AgentRuntime', () => {
     };
 
     await runtime.start();
-    state.setOwnedPerChatSession(lidKey, mockSession);
+    mockActiveAgentSession();
+    setOwnedTestSession(runtime, lidKey, mockSession);
     state.chatQueues.set(lidKey, mockQueue);
     state.pendingPolls.questions.set(lidKey, {
       questions: [{
@@ -3536,12 +4079,17 @@ describe('AgentRuntime', () => {
     const canonicalJid = '15550004444@s.whatsapp.net';
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({
-      chatJid: lidKey,
-      senderJid: lidKey,
-      content: 'hello',
-      inboundSeq: 41,
-    }));
+    attachRuntimeFaultMarkerSpies(runtime);
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        chatJid: lidKey,
+        senderJid: lidKey,
+        content: 'hello',
+        inboundSeq: 41,
+      }),
+      lidKey,
+    );
 
     expect(capturedOnEventRef.current).toBeTypeOf('function');
 
@@ -3549,9 +4097,11 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.debug.mockClear();
 
     runtime.handleJidAliasChanged('15550004444', canonicalJid);
+    expect(state.chatSessions.has(lidKey)).toBe(true);
+    expect(state.chatSessions.has(canonicalJid)).toBe(false);
     capturedOnEventRef.current!({ type: 'result', text: 'remapped result' });
 
-    expect(state.chatSessions.has(canonicalJid)).toBe(true);
+    await vi.waitFor(() => expect(state.chatSessions.has(canonicalJid)).toBe(true));
     expect(state.chatQueues.get(canonicalJid)).toBe(mockQueue);
     expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('remapped result');
     expect(state.perChatInboundSeqQueue.has(canonicalJid)).toBe(false);
@@ -3566,18 +4116,24 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, typeof mockSession>;
       perChatTurnText: Map<string, string>;
     };
     const lidKey = '15550004444@lid';
     const canonicalJid = '15550004444@s.whatsapp.net';
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({
-      chatJid: lidKey,
-      senderJid: lidKey,
-      content: 'hello',
-      inboundSeq: 42,
-    }));
+    attachRuntimeFaultMarkerSpies(runtime);
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        chatJid: lidKey,
+        senderJid: lidKey,
+        content: 'hello',
+        inboundSeq: 42,
+      }),
+      lidKey,
+    );
 
     expect(capturedOnEventRef.current).toBeTypeOf('function');
 
@@ -3585,13 +4141,16 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueResultText.mockClear();
 
     runtime.handleJidAliasChanged('15550004444', canonicalJid);
+    expect(state.chatSessions.has(lidKey)).toBe(true);
+    expect(state.chatSessions.has(canonicalJid)).toBe(false);
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello ' });
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'world' });
 
-    expect(state.perChatTurnText.get(canonicalJid)).toBe('Hello world');
+    expect(state.perChatTurnText.get(lidKey)).toBe('Hello world');
 
     capturedOnEventRef.current!({ type: 'result', text: '!' });
 
+    await vi.waitFor(() => expect(state.chatSessions.has(canonicalJid)).toBe(true));
     expect(mockQueue.enqueueStreamingText.mock.calls.map(([text]) => text)).toEqual(['Hello ', 'world']);
     expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!');
     expect(state.perChatTurnText.has(canonicalJid)).toBe(false);
@@ -3716,12 +4275,13 @@ describe('AgentRuntime', () => {
       mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
 
       await runtime.start();
-      (runtime as unknown as { durability: unknown }).durability = makeTerminalDurabilityMock();
+      attachRuntimeFaultMarkerSpies(runtime);
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 10 }));
       await sendAndDrain(runtime, makeMsg({ messageId: 'txt-1', content: 'after image', contentType: 'text', inboundSeq: 11 }));
 
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
-      capturedOnEventRef.current!({ type: 'result', text: null });
+      await waitForProviderDispatch(runtime, 'test@s.whatsapp.net');
+      handlePerChatProviderEvent(runtime, mockSession, { type: 'result', text: null });
       await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(2));
 
       const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).map(([text]) => text);
@@ -3742,7 +4302,7 @@ describe('AgentRuntime', () => {
       mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
 
       await runtime.start();
-      (runtime as unknown as { durability: unknown }).durability = makeTerminalDurabilityMock();
+      attachRuntimeFaultMarkerSpies(runtime);
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 21 }));
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-2', content: 'image two', contentType: 'image', inboundSeq: 22 }));
       await sendAndDrain(runtime, makeMsg({ messageId: 'img-3', content: 'image three', contentType: 'image', inboundSeq: 23 }));
@@ -3752,7 +4312,8 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => {
         expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([23]);
       });
-      capturedOnEventRef.current!({ type: 'result', text: null });
+      await waitForProviderDispatch(runtime, 'test@s.whatsapp.net');
+      handlePerChatProviderEvent(runtime, mockSession, { type: 'result', text: null });
       await vi.waitFor(() => {
         expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
       });
@@ -3768,7 +4329,7 @@ describe('AgentRuntime', () => {
     mockSession.getDbRowId.mockReturnValue(77);
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello' }), 'test@s.whatsapp.net');
 
     // No assistant_text, no tool_use — pure empty-output terminal result.
     capturedOnEventRef.current!({ type: 'result', text: null });
@@ -3794,21 +4355,24 @@ describe('AgentRuntime', () => {
     mockSession.getDbRowId.mockReturnValue(78);
 
     await runtime.start();
-    const durability = makeTerminalDurabilityMock();
-    (runtime as unknown as { durability: unknown }).durability = durability;
-    await sendAndDrain(runtime, makeMsg({ content: 'do not reply', inboundSeq: 102 }));
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ content: 'do not reply', inboundSeq: 102 }),
+      'test@s.whatsapp.net',
+    );
     await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do not reply'));
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     mockQueue.enqueueStreamingText.mockClear();
     mockQueue.flush.mockClear();
     mockRuntimeLogger.warn.mockClear();
 
-    capturedOnEventRef.current!({
+    handlePerChatProviderEvent(runtime, mockSession, {
       type: 'assistant_text',
       text: 'No outbound warranted — no user ask is pending. Staying silent; sending nothing to WhatsApp.',
     });
     expect(replyGuarantee.disarm).not.toHaveBeenCalled();
-    capturedOnEventRef.current!({ type: 'result', text: null });
+    handlePerChatProviderEvent(runtime, mockSession, { type: 'result', text: null });
     await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalled());
 
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
@@ -4144,6 +4708,8 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueText.mockClear();
     mockQueue.enqueueResultText.mockClear();
     mockQueue.flush.mockResolvedValue(undefined);
+    mockQueue.endTurn.mockClear();
+    mockSession.completeProviderTurn.mockClear();
 
     const result = await runtime.handleAgentCommand({
       command: 'compact',
@@ -4160,12 +4726,13 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
     await vi.waitFor(() => {
-      expect(mockQueue.flush).toHaveBeenCalled();
+      expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     });
+    expect(mockQueue.endTurn).toHaveBeenCalledOnce();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
 
     capturedOnEventRef.current!({ type: 'compact_boundary' });
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('ompact'));
+    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
   });
 
   it('per_chat handleAgentCommand rejects compact while the target chat has a turn in progress', async () => {
@@ -4267,10 +4834,9 @@ describe('AgentRuntime', () => {
     const perChatState = perChatRuntime as unknown as {
       autoCompact: AutoCompactView;
       chatSessions: Map<string, typeof mockSession>;
-      pendingSystemResults: { counts: Map<string, number> };
     };
     await perChatRuntime.start();
-    perChatState.chatSessions.set(groupJid, mockSession);
+    setOwnedTestSession(perChatRuntime, groupJid, mockSession);
     mockSession.sendTurn.mockRejectedValueOnce(new Error('per-chat compact send failed'));
 
     await expect(perChatRuntime.handleAgentCommand({
@@ -4279,7 +4845,7 @@ describe('AgentRuntime', () => {
       silent: true,
     })).rejects.toThrow('per-chat compact send failed');
 
-    expect(perChatState.pendingSystemResults.counts.get(groupJid) ?? 0).toBe(0);
+    expect(pendingSystemResults(perChatRuntime).count(groupJid)).toBe(0);
     expect(perChatState.autoCompact.silentCompactScopes.has(groupJid)).toBe(false);
 
     mockSession.sendTurn.mockReset();
@@ -4289,12 +4855,15 @@ describe('AgentRuntime', () => {
     const singleState = singleRuntime as unknown as {
       autoCompact: AutoCompactView;
       currentTurnChatJid: string | null;
-      pendingSystemResults: { counts: Map<string, number> };
       queue: typeof mockQueue | null;
       session: typeof mockSession;
+      managerIdFor(session: typeof mockSession): string;
+      sessionEventToolScopes: WeakMap<typeof mockSession, string>;
     };
     await singleRuntime.start();
     singleState.session = mockSession;
+    singleState.managerIdFor(mockSession);
+    singleState.sessionEventToolScopes.set(mockSession, '__global__');
     singleState.queue = mockQueue;
 
     await expect(singleRuntime.handleAgentCommand({
@@ -4303,13 +4872,13 @@ describe('AgentRuntime', () => {
       silent: true,
     })).rejects.toThrow('single compact send failed');
 
-    expect(singleState.pendingSystemResults.counts.get('__global__') ?? 0).toBe(0);
+    expect(pendingSystemResults(singleRuntime).count('__global__')).toBe(0);
     expect(singleState.autoCompact.silentCompactScopes.has('__global__')).toBe(false);
     expect(singleState.currentTurnChatJid).toBeNull();
     expect(mockSession.sendTurn).toHaveBeenLastCalledWith('/compact');
   });
 
-  it('per_chat manual /compact marks a system result so its turn does not arm the gate', async () => {
+  it('per_chat manual /compact terminalizes its system owner without arming the user gate', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const groupJid = '120363555555555000@g.us';
@@ -4317,7 +4886,6 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as {
-      pendingSystemResults: { counts: Map<string, number> };
       postTurnGate: Set<string>;
     };
     await runtime.start();
@@ -4335,14 +4903,15 @@ describe('AgentRuntime', () => {
     await runtime.handleAgentCommand({ command: 'compact', chatJid: groupJid, silent: false });
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
     // The manual /compact registered a pending system result for this chat.
-    expect(state.pendingSystemResults.counts.get(groupJid)).toBe(1);
+    expect(pendingSystemResults(runtime).count(groupJid)).toBe(1);
 
-    // Its result must not arm the gate, and a real reply after it is delivered.
+    // Its result must not arm the user-turn gate. Once terminal, later events
+    // from that request have no owner and must not leak into the queue.
     capturedOnEventRef.current!({ type: 'result', text: null });
     expect(state.postTurnGate.has(groupJid)).toBe(false);
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'After compact' });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('After compact');
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
   });
 
   it('single handleAgentCommand silently sends /compact without compact output or fallback', async () => {
@@ -4363,6 +4932,8 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueResultText.mockClear();
     mockQueue.flush.mockClear();
     mockQueue.flush.mockResolvedValue(undefined);
+    mockQueue.endTurn.mockClear();
+    mockSession.completeProviderTurn.mockClear();
 
     const result = await runtime.handleAgentCommand({
       command: 'compact',
@@ -4375,13 +4946,13 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'compact_boundary' });
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
     await vi.waitFor(() => {
-      expect(mockQueue.flush).toHaveBeenCalled();
+      expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     });
 
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
-    expect(mockQueue.flush).toHaveBeenCalled();
+    expect(mockQueue.endTurn).toHaveBeenCalledOnce();
   });
 
   it('shared handleAgentCommand requires chatJid and silently routes compact completion', async () => {
@@ -4403,6 +4974,8 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueResultText.mockClear();
     mockQueue.flush.mockClear();
     mockQueue.flush.mockResolvedValue(undefined);
+    mockQueue.endTurn.mockClear();
+    mockSession.completeProviderTurn.mockClear();
 
     await expect(runtime.handleAgentCommand({
       command: 'compact',
@@ -4421,13 +4994,13 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'compact_boundary' });
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
     await vi.waitFor(() => {
-      expect(mockQueue.flush).toHaveBeenCalled();
+      expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     });
 
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
-    expect(mockQueue.flush).toHaveBeenCalled();
+    expect(mockQueue.endTurn).toHaveBeenCalledOnce();
   });
 
   it('emit_heal_result rejects when no repair session is active', async () => {
@@ -4476,7 +5049,7 @@ describe('AgentRuntime', () => {
     }), 'Control queue not found');
   });
 
-  it('emit_heal_result fixed path notifies loops and clears the control slot', async () => {
+  it('emit_heal_result fixed path notifies loops but retains control ownership until terminal result', async () => {
     const db = makeDb();
     const { messenger, sentMessages } = makeMessenger();
     mockConfig.controlPeers.set('loops', '15550100002');
@@ -4519,12 +5092,12 @@ describe('AgentRuntime', () => {
       },
       undefined,
     );
-    expect(runtimeState.activeControlReportId).toBeNull();
-    expect(runtimeState.controlSessionTimeout).toBeNull();
+    expect(runtimeState.activeControlReportId).toBe('report-fixed');
+    expect(runtimeState.controlSessionTimeout).toBe(timeout);
     expect(sentMessages).toEqual([]);
   });
 
-  it('emit_heal_result escalates to loops and admin before dispatching the next queued report', async () => {
+  it('emit_heal_result escalates to loops and admin but does not dispatch the next report before terminal result', async () => {
     const queuedRow = {
       report_id: 'report-next',
       error_class: 'service_crash__next',
@@ -4591,16 +5164,8 @@ describe('AgentRuntime', () => {
         text: '[HEAL_ESCALATE] Repair for crash__boom escalated.\n\nneeds human repair',
       },
     ]);
-    expect(runtimeState.activeControlReportId).toBeNull();
-    expect(runtimeState.handleControlTurn).toHaveBeenCalledWith(
-      'report-next',
-      JSON.stringify({
-        type: 'service_crash',
-        recentLogs: 'next stack',
-        reportId: 'report-next',
-        errorClass: 'service_crash__next',
-      }),
-    );
+    expect(runtimeState.activeControlReportId).toBe('report-escalate');
+    expect(runtimeState.handleControlTurn).not.toHaveBeenCalled();
   });
 
   // ─── B02: STDIN_WRITE_TIMEOUT handling ────────────────────────────────────
@@ -4658,7 +5223,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
     // trigger session creation
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello there!' });
 
@@ -4672,11 +5237,14 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi', inboundSeq: 101 }));
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     mockQueue.enqueueStreamingText.mockClear();
 
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Now rebuild the workbook with the new trace columns.' });
+    handleEventDownstreamWithoutAdmission(
+      runtime,
+      { type: 'assistant_text', text: 'Now rebuild the workbook with the new trace columns.' },
+      { inboundSeq: 101, conversationKey: 'test@s.whatsapp.net' },
+    );
 
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(replyGuarantee.notifyActivity).not.toHaveBeenCalled();
@@ -4691,8 +5259,10 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
     (runtime as unknown as { durability: unknown }).durability = makeTerminalDurabilityMock();
-    await runtime.handleMessage(makeMsg({ content: 'do not reply', inboundSeq: 102 }));
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do not reply'));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ content: 'do not reply', inboundSeq: 102 }),
+    );
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     mockQueue.enqueueStreamingText.mockClear();
 
@@ -4713,7 +5283,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: "You're out of extra usage. Claude will be available at 8pm." });
 
@@ -4736,7 +5306,10 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'my oauth broke, what do we do?' }));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ content: 'my oauth broke, what do we do?' }),
+    );
 
     const reply = 'Yes — it looks like the OAuth token expired, so we should reconnect the account and re-run login.';
     capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
@@ -4756,6 +5329,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
     await runtime.start();
     await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'my oauth broke, what do we do?' }));
+    await waitForProviderDispatch(runtime);
 
     const reply = 'Right — the OAuth token expired; let us reconnect the provider account and continue.';
     capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
@@ -4777,7 +5351,10 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'my oauth broke, what do we do?' }));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ content: 'my oauth broke, what do we do?' }),
+    );
 
     const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
     capturedOnEventRef.current!({ type: 'assistant_text', text });
@@ -4801,6 +5378,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
     await runtime.start();
     await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'my oauth broke, what do we do?' }));
+    await waitForProviderDispatch(runtime);
 
     const text = 'Let me check on this — the oauth token expired, so let me verify the account status before we proceed.';
     capturedOnEventRef.current!({ type: 'assistant_text', text });
@@ -4825,7 +5403,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: "You're out of extra usage. Claude will be available at 8pm." });
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
@@ -4843,7 +5421,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
     (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
     mockQueue.enqueueStreamingText.mockClear();
     mockRuntimeLogger.warn.mockClear();
@@ -4865,7 +5443,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Bash', toolId: 'tool_1', toolInput: { command: 'git status' } });
 
@@ -4879,7 +5457,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Bash', toolId: 't1', toolInput: { command: 'git status\ngit diff' } });
 
@@ -4893,7 +5471,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Bash', toolId: 't2', toolInput: { command: 'git status', description: 'Show git status' } });
 
@@ -4907,7 +5485,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Read', toolId: 't3', toolInput: { file_path: '/workspace/WhatSoup/src/main.ts', offset: 10, limit: 5 } });
 
@@ -4922,7 +5500,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Glob', toolId: 't4', toolInput: { pattern: '**/*.ts', path: '/workspace/WhatSoup/src' } });
 
@@ -4937,7 +5515,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Grep', toolId: 't5', toolInput: { pattern: 'flushToolBuffer', glob: '*.ts' } });
 
@@ -4955,7 +5533,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'compact_boundary' });
 
@@ -4970,7 +5548,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
     capturedOnEventRef.current!({ type: 'result', text: null });
@@ -4985,7 +5563,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     // No assistant_text event — go straight to result
     capturedOnEventRef.current!({ type: 'result', text: null });
@@ -5001,7 +5579,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     // No assistant_text event, no tool_use — pure empty-output terminal result.
     capturedOnEventRef.current!({ type: 'result', text: null });
@@ -5023,7 +5601,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'Context limit reached' });
     await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Context limit reached'));
@@ -5038,7 +5616,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'Error: prompt is too long for the context window';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
@@ -5058,7 +5636,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = "There's an issue with the selected model (some-test-model). It may not exist or you may not have access to it. Run --model to pick a different model.";
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
@@ -5082,7 +5660,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'Unexpected provider explosion exposing internal-detail-xyz';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
@@ -5102,7 +5680,7 @@ describe('AgentRuntime', () => {
     const failedAt = turnCapability.lastTurnErrorAt as number;
 
     mockQueue.enqueueResultText.mockClear();
-    await runtime.handleMessage(makeMsg({ content: 'follow up' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'follow up' }));
     capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
     await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
 
@@ -5129,7 +5707,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'Gemini ACP internal failure exposing secret-token-xyz789';
     const parsed = parseGeminiAcpEvent(
@@ -5177,7 +5755,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const parsedSuccess = parseGeminiAcpEvent(
       JSON.stringify({
@@ -5199,7 +5777,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const socketText = 'API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()';
     mockEmitAlert.mockClear();
@@ -5242,7 +5820,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
     mockEmitAlert.mockClear();
@@ -5279,7 +5857,7 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger);
       await runtime.start();
-      await runtime.handleMessage(makeMsg({ content: 'hi' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
       (runtime as unknown as { singleTurnHadToolActivity: boolean }).singleTurnHadToolActivity = true;
       const raw = 'Authentication required. Sign in to continue.';
@@ -5318,7 +5896,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
@@ -5340,7 +5918,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     const raw = 'Authentication required. Sign in to continue.';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
@@ -5370,7 +5948,7 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger);
       await runtime.start();
-      await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
       (runtime as unknown as { singleTurnHadToolActivity: boolean }).singleTurnHadToolActivity = true;
       const raw = "There's an issue with the selected model (some-test-model). It may not exist or you may not have access to it.";
@@ -5405,7 +5983,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({
       type: 'assistant_text',
@@ -5427,7 +6005,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'a genuine terminal reply', isError: false });
     await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply'));
@@ -5438,7 +6016,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+      await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({
       type: 'assistant_text',
@@ -5447,17 +6025,20 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
   });
 
-  it('assistant_text after result event is suppressed (post-turn gate)', async () => {
+  it('downstream singleton post-turn gate suppresses assistant_text after result', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
-
-    // Complete the turn
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
-    capturedOnEventRef.current!({ type: 'result', text: null });
+    // Exercise downstream gate behavior after admission has selected the queue.
+    const downstreamOptions = { mapKey: '__global__', toolScopeKey: '__global__' };
+    handleEventDownstreamWithoutAdmission(
+      runtime,
+      { type: 'assistant_text', text: 'Hello' },
+      downstreamOptions,
+    );
+    handleEventDownstreamWithoutAdmission(runtime, { type: 'result', text: null }, downstreamOptions);
     await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
 
     // Reset mocks to isolate post-turn behavior
@@ -5466,7 +6047,11 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueResultText.mockClear();
 
     // SDK injects system-reminder, model reacts with assistant_text
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'I am still working on this.' });
+    handleEventDownstreamWithoutAdmission(
+      runtime,
+      { type: 'assistant_text', text: 'I am still working on this.' },
+      downstreamOptions,
+    );
 
     // Post-turn gate should suppress this — nothing enqueued
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
@@ -5480,7 +6065,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     // Complete turn 1
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
@@ -5491,75 +6076,625 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueStreamingText.mockClear();
     mockQueue.flush.mockClear();
     mockSession.sendTurn.mockClear();
-    await runtime.handleMessage(makeMsg({ content: 'follow up' }));
-    // Wait for the turn chain to settle — sendTurnNonShared runs async
-    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('follow up'));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'follow up' }));
 
     // Now assistant_text for turn 2 should go through
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Turn 2 response' });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Turn 2 response');
   });
 
-  it('tool_use after result event is suppressed (post-turn gate)', async () => {
+  it('downstream singleton post-turn gate suppresses tool_use after result', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
-
-    // Complete the turn
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
-    capturedOnEventRef.current!({ type: 'result', text: null });
-    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+    (runtime as unknown as { postTurnGate: Set<string> }).postTurnGate.add('__global__');
 
     // Reset mocks
     mockQueue.enqueueToolUpdate.mockClear();
 
     // SDK phantom: model tries to use a tool post-turn
-    capturedOnEventRef.current!({ type: 'tool_use', toolId: 'phantom-1', toolName: 'TodoWrite', toolInput: {} });
+    handleEventDownstreamWithoutAdmission(runtime, {
+      type: 'tool_use',
+      toolId: 'phantom-1',
+      toolName: 'TodoWrite',
+      toolInput: {},
+    }, { mapKey: '__global__', toolScopeKey: '__global__' });
 
     // Should be suppressed
     expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
     expect(mockEmitAlert).not.toHaveBeenCalled();
   });
 
-  it('second result event after gate does not throw', async () => {
+  it('rejects every late effect after singleton terminal cleanup before runtime side effects', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const runtime = new AgentRuntime(db, messenger);
+    const state = runtime as unknown as {
+      currentRuntimeTurnContext: unknown | null;
+      unownedProviderEventRejects: number;
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+    };
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndDrain(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
     capturedOnEventRef.current!({ type: 'result', text: null });
     await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+    await vi.waitFor(() => expect(state.currentRuntimeTurnContext).toBeNull());
 
-    // Phantom result from SDK — should not throw
-    expect(() => {
-      capturedOnEventRef.current!({ type: 'result', text: null });
-    }).not.toThrow();
+    mockSession.getDbRowId.mockReturnValue(77);
+    mockQueue.enqueueStreamingText.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+    mockQueue.enqueueToolUpdate.mockClear();
+    mockQueue.indicateTyping.mockClear();
+    mockQueue.endTurn.mockClear();
+    mockQueue.flush.mockClear();
+    mockAccumulateTokensWithEvent.mockClear();
+    mockEmitAlert.mockClear();
+    mockSession.shutdown.mockClear();
+
+    const lateEvents: AgentEvent[] = [
+      { type: 'assistant_text', text: 'late private text' },
+      { type: 'tool_result', isError: true, toolId: 'late-tool', content: 'late private error' },
+      { type: 'compact_boundary' },
+      { type: 'token_usage', inputTokens: 900, outputTokens: 1 },
+      { type: 'result', text: 'late terminal text' },
+    ];
+    for (const event of lateEvents) capturedOnEventRef.current!(event);
+
+    expect(state.unownedProviderEventRejects).toBe(lateEvents.length);
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
+    expect(mockQueue.indicateTyping).not.toHaveBeenCalled();
+    expect(mockQueue.endTurn).not.toHaveBeenCalled();
+    expect(mockQueue.flush).not.toHaveBeenCalled();
+    expect(mockAccumulateTokensWithEvent).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mockSession.shutdown).toHaveBeenCalledOnce());
+    expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+    await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(false));
+
+    capturedOnEventRef.current!({ type: 'result', text: 'late terminal from a later lifecycle' });
+    await vi.waitFor(() => expect(mockSession.shutdown).toHaveBeenCalledTimes(2));
+    expect(state.unownedProviderEventRejects).toBe(lateEvents.length + 1);
+  });
+
+  it('retains a failed rejected-terminal quarantine and blocks automatic redispatch', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const state = runtime as unknown as {
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+    };
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'first' }));
+    capturedOnEventRef.current?.({ type: 'result', text: 'first complete' });
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalled());
+
+    const teardownError = new Error('process tree still alive');
+    mockSession.shutdown.mockRejectedValueOnce(teardownError);
+    mockSession.sendTurn.mockClear();
+    capturedOnEventRef.current?.({ type: 'result', text: 'late terminal' });
+    await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true));
+    await vi.waitFor(() => {
+      expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: teardownError }),
+        'rejected terminal source teardown failed — provider lane remains closed',
+      );
+    });
+
+    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-after-terminal', content: 'second' }));
+
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: expect.objectContaining({
+          message: 'REJECTED_TERMINAL_QUARANTINE_FAILED: exact provider source was not proven closed',
+        }),
+      }),
+      'unhandled error in message processing',
+    );
+  });
+
+  it('keeps /new fail-closed when rejected-terminal teardown was not proven', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const state = runtime as unknown as {
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+    };
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'first' }));
+    capturedOnEventRef.current?.({ type: 'result', text: 'first complete' });
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalled());
+
+    mockSession.shutdown.mockRejectedValueOnce(new Error('process tree still alive'));
+    capturedOnEventRef.current?.({ type: 'result', text: 'late terminal' });
+    await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true));
+
+    mockSession.handleNew.mockClear();
+    await sendAndDrain(runtime, makeMsg({ messageId: 'blocked-new', content: '/new' }));
+
+    expect(mockSession.handleNew).not.toHaveBeenCalled();
+    expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'new',
+        err: expect.objectContaining({
+          message: 'REJECTED_TERMINAL_QUARANTINE_FAILED: exact provider source was not proven closed',
+        }),
+      }),
+      'local command handler failed',
+    );
+  });
+
+  it('keeps per-chat /new fail-closed when rejected-terminal teardown was not proven', async () => {
+    const chatJid = '15550100001@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const state = runtime as unknown as {
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+      perChatRuntimeTurnContexts: Map<string, unknown[]>;
+    };
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        messageId: 'per-chat-before-quarantine',
+        chatJid,
+        senderJid: chatJid,
+        content: 'first',
+      }),
+      chatJid,
+    );
+    capturedOnEventRef.current?.({ type: 'result', text: 'first complete' });
+    await vi.waitFor(() => expect(state.perChatRuntimeTurnContexts.has(chatJid)).toBe(false));
+
+    mockSession.shutdown.mockRejectedValueOnce(new Error('process tree still alive'));
+    capturedOnEventRef.current?.({ type: 'result', text: 'late terminal' });
+    await vi.waitFor(() => expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true));
+
+    mockSession.shutdown.mockClear();
+    mockSession.spawnSession.mockClear();
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'blocked-per-chat-new',
+      chatJid,
+      senderJid: chatJid,
+      content: '/new',
+    }));
+
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
+  });
+
+  it('rejects the exact logical completion when rejected-terminal finalization escapes', async () => {
+    const chatJid = 'rejected-finalization@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const state = runtime as unknown as {
+      perChatRuntimeTurnCompletions: Map<string, { promise: Promise<void> }>;
+      sessionEventToolScopes: WeakMap<typeof mockSession, string>;
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+    };
+    await runtime.start();
+    attachRuntimeFaultMarkerSpies(runtime);
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        messageId: 'rejected-finalization-source',
+        chatJid,
+        senderJid: chatJid,
+        content: 'source turn',
+        inboundSeq: 1811,
+      }),
+      chatJid,
+    );
+    const completion = state.perChatRuntimeTurnCompletions.get(chatJid);
+    expect(completion).toBeDefined();
+    let completionError: unknown;
+    void completion!.promise.catch((err: unknown) => {
+      completionError = err;
+    });
+    const finalizationError = new Error('rejected terminal evidence flush failed');
+    mockQueue.abortTurn.mockImplementationOnce(() => {
+      throw finalizationError;
+    });
+    state.sessionEventToolScopes.set(mockSession, 'superseded-tool-scope');
+
+    capturedOnEventRef.current!({ type: 'result', text: 'unattributable terminal' });
+
+    await vi.waitFor(() => expect(completionError).toBe(finalizationError));
+    expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
+  });
+
+  it('rejects the active logical completion when exact source teardown is unproved', async () => {
+    const chatJid = 'active-teardown-failure@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const state = runtime as unknown as {
+      perChatRuntimeTurnCompletions: Map<string, { promise: Promise<void> }>;
+      rejectedTerminalTeardowns: WeakMap<typeof mockSession, Promise<boolean>>;
+    };
+    await runtime.start();
+    attachRuntimeFaultMarkerSpies(runtime);
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        messageId: 'active-teardown-source',
+        chatJid,
+        senderJid: chatJid,
+        content: 'source turn',
+        inboundSeq: 1813,
+      }),
+      chatJid,
+    );
+    const completion = state.perChatRuntimeTurnCompletions.get(chatJid);
+    expect(completion).toBeDefined();
+    const teardownError = new Error('lifecycle persistence failed after reap');
+    let completionError: unknown;
+    void completion!.promise.catch((err: unknown) => {
+      completionError = err;
+    });
+    mockSession.shutdown.mockRejectedValueOnce(teardownError);
+
+    capturedOnEventRef.current!({ type: 'parse_error', line: 'malformed active record' });
+
+    await vi.waitFor(() => expect(completionError).toBe(teardownError));
+    expect(state.rejectedTerminalTeardowns.has(mockSession)).toBe(true);
+    mockSession.sendTurn.mockClear();
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'blocked-after-active-teardown',
+      chatJid,
+      senderJid: chatJid,
+      content: 'must remain quarantined',
+      inboundSeq: 1814,
+    }));
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it('quarantines an owned malformed provider record without waiting for the watchdog', async () => {
+    const chatJid = 'malformed-stream@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({
+        messageId: 'malformed-stream-source',
+        chatJid,
+        senderJid: chatJid,
+        content: 'source turn',
+        inboundSeq: 1812,
+      }),
+      chatJid,
+    );
+    mockSession.shutdown.mockClear();
+
+    capturedOnEventRef.current!({ type: 'parse_error', line: 'private malformed record' });
+
+    await vi.waitFor(() => expect(mockSession.shutdown).toHaveBeenCalledWith(false));
+    await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        terminal: expect.objectContaining({
+          inboundSeq: 1812,
+          attemptKind: 'failed',
+          attemptFailureClass: 'provider_stream_corrupt',
+        }),
+      }),
+    ));
+    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('private malformed record');
+  });
+
+  it('cancels only the rejected source system lease after exact teardown proof', async () => {
+    const chatJid = 'rejected-system@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const state = runtime as unknown as {
+      chatQueues: Map<string, IOutboundQueue>;
+      sessionEventToolScopes: WeakMap<typeof mockSession, string>;
+      handleEventPerChat(
+        sourceSession: typeof mockSession,
+        event: AgentEvent,
+        toolScopeKey: string,
+      ): void;
+    };
+    await runtime.start();
+    const originalToolScope = setOwnedTestSession(runtime, chatJid, mockSession);
+    state.chatQueues.set(chatJid, mockQueue);
+    const lease = markOwnedSystemTurn(
+      runtime,
+      mockSession,
+      chatJid,
+      'fresh_session_context',
+      chatJid,
+    );
+    const siblingLease = markOwnedSystemTurn(
+      runtime,
+      mockSession,
+      chatJid,
+      'poll_answer_continuation',
+      chatJid,
+    );
+    let proveTeardown!: () => void;
+    mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      proveTeardown = resolve;
+    }));
+    state.sessionEventToolScopes.set(mockSession, 'superseded-tool-scope');
+
+    state.handleEventPerChat(
+      mockSession,
+      { type: 'result', text: 'unattributable system terminal' },
+      originalToolScope,
+    );
+
+    expect(pendingSystemResults(runtime).peek(chatJid)?.lease).toEqual(lease);
+    proveTeardown();
+    await vi.waitFor(() => expect(pendingSystemResults(runtime).count(chatJid)).toBe(1));
+    expect(pendingSystemResults(runtime).peek(chatJid)?.lease).toEqual(siblingLease);
+    expect(mockSession.completeProviderTurn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a replaced per-chat source even when the replacement owns a live context', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const mapKey = 'source-bound@s.whatsapp.net';
+    const queue = makeQueueMock(mapKey);
+    const makeOwnedSession = () => ({
+      ...mockSession,
+      getStatus: vi.fn(() => ({
+        active: false,
+        pid: null,
+        sessionId: null,
+        startedAt: null,
+        messageCount: 0,
+        lastMessageAt: null,
+      })),
+      shutdown: vi.fn(async () => {}),
+      bindGenerationOwnership: vi.fn(),
+    });
+    const sourceA = makeOwnedSession();
+    const sourceB = makeOwnedSession();
+    const state = runtime as unknown as {
+      setOwnedPerChatSession(mapKey: string, session: typeof sourceA): void;
+      managerIdFor(session: typeof sourceA): string;
+      sessionOwnership: {
+        get(mapKey: string): { managerId: string; generation: number } | undefined;
+      };
+      chatQueues: Map<string, IOutboundQueue>;
+      perChatRuntimeTurnContexts: Map<string, ReturnType<typeof createRuntimeTurnContext>[]>;
+      sessionEventToolScopes: WeakMap<typeof sourceA, string>;
+      handleEventPerChat(
+        sourceSession: typeof sourceA,
+        event: AgentEvent,
+        toolScopeKey: string,
+      ): void;
+      unownedProviderEventRejects: number;
+    };
+
+    state.setOwnedPerChatSession(mapKey, sourceA);
+    state.setOwnedPerChatSession(mapKey, sourceB);
+    state.chatQueues.set(mapKey, queue);
+    const ownerB = state.sessionOwnership.get(mapKey)!;
+    const context = createRuntimeTurnContext({
+      identity: {
+        scope: 'per_chat',
+        conversationKey: 'source-bound',
+        deliveryJid: mapKey,
+        inboundSeq: 1,
+        logicalTurnId: 'turn-source-b',
+        managerId: state.managerIdFor(sourceB),
+        generation: ownerB.generation,
+      },
+      recoveryOwner: {
+        logicalTurnId: 'turn-source-b:recovery',
+        managerId: state.managerIdFor(sourceB),
+        generation: ownerB.generation,
+      },
+      replay: {
+        sourceMessageId: 'wamid-source-b',
+        replaySafe: true,
+        senderJid: mapKey,
+        senderName: null,
+        text: 'current turn',
+        isGroup: false,
+      },
+      contentType: 'text',
+      toolScopeKey: 'source-bound#tool',
+    });
+    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
+    state.sessionEventToolScopes.set(sourceA, 'source-bound#tool');
+    state.sessionEventToolScopes.set(sourceB, 'source-bound#tool');
+
+    state.handleEventPerChat(
+      sourceA,
+      { type: 'assistant_text', text: 'stale source output' },
+      'source-bound#tool',
+    );
+    expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(state.unownedProviderEventRejects).toBe(1);
+
+    state.handleEventPerChat(
+      sourceA,
+      { type: 'result', text: 'stale source terminal' },
+      'source-bound#tool',
+    );
+    expect(sourceA.shutdown).toHaveBeenCalledOnce();
+    expect(sourceA.shutdown).toHaveBeenCalledWith(false);
+    expect(sourceB.shutdown).not.toHaveBeenCalled();
+
+    state.handleEventPerChat(
+      sourceB,
+      { type: 'assistant_text', text: 'current source output' },
+      'source-bound#tool',
+    );
+    expect(queue.enqueueStreamingText).toHaveBeenCalledWith('current source output');
+  });
+
+  it('reconstructs a missing per-chat output route before terminalizing its exact owner', async () => {
+    const chatJid = 'route-recovery@s.whatsapp.net';
+    const runtime = new AgentRuntime(
+      makeDb(),
+      makeMessenger().messenger,
+      'test',
+      { sessionScope: 'per_chat' },
+    );
+    const state = runtime as unknown as {
+      chatQueues: Map<string, IOutboundQueue>;
+      unownedProviderEventRejects: number;
+    };
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ chatJid, senderJid: chatJid, content: 'recover my terminal route' }),
+      chatJid,
+    );
+    state.chatQueues.delete(chatJid);
+    mockSession.completeProviderTurn.mockClear();
+    mockSession.shutdown.mockClear();
+
+    capturedOnEventRef.current?.({ type: 'result', text: 'done' });
+
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce());
+    expect(state.chatQueues.has(chatJid)).toBe(true);
+    expect(state.unownedProviderEventRejects).toBe(0);
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
+  });
+
+  it('reconstructs a missing singleton output route before terminalizing its exact owner', async () => {
+    const chatJid = 'singleton-route-recovery@s.whatsapp.net';
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const state = runtime as unknown as {
+      queue: IOutboundQueue | null;
+      unownedProviderEventRejects: number;
+    };
+
+    await runtime.start();
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ chatJid, senderJid: chatJid, content: 'recover singleton terminal route' }),
+    );
+    state.queue = null;
+    mockSession.completeProviderTurn.mockClear();
+    mockSession.shutdown.mockClear();
+
+    capturedOnEventRef.current?.({ type: 'result', text: 'done' });
+
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce());
+    expect(state.queue).toBe(mockQueue);
+    expect(state.unownedProviderEventRejects).toBe(0);
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
+  });
+
+  it('keeps dispatch closed until a rejected journaled terminal is reaped and finalized', async () => {
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'rejected-terminal-owner',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    let proveTeardown!: () => void;
+    mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      proveTeardown = resolve;
+    }));
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { shared: true });
+    const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+    const state = runtime as unknown as {
+      sessionEventToolScopes: WeakMap<typeof mockSession, string>;
+      turnQueue: { idle(): Promise<void> };
+    };
+    await runtime.start();
+
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({
+      messageId: 'rejected-terminal-1',
+      inboundSeq: 801,
+      chatJid: 'rejected-a@g.us',
+      senderJid: '801@s.whatsapp.net',
+      content: 'first',
+      isGroup: true,
+    }));
+    await runtime.handleMessage(makeMsg({
+      messageId: 'rejected-terminal-2',
+      inboundSeq: 802,
+      chatJid: 'rejected-b@g.us',
+      senderJid: '802@s.whatsapp.net',
+      content: 'second',
+      isGroup: true,
+    }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+
+    state.sessionEventToolScopes.set(mockSession, 'corrupt-source-scope');
+    capturedOnEventRef.current?.({ type: 'result', text: 'unattributable terminal' });
+    await Promise.resolve();
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+
+    proveTeardown();
+    await vi.waitFor(() => {
+      expect(durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminal: expect.objectContaining({
+          inboundSeq: 801,
+          attemptKind: 'failed',
+          attemptFailureClass: 'provider_stream_corrupt',
+        }),
+      }));
+    });
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(2));
+
+    state.sessionEventToolScopes.set(mockSession, '__global__');
+    capturedOnEventRef.current?.({ type: 'result', text: 'second complete' });
+    await state.turnQueue.idle();
   });
 
   it('per_chat: system-turn result does not arm the post-turn gate (real reply still delivered)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const state = runtime as unknown as {
-      pendingSystemResults: { counts: Map<string, number> };
-      postTurnGate: Set<string>;
-    };
+    const state = runtime as unknown as { postTurnGate: Set<string> };
     const chatJid = '15550001111@s.whatsapp.net';
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }),
+      chatJid,
+    );
     expect(capturedOnEventRef.current).toBeTypeOf('function');
 
     // A system turn is in flight (context injection on respawn, resume
     // continuation, or auto-compact /compact). Its result must NOT arm the
     // post-turn gate, otherwise the real user turn that follows is suppressed.
-    state.pendingSystemResults.counts.set(chatJid, 1);
+    markOwnedSystemTurn(runtime, mockSession, chatJid, 'manual_compact_silent', chatJid);
     capturedOnEventRef.current!({ type: 'result', text: null });
 
     expect(state.postTurnGate.has(chatJid)).toBe(false);
@@ -5578,7 +6713,11 @@ describe('AgentRuntime', () => {
     const chatJid = '15550002222@s.whatsapp.net';
 
     await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }),
+      chatJid,
+    );
     expect(capturedOnEventRef.current).toBeTypeOf('function');
 
     // No system result pending — this is a genuine user-turn completion.
@@ -5595,17 +6734,20 @@ describe('AgentRuntime', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
-    const state = runtime as unknown as {
-      pendingSystemResults: { counts: Map<string, number> };
-      postTurnGate: Set<string>;
-    };
+    const state = runtime as unknown as { postTurnGate: Set<string> };
 
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     // A system turn is in flight (single-mode auto-compact /compact is keyed by
     // the global scope). Its result must NOT arm the post-turn gate.
-    state.pendingSystemResults.counts.set('__global__', 1);
+    markOwnedSystemTurn(
+      runtime,
+      mockSession,
+      '__global__',
+      'manual_compact_silent',
+      'test@s.whatsapp.net',
+    );
     capturedOnEventRef.current!({ type: 'result', text: null });
 
     expect(state.postTurnGate.has('__global__')).toBe(false);
@@ -5620,7 +6762,6 @@ describe('AgentRuntime', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const state = runtime as unknown as { pendingSystemResults: { counts: Map<string, number> } };
     const chatJid = '15550004444@s.whatsapp.net';
 
     // Recent messages exist, so a fresh (inactive) session triggers context
@@ -5655,7 +6796,7 @@ describe('AgentRuntime', () => {
 
     // No stranded +1 — otherwise the next real user-turn result would be
     // misclassified as a system turn.
-    expect(state.pendingSystemResults.counts.get(chatJid) ?? 0).toBe(0);
+    expect(pendingSystemResults(runtime).count(chatJid)).toBe(0);
   });
 
   // QR-095: in single/shared mode the context-injection system turn must be
@@ -5669,7 +6810,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger); // single/shared (no sessionScope)
     const chatJid = '15550005555@s.whatsapp.net';
     const state = runtime as unknown as {
-      pendingSystemResults: { mark: (k: string) => void };
+      pendingSystemResults: PendingSystemResultTrackerView;
     };
 
     vi.mocked(getRecentMessages).mockReturnValue([
@@ -5686,17 +6827,27 @@ describe('AgentRuntime', () => {
 
     await runtime.start();
     const markSpy = vi.spyOn(state.pendingSystemResults, 'mark');
-    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
+    await runtime.handleMessage(makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
     await vi.waitFor(() => expect(markSpy).toHaveBeenCalled());
 
-    const markedKeys = markSpy.mock.calls.map((c) => c[0]);
+    const markedInputs = markSpy.mock.calls.map((call) => call[0]);
     // RED pre-fix: the injection marked `undefined` (a no-op → phantom leak).
-    expect(markedKeys).not.toContain(undefined);
+    expect(markedInputs).not.toContain(undefined);
     // GREEN post-fix: marked under the global scope the single/shared handler consumes.
-    expect(markedKeys).toContain('__global__');
+    expect(markedInputs).toContainEqual(expect.objectContaining({
+      scopeKey: '__global__',
+      owner: expect.objectContaining({ toolScopeKey: '__global__' }),
+    }));
+
+    // Release the context-injection result, then complete the user turn so the
+    // queued test work does not outlive this test.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await waitForProviderDispatch(runtime);
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
   });
 
-  it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
+  it('downstream shared-session post-turn gate suppresses assistant_text after result', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
@@ -5708,27 +6859,47 @@ describe('AgentRuntime', () => {
       currentTurnChatJid: string | null;
       turnHadVisibleOutput: boolean;
       outboundQueues: Map<string, IOutboundQueue>;
-      handleEvent: (event: AgentEvent) => void;
     };
-    state.session = Object.assign({}, mockSession, {
+    const sourceSession = Object.assign({}, mockSession, {
       getDbRowId: vi.fn(() => null),
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
     });
+    state.session = sourceSession;
     state.activeChatJid = '111@s.whatsapp.net';
     state.currentTurnChatJid = '111@s.whatsapp.net';
     state.turnHadVisibleOutput = true;
     state.outboundQueues.set('111@s.whatsapp.net', queue);
 
     // Simulate a turn with text + result
-    state.handleEvent({ type: 'assistant_text', text: 'Hello' });
-    state.handleEvent({ type: 'result', text: null });
+    handleEventDownstreamWithoutAdmission(runtime, { type: 'assistant_text', text: 'Hello' }, {
+      queue,
+      session: sourceSession,
+      mapKey: '__global__',
+      toolScopeKey: '__global__',
+    });
+    handleEventDownstreamWithoutAdmission(runtime, { type: 'result', text: null }, {
+      queue,
+      session: sourceSession,
+      mapKey: '__global__',
+      toolScopeKey: '__global__',
+    });
 
     // Reset mocks to isolate post-turn behavior
     (queue.enqueueStreamingText as ReturnType<typeof vi.fn>).mockClear();
     (queue.enqueueText as ReturnType<typeof vi.fn>).mockClear();
 
     // Phantom assistant_text after result — should be suppressed by gate
-    state.handleEvent({ type: 'assistant_text', text: 'Phantom from SDK reminder' });
+    handleEventDownstreamWithoutAdmission(
+      runtime,
+      { type: 'assistant_text', text: 'Phantom from SDK reminder' },
+      {
+        queue,
+        session: sourceSession,
+        mapKey: '__global__',
+        toolScopeKey: '__global__',
+      },
+    );
 
     expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(queue.enqueueText).not.toHaveBeenCalled();
@@ -5755,25 +6926,27 @@ describe('AgentRuntime', () => {
       postTurnGate: Set<string>;
       singleTurnHadToolActivity: boolean;
       activeToolNames: Map<string, Map<string, string>>;
-      handleEvent: (event: AgentEvent) => void;
+      handleEvent: (sourceSession: object, event: AgentEvent) => void;
     };
-    state.session = Object.assign({}, mockSession, {
+    const sourceSession = Object.assign({}, mockSession, {
       tickWatchdog: vi.fn(),
       trackToolStart: vi.fn(),
       trackToolEnd: vi.fn(),
     });
+    state.session = sourceSession;
     state.operationTracker = tracker;
     state.activeChatJid = '111@s.whatsapp.net';
     state.currentTurnChatJid = '111@s.whatsapp.net';
     state.outboundQueues.set('111@s.whatsapp.net', queue);
+    publishSingletonTestOwner(runtime, sourceSession, '111@s.whatsapp.net');
 
-    state.handleEvent({ type: 'init', sessionId: 'shared-session-id' });
+    state.handleEvent(sourceSession, { type: 'init', sessionId: 'shared-session-id' });
     expect(mockRuntimeLogger.debug).toHaveBeenCalledWith(
       { chatJid: '111@s.whatsapp.net', sessionId: 'shared-session-id' },
       'session init',
     );
 
-    state.handleEvent({
+    state.handleEvent(sourceSession, {
       type: 'tool_use',
       toolId: 'ask-user-shared',
       toolName: 'AskUserQuestion',
@@ -5789,12 +6962,12 @@ describe('AgentRuntime', () => {
       expect.any(String),
     );
 
-    state.handleEvent({ type: 'compact_boundary' });
+    state.handleEvent(sourceSession, { type: 'compact_boundary' });
     expect(queue.indicateTyping).toHaveBeenCalledTimes(1);
     expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context compacted'));
     expect(tracker.onAnyActivity).toHaveBeenCalled();
 
-    state.handleEvent({
+    state.handleEvent(sourceSession, {
       type: 'tool_result',
       toolId: 'ask-user-shared',
       isError: true,
@@ -5808,7 +6981,7 @@ describe('AgentRuntime', () => {
 
     (queue.enqueueToolUpdate as ReturnType<typeof vi.fn>).mockClear();
     state.postTurnGate.add('__global__');
-    state.handleEvent({
+    state.handleEvent(sourceSession, {
       type: 'tool_use',
       toolId: 'phantom-tool',
       toolName: 'Bash',
@@ -6025,7 +7198,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_result', isError: true, toolId: 'test', content: 'error msg' });
 
@@ -6112,16 +7285,16 @@ describe('AgentRuntime', () => {
       currentRuntimeTurnContext: typeof context;
       singleTurnHadToolActivity: boolean;
       activeToolNames: Map<string, Map<string, string>>;
-      handleEvent(event: AgentEvent): void;
+      handleEvent(sourceSession: object, event: AgentEvent): void;
     };
-    state.session = mockSession;
     state.activeChatJid = queue.targetChatJid;
     state.currentTurnChatJid = queue.targetChatJid;
     state.outboundQueues.set(queue.targetChatJid, queue);
     state.operationTracker = tracker;
     state.currentRuntimeTurnContext = context;
+    publishSingletonTestOwner(runtime, mockSession, queue.targetChatJid);
 
-    state.handleEvent({
+    state.handleEvent(mockSession, {
       type: 'tool_result',
       toolId: 'call_bash_rejected',
       toolName: 'bash',
@@ -6213,19 +7386,19 @@ describe('AgentRuntime', () => {
       currentRuntimeTurnContext: typeof context;
       singleTurnHadToolActivity: boolean;
       activeToolNames: Map<string, Map<string, string>>;
-      handleEvent(event: AgentEvent): void;
+      handleEvent(sourceSession: object, event: AgentEvent): void;
     };
     const toolId = `global-${isError ? 'error' : 'completed'}-${toolName === undefined ? 'missing' : 'ignorable'}`;
     const event = parseOpenCodeToolResult(toolName, isError, toolId);
     expect(event).not.toHaveProperty('toolName');
-    state.session = mockSession;
     state.activeChatJid = queue.targetChatJid;
     state.currentTurnChatJid = queue.targetChatJid;
     state.outboundQueues.set(queue.targetChatJid, queue);
     state.operationTracker = tracker;
     state.currentRuntimeTurnContext = context;
+    publishSingletonTestOwner(runtime, mockSession, queue.targetChatJid);
 
-    state.handleEvent(event);
+    state.handleEvent(mockSession, event);
 
     expect(state.singleTurnHadToolActivity).toBe(true);
     expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(false);
@@ -6242,7 +7415,7 @@ describe('AgentRuntime', () => {
     agentConfig.agentProvider = 'claude-cli';
     const runtime = new AgentRuntime(db, messenger, 'ana-bot');
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({
       type: 'tool_use',
@@ -6281,7 +7454,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger, 'ana-bot');
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({
       type: 'tool_use',
@@ -6318,7 +7491,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger, 'ana-bot');
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({
       type: 'tool_use',
@@ -6348,7 +7521,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger);
     await runtime.start();
-    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'tool_result', isError: false, toolId: 'test', content: '' });
 
@@ -7287,7 +8460,11 @@ describe('AgentRuntime', () => {
       });
       await runtime.start();
 
-      await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }),
+        '15550100001',
+      );
 
       const runtimeState = runtime as unknown as {
         workspaceResources: Map<string, {
@@ -7305,8 +8482,9 @@ describe('AgentRuntime', () => {
 
       vi.setSystemTime(resultAt);
       capturedOnEventRef.current?.({ type: 'result', text: 'done' });
-
-      expect(runtimeState.workspaceResources.get('15550100001')?.lastActivity).toBe(resultAt.getTime());
+      await vi.waitFor(() => {
+        expect(runtimeState.workspaceResources.get('15550100001')?.lastActivity).toBe(resultAt.getTime());
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -7634,10 +8812,20 @@ describe('AgentRuntime', () => {
     mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
 
     const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    attachRuntimeFaultMarkerSpies(runtime);
     await runtime.start();
 
-    await sendAndDrainShared(runtime, makeMsg({ chatJid: 'chat-a@g.us', senderJid: '111@s.whatsapp.net', content: 'hello from A', isGroup: true }));
-    await sendAndDrainShared(runtime, makeMsg({ chatJid: 'chat-b@s.whatsapp.net', senderJid: '222@s.whatsapp.net', content: 'hello from B', isGroup: false }));
+    await sendAndAwaitProviderDispatch(runtime, makeMsg({ messageId: 'shared-a', inboundSeq: 1, chatJid: 'chat-a@g.us', senderJid: '111@s.whatsapp.net', content: 'hello from A', isGroup: true }));
+    await runtime.handleMessage(makeMsg({ messageId: 'shared-b', inboundSeq: 2, chatJid: 'chat-b@s.whatsapp.net', senderJid: '222@s.whatsapp.net', content: 'hello from B', isGroup: false }));
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    mockSession.completeProviderTurn.mockClear();
+    capturedOnEventRef.current?.({ type: 'result', text: 'A complete' });
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(2));
+    capturedOnEventRef.current?.({ type: 'result', text: 'B complete' });
+    await (runtime as unknown as { turnQueue: { idle(): Promise<void> } }).turnQueue.idle();
 
     // Both messages should be forwarded to Claude Code as turns
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
@@ -7955,6 +9143,7 @@ describe('AgentRuntime', () => {
     const spawnBlocked = new Promise<void>((resolve) => {
       releaseSpawn = resolve;
     });
+    let localOnEvent: ((event: AgentEvent) => void) | null = null;
 
     const localSession = {
       ...mockSession,
@@ -7974,16 +9163,20 @@ describe('AgentRuntime', () => {
       sendTurn: vi.fn(async () => {}),
       shutdown: vi.fn(async () => {}),
     };
-    (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+    (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
+      opts: { onEvent: (event: AgentEvent) => void },
+    ) {
+      localOnEvent = opts.onEvent;
       return localSession;
     });
 
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    attachRuntimeFaultMarkerSpies(runtime);
     await runtime.start();
 
-    await runtime.handleMessage(makeMsg({ messageId: 'msg-1', chatJid: 'same@s.whatsapp.net', content: 'first' }));
+    await runtime.handleMessage(makeMsg({ messageId: 'msg-1', inboundSeq: 1, chatJid: 'same@s.whatsapp.net', content: 'first' }));
     await spawnStarted;
-    await runtime.handleMessage(makeMsg({ messageId: 'msg-2', chatJid: 'same@s.whatsapp.net', content: 'second' }));
+    await runtime.handleMessage(makeMsg({ messageId: 'msg-2', inboundSeq: 2, chatJid: 'same@s.whatsapp.net', content: 'second' }));
 
     expect(localSession.spawnSession).toHaveBeenCalledTimes(1);
     expect(localSession.sendTurn).not.toHaveBeenCalled();
@@ -7995,8 +9188,23 @@ describe('AgentRuntime', () => {
       const sent = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
         .map(([turnText]) => turnText)
         .filter((turnText) => turnText === 'first' || turnText === 'second');
+      expect(sent).toEqual(['first']);
+    });
+    expect(localOnEvent).toBeTypeOf('function');
+    const emitLocalEvent = localOnEvent as unknown as (event: AgentEvent) => void;
+    mockSession.completeProviderTurn.mockClear();
+    emitLocalEvent({ type: 'result', text: 'first complete' });
+    await vi.waitFor(() => expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce());
+    await vi.waitFor(() => {
+      const sent = (localSession.sendTurn.mock.calls as unknown as Array<[string]>)
+        .map(([turnText]) => turnText)
+        .filter((turnText) => turnText === 'first' || turnText === 'second');
       expect(sent).toEqual(['first', 'second']);
     });
+    emitLocalEvent({ type: 'result', text: 'second complete' });
+    await (runtime as unknown as {
+      perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
+    }).perChatTurnQueues.get('same@s.whatsapp.net')?.idle();
 
     const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
     expect(chatSessions.size).toBe(1);
@@ -8023,8 +9231,25 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
 
-    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-1', chatJid: canonicalJid, content: 'hello' }));
-    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-2', chatJid: '15550100001@lid', content: 'follow-up' }));
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ messageId: 'msg-1', chatJid: canonicalJid, content: 'hello' }),
+      canonicalJid,
+    );
+    capturedOnEventRef.current?.({ type: 'result', text: 'hello complete' });
+    await (runtime as unknown as {
+      perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
+    }).perChatTurnQueues.get(canonicalJid)?.idle();
+
+    await sendAndAwaitProviderDispatch(
+      runtime,
+      makeMsg({ messageId: 'msg-2', chatJid: '15550100001@lid', content: 'follow-up' }),
+      canonicalJid,
+    );
+    capturedOnEventRef.current?.({ type: 'result', text: 'follow-up complete' });
+    await (runtime as unknown as {
+      perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
+    }).perChatTurnQueues.get(canonicalJid)?.idle();
     await vi.waitFor(() => {
       const sent = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
         .map(([turnText]) => turnText)
@@ -8850,9 +10075,11 @@ describe('AgentRuntime', () => {
 
     // Create distinct sessions per workspace key so we can tell them apart
     const sessionsByKey = new Map<string, Record<string, ReturnType<typeof vi.fn>>>();
+    const sessionEvents = new Map<string, (event: AgentEvent) => void>();
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
         const key = opts.chatJid.replace('@s.whatsapp.net', '');
+        sessionEvents.set(key, opts.onEvent);
         const perChatSession = {
           spawnSession: vi.fn(async () => {}),
           sendTurn: vi.fn(async () => {}),
@@ -8866,7 +10093,10 @@ describe('AgentRuntime', () => {
             lastMessageAt: new Date().toISOString(),
           })),
           shutdown: vi.fn(async () => {}),
+          getDbRowId: vi.fn(() => null),
+          getProviderId: vi.fn(() => 'claude-cli'),
           clearTurnWatchdog: vi.fn(() => {}),
+          completeProviderTurn: vi.fn(() => {}),
           tickWatchdog: vi.fn(() => {}),
           trackToolStart: vi.fn((_toolId: string) => {}),
           trackToolEnd: vi.fn((_toolId: string) => {}),
@@ -8892,6 +10122,14 @@ describe('AgentRuntime', () => {
       cwd: tmpdir(),
     });
     await runtime.start();
+    const runtimeState = runtime as unknown as {
+      perChatTurnQueues: Map<string, { activeTurn: unknown; idle(): Promise<void> }>;
+    };
+    const finishTurn = async (key: string): Promise<void> => {
+      await vi.waitFor(() => expect(runtimeState.perChatTurnQueues.get(key)?.activeTurn).not.toBeNull());
+      sessionEvents.get(key)?.({ type: 'result', text: `${key} complete` });
+      await runtimeState.perChatTurnQueues.get(key)?.idle();
+    };
 
     // Chat A sends a message → creates session for chat A
     await sendAndDrain(runtime, makeMsg({
@@ -8899,6 +10137,7 @@ describe('AgentRuntime', () => {
       chatJid: '111@s.whatsapp.net',
       content: 'hello from A',
     }));
+    await finishTurn('111');
     // Chat B sends a message → creates session for chat B
     // (OLD BUG: this would set this.session to B's session)
     await sendAndDrain(runtime, makeMsg({
@@ -8906,6 +10145,7 @@ describe('AgentRuntime', () => {
       chatJid: '222@s.whatsapp.net',
       content: 'hello from B',
     }));
+    await finishTurn('222');
 
     // Clear getStatus call tracking on both sessions
     const sessionA = sessionsByKey.get('111');
@@ -8949,8 +10189,10 @@ describe('AgentRuntime', () => {
             startedAt: new Date().toISOString(), messageCount: 1, lastMessageAt: new Date().toISOString(),
           })),
           getDbRowId: vi.fn(() => null),
+          getProviderId: vi.fn(() => 'claude-cli'),
           shutdown: vi.fn(async () => {}),
           clearTurnWatchdog: vi.fn(() => {}),
+          completeProviderTurn: vi.fn(() => {}),
           tickWatchdog: vi.fn(() => {}),
           trackToolStart: vi.fn((_toolId: string) => {}),
           trackToolEnd: vi.fn((_toolId: string) => {}),
@@ -8975,11 +10217,10 @@ describe('AgentRuntime', () => {
     await runtime.start();
     const runtimeState = runtime as unknown as {
       perChatTurnQueues: Map<string, { activeTurn: unknown; idle(): Promise<void> }>;
-      pendingSystemResults: { counts: Map<string, number> };
     };
     const finishTurn = async (key: string): Promise<void> => {
       await vi.waitFor(() => expect(runtimeState.perChatTurnQueues.get(key)?.activeTurn).not.toBeNull());
-      while ((runtimeState.pendingSystemResults.counts.get(key) ?? 0) > 0) {
+      while (pendingSystemResults(runtime).count(key) > 0) {
         sessionEvents.get(key)?.({ type: 'result', text: null });
         await Promise.resolve();
       }
@@ -9188,6 +10429,7 @@ describe('AgentRuntime', () => {
     const completeTurn = vi.fn();
     const session = {
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
       shutdown: vi.fn(),
       getDbRowId: vi.fn(() => 41),
       getStatus: vi.fn(() => ({ active: true })),
@@ -9201,6 +10443,7 @@ describe('AgentRuntime', () => {
           queue: IOutboundQueue,
           session: {
             clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            completeProviderTurn: ReturnType<typeof vi.fn>;
             shutdown: ReturnType<typeof vi.fn>;
             getDbRowId: ReturnType<typeof vi.fn>;
           } | null,
@@ -9253,6 +10496,7 @@ describe('AgentRuntime', () => {
     const queue = makeQueueMock('111@s.whatsapp.net');
     const session = {
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
       shutdown: vi.fn(),
       getDbRowId: vi.fn(() => 41),
       getStatus: vi.fn(() => ({ active: true })),
@@ -9279,6 +10523,7 @@ describe('AgentRuntime', () => {
           queue: IOutboundQueue,
           session: {
             clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            completeProviderTurn: ReturnType<typeof vi.fn>;
             shutdown: ReturnType<typeof vi.fn>;
             getDbRowId: ReturnType<typeof vi.fn>;
           } | null,
@@ -9320,6 +10565,7 @@ describe('AgentRuntime', () => {
     const queue = makeQueueMock('111@s.whatsapp.net');
     const session = {
       clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
       shutdown: vi.fn(),
       getDbRowId: vi.fn(() => 41),
       getStatus: vi.fn(() => ({ active: true })),
@@ -9386,6 +10632,7 @@ describe('AgentRuntime', () => {
       const queue = makeQueueMock('111@s.whatsapp.net');
       const session = {
         clearTurnWatchdog: vi.fn(),
+        completeProviderTurn: vi.fn(),
         shutdown: vi.fn(),
         getDbRowId: vi.fn(() => 41),
         getStatus: vi.fn(() => ({ active: true })),
@@ -9529,17 +10776,23 @@ describe('AgentRuntime', () => {
       currentTurnChatJid: string | null;
       currentInboundSeq: number | undefined;
       outboundQueues: Map<string, IOutboundQueue>;
-      handleEvent: (event: AgentEvent) => void;
+      handleEvent: (sourceSession: object, event: AgentEvent) => void;
     };
     state.durability = { completeTurn: vi.fn(), upsertSessionCheckpoint: vi.fn(), completeInbound: vi.fn() };
-    state.session = Object.assign({}, mockSession, { shutdown: vi.fn(), clearTurnWatchdog: vi.fn() });
+    const sourceSession = Object.assign({}, mockSession, {
+      shutdown: vi.fn(),
+      clearTurnWatchdog: vi.fn(),
+      completeProviderTurn: vi.fn(),
+    });
+    state.session = sourceSession;
     state.activeChatJid = '111@s.whatsapp.net';
     state.currentTurnChatJid = '111@s.whatsapp.net';
     state.currentInboundSeq = 1;
     state.outboundQueues.set('111@s.whatsapp.net', queue);
+    publishSingletonTestOwner(runtime, sourceSession, '111@s.whatsapp.net');
 
     const raw = "There's an issue with the selected model (x). It may not exist or you may not have access to it.";
-    state.handleEvent({ type: 'result', text: raw, isError: true });
+    state.handleEvent(sourceSession, { type: 'result', text: raw, isError: true });
 
     const forwarded = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a) => a[0] as string);
     expect(forwarded).not.toContain(raw);
@@ -9882,13 +11135,13 @@ describe('AgentRuntime', () => {
       capturedOnEventRef.current?.({ type: 'result', text: 'late result' });
 
       expect(state.handleEventPerChat).toHaveBeenCalledWith(
-        mapKey,
+        state.chatSessions.get(mapKey),
         { type: 'result', text: 'late result' },
         expect.any(String),
       );
     });
 
-    it('proactive resume injects missed messages and unmarks failed continuation sends', async () => {
+    it('proactive resume waits for missed context terminal before quarantining a failed continuation', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
       try {
@@ -9903,7 +11156,8 @@ describe('AgentRuntime', () => {
           startedAt: new Date().toISOString(),
           messageCount: 1,
           lastMessageAt: null,
-        });
+          turnInFlight: true,
+        } as ReturnType<typeof mockSession.getStatus> & { turnInFlight: boolean });
         mockSession.sendTurn.mockRejectedValueOnce(new Error('stdin closed'));
 
         const mockDurability = {
@@ -9925,13 +11179,10 @@ describe('AgentRuntime', () => {
 
         const state = runtime as unknown as {
           injectMissedMessages: ReturnType<typeof vi.fn>;
-          pendingSystemResults: {
-            counts: Map<string, number>;
-          };
         };
         let missedContextMarkedBeforeInjection = false;
         state.injectMissedMessages = vi.fn(async () => {
-          missedContextMarkedBeforeInjection = (state.pendingSystemResults.counts.get('15551230008@lid') ?? 0) === 1;
+          missedContextMarkedBeforeInjection = pendingSystemResults(runtime).count('15551230008@lid') === 1;
           return true;
         });
 
@@ -9945,10 +11196,17 @@ describe('AgentRuntime', () => {
           Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
         );
         expect(missedContextMarkedBeforeInjection).toBe(true);
-        expect(mockSession.sendTurn).toHaveBeenCalledWith(
-          '[System: session resumed after service restart — continue where you left off]',
-        );
-        expect(state.pendingSystemResults.counts.get('15551230008@lid') ?? 0).toBe(1);
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        expect(pendingSystemResults(runtime).count('15551230008@lid')).toBe(1);
+
+        capturedOnEventRef.current?.({ type: 'result', text: 'context received', inputTokens: 25, outputTokens: 0 });
+        await vi.waitFor(() => {
+          expect(mockSession.sendTurn).toHaveBeenCalledWith(
+            '[System: session resumed after service restart — continue where you left off]',
+          );
+        });
+        await vi.waitFor(() => expect(pendingSystemResults(runtime).count('15551230008@lid')).toBe(0));
+        expect(mockSession.shutdown).toHaveBeenCalled();
         expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
           expect.objectContaining({
             err: expect.any(Error),
@@ -9956,10 +11214,65 @@ describe('AgentRuntime', () => {
           }),
           'failed to send continuation turn after resume',
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
-        await emitAgentResult(25, 'context received');
+    it('proactive resume cancels its context lease when missed-message injection throws', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+      try {
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+        const chatJid = '15551230018@lid';
+        const injectionError = new Error('missed-message lookup failed');
 
-        expect(state.pendingSystemResults.counts.get('15551230008@lid') ?? 0).toBe(0);
+        mockSession.spawnSession.mockResolvedValue(undefined);
+        mockSession.getStatus.mockReturnValue({
+          active: true,
+          pid: 123,
+          sessionId: 'dm-sess-inject-error',
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: null,
+        });
+
+        const mockDurability = {
+          getResumableCheckpoints: vi.fn(() => [
+            { conversation_key: '15551230018' },
+          ]),
+          getSessionCheckpoint: vi.fn(() => completedCheckpoint({
+            conversationKey: '15551230018',
+            deliveryJid: chatJid,
+            deliveryNamespace: 'lid',
+            scope: 'per_chat',
+            sessionId: 'dm-sess-inject-error',
+            updatedAt: '2026-06-10T09:59:00',
+          })),
+          upsertSessionCheckpoint: vi.fn(),
+        };
+        (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+        const state = runtime as unknown as {
+          injectMissedMessages: ReturnType<typeof vi.fn>;
+        };
+        state.injectMissedMessages = vi.fn(async () => {
+          expect(pendingSystemResults(runtime).count(chatJid)).toBe(1);
+          throw injectionError;
+        });
+
+        await runtime.start();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(state.injectMissedMessages).toHaveBeenCalledOnce();
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        expect(pendingSystemResults(runtime).count(chatJid)).toBe(0);
+        expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ err: injectionError, chatJid }),
+          'failed to send continuation turn after resume',
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -10027,14 +11340,11 @@ describe('AgentRuntime', () => {
         (activeRuntime as unknown as { durability: unknown }).durability = activeDurability;
         const activeState = activeRuntime as unknown as {
           injectMissedMessages: ReturnType<typeof vi.fn>;
-          pendingSystemResults: {
-            mark: ReturnType<typeof vi.fn>;
-            unmark: ReturnType<typeof vi.fn>;
-          };
         };
         activeState.injectMissedMessages = vi.fn(async () => false);
-        activeState.pendingSystemResults.mark = vi.fn();
-        activeState.pendingSystemResults.unmark = vi.fn();
+        const activeTracker = pendingSystemResults(activeRuntime);
+        const markSpy = vi.spyOn(activeTracker, 'mark');
+        const cancelSpy = vi.spyOn(activeTracker, 'cancel');
         mockSession.getStatus.mockReturnValue({
           active: true,
           pid: 123,
@@ -10054,10 +11364,17 @@ describe('AgentRuntime', () => {
           '15551230011@lid',
           Math.floor(new Date('2026-06-10T09:59:00Z').getTime() / 1000),
         );
-        expect(activeState.pendingSystemResults.mark).toHaveBeenCalledTimes(2);
-        expect(activeState.pendingSystemResults.mark).toHaveBeenCalledWith('15551230011@lid');
-        expect(activeState.pendingSystemResults.unmark).toHaveBeenCalledTimes(1);
-        expect(activeState.pendingSystemResults.unmark).toHaveBeenCalledWith('15551230011@lid');
+        expect(markSpy).toHaveBeenCalledTimes(2);
+        expect(markSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+          scopeKey: '15551230011@lid',
+          purpose: 'proactive_resume_context',
+        }));
+        expect(markSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+          scopeKey: '15551230011@lid',
+          purpose: 'proactive_resume_continuation',
+        }));
+        expect(cancelSpy).toHaveBeenCalledTimes(1);
+        expect(cancelSpy).toHaveBeenCalledWith(markSpy.mock.results[0]?.value);
         expect(mockSession.sendTurn).toHaveBeenCalledWith(
           '[System: session resumed after service restart — continue where you left off]',
         );
@@ -10149,7 +11466,11 @@ describe('AgentRuntime', () => {
 
       // Session too stale — should NOT spawn
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
-      expect(mockDurability.retireSessionLifecycle).toHaveBeenCalledWith(1, 'sess-stale');
+      expect(mockDurability.retireSessionLifecycle).toHaveBeenCalledWith({
+        agentSessionRowId: 1,
+        provider: undefined,
+        providerSessionId: 'sess-stale',
+      });
     });
 
     it('shared mode group suppression — session spawned but no startup message', async () => {
@@ -10488,7 +11809,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
       mockQueue.enqueueToolUpdate.mockClear();
@@ -10531,7 +11856,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -10563,7 +11892,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -10600,7 +11933,11 @@ describe('AgentRuntime', () => {
       }));
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -10632,7 +11969,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
       mockQueue.flush.mockClear();
@@ -10679,7 +12020,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
       mockQueue.flush.mockReset();
@@ -10717,7 +12062,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
 
@@ -10762,7 +12111,11 @@ describe('AgentRuntime', () => {
         .mockRejectedValueOnce(new Error('poll send unavailable'));
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
 
@@ -10845,7 +12198,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueText.mockClear();
       mockQueue.flush.mockClear();
@@ -10889,7 +12246,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -10919,7 +12280,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -10956,13 +12321,215 @@ describe('AgentRuntime', () => {
       expect(injected).toContain('Q: Pick a runtime');
     });
 
+    it('holds a fast poll answer behind the exact source provider turn', async () => {
+      let releaseSourceTurn!: () => void;
+      const sourceTurnTerminal = new Promise<void>((resolve) => {
+        releaseSourceTurn = resolve;
+      });
+      mockSession.waitForProviderTurnToTerminalize.mockReturnValueOnce(sourceTurnTerminal);
+      const { messenger, pollSends, eventHandlers } = makePollMessenger({
+        waMessageId: 'POLL_FAST_ANSWER',
+        hasSecret: true,
+      });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-fast-answer',
+        toolInput: {
+          questions: [{
+            question: 'Pick a runtime',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(mockSession.waitForProviderTurnToTerminalize).toHaveBeenCalledOnce();
+      mockSession.sendTurn.mockClear();
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_FAST_ANSWER',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Go'],
+      });
+
+      await Promise.resolve();
+      expect(sendTurnTexts().some((arg) => arg.includes('[User answered poll]'))).toBe(false);
+      expect((runtime as unknown as {
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+      }).pendingPolls.questions.has('5678@s.whatsapp.net')).toBe(true);
+
+      releaseSourceTurn();
+      await vi.waitFor(() => {
+        expect(sendTurnTexts().some((arg) => arg.includes('A: Go'))).toBe(true);
+      });
+      expect((runtime as unknown as {
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+      }).pendingPolls.questions.has('5678@s.whatsapp.net')).toBe(false);
+    });
+
+    it('holds a fast poll answer until the exact journaled source turn is durably finalized', async () => {
+      let releaseEvidence!: () => void;
+      const evidenceBarrier = new Promise<void>((resolve) => {
+        releaseEvidence = resolve;
+      });
+      mockQueue.flushTurnEvidence.mockImplementationOnce(async (turnId: string) => {
+        await evidenceBarrier;
+        return { turnId, answerOpIds: [], lifecycleOpIds: [], statusOpIds: [] };
+      });
+      const { messenger, pollSends, eventHandlers } = makePollMessenger({
+        waMessageId: 'POLL_JOURNALED_FAST_ANSWER',
+        hasSecret: true,
+      });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      const { durability } = attachRuntimeFaultMarkerSpies(runtime);
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({
+          content: 'test',
+          chatJid: '5678@s.whatsapp.net',
+          senderJid: '5678@s.whatsapp.net',
+          inboundSeq: 1701,
+        }),
+        '5678@s.whatsapp.net',
+      );
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-journaled-fast-answer',
+        toolInput: {
+          questions: [{
+            question: 'Pick a runtime',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(mockSession.waitForProviderTurnToTerminalize).not.toHaveBeenCalled();
+      mockSession.sendTurn.mockClear();
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_JOURNALED_FAST_ANSWER',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Go'],
+      });
+
+      capturedOnEventRef.current!({ type: 'result', text: null });
+      await vi.waitFor(() => expect(mockQueue.flushTurnEvidence).toHaveBeenCalledOnce());
+      expect(sendTurnTexts().some((arg) => arg.includes('[User answered poll]'))).toBe(false);
+      expect(durability.finalizeTurnTerminal).not.toHaveBeenCalled();
+
+      releaseEvidence();
+      await vi.waitFor(() => {
+        expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce();
+        expect(sendTurnTexts().filter((arg) => arg.includes('A: Go'))).toHaveLength(1);
+      });
+    });
+
+    it('captures the exact group AskUser source before admin metadata resolves', async () => {
+      const groupJid = 'group-barrier@g.us';
+      (mockConfig as Record<string, unknown>).pollResolution = {
+        defaultStrategy: 'admin-only',
+        defaultTimeoutMs: 60_000,
+      };
+      let releaseMetadata!: (admins: Set<string>) => void;
+      const metadata = new Promise<Set<string>>((resolve) => {
+        releaseMetadata = resolve;
+      });
+      let releaseSource!: () => void;
+      const sourceBarrier = new Promise<void>((resolve) => {
+        releaseSource = resolve;
+      });
+      mockSession.waitForProviderTurnToTerminalize.mockReturnValueOnce(sourceBarrier);
+      const { messenger, pollSends } = makePollMessenger({
+        waMessageId: 'POLL_GROUP_BARRIER',
+        hasSecret: true,
+      });
+      const runtime = new AgentRuntime(makeDb(), messenger, 'test', { sessionScope: 'per_chat' });
+      const queue = makeQueueMock(groupJid);
+      const state = runtime as unknown as {
+        chatQueues: Map<string, IOutboundQueue>;
+        pendingPolls: { questions: Map<string, PendingPollQuestion> };
+        pendingPollSourceTurnBarriers: WeakMap<PendingPollQuestion, Promise<void>>;
+        suppressedAskUserToolIds: Set<string>;
+        fetchGroupAdminJids(chatJid: string): Promise<Set<string> | null>;
+        handleAskUserQuestionAsPoll(
+          questions: Array<{
+            question: string;
+            header: string;
+            options: Array<{ label: string; description: string }>;
+            multiSelect: boolean;
+          }>,
+          toolId: string,
+          mapKey: string,
+          output: IOutboundQueue,
+        ): Promise<void>;
+      };
+      await runtime.start();
+      setOwnedTestSession(runtime, groupJid, mockSession);
+      state.chatQueues.set(groupJid, queue);
+      vi.spyOn(state, 'fetchGroupAdminJids').mockReturnValueOnce(metadata);
+
+      const pollSetup = state.handleAskUserQuestionAsPoll([{
+        question: 'Approve?',
+        header: 'Approval',
+        options: [
+          { label: 'Yes', description: 'Approve' },
+          { label: 'No', description: 'Reject' },
+        ],
+        multiSelect: false,
+      }], 'tool-group-barrier', groupJid, queue);
+
+      const pending = state.pendingPolls.questions.get(groupJid);
+      expect(pending).toBeDefined();
+      expect(state.suppressedAskUserToolIds.has('tool-group-barrier')).toBe(true);
+      expect(mockSession.waitForProviderTurnToTerminalize).toHaveBeenCalledOnce();
+      expect(state.pendingPollSourceTurnBarriers.get(pending!)).toBe(sourceBarrier);
+      expect(pollSends).toHaveLength(0);
+
+      releaseMetadata(new Set(['admin@s.whatsapp.net']));
+      await pollSetup;
+      expect(state.pendingPollSourceTurnBarriers.get(pending!)).toBe(sourceBarrier);
+      expect(pollSends).toHaveLength(1);
+      releaseSource();
+    });
+
     it('drops an out-of-range poll vote mapping without injecting an answer', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_ANSWER', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11021,7 +12588,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11088,7 +12659,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11181,7 +12756,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11223,7 +12802,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11279,7 +12862,11 @@ describe('AgentRuntime', () => {
       await runtime.start();
       (runtime as unknown as { durability: typeof durability }).durability = durability;
       (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11329,7 +12916,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11370,7 +12961,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11474,7 +13069,11 @@ describe('AgentRuntime', () => {
         const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
         await runtime.start();
-        await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+        await sendAndAwaitProviderDispatch(
+          runtime,
+          makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+          '5678@s.whatsapp.net',
+        );
 
         capturedOnEventRef.current!({
           type: 'tool_use',
@@ -11531,7 +13130,11 @@ describe('AgentRuntime', () => {
         const state = runtime as unknown as { pendingPolls: PerChatCleanupRuntimeState['pendingPolls'] };
 
         await runtime.start();
-        await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+        await sendAndAwaitProviderDispatch(
+          runtime,
+          makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+          '5678@s.whatsapp.net',
+        );
 
         capturedOnEventRef.current!({
           type: 'tool_use',
@@ -11610,7 +13213,11 @@ describe('AgentRuntime', () => {
       const state = runtime as unknown as { pendingPolls: PerChatCleanupRuntimeState['pendingPolls'] };
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11672,7 +13279,11 @@ describe('AgentRuntime', () => {
         const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
         await runtime.start();
-        await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+        await sendAndAwaitProviderDispatch(
+          runtime,
+          makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+          '5678@s.whatsapp.net',
+        );
 
         capturedOnEventRef.current!({
           type: 'tool_use',
@@ -11718,7 +13329,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11771,7 +13386,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       capturedOnEventRef.current!({
         type: 'tool_use',
@@ -11841,7 +13460,11 @@ describe('AgentRuntime', () => {
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+      await sendAndAwaitProviderDispatch(
+        runtime,
+        makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }),
+        '5678@s.whatsapp.net',
+      );
 
       mockQueue.enqueueToolUpdate.mockClear();
 
@@ -11985,7 +13608,8 @@ describe('AgentRuntime', () => {
       const state = runtime as unknown as AdminRuntimeState;
       await runtime.start();
 
-      state.setOwnedPerChatSession(groupJid, mockSession);
+      mockActiveAgentSession();
+      setOwnedTestSession(runtime, groupJid, mockSession);
       state.chatQueues.set(groupJid, mockQueue);
       const pollMessageId = 'POLL_ADMIN_ASKUSER';
       const pending = seedAdminOnlyPending(state, groupJid, 'askuser', pollMessageId);
@@ -12297,6 +13921,32 @@ describe('AgentRuntime', () => {
       expect(state.pendingPolls.questions.has('send_poll:a1')).toBe(false);
       const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
       expect(remaining.cnt).toBe(1);
+
+      db.close();
+    });
+
+    it('rehydrate removes a resolved AskUser continuation and sends a deterministic retry notice', async () => {
+      const db = makeRealDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const future = Date.now() + 3_600_000;
+      insertRow(db, 'resolved-askuser', 'resolved-chat@g.us', future, buildPayload({
+        chatJid: 'resolved-chat@g.us',
+        answersCollected: { 0: 'A' },
+        resolvedAt: Date.now() - 1_000,
+      }));
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await (runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls();
+
+      expect(sentMessages).toEqual([{
+        jid: 'resolved-chat@g.us',
+        text: expect.stringMatching(/received your poll answer.*send the answer again/i),
+      }]);
+      expect((runtime as unknown as {
+        pendingPolls: { questions: Map<string, unknown> };
+      }).pendingPolls.questions.has('resolved-askuser')).toBe(false);
+      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
+      expect(remaining.cnt).toBe(0);
 
       db.close();
     });
@@ -12927,11 +14577,9 @@ describe('AgentRuntime', () => {
       expect(mockQueue.endTurn).toHaveBeenCalledTimes(1);
     });
 
-    it('per-chat path: endTurn() called on handleEventPerChat result (usage-limit early-break)', () => {
-      // Drive a result through the per_chat code path (handleEventPerChat →
-      // handleEventWithContext) and verify endTurn() is reached on the per-chat
-      // queue, not just the shared queue. This would fail if queue.endTurn() were
-      // removed from handleEventWithContext.
+    it('per-chat downstream handler calls endTurn() on a usage-limit early-break', () => {
+      // Admission is intentionally out of scope: this isolates the downstream
+      // handleEventWithContext choke point used after source-bound admission.
       const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
       const MAP_KEY = 'chat-x@s.whatsapp.net';
       const perChatQueue = makeQueueMock(MAP_KEY);
@@ -12939,7 +14587,6 @@ describe('AgentRuntime', () => {
       type PerChatRuntimeView = {
         chatQueues: Map<string, IOutboundQueue>;
         perChatInboundSeqQueue: Map<string, number[]>;
-        handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void;
       };
       const view = runtime as unknown as PerChatRuntimeView;
 
@@ -12947,12 +14594,19 @@ describe('AgentRuntime', () => {
       view.perChatInboundSeqQueue.set(MAP_KEY, [1]);
 
       // Drive a usage-limit result — early-break branch in handleEventWithContext
-      view.handleEventPerChat(MAP_KEY, {
+      handleEventDownstreamWithoutAdmission(runtime, {
         type: 'result',
         text: 'Claude usage limit reached. Your limit will reset at 3pm.',
         inputTokens: 0,
         outputTokens: 0,
-      }, MAP_KEY);
+      }, {
+        queue: perChatQueue,
+        session: mockSession,
+        conversationKey: toConversationKey(MAP_KEY),
+        inboundSeq: 1,
+        mapKey: MAP_KEY,
+        toolScopeKey: `${MAP_KEY}#test`,
+      });
 
       expect(perChatQueue.endTurn).toHaveBeenCalledTimes(1);
     });
@@ -13031,6 +14685,12 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // out of scope here).
     if (cfgAny().nlRouting === true) ensurePrefSchema?.(routingDb);
     return { runtime, sentMessages };
+  }
+
+  function handleRoutingEvent(runtime: AgentRuntime, event: AgentEvent): void {
+    handleEventDownstreamWithoutAdmission(runtime, event, {
+      queue: { ...mockQueue, targetChatJid: CHAT },
+    });
   }
 
   function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
@@ -13239,13 +14899,18 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(typeof offOpts.routingSystemBlock).toBe('undefined');
   });
 
+  // These marker tests exercise downstream routing after admission has already
+  // supplied the active chat and actor; source admission is covered separately.
   it('NL typed-intent marker feeds the SAME preference path as the aliases and is stripped from delivery', async () => {
     const { runtime } = makeRoutingRuntime();
     await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'use your best model' }));
     (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
     mockQueue.enqueueStreamingText.mockClear();
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: strongest]]\nOkay — from your next session.' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: '[[wa-route: strongest]]\nOkay — from your next session.',
+    });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Okay — from your next session.');
     const rows = prefRows();
     expect(rows).toHaveLength(1);
@@ -13262,7 +14927,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
     mockQueue.enqueueStreamingText.mockClear();
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: give-me-admin]]\nSure.' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: '[[wa-route: give-me-admin]]\nSure.',
+    });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Sure.');
     expect(prefRows()).toHaveLength(0);
   });
@@ -13273,11 +14941,14 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
     mockQueue.enqueueStreamingText.mockClear();
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: fastest]]' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: '[[wa-route: fastest]]',
+    });
     // The marker has no trailing newline, so the streaming-safe scan holds it
     // until the terminal result (text:null, as the token-streaming providers
     // emit for a streamed reply) flushes it — registering the intent.
-    capturedOnEventRef.current!({ type: 'result', text: null });
+    handleRoutingEvent(runtime, { type: 'result', text: null });
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
     expect(prefRows()[0]?.intent).toBe('fastest');
   });
@@ -13287,12 +14958,17 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'use your best model' }));
     (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
+    (runtime as unknown as { perChatRouteMarkerHold: Map<string, string> })
+      .perChatRouteMarkerHold.set('__global__', '');
     mockQueue.enqueueStreamingText.mockClear();
     // anthropic-api / openai-api stream one token fragment at a time with no
     // itemId, so the [[wa-route: …]] envelope is split across deltas.
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: ' });
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'strongest]]\n' });
-    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Okay — from your next session.' });
+    handleRoutingEvent(runtime, { type: 'assistant_text', text: '[[wa-route: ' });
+    handleRoutingEvent(runtime, { type: 'assistant_text', text: 'strongest]]\n' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: 'Okay — from your next session.',
+    });
     const delivered = mockQueue.enqueueStreamingText.mock.calls.map(([t]) => String(t)).join('');
     expect(delivered).not.toContain('[[wa-route');
     expect(delivered).not.toContain('strongest]]');
@@ -13311,7 +14987,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     mockQueue.enqueueStreamingText.mockClear();
     // No marker, whitespace-only: the flag-off path delivers this, so flag-on
     // must too — it must not be swallowed by the marker-strip suppression.
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '   ' });
+    handleRoutingEvent(runtime, { type: 'assistant_text', text: '   ' });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('   ');
   });
 
@@ -13322,7 +14998,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
     await runtime.handleMessage(makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: 'back to normal please', messageId: 'msg-2' }));
     (runtime as unknown as Record<string, unknown>).currentTurnReplayActorJid = SENDER_A;
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: reset]]\nBack to normal.' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: '[[wa-route: reset]]\nBack to normal.',
+    });
     expect(prefRows()).toHaveLength(0);
     const events = await readEvents();
     expect(events.some((e) => e.event === 'model_preference_cleared')).toBe(true);
@@ -13337,7 +15016,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     (runtime as unknown as Record<string, unknown>).activeChatJid = CHAT;
     mockQueue.enqueueStreamingText.mockClear();
     const text = '[[wa-route: strongest]]\nHello.';
-    capturedOnEventRef.current!({ type: 'assistant_text', text });
+    handleRoutingEvent(runtime, { type: 'assistant_text', text });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text);
     const tables = (routingDb.raw as unknown as { prepare: (s: string) => { all: () => unknown[] } })
       .prepare("SELECT name FROM sqlite_master WHERE name='chat_model_preference'");
@@ -13405,7 +15084,10 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // Drop the table so recordRoutePreference's store write throws in consumeRouteIntents.
     routingDb.raw.exec('DROP TABLE chat_model_preference');
     mockQueue.enqueueStreamingText.mockClear();
-    capturedOnEventRef.current!({ type: 'assistant_text', text: '[[wa-route: strongest]]\nDone.' });
+    handleRoutingEvent(runtime, {
+      type: 'assistant_text',
+      text: '[[wa-route: strongest]]\nDone.',
+    });
     // Reply is delivered (marker stripped) even though the apply failed.
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Done.');
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(

@@ -6,6 +6,10 @@ import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/sess
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type {
+  MarkSystemTurnInput,
+  SystemTurnLeaseToken,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
+import type {
   PendingPollQuestion,
   PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
@@ -50,6 +54,7 @@ const {
     getStatus: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
     clearTurnWatchdog: ReturnType<typeof vi.fn>;
+    completeProviderTurn: ReturnType<typeof vi.fn>;
     tickWatchdog: ReturnType<typeof vi.fn>;
     trackToolStart: ReturnType<typeof vi.fn>;
     trackToolEnd: ReturnType<typeof vi.fn>;
@@ -339,10 +344,11 @@ type RuntimeView = {
   perChatAssistantItemText: Map<string, Map<string, string>>;
   resumeFailedHandling: Set<string>;
   pendingSystemResults: {
-    counts: Map<string | undefined, number>;
-    mark: (scopeKey?: string) => void;
-    unmark: (scopeKey?: string) => void;
+    mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+    cancel(lease: SystemTurnLeaseToken | null | undefined): boolean;
+    peek(scopeKey: string): { lease: SystemTurnLeaseToken; purpose: string; blocking: boolean } | null;
   };
+  sessionEventToolScopes: WeakMap<object, string>;
   imageCoalesce: {
     buffers: Map<string, {
       timer: ReturnType<typeof setTimeout>;
@@ -357,8 +363,8 @@ type RuntimeView = {
   };
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
-  handleEventPerChat: ReturnType<typeof vi.fn>;
-  handleEvent(event: AgentEvent): void;
+  handleEventPerChat(sourceSession: object, event: AgentEvent, toolScopeKey: string): void;
+  handleEvent(sourceSession: object, event: AgentEvent): void;
   handlePerChatCrash: ReturnType<typeof vi.fn>;
   handleCrashNotify: ReturnType<typeof vi.fn>;
   handleResumeFailed(chatJid: string): void;
@@ -433,6 +439,7 @@ type RuntimeView = {
     queue: IOutboundQueue,
     session: {
       clearTurnWatchdog: ReturnType<typeof vi.fn>;
+      completeProviderTurn: ReturnType<typeof vi.fn>;
       getDbRowId: ReturnType<typeof vi.fn>;
       shutdown: ReturnType<typeof vi.fn>;
       tickWatchdog: ReturnType<typeof vi.fn>;
@@ -450,6 +457,7 @@ type RuntimeView = {
   getFallbackState(): { fallbackReason: string | null; fallbackActiveUntil: number | null };
   setOwnedPerChatSession(mapKey: string, session: unknown): void;
   deleteOwnedPerChatSession(mapKey: string, expected?: unknown): boolean;
+  managerIdFor(session: object): string;
 };
 
 function makeSession() {
@@ -470,6 +478,7 @@ function makeSession() {
     })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
     tickWatchdog: vi.fn(),
     trackToolStart: vi.fn(),
     trackToolEnd: vi.fn(),
@@ -625,9 +634,18 @@ function runtimeContext(
   deliveryJid: string,
   inboundSeq: number,
   logicalTurnId: string,
+  owner: { managerId?: string; generation?: number; toolScopeKey?: string } = {},
 ): RuntimeTurnContext {
   return createRuntimeTurnContext({
-    identity: { scope, conversationKey, deliveryJid, inboundSeq, logicalTurnId, managerId: `manager-${scope}`, generation: 1 },
+    identity: {
+      scope,
+      conversationKey,
+      deliveryJid,
+      inboundSeq,
+      logicalTurnId,
+      managerId: owner.managerId ?? `manager-${scope}`,
+      generation: owner.generation ?? 1,
+    },
     recoveryOwner: { logicalTurnId: `${logicalTurnId}:recovery`, managerId: 'manager-recovery', generation: 2 },
     replay: {
       sourceMessageId: `wamid-${logicalTurnId}`,
@@ -638,7 +656,7 @@ function runtimeContext(
       isGroup: false,
     },
     contentType: 'text',
-    toolScopeKey: scope === 'per_chat' ? conversationKey : '__global__',
+    toolScopeKey: owner.toolScopeKey ?? (scope === 'per_chat' ? conversationKey : '__global__'),
   });
 }
 
@@ -846,7 +864,7 @@ describe('AgentRuntime edge coverage', () => {
         mapKey,
       );
 
-      expect(session.clearTurnWatchdog).toHaveBeenCalledTimes(1);
+      expect(session.completeProviderTurn).toHaveBeenCalledTimes(1);
       expect(queue.endTurn).toHaveBeenCalledTimes(1);
       expect(session.shutdown).toHaveBeenCalledTimes(1);
       expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
@@ -999,9 +1017,18 @@ describe('AgentRuntime edge coverage', () => {
       const queue = makeQueue(`${item.reason}@s.whatsapp.net`);
       const session = makeSession();
       const durability = installDurabilityStub(runtime);
-      const context = runtimeContext('shared', `${item.reason}-conversation`, queue.targetChatJid, 84, `turn-shared-${item.reason}`);
 
       state.session = session;
+      const managerId = state.managerIdFor(session);
+      state.sessionEventToolScopes.set(session, '__global__');
+      const context = runtimeContext(
+        'shared',
+        `${item.reason}-conversation`,
+        queue.targetChatJid,
+        84,
+        `turn-shared-${item.reason}`,
+        { managerId, toolScopeKey: '__global__' },
+      );
       state.activeChatJid = queue.targetChatJid;
       state.currentTurnChatJid = queue.targetChatJid;
       state.currentInboundSeq = 84;
@@ -1009,9 +1036,9 @@ describe('AgentRuntime edge coverage', () => {
       state.singleTurnHadToolActivity = true;
       state.outboundQueues.set(queue.targetChatJid, queue);
 
-      state.handleEvent({ type: 'result', text: item.text, isError: true });
+      state.handleEvent(session, { type: 'result', text: item.text, isError: true });
 
-      expect(session.clearTurnWatchdog).toHaveBeenCalledTimes(1);
+      expect(session.completeProviderTurn).toHaveBeenCalledTimes(1);
       expect(queue.endTurn).toHaveBeenCalledTimes(1);
       expect(session.shutdown).toHaveBeenCalledTimes(1);
       expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
@@ -1071,9 +1098,9 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.onEvent({ type: 'result', text: 'stand-in reply' });
     expect(state.handleEventPerChat).toHaveBeenCalledWith(
-      'group-edge@g.us',
+      created.session,
       { type: 'result', text: 'stand-in reply' },
-      expect.stringMatching(/^group-edge@g\.us#/),
+      'group-edge@g.us#1',
     );
 
     created.opts.onCrash?.({
@@ -1099,7 +1126,12 @@ describe('AgentRuntime edge coverage', () => {
     expect(state.deleteOwnedPerChatSession('group-edge@g.us', created.session)).toBe(true);
     expect(created.session.resolveGenerationOwnership()).toBeNull();
     created.opts.onEvent({ type: 'result', text: 'late event' });
-    expect(state.handleEventPerChat).toHaveBeenCalledTimes(1);
+    expect(state.handleEventPerChat).toHaveBeenNthCalledWith(
+      2,
+      created.session,
+      { type: 'result', text: 'late event' },
+      'group-edge@g.us#1',
+    );
   });
 
   it('wires operation tracker callbacks to queue progress and session recovery', async () => {
@@ -1253,9 +1285,9 @@ describe('AgentRuntime edge coverage', () => {
 
     perChatCreated.opts.onEvent({ type: 'result', text: 'per-chat result' });
     expect(perChatState.handleEventPerChat).toHaveBeenCalledWith(
-      'per-setup@s.whatsapp.net',
+      perChatCreated.session,
       { type: 'result', text: 'per-chat result' },
-      expect.stringMatching(/^per-setup@s\.whatsapp\.net#/),
+      'per-setup@s.whatsapp.net#1',
     );
 
     perChatTracker!.onToolStart!('per-tool', 'Bash', 'running');
@@ -1291,7 +1323,12 @@ describe('AgentRuntime edge coverage', () => {
     ).toBe(true);
     expect(perChatCreated.session.resolveGenerationOwnership()).toBeNull();
     perChatCreated.opts.onEvent({ type: 'result', text: 'late event' });
-    expect(perChatState.handleEventPerChat).toHaveBeenCalledTimes(1);
+    expect(perChatState.handleEventPerChat).toHaveBeenNthCalledWith(
+      2,
+      perChatCreated.session,
+      { type: 'result', text: 'late event' },
+      'per-setup@s.whatsapp.net#1',
+    );
 
     const singleRuntime = makeRuntime({ sessionScope: 'single' });
     mockConfig.operationTracker = trackerConfig;
@@ -1310,7 +1347,10 @@ describe('AgentRuntime edge coverage', () => {
     };
 
     singleCreated.opts.onEvent({ type: 'result', text: 'singleton result' });
-    expect(singleState.handleEvent).toHaveBeenCalledWith({ type: 'result', text: 'singleton result' });
+    expect(singleState.handleEvent).toHaveBeenCalledWith(
+      singleCreated.session,
+      { type: 'result', text: 'singleton result' },
+    );
     singleCreated.opts.notifyUser?.('singleton crash notice');
     expect(singleQueue.enqueueText).toHaveBeenCalledWith('singleton crash notice');
     await vi.waitFor(() => {
@@ -1395,7 +1435,10 @@ describe('AgentRuntime edge coverage', () => {
     expect(created.opts.mcpSessionContext?.actorJid).toBe('actor-edge@s.whatsapp.net');
 
     created.opts.onEvent({ type: 'result', text: 'singleton reply' });
-    expect(state.handleEvent).toHaveBeenCalledWith({ type: 'result', text: 'singleton reply' });
+    expect(state.handleEvent).toHaveBeenCalledWith(
+      created.session,
+      { type: 'result', text: 'singleton reply' },
+    );
 
     created.opts.onCrash?.({
       exitCode: 1,
@@ -1504,9 +1547,9 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.onEvent({ type: 'result', text: 'control event' });
     expect(state.handleEventPerChat).toHaveBeenCalledWith(
-      controlJid,
+      created.session,
       { type: 'result', text: 'control event' },
-      expect.stringMatching(new RegExp('^control' + '@' + 'heal\\.internal#')),
+      'control@heal.internal#1',
     );
 
     tracker!.onToolStart!('control-tool', 'Bash', 'running');
@@ -1727,6 +1770,7 @@ describe('AgentRuntime edge coverage', () => {
     const queue = makeQueue(mapKey);
     const durability = installDurabilityStub(runtime);
     state.setOwnedPerChatSession(mapKey, session);
+    state.sessionEventToolScopes.set(session, `${mapKey}#batch`);
     state.chatQueues.set(mapKey, queue);
 
     for (let i = 0; i < 20; i += 1) {
@@ -1783,6 +1827,7 @@ describe('AgentRuntime edge coverage', () => {
     } as never);
     const queue = makeQueue(mapKey);
     state.setOwnedPerChatSession(mapKey, session);
+    state.sessionEventToolScopes.set(session, `${mapKey}#manual`);
     state.chatQueues.set(mapKey, queue);
 
     await state.coalesceImageTurn(
@@ -1840,19 +1885,27 @@ describe('AgentRuntime edge coverage', () => {
     const session = makeSession();
     const chatJid = '15551237777@s.whatsapp.net';
     const mapKey = '15551237777';
-    const mark = vi.fn<(scopeKey?: string) => void>();
-    const unmark = vi.fn<(scopeKey?: string) => void>();
+    const toolScopeKey = `${mapKey}#manual`;
     const coalesceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: 321,
+      sessionId: 'resume-recovery-session',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: new Date().toISOString(),
+    } as never);
 
     state.setOwnedPerChatSession(mapKey, session);
+    state.sessionEventToolScopes.set(session, toolScopeKey);
     state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
     state.imageCoalesce.buffers.set(mapKey, {
       timer: coalesceTimer,
       msg: { chatJid },
     });
-    state.pendingSystemResults.mark = mark;
-    state.pendingSystemResults.unmark = unmark;
+    const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+    const cancel = vi.spyOn(state.pendingSystemResults, 'cancel');
     vi.mocked(getRecentMessages).mockReturnValueOnce([
       makeStoredMessage({
         pk: 1,
@@ -1878,8 +1931,15 @@ describe('AgentRuntime edge coverage', () => {
     expect(session.spawnSession).toHaveBeenCalledTimes(1);
     expect(state.imageCoalesce.buffers.has(mapKey)).toBe(false);
     expect(getRecentMessages).toHaveBeenCalledWith(expect.anything(), mapKey, 30);
-    expect(mark).toHaveBeenCalledWith(mapKey);
-    expect(unmark).not.toHaveBeenCalled();
+    expect(mark).toHaveBeenCalledWith({
+      scopeKey: mapKey,
+      purpose: 'resume_failure_context',
+      owner: expect.objectContaining({ generation: 1, toolScopeKey }),
+      routeChatJid: chatJid,
+      timeoutMs: 240_000,
+      onTimeout: expect.any(Function),
+    });
+    expect(cancel).not.toHaveBeenCalled();
     expect(session.sendTurn).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('[CONTEXT RECOVERY'),
@@ -1887,27 +1947,41 @@ describe('AgentRuntime edge coverage', () => {
     const sendTurnCalls = session.sendTurn.mock.calls as unknown as Array<[string]>;
     expect(sendTurnCalls[0]![0]).toContain('[media]');
     expect(sendTurnCalls[0]![0]).toContain('Ada: older context');
+    expect(session.sendTurn).toHaveBeenCalledTimes(1);
+    const contextTurn = state.pendingSystemResults.peek(mapKey);
+    expect(contextTurn).toEqual(expect.objectContaining({
+      purpose: 'resume_failure_context',
+      blocking: true,
+    }));
+
+    // Context recovery is a distinct provider request. The pending user turn
+    // may replay only after that request's accepted terminal result releases
+    // the exact system lease.
+    state.handleEventPerChat(session, { type: 'result', text: null }, toolScopeKey);
+    await drainMicrotasks();
+
     expect(session.sendTurn).toHaveBeenNthCalledWith(2, 'lost user turn after rejected resume');
+    expect(session.completeProviderTurn).toHaveBeenCalledOnce();
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
 
-  it('unmarks failed context recovery and still replays the pending turn', async () => {
+  it('cancels failed context recovery and still replays the pending turn', async () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
     const state = view(runtime);
     const session = makeSession();
     const chatJid = '15551237778@s.whatsapp.net';
     const mapKey = '15551237778';
-    const mark = vi.fn<(scopeKey?: string) => void>();
-    const unmark = vi.fn<(scopeKey?: string) => void>();
+    const toolScopeKey = `${mapKey}#manual`;
 
     session.sendTurn
       .mockRejectedValueOnce(new Error('context pipe closed'))
       .mockResolvedValueOnce(undefined);
     state.setOwnedPerChatSession(mapKey, session);
+    state.sessionEventToolScopes.set(session, toolScopeKey);
     state.pendingTurnText.set(mapKey, 'turn survives context failure');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
-    state.pendingSystemResults.mark = mark;
-    state.pendingSystemResults.unmark = unmark;
+    const mark = vi.spyOn(state.pendingSystemResults, 'mark');
+    const cancel = vi.spyOn(state.pendingSystemResults, 'cancel');
     vi.mocked(getRecentMessages).mockReturnValueOnce([
       makeStoredMessage({
         chatJid,
@@ -1919,8 +1993,15 @@ describe('AgentRuntime edge coverage', () => {
     state.handleResumeFailed(chatJid);
     await drainMicrotasks();
 
-    expect(mark).toHaveBeenCalledWith(mapKey);
-    expect(unmark).toHaveBeenCalledWith(mapKey);
+    expect(mark).toHaveBeenCalledWith({
+      scopeKey: mapKey,
+      purpose: 'resume_failure_context',
+      owner: expect.objectContaining({ generation: 1, toolScopeKey }),
+      routeChatJid: chatJid,
+      timeoutMs: 240_000,
+      onTimeout: expect.any(Function),
+    });
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: mapKey }));
     expect(session.sendTurn).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('context that fails to send'),
@@ -1933,7 +2014,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(state.resumeFailedHandling.has(mapKey)).toBe(false);
   });
 
-  it('drops stale pending-turn state when replay after resume failure cannot be sent', async () => {
+  it('retains pending-turn evidence when replay after resume failure cannot be sent', async () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat', sandboxPerChat: true, cwd: '/tmp/runtime-recovery' });
     const state = view(runtime);
     const session = makeSession();
@@ -1950,8 +2031,8 @@ describe('AgentRuntime edge coverage', () => {
 
     expect(getRecentMessages).toHaveBeenCalledWith(expect.anything(), mapKey, 30);
     expect(session.sendTurn).toHaveBeenCalledWith('stale pending turn');
-    expect(state.pendingTurnText.has(mapKey)).toBe(false);
-    expect(state.pendingTurnActorJid.has(mapKey)).toBe(false);
+    expect(state.pendingTurnText.get(mapKey)).toBe('stale pending turn');
+    expect(state.pendingTurnActorJid.get(mapKey)).toBe('actor-recovery@s.whatsapp.net');
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error), chatJid }),
       'pending turn replay failed',

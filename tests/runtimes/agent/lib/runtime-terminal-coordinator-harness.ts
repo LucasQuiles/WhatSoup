@@ -308,6 +308,7 @@ export function queueStub(chatJid: string): IOutboundQueue {
 export function sessionStub() {
   return {
     clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
     tickWatchdog: vi.fn(),
     sendTurn: vi.fn(async () => {}),
     spawnSession: vi.fn(async () => {}),

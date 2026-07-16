@@ -42,6 +42,26 @@ vi.mock('node:fs', () => ({
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 7),
   incrementMessageCount: vi.fn(),
+  resolveResumableAgentSession: vi.fn((
+    _db: unknown,
+    input: {
+      provider: string;
+      providerSessionId: string;
+      agentSessionRowId?: number;
+      workspaceKey?: string;
+    },
+  ) => {
+    if (
+      input.provider !== 'opencode-cli'
+      || input.providerSessionId !== 'ses_existing'
+      || input.agentSessionRowId !== undefined
+      || input.workspaceKey !== 'custom-endpoint'
+    ) {
+      throw new Error('resume fixture does not match the persisted provider/checkpoint identity');
+    }
+    return { id: 7, provider: 'opencode-cli', workspace_key: 'custom-endpoint' };
+  }),
+  updateResumedSessionStatus: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),
@@ -65,6 +85,7 @@ import {
 } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { resolveResumableAgentSession } from '../../../src/runtimes/agent/session-db.ts';
 
 function makeMockChild(pid = 4242) {
   const stdin = new EventEmitter() as EventEmitter & {
@@ -105,10 +126,24 @@ function makeMessenger(): Messenger {
 }
 
 const CHAT_JID = 'custom-endpoint@s.whatsapp.net';
-const BASE_URL_CONFIG = { baseUrl: 'https://api.cloud.example/v1' };
+const PROFILE_CONFIG = { executionProfile: 'whatsoup-headless' };
+const BASE_URL_CONFIG = {
+  ...PROFILE_CONFIG,
+  baseUrl: 'https://api.cloud.example/v1',
+};
+const MANAGED_AGENT_ARGS = ['--agent', 'whatsoup-headless'];
+
+function expectContainedHeadlessArgs(args: string[]): void {
+  const agentIndexes = args.flatMap((arg, index) => arg === '--agent' ? [index] : []);
+  expect(agentIndexes).toHaveLength(1);
+  expect(args.slice(agentIndexes[0], agentIndexes[0] + 2)).toEqual(MANAGED_AGENT_ARGS);
+  expect(args).not.toContain('--auto');
+  expect(args).not.toContain('--yolo');
+  expect(args).not.toContain('--dangerously-skip-permissions');
+}
 
 describe('resolveProviderArgs — opencode-cli custom endpoint omits -m', () => {
-  const getArgs = (providerConfig?: Record<string, unknown>, model: string | undefined = 'MiniMax-M2') =>
+  const getArgs = (providerConfig?: Record<string, unknown>, model: string | undefined = 'minimax/MiniMax-M2') =>
     __provider_switch_for_test.getProviderArgs(
       'opencode-cli',
       'sys',
@@ -122,18 +157,17 @@ describe('resolveProviderArgs — opencode-cli custom endpoint omits -m', () => 
   it('omits -m when providerConfig.baseUrl is set and a model is configured', () => {
     const args = getArgs(BASE_URL_CONFIG);
     expect(args).not.toContain('-m');
-    expect(args).not.toContain('MiniMax-M2');
-    // The rest of the argv contract is unchanged.
-    expect(args).toEqual(['run', '--format', 'json', '--pure']);
+    expect(args).not.toContain('minimax/MiniMax-M2');
+    expect(args).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS]);
+    expectContainedHeadlessArgs(args);
   });
 
   it('keeps -m when no baseUrl is configured (regression pin)', () => {
-    expect(getArgs(undefined)).toEqual(['run', '--format', 'json', '--pure', '-m', 'MiniMax-M2']);
-    expect(getArgs({})).toEqual(['run', '--format', 'json', '--pure', '-m', 'MiniMax-M2']);
+    expect(getArgs(PROFILE_CONFIG)).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
   });
 
   it('ignores a blank baseUrl (no silent -m drop on a value the validator rejects)', () => {
-    expect(getArgs({ baseUrl: '   ' })).toEqual(['run', '--format', 'json', '--pure', '-m', 'MiniMax-M2']);
+    expect(getArgs({ ...PROFILE_CONFIG, baseUrl: '   ' })).toEqual(['run', '--format', 'json', '--pure', ...MANAGED_AGENT_ARGS, '-m', 'minimax/MiniMax-M2']);
   });
 
   it('leaves non-opencode provider argv unchanged when a baseUrl is present', () => {
@@ -161,17 +195,20 @@ describe('SessionManager spawn-per-turn — opencode-cli custom endpoint omits -
     vi.restoreAllMocks();
   });
 
-  async function spawnTurnArgs(providerConfig?: Record<string, unknown>): Promise<string[]> {
+  async function spawnTurnArgs(
+    providerConfig?: Record<string, unknown>,
+    resumeSessionId?: string,
+  ): Promise<string[]> {
     const sm = new SessionManager({
       db: makeDb(),
       messenger: makeMessenger(),
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
-      model: 'MiniMax-M2',
+      model: 'minimax/MiniMax-M2',
       providerConfig,
     });
-    await sm.spawnSession();
+    await sm.spawnSession(resumeSessionId);
     await sm.sendTurn('hello there');
     const call = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1);
     expect(call?.[0]).toBe('opencode');
@@ -181,16 +218,30 @@ describe('SessionManager spawn-per-turn — opencode-cli custom endpoint omits -
   it('omits -m from the per-turn argv when providerConfig.baseUrl is set', async () => {
     const args = await spawnTurnArgs(BASE_URL_CONFIG);
     expect(args).not.toContain('-m');
-    expect(args).not.toContain('MiniMax-M2');
+    expect(args).not.toContain('minimax/MiniMax-M2');
     // The prompt and run flags still ship.
     expect(args.slice(0, 4)).toEqual(['run', '--format', 'json', '--pure']);
+    expectContainedHeadlessArgs(args);
     expect(args.at(-1)).toContain('hello there');
   });
 
   it('keeps -m in the per-turn argv without a baseUrl (regression pin)', async () => {
-    const args = await spawnTurnArgs(undefined);
+    const args = await spawnTurnArgs(PROFILE_CONFIG);
     const mIdx = args.indexOf('-m');
     expect(mIdx).toBeGreaterThan(-1);
-    expect(args[mIdx + 1]).toBe('MiniMax-M2');
+    expect(args[mIdx + 1]).toBe('minimax/MiniMax-M2');
+    expectContainedHeadlessArgs(args);
+  });
+
+  it('selects the managed agent exactly once on a resumed turn', async () => {
+    const args = await spawnTurnArgs(PROFILE_CONFIG, 'ses_existing');
+    expect(resolveResumableAgentSession).toHaveBeenCalledWith(expect.anything(), {
+      provider: 'opencode-cli',
+      providerSessionId: 'ses_existing',
+      workspaceKey: 'custom-endpoint',
+    });
+    expect(args.slice(args.indexOf('--session'), args.indexOf('--session') + 2))
+      .toEqual(['--session', 'ses_existing']);
+    expectContainedHeadlessArgs(args);
   });
 });

@@ -486,7 +486,8 @@ class ProviderHarness {
 function createSession(provider: ProviderId, overrides: Partial<ConstructorParameters<typeof SessionManager>[0]> = {}) {
   const events: string[] = [];
   const eventLog: Array<Record<string, unknown>> = [];
-  const session = new SessionManager({
+  let session!: SessionManager;
+  session = new SessionManager({
     db: makeDb(),
     messenger: makeMessenger(),
     chatJid: 'agent@s.whatsapp.net',
@@ -495,6 +496,7 @@ function createSession(provider: ProviderId, overrides: Partial<ConstructorParam
       if (event.type === 'assistant_text') {
         events.push(event.text);
       }
+      if (event.type === 'result') session.completeProviderTurn();
     },
     provider,
     instanceName: 'conformance',

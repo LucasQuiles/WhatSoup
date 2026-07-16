@@ -123,7 +123,18 @@ import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
-import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
+import {
+  PendingSystemResultTracker,
+  type PendingSystemTurnOwner,
+  type PendingSystemTurnSnapshot,
+  type SystemTurnPurpose,
+  type SystemTurnLeaseToken,
+} from './pending-system-result-tracker.ts';
+import {
+  decideProviderEventAdmission,
+  systemPurposeAllowsOutput,
+  type ProviderEventOwner,
+} from './runtime-event-admission.ts';
 import {
   handleProviderFailureResult as handleProviderFailureResultWithPort,
   handleGlobalRuntimeResult,
@@ -207,6 +218,11 @@ export {
 } from './media-prep.ts';
 
 const log = createChildLogger('agent-runtime');
+
+interface LegacyProviderTurnOwner {
+  readonly owner: PendingSystemTurnOwner;
+  readonly routeChatJid: string;
+}
 
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
 const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
@@ -389,6 +405,8 @@ type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
 // (defined in auto-compact-controller.ts) so the silent-compact flag does not
 // expire mid-compaction.
 const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
+/** Absolute wall bound for every non-auto provider request owned by the runtime. */
+const SYSTEM_TURN_TIMEOUT_MS = AUTO_COMPACT_TIMEOUT_MS;
 // Cooldown after a timed-out /compact before another auto-compact may be tried.
 // Kept short so a session that times out retries soon (bounding how far it grows
 // between attempts) rather than degrading for a long window; still long enough to
@@ -744,6 +762,7 @@ export class AgentRuntime implements Runtime {
   private chatQueues: Map<string, IOutboundQueue> = new Map();
   private readonly sessionOwnership = new SessionOwnershipRegistry();
   private readonly sessionManagerIds = new WeakMap<SessionManager, string>();
+  private readonly sessionEventToolScopes = new WeakMap<SessionManager, string>();
   private readonly ownedSessionManagers = new Map<string, SessionManager>();
 
   // Operation tracker: per-session progress reporting & stall detection
@@ -764,6 +783,15 @@ export class AgentRuntime implements Runtime {
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private proactiveResumeIdentityRejects = 0;
+  private unownedProviderEventRejects = 0;
+  private readonly providerEventRejectReasonCounts = new Map<string, number>();
+  /**
+   * Explicit source-bound ownership for turns admitted without a durability
+   * journal row. Production normally uses RuntimeTurnContext; this lane keeps
+   * legacy/test deployments fail-closed without inferring ownership from a
+   * queue or mutable current-chat field.
+   */
+  private readonly legacyProviderTurnOwners = new Map<string, LegacyProviderTurnOwner>();
   private workspaceSweeper: WorkspaceSweeper;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -853,6 +881,8 @@ export class AgentRuntime implements Runtime {
   // AgentRuntime's settle/expiry/persist/restore/cleanup orchestration drives
   // this.pendingPolls.questions directly.
   private readonly pendingPolls = new PendingPollStore();
+  /** Exact source-turn terminal barrier for each live AskUser continuation. */
+  private readonly pendingPollSourceTurnBarriers = new WeakMap<PendingPollQuestion, Promise<void>>();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
   private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
@@ -941,6 +971,14 @@ export class AgentRuntime implements Runtime {
   private createToolScopeKey(scopeBase: string): string {
     this.nextToolScopeOrdinal += 1;
     return `${scopeBase}#${this.nextToolScopeOrdinal}`;
+  }
+
+  private requireSessionToolScopeKey(session: SessionManager): string {
+    const toolScopeKey = this.sessionEventToolScopes.get(session);
+    if (!toolScopeKey) {
+      throw new Error('Cannot dispatch a runtime turn for an unregistered session manager');
+    }
+    return toolScopeKey;
   }
 
   private getToolNames(toolScopeKey: string): Map<string, string> {
@@ -1115,6 +1153,72 @@ export class AgentRuntime implements Runtime {
     this.autoCompact.recordAutoCompactNextTurnIfNeeded(scopeKey, inputTokens, consumeWhenNotOverThreshold);
   }
 
+  /**
+   * A provider stream without request IDs cannot safely retain a timed-out
+   * classification slot while admitting another request. Prove the old process
+   * tree is gone before cancelling the exact lease and reopening the lane.
+   */
+  private quarantineTimedOutSystemTurn(
+    session: SessionManager,
+    scopeKey: string,
+    lease: SystemTurnLeaseToken,
+  ): Promise<boolean> {
+    const existing = this.systemTurnQuarantines.get(scopeKey);
+    if (existing) return existing;
+
+    let quarantine!: Promise<boolean>;
+    quarantine = session.shutdown(false).then(
+      () => true,
+      (err) => {
+        log.error(
+          { err, scopeKey, leaseId: lease.id },
+          'timed-out system request quarantine failed — provider lane remains closed',
+        );
+        return false;
+      },
+    ).then((provedClosed) => {
+      if (provedClosed && this.systemTurnQuarantines.get(scopeKey) === quarantine) {
+        this.systemTurnQuarantines.delete(scopeKey);
+      }
+      return provedClosed;
+    });
+    this.systemTurnQuarantines.set(scopeKey, quarantine);
+    return quarantine;
+  }
+
+  private async waitForSystemTurnQuarantine(scopeKey: string): Promise<void> {
+    const quarantine = this.systemTurnQuarantines.get(scopeKey);
+    if (!quarantine) return;
+    if (await quarantine) return;
+    throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`);
+  }
+
+  private async settleFailedSystemTurnDispatch(
+    session: SessionManager,
+    scopeKey: string,
+    lease: SystemTurnLeaseToken | null | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (!lease) return;
+    const message = error instanceof Error ? error.message : String(error);
+    const status = session.getStatus();
+    // A synchronous one-flight rejection proves this new lease never crossed
+    // the provider boundary. Likewise, a manager reporting no request owner has
+    // already proved pre-dispatch failure or completed teardown.
+    if (message.includes('PROVIDER_TURN_IN_FLIGHT') || status.turnInFlight !== true) {
+      this.pendingSystemResults.cancel(lease);
+      return;
+    }
+    const provedClosed = await this.quarantineTimedOutSystemTurn(session, scopeKey, lease);
+    if (provedClosed) {
+      this.pendingSystemResults.cancel(lease);
+      return;
+    }
+    throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`, {
+      cause: error,
+    });
+  }
+
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
     if (this.autoCompactInputTokens === undefined || session === null) return;
     // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
@@ -1203,7 +1307,7 @@ export class AgentRuntime implements Runtime {
     }
 
     let resolveWaiter!: () => void;
-    let timeoutReleased = false;
+    let compactLease: SystemTurnLeaseToken | null = null;
     const timer = setTimeout(() => {
       log.error(
         { scopeKey, rowId, timeoutMs: AUTO_COMPACT_TIMEOUT_MS, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS },
@@ -1212,11 +1316,16 @@ export class AgentRuntime implements Runtime {
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       this.autoCompact.cooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
-      // Release later dispatch without forgetting result ownership. A late
-      // FIFO /compact result still consumes its classification slot as a system
-      // result, so it cannot steal the following user's inbound/result identity.
-      this.pendingSystemResults.releaseBlockingMark(scopeKey);
-      timeoutReleased = true;
+      // The stream has no per-request correlation. If /compact produced no
+      // terminal result, retaining its FIFO slot while admitting a user request
+      // lets the user's result consume the compact slot. Tear down the source
+      // process first; only proven teardown cancels the exact lease.
+      if (compactLease) {
+        void this.quarantineTimedOutSystemTurn(session, scopeKey, compactLease)
+          .then((provedClosed) => {
+            if (provedClosed) this.pendingSystemResults.cancel(compactLease);
+          });
+      }
     }, AUTO_COMPACT_TIMEOUT_MS);
     timer.unref?.();
 
@@ -1233,16 +1342,21 @@ export class AgentRuntime implements Runtime {
       threshold: this.autoCompactInputTokens,
     }, 'auto compact triggered');
 
-    this.pendingSystemResults.mark(scopeKey);
-    void session.sendTurn('/compact').catch((err) => {
+    compactLease = this.markSystemTurn(
+      session,
+      scopeKey,
+      'auto_compact_silent',
+      mapKey !== undefined
+        ? this.chatQueues.get(mapKey)?.targetChatJid
+        : (this.currentTurnChatJid ?? this.activeChatJid ?? undefined),
+    );
+    void session.sendTurn('/compact').catch(async (err) => {
       log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
-      // No result event will arrive for a failed send. If timeout already
-      // released this exact FIFO slot, remove that slot without unblocking a
-      // newer system turn that may have started in the meantime.
-      if (timeoutReleased) this.pendingSystemResults.unmarkReleased(scopeKey);
-      else this.pendingSystemResults.unmark(scopeKey);
+      await this.settleFailedSystemTurnDispatch(session, scopeKey, compactLease, err);
+    }).catch((err) => {
+      log.error({ err, scopeKey, rowId }, 'auto compact failed to quarantine ambiguous dispatch');
     });
   }
 
@@ -1334,6 +1448,7 @@ export class AgentRuntime implements Runtime {
       recentCrashCount: this.getRecentCrashCount(),
       lastCrashAt: this.crashes.lastCrashAt,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+      unownedProviderEventRejects: this.unownedProviderEventRejects,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
       turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
       turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -1633,6 +1748,12 @@ export class AgentRuntime implements Runtime {
   // counter invariants (mark / unmark / consumeIfPending / count) live in the
   // collaborator; the raw map is reachable via .counts for per-chat cleanup/shutdown.
   private readonly pendingSystemResults = new PendingSystemResultTracker();
+  /** Latest alias update deferred until an uncorrelated provider lane is empty. */
+  private readonly pendingJidAliasChanges = new Map<string, { newJid: string }>();
+  /** Provider teardown barriers created when a system request misses its terminal result. */
+  private readonly systemTurnQuarantines = new Map<string, Promise<boolean>>();
+  /** Exact-source teardowns for terminal results that could not be safely attributed. */
+  private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
   private shutdownRequested = false;
 
@@ -1671,6 +1792,11 @@ export class AgentRuntime implements Runtime {
   // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
   // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
   private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
+  private readonly systemTurnExecActors = new Map<number, {
+    scopeKey: string;
+    actorJid: string | undefined;
+  }>();
   private perChatSocketResources: Map<string, { socketServer: WhatSoupSocketServer; socketPath: string; cfgPath: string }> = new Map();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
@@ -1721,7 +1847,10 @@ export class AgentRuntime implements Runtime {
    */
   private cleanupPerChatState(
     mapKey: string,
-    options: { preserveCrashHistory?: boolean } = {},
+    options: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+    } = {},
   ): void {
     this.cleanupPerChatGenerationState(mapKey, options);
     // F-STICKY-ACTOR: terminal cleanup also stops the per-chat socket. A /new
@@ -1741,11 +1870,18 @@ export class AgentRuntime implements Runtime {
   /** Clear resources owned by one child generation while preserving its logical owner. */
   private cleanupPerChatGenerationState(
     mapKey: string,
-    options: { preserveCrashHistory?: boolean } = {},
+    options: {
+      preserveCrashHistory?: boolean;
+      preserveProviderTurnOwnership?: boolean;
+    } = {},
   ): void {
     if (options.preserveCrashHistory !== true) this.crashes.forget(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
-    this.pendingSystemResults.clearScope(mapKey);
+    if (options.preserveProviderTurnOwnership !== true) {
+      this.pendingSystemResults.clearScope(mapKey);
+      this.legacyProviderTurnOwners.delete(mapKey);
+      this.systemTurnQuarantines.delete(mapKey);
+    }
     this.perChatTurnSourceMessageId.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
@@ -1755,6 +1891,7 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
     this.perChatExecActorQueue.delete(mapKey);
+    this.clearSystemTurnExecutingActors(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
     // Drop all auto-compact bookkeeping for this scope (cooldown/last-success/
@@ -1775,6 +1912,8 @@ export class AgentRuntime implements Runtime {
   private cleanupGlobalAutoCompactState(): void {
     this.autoCompact.cleanupScope(GLOBAL_TOOL_SCOPE_KEY);
     this.pendingSystemResults.clearScope(GLOBAL_TOOL_SCOPE_KEY);
+    this.legacyProviderTurnOwners.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.systemTurnQuarantines.delete(GLOBAL_TOOL_SCOPE_KEY);
   }
 
   // ---------------------------------------------------------------------------
@@ -1886,7 +2025,7 @@ export class AgentRuntime implements Runtime {
         inboundSeq: representativeSeq,
         source,
         session,
-        toolScopeKey: mapKey,
+        toolScopeKey: this.requireSessionToolScopeKey(session),
         mapKey,
       });
       this.enqueuePerChatRuntimeTurn(mapKey, {
@@ -2090,6 +2229,10 @@ export class AgentRuntime implements Runtime {
 
   // ─── Control session (self-healing repair) ────────────────────────────────
   private activeControlReportId: string | null = null;
+  /** Tool protocol completed, but the owning provider request has not terminalized yet. */
+  private controlProtocolCompletedReportId: string | null = null;
+  /** Prevent duplicate terminal-result effects while teardown proof is pending. */
+  private controlTerminalizingReportId: string | null = null;
   private controlSession: SessionManager | null = null;
   private controlSessionTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -2390,6 +2533,30 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
+    if (deferIfActive && this.sessionScope === 'per_chat' && !this.sandboxPerChat) {
+      const lidKey = `${conversationKey}@lid`;
+      if (this.chatSessions.has(lidKey) && this.pendingSystemResults.count(lidKey) > 0) {
+        const existing = this.pendingJidAliasChanges.get(conversationKey);
+        if (existing) {
+          existing.newJid = newJid;
+        } else {
+          const pending = { newJid };
+          this.pendingJidAliasChanges.set(conversationKey, pending);
+          void this.pendingSystemResults.waitUntilEmpty(lidKey).then(() => {
+            if (this.pendingJidAliasChanges.get(conversationKey) !== pending) return;
+            this.pendingJidAliasChanges.delete(conversationKey);
+            if (this.shutdownRequested) return;
+            this.handleJidAliasChanged(conversationKey, pending.newJid, false);
+          });
+        }
+        log.info(
+          { conversationKey, newJid, systemScopeKey: lidKey },
+          'deferred delivery JID migration until provider system requests terminalized',
+        );
+        return;
+      }
+    }
+
     // Per-chat queues (sandboxPerChat or per_chat mode)
     const queue = this.chatQueues.get(conversationKey);
     if (queue) {
@@ -2451,6 +2618,16 @@ export class AgentRuntime implements Runtime {
       if (this.chatSessions.has(lidKey)) {
         const canonical = canonicalizeChatJid(newJid, this.db);
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
+          const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
+          if (legacyProviderTurn && this.legacyProviderTurnOwners.has(canonical)) {
+            throw new Error(`Cannot rekey provider turn ownership onto occupied scope "${canonical}"`);
+          }
+          this.pendingSystemResults.rekeyScope(lidKey, canonical);
+          if (legacyProviderTurn) {
+            this.legacyProviderTurnOwners.delete(lidKey);
+            this.legacyProviderTurnOwners.set(canonical, legacyProviderTurn);
+          }
+
           // Migrate session
           const session = this.chatSessions.get(lidKey)!;
           this.rekeyOwnedPerChatSession(lidKey, canonical, session);
@@ -2510,6 +2687,9 @@ export class AgentRuntime implements Runtime {
           if (execActors !== undefined) {
             this.perChatExecActorQueue.delete(lidKey);
             this.perChatExecActorQueue.set(canonical, execActors);
+          }
+          for (const binding of this.systemTurnExecActors.values()) {
+            if (binding.scopeKey === lidKey) binding.scopeKey = canonical;
           }
           const sockRes = this.perChatSocketResources.get(lidKey);
           if (sockRes !== undefined) {
@@ -2582,7 +2762,7 @@ export class AgentRuntime implements Runtime {
             this.imageCoalesce.buffers.delete(lidKey);
             this.imageCoalesce.buffers.set(canonical, imageBuffer);
           }
-          this.cleanupPerChatState(lidKey);
+          this.cleanupPerChatState(lidKey, { preserveProviderTurnOwnership: true });
           log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
         }
       }
@@ -2868,12 +3048,7 @@ export class AgentRuntime implements Runtime {
             chatJid,
             cwd: this.cwd,
             onEvent: (event) => {
-              const mapKey = resolveSessionMapKey();
-              if (!mapKey) {
-                log.debug({ initialMapKey, chatJid, eventType: event.type }, 'event dropped — session key missing for per-chat callback');
-                return;
-              }
-              this.handleEventPerChat(mapKey, event, toolScopeKey);
+              this.handleEventPerChat(session, event, toolScopeKey);
             },
             onCrash: (info) => {
               const mapKey = resolveSessionMapKey() ?? initialMapKey;
@@ -2882,6 +3057,7 @@ export class AgentRuntime implements Runtime {
             notifyUser: (msg) => {
               this.handleCrashNotify(msg, chatJid);
             },
+            eventToolScopeKey: toolScopeKey,
           });
         } catch (err) {
           // F-STICKY-ACTOR (QR-247 hardening): per-chat socket wiring now runs inside
@@ -2910,6 +3086,8 @@ export class AgentRuntime implements Runtime {
           : undefined;
         const resumeOwnership = this.captureOwnedPerChatGeneration(initialMapKey, session);
         session.spawnSession(full.session_id).then(async () => {
+          let contextLease: SystemTurnLeaseToken | null = null;
+          let continuationLease: SystemTurnLeaseToken | null = null;
           const effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
             initialMapKey,
             session,
@@ -2923,17 +3101,36 @@ export class AgentRuntime implements Runtime {
             // Without this, the agent resumes with stale context — it has no
             // awareness of messages sent during the downtime window.
             if (checkpointUpdatedAt) {
-              this.pendingSystemResults.mark(effectiveMapKey);
+              contextLease = this.markSystemTurn(
+                session,
+                effectiveMapKey,
+                'proactive_resume_context',
+                chatJid,
+              );
               const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
-              if (!injected) this.pendingSystemResults.unmark(effectiveMapKey);
+              if (!injected) this.pendingSystemResults.cancel(contextLease);
+              else {
+                await this.pendingSystemResults.waitUntilEmpty(effectiveMapKey);
+                await this.waitForSystemTurnQuarantine(effectiveMapKey);
+                if (!session.getStatus().active) return;
+              }
             }
-            this.pendingSystemResults.mark(effectiveMapKey);
+            continuationLease = this.markSystemTurn(
+              session,
+              effectiveMapKey,
+              'proactive_resume_continuation',
+              chatJid,
+            );
             await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
-            // Continuation send failed — no result will arrive for its mark.
-            this.pendingSystemResults.unmark(effectiveMapKey);
+            await this.settleFailedSystemTurnDispatch(
+              session,
+              effectiveMapKey,
+              continuationLease ?? contextLease,
+              err,
+            );
           }
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
@@ -2945,7 +3142,9 @@ export class AgentRuntime implements Runtime {
     // Skipped for per_chat mode (all variants) — per_chat resume is handled above (proactive) or lazily.
     // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
     // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
-    const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);
+    const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat')
+      ? null
+      : getActiveSession(this.db, this.effectiveProvider);
 
     // AE2: Staleness check for shared/single mode — match per_chat's 60-minute threshold.
     let priorSession = prior;
@@ -2974,7 +3173,11 @@ export class AgentRuntime implements Runtime {
         if (ageMs > 60 * 60 * 1000) {
           log.info({ chatJid: priorResumeIdentity.deliveryJid, ageMinutes: Math.round(ageMs / 60_000) },
             'skipping shared/single resume — session too stale');
-          this.durability!.retireSessionLifecycle(priorSession.id, priorSession.session_id!);
+          this.durability!.retireSessionLifecycle({
+            agentSessionRowId: priorSession.id,
+            providerSessionId: priorSession.session_id!,
+            provider: this.effectiveProvider,
+          });
           priorSession = null;
           priorResumeIdentity = null;
         }
@@ -3005,11 +3208,12 @@ export class AgentRuntime implements Runtime {
       } else {
         log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
         this.activeChatJid = resumeChatJid;
-        this.session = this.createSessionManager({
+        let resumedSession!: SessionManager;
+        resumedSession = this.createSessionManager({
           chatJid: resumeChatJid,
           cwd: this.cwd,
           trackSingletonMcpSession: true,
-          onEvent: (event) => this.handleEvent(event),
+          onEvent: (event) => this.handleEvent(resumedSession, event),
           onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
           onCrash: (info) => {
             this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
@@ -3037,6 +3241,7 @@ export class AgentRuntime implements Runtime {
           },
           notifyUser: (msg) => this.handleCrashNotify(msg),
         });
+        this.session = resumedSession;
 
         // Bug C2 fix: Do NOT create a group-keyed queue for shared mode — it would
         // remain as a stale entry in outboundQueues since no startup message is sent.
@@ -3113,6 +3318,9 @@ export class AgentRuntime implements Runtime {
           if (parsed.reportId !== this.activeControlReportId) {
             throw new Error(`No active repair for reportId ${parsed.reportId}. Active: ${this.activeControlReportId}`);
           }
+          if (this.controlProtocolCompletedReportId === parsed.reportId) {
+            throw new Error(`Repair result already emitted for reportId ${parsed.reportId}`);
+          }
 
           const controlQueue = this.getControlQueue();
           if (!controlQueue) {
@@ -3162,27 +3370,11 @@ export class AgentRuntime implements Runtime {
             log.warn({ err, reportId: parsed.reportId }, 'failed to mark heal report resolved; row stays pending');
           }
 
-          // Clear hard timeout (normal completion path)
-          if (this.controlSessionTimeout) {
-            clearTimeout(this.controlSessionTimeout);
-            this.controlSessionTimeout = null;
-          }
-
-          // Clear single-flight slot
-          this.clearControlReport();
-
-          // Dequeue next report if any
-          const next = dequeueNextReport(this.db);
-          if (next) {
-            const context = parseHealContext(next.context);
-            void this.handleControlTurn(next.report_id, JSON.stringify({
-              ...context,
-              reportId: next.report_id,
-              errorClass: next.error_class,
-            })).catch(err => {
-              log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
-            });
-          }
+          // The MCP result still has to travel back through this exact provider
+          // request. Retain the immutable report owner and the timeout until the
+          // provider emits its terminal result; advancing here lets report A's
+          // trailing result terminalize a newly-dispatched report B.
+          this.controlProtocolCompletedReportId = parsed.reportId;
 
           return { sent: true, reportId: parsed.reportId, result: parsed.result };
         },
@@ -3536,7 +3728,11 @@ export class AgentRuntime implements Runtime {
               } else {
                 this.queue = this.createOutboundQueue(chatJid, '/new single replacement');
               }
-              await sessionForNew?.handleNew();
+              if (sessionForNew) {
+                await this.waitForRejectedTerminalTeardown(sessionForNew);
+                await sessionForNew.handleNew();
+                this.rejectedTerminalTeardowns.delete(sessionForNew);
+              }
             }
             // QR-108: /new is a clean reset, so drop the one-message-handoff latches
             // for this conversation too — otherwise a standby notice or handoff
@@ -3916,7 +4112,7 @@ export class AgentRuntime implements Runtime {
             ...(msg.isGroup ? { groupName: chatJid } : {}),
           },
           session,
-          toolScopeKey: mapKey,
+          toolScopeKey: this.requireSessionToolScopeKey(session),
           mapKey,
         });
 
@@ -4051,14 +4247,25 @@ export class AgentRuntime implements Runtime {
       this.currentRuntimeTurnCompletion = completion;
     }
 
+    await this.waitForRejectedTerminalTeardown(this.session!);
     if (!this.session!.getStatus().active) {
       await this.session!.spawnSession();
     }
 
+    const legacyOwner = context === null
+      ? this.publishLegacyProviderTurn(
+          this.session!,
+          GLOBAL_TOOL_SCOPE_KEY,
+          chatJid,
+        )
+      : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
       await this.session!.sendTurn(prefixedText);
     } catch (err) {
+      if (legacyOwner) {
+        this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
+      }
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
         const status = this.session?.getStatus() ?? { sessionId: null, pid: null };
@@ -4088,7 +4295,7 @@ export class AgentRuntime implements Runtime {
     mapKey?: string,
     actorJid?: string,
     beforeUserSend?: () => void,
-    systemTurnAlreadyMarked: boolean = false,
+    systemTurnLease?: SystemTurnLeaseToken,
     dispatchAllowed?: () => boolean,
   ): Promise<void> {
     let effectiveMapKey = mapKey;
@@ -4108,38 +4315,18 @@ export class AgentRuntime implements Runtime {
     // here at the single dispatch chokepoint, independent of the per-path binds.
     this.enforceGlobalConversationBinding(chatJid);
     this.updateSessionActorJid(session, actorJid);
-    // F-STICKY-ACTOR (QR-247): push this turn's actor onto the per-chat executing
-    // register. sendTurnToSession is the single dispatch chokepoint reached only
-    // with a confirmed-live session (past sendTurnPerChat's :3534 spawn-fail drop),
-    // so a pushed entry always corresponds to a turn that will run. HEAD = the turn
-    // the subprocess is currently executing; shifted on that turn's result, cleared
-    // on any abnormal termination (Slice-4). per_chat non-sandbox claude-cli only
-    // (instance-global gate, matching the broadcast-skip: the exec-queue that feeds the
-    // per-chat resolver is populated exactly when the global socket is kept fail-closed).
-    if (this.usesPerChatActorSocket() && mapKey !== undefined) {
-      // If the session is not active, any pre-existing entries are from a dead
-      // subprocess (a prior turn whose session crashed/resume-failed without an
-      // in-band clear) — drop them so a stale actor cannot survive a subprocess
-      // restart. A fresh subprocess starts with only this turn. (handleResumeFailed
-      // is a no-op for non-sandbox per_chat, so this is the resume-fail coverage.)
-      if (!session.getStatus().active) this.perChatExecActorQueue.delete(mapKey);
-      const execQ = this.perChatExecActorQueue.get(mapKey) ?? [];
-      execQ.push(actorJid);
-      this.perChatExecActorQueue.set(mapKey, execQ);
-    }
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
     const mapKeyForChat = this.sandboxPerChat
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : undefined;
     const crashScopeKey = this.getCrashScopeKey(chatJid);
-    const systemScopeKey = effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+    let systemScopeKey = effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY;
     const autoCompactWaiter = this.autoCompact.waiters.get(systemScopeKey);
     if (autoCompactWaiter) await autoCompactWaiter.promise;
-    await this.pendingSystemResults.waitForCountAtMost(
-      systemScopeKey,
-      systemTurnAlreadyMarked ? 1 : 0,
-    );
+    await this.waitForRejectedTerminalTeardown(session);
+    await this.waitForSystemTurnQuarantine(systemScopeKey);
+    await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
     if (dispatchCancelled()) return;
 
     const wasInactive = !session.getStatus().active;
@@ -4171,6 +4358,10 @@ export class AgentRuntime implements Runtime {
           session,
           spawnOwnership,
         );
+        // A LID→canonical rekey may land while spawn is in flight. Every
+        // post-spawn system barrier must follow the activated scope rather than
+        // consulting the retired key and admitting the user request early.
+        systemScopeKey = effectiveMapKey;
         if (dispatchCancelled()) {
           await stopCancelledSpawn();
           return;
@@ -4186,6 +4377,7 @@ export class AgentRuntime implements Runtime {
       // avoid sending two context blocks to the same fresh session.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       if (!resumeFailedOwnsContext) {
+        let contextLease: SystemTurnLeaseToken | null = null;
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = getRecentMessages(this.db, convKey, 20);
@@ -4198,13 +4390,22 @@ export class AgentRuntime implements Runtime {
             // USER turn (phantom '[Recent chat context]' reply leaks to the user +
             // wrong post-turn gate). In per_chat mapKey is defined so this is a
             // no-op there (consumed by the per_chat consumeIfPending(mapKey)).
-            this.pendingSystemResults.mark(effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+            contextLease = this.markSystemTurn(
+              session,
+              effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              'fresh_session_context',
+              chatJid,
+            );
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
-          // Context-injection send failed — no result will arrive for its mark.
-          this.pendingSystemResults.unmark(effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+          await this.settleFailedSystemTurnDispatch(
+            session,
+            systemScopeKey,
+            contextLease,
+            err,
+          );
         }
       }
     }
@@ -4217,15 +4418,31 @@ export class AgentRuntime implements Runtime {
     // Activate the immutable user-turn evidence epoch only after fresh-session
     // context injection has completed. System-turn output must never inherit the
     // journal identity or answer-op evidence of the following user turn.
-    await this.pendingSystemResults.waitForCountAtMost(
-      systemScopeKey,
-      systemTurnAlreadyMarked ? 1 : 0,
-    );
+    await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
     if (dispatchCancelled()) {
       await stopCancelledSpawn();
       return;
     }
     beforeUserSend?.();
+
+    // Publish the execution actor only when this exact request is ready to cross
+    // the provider boundary. Earlier placement leaked actors from cancelled or
+    // context-blocked sends. The one-flight SessionManager invariant makes this
+    // entry the provider request at FIFO HEAD.
+    let actorPushed = false;
+    if (this.usesPerChatActorSocket() && effectiveMapKey !== undefined) {
+      if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
+      const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
+      execQ.push(actorJid);
+      this.perChatExecActorQueue.set(effectiveMapKey, execQ);
+      actorPushed = true;
+      if (systemTurnLease) {
+        this.systemTurnExecActors.set(systemTurnLease.id, {
+          scopeKey: effectiveMapKey,
+          actorJid,
+        });
+      }
+    }
 
     // Assert typing immediately so the user sees the indicator while the agent thinks.
     // Without this, there's a visible gap between message receipt and first tool call.
@@ -4235,6 +4452,9 @@ export class AgentRuntime implements Runtime {
     try {
       await session.sendTurn(text);
     } catch (err) {
+      if (actorPushed && effectiveMapKey !== undefined) {
+        this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
+      }
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
         const status = session.getStatus();
@@ -4284,15 +4504,23 @@ export class AgentRuntime implements Runtime {
       });
       this.pendingSingletonRuntimeTurnContext = context;
     }
+    let legacyOwner: LegacyProviderTurnOwner | null = null;
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
-        if (!context) return;
+        if (!context) {
+          legacyOwner = this.publishLegacyProviderTurn(
+            this.session!,
+            GLOBAL_TOOL_SCOPE_KEY,
+            chatJid,
+          );
+          return;
+        }
         this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(this.queue!, context);
         this.currentRuntimeTurnContext = context;
         this.pendingSingletonRuntimeTurnContext = null;
         completion.value = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
         this.currentRuntimeTurnCompletion = completion.value;
-      }, false, () => (
+      }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ));
@@ -4303,6 +4531,11 @@ export class AgentRuntime implements Runtime {
         return;
       }
       if (completion.value !== null) await completion.value.promise;
+    } catch (err) {
+      if (legacyOwner) {
+        this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
+      }
+      throw err;
     } finally {
       if (this.pendingSingletonRuntimeTurnContext === context) {
         this.pendingSingletonRuntimeTurnContext = null;
@@ -4321,7 +4554,7 @@ export class AgentRuntime implements Runtime {
     actorJid?: string,
     runtimeContext?: RuntimeTurnContext,
     scopeRef?: PerChatRuntimeScopeRef,
-    systemTurnAlreadyMarked: boolean = false,
+    systemTurnLease?: SystemTurnLeaseToken,
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined
@@ -4375,6 +4608,7 @@ export class AgentRuntime implements Runtime {
           advancePendingPollIndex(pendingPoll);
 
           if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
+            this.stageResolvedAskUserPoll(mapKey, pendingPoll);
             await this.completeConsumedPerChatInbound(
               mapKey,
               'poll_answer_collected',
@@ -4411,6 +4645,28 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnText.set(mapKey, text);
     this.pendingTurnActorJid.set(mapKey, actorJid);
 
+    const legacyOwner: { value: LegacyProviderTurnOwner | null } = { value: null };
+    const beginDispatchedTurn = (
+      targetSession: SessionManager,
+      currentMapKey: string,
+    ): RuntimeTurnCompletion | null => {
+      if (runtimeContext === undefined && systemTurnLease === undefined) {
+        legacyOwner.value = this.publishLegacyProviderTurn(
+          targetSession,
+          currentMapKey,
+          chatJid,
+        );
+        return null;
+      }
+      return this.beginPerChatRuntimeTurn(
+        targetSession,
+        chatJid,
+        currentMapKey,
+        runtimeContext,
+        scopeRef,
+      );
+    };
+
     const session = this.chatSessions.get(mapKey);
     if (!session) {
       log.warn({ chatJid, mapKey }, 'no active session for chat — spawning new session');
@@ -4438,28 +4694,36 @@ export class AgentRuntime implements Runtime {
         return;
       }
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
-      await this.sendTurnToSession(retrySession, chatJid, text, currentMapKey, actorJid, () => {
-        completion.value = this.beginPerChatRuntimeTurn(
-          retrySession,
-          chatJid,
-          scopeRef?.value ?? currentMapKey,
-          runtimeContext,
-          scopeRef,
-        );
-      }, systemTurnAlreadyMarked, dispatchAllowed);
+      try {
+        await this.sendTurnToSession(retrySession, chatJid, text, currentMapKey, actorJid, () => {
+          completion.value = beginDispatchedTurn(
+            retrySession,
+            scopeRef?.value ?? currentMapKey,
+          );
+        }, systemTurnLease, dispatchAllowed);
+      } catch (err) {
+        if (legacyOwner.value) {
+          this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
+        }
+        throw err;
+      }
       if (completion.value) await completion.value.promise;
       return;
     }
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
-    await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid, () => {
-      completion.value = this.beginPerChatRuntimeTurn(
-        session,
-        chatJid,
-        scopeRef?.value ?? mapKey,
-        runtimeContext,
-        scopeRef,
-      );
-    }, systemTurnAlreadyMarked, dispatchAllowed);
+    try {
+      await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid, () => {
+        completion.value = beginDispatchedTurn(
+          session,
+          scopeRef?.value ?? mapKey,
+        );
+      }, systemTurnLease, dispatchAllowed);
+    } catch (err) {
+      if (legacyOwner.value) {
+        this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
+      }
+      throw err;
+    }
     if (completion.value) await completion.value.promise;
   }
 
@@ -4548,29 +4812,524 @@ export class AgentRuntime implements Runtime {
    * Resolves queue and session locally from the mapKey to avoid mutating shared
    * instance fields that another concurrent chat could overwrite.
    */
-  private handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void {
-    const queue = this.chatQueues.get(mapKey);
-    if (!queue) {
-      log.debug({ mapKey, eventType: event.type }, 'event dropped — no queue for chat');
-      return;
-    }
-    const session = this.chatSessions.get(mapKey) ?? null;
-    // Use queue.targetChatJid — mapKey may be a workspaceKey (not a raw JID) when sandboxPerChat=true
-    const conversationKey = toConversationKey(queue.targetChatJid);
-    const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
-    const inboundSeq = seqQueue[0]; // peek — don't shift yet
-    let isSystemResult = false;
-    if (event.type === 'result') {
-      if (this.pendingSystemResults.consumeIfPending(mapKey)) {
-        // This result belongs to a system turn (context injection, continuation) — don't consume user seq
-        isSystemResult = true;
-      } else {
-        // Peek only. The finalizer advances seq/context/actor together after a
-        // terminal write or a durably owned retry incident. No result callback
-        // may release FIFO ownership before that point.
+  private resolveProviderEventOwner(
+    event: AgentEvent,
+    logicalOwnerMatches: boolean,
+    systemTurn: PendingSystemTurnSnapshot | null,
+  ): { owner: ProviderEventOwner; systemTurn: PendingSystemTurnSnapshot | null } {
+    if (systemTurn) {
+      const systemOwner: ProviderEventOwner = {
+        kind: 'system_request',
+        purpose: systemTurn.purpose,
+      };
+      const systemDecision = decideProviderEventAdmission(event, systemOwner);
+      if (
+        event.type === 'result'
+        || !logicalOwnerMatches
+        || (event.type === 'compact_boundary' && systemDecision.admit)
+      ) {
+        return { owner: systemOwner, systemTurn };
       }
     }
-    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey, isSystemResult);
+    if (logicalOwnerMatches) {
+      return { owner: { kind: 'logical_turn' }, systemTurn: null };
+    }
+    if (event.type === 'init') {
+      return { owner: { kind: 'session_accounting' }, systemTurn: null };
+    }
+    return { owner: { kind: 'none' }, systemTurn: null };
+  }
+
+  private rejectProviderEvent(
+    eventType: AgentEvent['type'],
+    runtimeScope: 'per_chat' | 'singleton_shared',
+    ownerKind: string,
+    reason: string,
+    sourceSession?: SessionManager,
+  ): void {
+    this.unownedProviderEventRejects = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      this.unownedProviderEventRejects + 1,
+    );
+    const reasonCount = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      (this.providerEventRejectReasonCounts.get(reason) ?? 0) + 1,
+    );
+    this.providerEventRejectReasonCounts.set(reason, reasonCount);
+    if (reasonCount === 1 || (reasonCount & (reasonCount - 1)) === 0) {
+      log.warn(
+        { eventType, runtimeScope, ownerKind, reason, reasonCount },
+        'provider event rejected before runtime effects',
+      );
+    }
+    // A malformed stdout record on an owned JSON stream destroys framing just
+    // as decisively as an unattributable terminal. Reap/finalize immediately;
+    // waiting for the activity-rearmed watchdog can otherwise hold the lane for
+    // its full hard timeout with no usable terminal event.
+    if ((eventType === 'result' || eventType === 'parse_error') && sourceSession) {
+      this.invalidateRejectedTerminalSource(sourceSession, runtimeScope, reason);
+    }
+  }
+
+  private invalidateRejectedTerminalSource(
+    sourceSession: SessionManager,
+    runtimeScope: 'per_chat' | 'singleton_shared',
+    reason: string,
+  ): void {
+    if (this.rejectedTerminalTeardowns.has(sourceSession)) return;
+    const logicalOwner = this.captureRejectedTerminalLogicalOwner(sourceSession, runtimeScope);
+    const systemTurn = this.captureRejectedTerminalSystemTurn(sourceSession);
+
+    let teardown!: Promise<boolean>;
+    teardown = sourceSession.shutdown(false).then(async () => {
+      if (systemTurn && this.pendingSystemResults.cancel(systemTurn.lease)) {
+        this.releaseSystemTurnExecutingActor(systemTurn);
+      }
+      if (logicalOwner) {
+        await this.finalizeRejectedTerminalLogicalOwner(logicalOwner, sourceSession);
+      }
+      return true;
+    }).then(
+      () => true,
+      (err) => {
+        log.error(
+          { err, runtimeScope, reason },
+          'rejected terminal source teardown failed — provider lane remains closed',
+        );
+        if (logicalOwner) {
+          // shutdown() clears the provider watchdog before process-tree or
+          // lifecycle persistence can reject. Settle the exact processor
+          // waiter even though quarantine remains closed; otherwise no future
+          // event or watchdog can release this logical turn.
+          this.rejectRejectedTerminalLogicalOwner(logicalOwner, err);
+        }
+        return false;
+      },
+    ).then((provedClosed) => {
+      // SessionManager instances survive /new generation changes. Retain a
+      // failed proof to block automatic respawn, but retire a successful proof
+      // so a future generation on the same manager can be quarantined anew.
+      if (provedClosed && this.rejectedTerminalTeardowns.get(sourceSession) === teardown) {
+        this.rejectedTerminalTeardowns.delete(sourceSession);
+      }
+      return provedClosed;
+    });
+    this.rejectedTerminalTeardowns.set(sourceSession, teardown);
+  }
+
+  private captureRejectedTerminalSystemTurn(
+    sourceSession: SessionManager,
+  ): PendingSystemTurnSnapshot | null {
+    const managerId = this.sessionManagerIds.get(sourceSession);
+    if (!managerId) return null;
+    for (const scopeKey of this.pendingSystemResults.counts.keys()) {
+      const candidate = this.pendingSystemResults.peek(scopeKey);
+      if (candidate?.owner?.managerId === managerId) return candidate;
+    }
+    return null;
+  }
+
+  private captureRejectedTerminalLogicalOwner(
+    sourceSession: SessionManager,
+    runtimeScope: 'per_chat' | 'singleton_shared',
+  ): { context: RuntimeTurnContext; queue: IOutboundQueue; mapKey?: string } | null {
+    const managerId = this.sessionManagerIds.get(sourceSession);
+    if (!managerId) return null;
+
+    if (runtimeScope === 'singleton_shared') {
+      const context = this.currentRuntimeTurnContext;
+      if (!context || context.identity.managerId !== managerId) return null;
+      const queue = this.shared
+        ? this.outboundQueues.get(context.identity.deliveryJid)
+          ?? this.outboundQueues.get(canonicalizeChatJid(context.identity.deliveryJid, this.db))
+        : this.queue;
+      return {
+        context,
+        queue: queue ?? this.createOutboundQueue(
+          context.identity.deliveryJid,
+          'rejected terminal detached finalization',
+        ),
+      };
+    }
+
+    for (const [mapKey, contexts] of this.perChatRuntimeTurnContexts) {
+      const context = contexts.find((candidate) => candidate.identity.managerId === managerId);
+      if (!context) continue;
+      return {
+        context,
+        queue: this.chatQueues.get(mapKey) ?? this.createOutboundQueue(
+          context.identity.deliveryJid,
+          'rejected terminal detached finalization',
+        ),
+        mapKey,
+      };
+    }
+    return null;
+  }
+
+  private async finalizeRejectedTerminalLogicalOwner(
+    owner: { context: RuntimeTurnContext; queue: IOutboundQueue; mapKey?: string },
+    sourceSession: SessionManager,
+  ): Promise<void> {
+    try {
+      owner.queue.abortTurn({ preserveEvidence: true });
+      const result = await this.finalizeRuntimeTurnContext({
+        context: owner.context,
+        queue: owner.queue,
+        attemptOutcome: { kind: 'failed', class: 'provider_stream_corrupt' },
+        session: sourceSession,
+        ...(owner.mapKey === undefined ? {} : { mapKey: owner.mapKey }),
+        clearReplayOnSuccess: false,
+      });
+      if (result.kind !== 'terminal' && !result.mayAdvance) {
+        await this.runtimeTurnSupervisor.waitForRecovery(owner.context);
+      }
+    } catch (err) {
+      this.rejectRejectedTerminalLogicalOwner(owner, err);
+      throw err;
+    }
+  }
+
+  private rejectRejectedTerminalLogicalOwner(
+    owner: { context: RuntimeTurnContext; mapKey?: string },
+    error: unknown,
+  ): void {
+    this.runtimeTurnCoordinator.markRuntimeTurnDegraded(owner.context);
+    this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+      error,
+      owner.mapKey,
+      owner.context,
+    );
+  }
+
+  private async waitForRejectedTerminalTeardown(sourceSession: SessionManager): Promise<void> {
+    const teardown = this.rejectedTerminalTeardowns.get(sourceSession);
+    if (!teardown) return;
+    if (await teardown) return;
+    throw new Error('REJECTED_TERMINAL_QUARANTINE_FAILED: exact provider source was not proven closed');
+  }
+
+  private handleRestrictedSystemResult(
+    sourceSession: SessionManager,
+    scopeKey: string,
+    systemTurn: PendingSystemTurnSnapshot,
+    event: Extract<AgentEvent, { type: 'result' }>,
+    tracker: OperationTracker | null,
+  ): void {
+    sourceSession.completeProviderTurn();
+    tracker?.onTurnComplete();
+    const rowId = sourceSession.getDbRowId();
+    if (rowId !== null && (event.inputTokens !== undefined || event.outputTokens !== undefined)) {
+      const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+      accumulateTokensWithEvent(
+        this.db,
+        rowId,
+        newInputTokens,
+        event.outputTokens ?? 0,
+        cacheReadTokens,
+      );
+    }
+    this.recordTurnCostUsd(event);
+
+    const compactPurpose = systemTurn.purpose === 'auto_compact_silent'
+      || systemTurn.purpose === 'manual_compact_silent'
+      || systemTurn.purpose === 'manual_compact_notice';
+    if (!compactPurpose) return;
+    const hadCompactBoundary = this.consumeCompactBoundary(scopeKey);
+    if (hadCompactBoundary && rowId !== null) {
+      markSessionCompacted(this.db, rowId);
+      this.recordAutoCompactSuccess(scopeKey);
+    }
+    this.finishAutoCompact(scopeKey);
+    if (
+      systemTurn.purpose === 'auto_compact_silent'
+      || systemTurn.purpose === 'manual_compact_silent'
+    ) {
+      this.clearSilentCompact(scopeKey);
+    }
+    const routeQueue = scopeKey === GLOBAL_TOOL_SCOPE_KEY
+      ? (systemTurn.routeChatJid
+          ? this.getQueueForChat(systemTurn.routeChatJid)
+          : this.getActiveQueue())
+      : this.chatQueues.get(scopeKey) ?? null;
+    routeQueue?.endTurn();
+    if (scopeKey === GLOBAL_TOOL_SCOPE_KEY) {
+      this.currentTurnChatJid = null;
+    }
+  }
+
+  /**
+   * Control turns are synthetic repair traffic. Their terminal result releases
+   * only control ownership/accounting; it must never enter user fallback,
+   * durability, reply-guarantee, voice, or post-turn finalization paths.
+   */
+  private handleControlTerminalResult(
+    sourceSession: SessionManager,
+    controlQueue: IOutboundQueue,
+    toolScopeKey: string,
+    event: Extract<AgentEvent, { type: 'result' }>,
+  ): void {
+    const reportId = this.activeControlReportId;
+    if (reportId === null || this.controlTerminalizingReportId === reportId) return;
+
+    sourceSession.completeProviderTurn();
+
+    this.operationTrackers.get('control@heal.internal')?.onTurnComplete();
+    controlQueue.endTurn();
+    this.turnHadToolActivity.delete(toolScopeKey);
+    this.clearToolNames(toolScopeKey);
+    const rowId = sourceSession.getDbRowId();
+    if (rowId !== null && (event.inputTokens !== undefined || event.outputTokens !== undefined)) {
+      const { newInputTokens, cacheReadTokens } = splitInputTokenUsage(event);
+      accumulateTokensWithEvent(
+        this.db,
+        rowId,
+        newInputTokens,
+        event.outputTokens ?? 0,
+        cacheReadTokens,
+      );
+    }
+    this.recordTurnCostUsd(event);
+
+    if (this.controlProtocolCompletedReportId !== reportId) return;
+    this.controlTerminalizingReportId = reportId;
+    void this.finishControlReportAfterTerminal(reportId, sourceSession);
+  }
+
+  private async finishControlReportAfterTerminal(
+    reportId: string,
+    sourceSession: SessionManager,
+  ): Promise<void> {
+    try {
+      // A provider result is final for the request, but this persistent process
+      // has no supported request ID on later events. Reap it before admitting
+      // the next report so report A can never bleed into report B.
+      await sourceSession.shutdown(false);
+    } catch (err) {
+      log.error(
+        { err, reportId },
+        'control terminal teardown failed — repair lane remains closed',
+      );
+      return;
+    }
+
+    if (
+      this.activeControlReportId !== reportId
+      || this.controlSession !== sourceSession
+      || this.controlProtocolCompletedReportId !== reportId
+    ) return;
+
+    this.releaseControlSession(reportId, sourceSession);
+    this.dispatchNextControlReport();
+  }
+
+  private releaseControlSession(reportId: string, sourceSession: SessionManager): void {
+    if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+    if (this.controlSessionTimeout) {
+      clearTimeout(this.controlSessionTimeout);
+      this.controlSessionTimeout = null;
+    }
+    const syntheticJid = 'control@heal.internal';
+    const tracker = this.operationTrackers.get(syntheticJid);
+    tracker?.shutdown();
+    this.operationTrackers.delete(syntheticJid);
+    this.chatSessions.delete(syntheticJid);
+    this.chatQueues.delete(syntheticJid);
+    this.controlSession = null;
+    this.activeControlReportId = null;
+    this.controlProtocolCompletedReportId = null;
+    this.controlTerminalizingReportId = null;
+  }
+
+  private dispatchNextControlReport(): void {
+    const next = dequeueNextReport(this.db);
+    if (!next) return;
+    const context = parseHealContext(next.context);
+    void this.handleControlTurn(next.report_id, JSON.stringify({
+      ...context,
+      reportId: next.report_id,
+      errorClass: next.error_class,
+    })).catch((err) => {
+      log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
+    });
+  }
+
+  private handleEventPerChat(
+    sourceSession: SessionManager,
+    event: AgentEvent,
+    toolScopeKey: string,
+  ): void {
+    const controlSource = sourceSession === this.controlSession;
+    let mapKey: string | null = null;
+    for (const [candidateKey, currentSession] of this.chatSessions) {
+      if (currentSession === sourceSession) {
+        mapKey = candidateKey;
+        break;
+      }
+    }
+    const registeredToolScope = this.sessionEventToolScopes.get(sourceSession);
+    if (!mapKey || registeredToolScope !== toolScopeKey) {
+      this.rejectProviderEvent(event.type, 'per_chat', 'none', 'source_session_not_current', sourceSession);
+      return;
+    }
+
+    if (controlSource) {
+      if (
+        mapKey !== 'control@heal.internal'
+        || this.activeControlReportId === null
+        || this.chatSessions.get(mapKey) !== sourceSession
+      ) {
+        this.rejectProviderEvent(event.type, 'per_chat', 'control', 'control_owner_missing', sourceSession);
+        return;
+      }
+      if (event.type === 'tool_use' && event.toolName === 'AskUserQuestion') {
+        this.rejectProviderEvent(event.type, 'per_chat', 'control', 'event_not_allowed_for_owner', sourceSession);
+        return;
+      }
+      const decision = decideProviderEventAdmission(event, { kind: 'control' });
+      if (!decision.admit) {
+        this.rejectProviderEvent(event.type, 'per_chat', 'control', decision.reason, sourceSession);
+        return;
+      }
+      if (event.type === 'ignored') return;
+      const controlQueue = this.chatQueues.get(mapKey);
+      if (!controlQueue) {
+        this.rejectProviderEvent(event.type, 'per_chat', 'control', 'control_owner_missing', sourceSession);
+        return;
+      }
+      if (event.type === 'result') {
+        this.handleControlTerminalResult(sourceSession, controlQueue, toolScopeKey, event);
+        return;
+      }
+      this.handleEventWithContext(
+        event,
+        controlQueue,
+        sourceSession,
+        toConversationKey(controlQueue.targetChatJid),
+        undefined,
+        mapKey,
+        toolScopeKey,
+        false,
+        null,
+      );
+      return;
+    }
+
+    const managerId = this.sessionManagerIds.get(sourceSession);
+    const generationOwner = managerId ? this.sessionOwnership.get(mapKey) : undefined;
+    if (
+      !managerId
+      || !generationOwner
+      || !this.sessionOwnership.isCurrent(mapKey, managerId, generationOwner.generation)
+    ) {
+      this.rejectProviderEvent(event.type, 'per_chat', 'none', 'source_generation_not_current', sourceSession);
+      return;
+    }
+
+    const runtimeContext = this.runtimeTurnCoordinator.runtimeTurnContext(mapKey);
+    const runtimeOwnerMatches = runtimeContext !== null
+      && runtimeContext.identity.managerId === managerId
+      && runtimeContext.identity.generation === generationOwner.generation
+      && runtimeContext.toolScopeKey === toolScopeKey;
+    const legacyOwner = this.legacyProviderTurnMatches(
+      mapKey,
+      managerId,
+      generationOwner.generation,
+      toolScopeKey,
+    );
+    const logicalOwnerMatches = runtimeOwnerMatches || legacyOwner !== null;
+    const systemTurn = this.pendingSystemResults.peek(mapKey);
+    const systemOwnerMatches = systemTurn?.owner != null
+      && systemTurn.owner.managerId === managerId
+      && systemTurn.owner.generation === generationOwner.generation
+      && systemTurn.owner.toolScopeKey === toolScopeKey;
+    const resolved = this.resolveProviderEventOwner(
+      event,
+      logicalOwnerMatches,
+      systemOwnerMatches ? systemTurn : null,
+    );
+    const decision = decideProviderEventAdmission(event, resolved.owner);
+    if (!decision.admit) {
+      this.rejectProviderEvent(event.type, 'per_chat', resolved.owner.kind, decision.reason, sourceSession);
+      return;
+    }
+    if (event.type === 'ignored') return;
+
+    let queue = this.chatQueues.get(mapKey);
+    if (!queue && event.type === 'result') {
+      const recoveryChatJid = runtimeOwnerMatches
+        ? runtimeContext!.identity.deliveryJid
+        : legacyOwner?.routeChatJid ?? resolved.systemTurn?.routeChatJid;
+      if (recoveryChatJid) {
+        queue = this.createOutboundQueue(recoveryChatJid, 'provider terminal route recovery');
+        this.chatQueues.set(mapKey, queue);
+        log.warn(
+          { mapKey, recoveryChatJid, ownerKind: resolved.owner.kind },
+          'reconstructed missing output route for an owned provider terminal',
+        );
+      }
+    }
+    const resultNeedsRoute = event.type === 'result'
+      && (
+        resolved.owner.kind === 'logical_turn'
+        || (resolved.systemTurn !== null && systemPurposeAllowsOutput(resolved.systemTurn.purpose))
+      );
+    if (resultNeedsRoute && !queue) {
+      this.rejectProviderEvent(
+        event.type,
+        'per_chat',
+        resolved.owner.kind,
+        'owner_queue_missing',
+        sourceSession,
+      );
+      return;
+    }
+
+    if (
+      event.type === 'result'
+      && resolved.owner.kind === 'logical_turn'
+      && legacyOwner !== null
+    ) {
+      this.clearLegacyProviderTurn(mapKey, legacyOwner);
+    }
+
+    let consumedSystemTurn: PendingSystemTurnSnapshot | null = null;
+    if (event.type === 'result' && resolved.systemTurn) {
+      consumedSystemTurn = this.pendingSystemResults.consumeResult(resolved.systemTurn.lease);
+      if (!consumedSystemTurn) {
+        this.rejectProviderEvent(event.type, 'per_chat', 'system_request', 'system_owner_race', sourceSession);
+        return;
+      }
+      this.releaseSystemTurnExecutingActor(consumedSystemTurn);
+      if (!systemPurposeAllowsOutput(consumedSystemTurn.purpose)) {
+        this.handleRestrictedSystemResult(
+          sourceSession,
+          mapKey,
+          consumedSystemTurn,
+          event,
+          this.getTracker(mapKey),
+        );
+        return;
+      }
+    }
+
+    if (!queue) {
+      this.rejectProviderEvent(event.type, 'per_chat', resolved.owner.kind, 'owner_queue_missing', sourceSession);
+      return;
+    }
+    const conversationKey = toConversationKey(queue.targetChatJid);
+    const inboundSeq = this.perChatInboundSeqQueue.get(mapKey)?.[0];
+    this.handleEventWithContext(
+      event,
+      queue,
+      sourceSession,
+      conversationKey,
+      inboundSeq,
+      mapKey,
+      toolScopeKey,
+      consumedSystemTurn !== null,
+      consumedSystemTurn?.purpose ?? null,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -4594,6 +5353,56 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingPolls.questions.delete(mapKey);
     this.pollPersistence.remove(mapKey);
+  }
+
+  /** Remove an AskUser continuation from interception while retaining its durable row. */
+  private detachPendingPollContinuation(
+    mapKey: string,
+    pending: PendingPollQuestion,
+  ): boolean {
+    if (this.pendingPolls.questions.get(mapKey) !== pending) return false;
+    clearPendingPollTimers(pending);
+    this.suppressedAskUserToolIds.delete(pending.toolId);
+    this.pendingPolls.questions.delete(mapKey);
+    return true;
+  }
+
+  private abandonPendingPollContinuation(
+    mapKey: string,
+    pending: PendingPollQuestion,
+    error: unknown,
+  ): void {
+    const current = this.pendingPolls.questions.get(mapKey);
+    if (current === pending) {
+      this.deletePendingPollQuestions(mapKey);
+    } else if (current === undefined) {
+      this.pollPersistence.remove(mapKey);
+    }
+    this.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
+    this.sendDirect(
+      pending.chatJid,
+      'I received your poll answer, but could not continue it safely. Please send your answer again.',
+    );
+    log.error(
+      { err: error, mapKey, chatJid: pending.chatJid },
+      'resolved AskUser continuation abandoned after dispatch failure',
+    );
+  }
+
+  private stageResolvedAskUserPoll(
+    mapKey: string,
+    pending: PendingPollQuestion,
+  ): void {
+    pending.resolvedAt ??= Date.now();
+    clearPendingPollTimers(pending);
+    const connection = this.messenger as ConnectionManager;
+    if (typeof connection.clearPollTracking === 'function') {
+      for (const pollMessageId of pending.sentPollMessageIds) {
+        connection.clearPollTracking(pollMessageId);
+      }
+    }
+    this.pollPersistence.save(mapKey, pending);
+    this.getQueueForChat(pending.chatJid, mapKey)?.setPollPending(false);
   }
 
   private async completeConsumedPerChatInbound(
@@ -4657,6 +5466,7 @@ export class AgentRuntime implements Runtime {
     // many polls in one chat produces a single consolidated notification rather
     // than one message per stranded poll.
     const expiredByChat = new Map<string, number>();
+    const interruptedContinuationsByChat = new Map<string, number>();
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
@@ -4667,6 +5477,14 @@ export class AgentRuntime implements Runtime {
         }
         const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
         const pending = deserializePendingPoll(serialized);
+        if (pending.source === 'askuser' && pending.resolvedAt !== undefined) {
+          this.pollPersistence.remove(row.map_key);
+          interruptedContinuationsByChat.set(
+            row.chat_jid,
+            (interruptedContinuationsByChat.get(row.chat_jid) ?? 0) + 1,
+          );
+          continue;
+        }
         this.pendingPolls.questions.set(row.map_key, pending);
         this.startPendingPollExpiry(row.map_key, pending);
         restored += 1;
@@ -4678,8 +5496,16 @@ export class AgentRuntime implements Runtime {
     for (const [chatJid, count] of expiredByChat) {
       this.notifyPollExpiredDuringDowntime(chatJid, count);
     }
-    if (restored > 0 || expired > 0) {
-      log.info({ restored, expired, chatsNotified: expiredByChat.size }, 'rehydratePendingPolls: completed');
+    for (const [chatJid, count] of interruptedContinuationsByChat) {
+      this.notifyPollContinuationInterrupted(chatJid, count);
+    }
+    if (restored > 0 || expired > 0 || interruptedContinuationsByChat.size > 0) {
+      log.info({
+        restored,
+        expired,
+        chatsNotified: expiredByChat.size,
+        interruptedContinuationChats: interruptedContinuationsByChat.size,
+      }, 'rehydratePendingPolls: completed');
     }
   }
 
@@ -4699,6 +5525,19 @@ export class AgentRuntime implements Runtime {
       );
     } catch (err) {
       log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)');
+    }
+  }
+
+  private notifyPollContinuationInterrupted(chatJid: string, count = 1): void {
+    const message = count > 1
+      ? `I received ${count} poll answers before restarting, but could not continue them safely. Please send the answers again.`
+      : 'I received your poll answer before restarting, but could not continue it safely. Please send the answer again.';
+    try {
+      void this.messenger.sendMessage(chatJid, message).catch((err) =>
+        log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: send failed (non-fatal)'),
+      );
+    } catch (err) {
+      log.warn({ err, chatJid }, 'notifyPollContinuationInterrupted: dispatch failed (non-fatal)');
     }
   }
 
@@ -4781,11 +5620,19 @@ export class AgentRuntime implements Runtime {
       pending.awaitReject = undefined;
     }
 
-    // Remove from pending map (safe — awaiters already settled)
-    this.deletePendingPollQuestions(mapKey);
+    const askUserContinuation = pending.source === 'askuser' || pending.source === undefined;
+    if (askUserContinuation) {
+      // Retain the resolved answer in memory + SQLite until the continuation
+      // has crossed the provider boundary. A crash or failed source
+      // finalization must not turn a successfully collected vote into silence.
+      this.pollPersistence.save(mapKey, pending);
+    } else {
+      // send_poll awaiters were settled above and have no provider continuation.
+      this.deletePendingPollQuestions(mapKey);
+    }
 
     // AskUser: inject answer into session (treat undefined source as 'askuser' for legacy compat)
-    if (pending.source === 'askuser' || pending.source === undefined) {
+    if (askUserContinuation) {
       void this.injectPollAnswers(mapKey, pending).catch((err) => {
         log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
       });
@@ -5054,23 +5901,21 @@ export class AgentRuntime implements Runtime {
 
     const instanceConfig = config.pollResolution;
     const isGroup = isGroupJid(chatJid);
-    let resolvedStrategy: ResolutionStrategy = isGroup
+    const resolvedStrategy: ResolutionStrategy = isGroup
       ? ((instanceConfig?.defaultStrategy as ResolutionStrategy | undefined) ?? 'first-vote-wins')
       : 'first-vote-wins';
-    let adminJids: Set<string> | null = null;
-    if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
-      adminJids = await this.fetchGroupAdminJids(chatJid);
-      if (adminJids === null) {
-        // QR-036: fail CLOSED. Keep the admin-only/admin-wins strategy with
-        // adminJids=null so no member vote qualifies as admin (no non-admin can
-        // resolve the gated decision on transient metadata failure); liveness via
-        // the soft-expiry timeout fallback.
-        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
-      }
-    }
+    const sourceContext = this.runtimeTurnCoordinator.runtimeTurnContext(mapKey);
+    const sourceCompletion = this.perChatRuntimeTurnCompletions.get(mapKey);
+    const sourceSession = this.chatSessions.get(mapKey);
+    const sourceBarrier = (
+      sourceContext
+      && sourceCompletion?.context.identity.logicalTurnId === sourceContext.identity.logicalTurnId
+    )
+      ? sourceCompletion.promise
+      : sourceSession?.waitForProviderTurnToTerminalize();
 
-    // Register ALL synchronous state BEFORE any async work — tool_result and
-    // result events may arrive while we're awaiting poll send.
+    // Register every ownership/suppression surface before the first await.
+    // Group metadata and poll transport can both outlive the source result.
     this.deletePendingPollQuestions(mapKey);
     this.suppressedAskUserToolIds.add(toolId);
     const pending: PendingPollQuestion = {
@@ -5086,13 +5931,28 @@ export class AgentRuntime implements Runtime {
       resolution: resolvedStrategy,
       timeoutMs: configuredDefaultPollTimeoutMs(),
       votesByQuestion: new Map(),
-      adminJids,
+      adminJids: null,
       sentPollMessageIds: [],
       source: 'askuser' as const,
       resolvedAt: undefined,
     };
     this.pendingPolls.questions.set(mapKey, pending);
+    if (sourceBarrier) this.pendingPollSourceTurnBarriers.set(pending, sourceBarrier);
     this.pollPersistence.save(mapKey, pending);
+
+    if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
+      const adminJids = await this.fetchGroupAdminJids(chatJid);
+      if (!this.pendingPolls.shouldContinueSend(mapKey, pending)) return;
+      pending.adminJids = adminJids;
+      this.pollPersistence.save(mapKey, pending);
+      if (adminJids === null) {
+        // QR-036: fail CLOSED. Keep the admin-only/admin-wins strategy with
+        // adminJids=null so no member vote qualifies as admin (no non-admin can
+        // resolve the gated decision on transient metadata failure); liveness via
+        // the soft-expiry timeout fallback.
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — keeping admin gate (fail-closed)');
+      }
+    }
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
@@ -5322,30 +6182,59 @@ export class AgentRuntime implements Runtime {
     });
     const answerText = lines.join('\n').trim();
 
-    // Clear pending state BEFORE sending the turn — sendTurnPerChat checks
-    // pendingPolls.questions and would re-intercept as another answer.
-    this.deletePendingPollQuestions(mapKey);
-
-    // Route through sendTurnPerChat for proper lifecycle handling.
-    // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
-    // pendingPolls.questions from being populated in shared mode.
-    this.pendingSystemResults.mark(mapKey);
+    // A fast vote can arrive before the provider emits the terminal result for
+    // the AskUser turn. Wait for that exact logical owner to finish before even
+    // reserving the continuation lease; otherwise the old result can consume
+    // the new lease or the one-flight provider guard can drop the answer.
     try {
-      await this.sendTurnPerChat(
-        pending.chatJid,
-        answerText,
+      const sourceBarrier = this.pendingPollSourceTurnBarriers.get(pending);
+      if (sourceBarrier) {
+        await sourceBarrier;
+      } else {
+        const sourceSession = this.chatSessions.get(mapKey);
+        if (sourceSession) await sourceSession.waitForProviderTurnToTerminalize();
+      }
+
+      // An explicit reset/replacement cancels the staged continuation.
+      if (this.pendingPolls.questions.get(mapKey) !== pending) return;
+
+      // Remove only the in-memory interceptor before sending. The SQLite row
+      // remains until provider-boundary acceptance is proven.
+      if (!this.detachPendingPollContinuation(mapKey, pending)) return;
+
+      // Route through sendTurnPerChat for proper lifecycle handling.
+      // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
+      // pendingPolls.questions from being populated in shared mode.
+      const pollSession = this.chatSessions.get(mapKey);
+      if (!pollSession) throw new Error('Cannot inject poll answers without a current session');
+      const pollLease = this.markSystemTurn(
+        pollSession,
         mapKey,
-        answererActorJid,
-        undefined,
-        undefined,
-        true,
+        'poll_answer_continuation',
+        pending.chatJid,
       );
+      try {
+        await this.sendTurnPerChat(
+          pending.chatJid,
+          answerText,
+          mapKey,
+          answererActorJid,
+          undefined,
+          undefined,
+          pollLease,
+        );
+      } catch (err) {
+        await this.settleFailedSystemTurnDispatch(pollSession, mapKey, pollLease, err);
+        throw err;
+      }
+
+      // A newer poll may already own the same mapKey/row. Never delete it.
+      if (!this.pendingPolls.questions.has(mapKey)) this.pollPersistence.remove(mapKey);
+      log.info({ mapKey, chatJid: pending.chatJid, questionCount: pending.questions.length }, 'poll answers injected');
     } catch (err) {
-      this.pendingSystemResults.unmark(mapKey);
+      this.abandonPendingPollContinuation(mapKey, pending, err);
       throw err;
     }
-
-    log.info({ mapKey, chatJid: pending.chatJid, questionCount: pending.questions.length }, 'poll answers injected');
   }
 
   /**
@@ -5353,7 +6242,17 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY, isSystemResult: boolean = false): void {
+  private handleEventWithContext(
+    event: AgentEvent,
+    queue: IOutboundQueue,
+    session: SessionManager | null,
+    conversationKey?: string,
+    inboundSeq?: number,
+    mapKey?: string,
+    toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+    isSystemResult: boolean = false,
+    systemTurnPurpose: SystemTurnPurpose | null = null,
+  ): void {
     const tracker = this.getTracker(mapKey);
     switch (event.type) {
       case 'init':
@@ -5530,6 +6429,7 @@ export class AgentRuntime implements Runtime {
           mapKey,
           toolScopeKey,
           isSystemResult,
+          systemTurnPurpose,
           tracker: tracker ?? undefined,
           extractUsageLimitResetTime,
         });
@@ -5555,7 +6455,6 @@ export class AgentRuntime implements Runtime {
         }
         break;
 
-      case 'ignored':
       case 'unknown_block':
       case 'unknown':
       case 'parse_error':
@@ -5628,6 +6527,7 @@ export class AgentRuntime implements Runtime {
           autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
           proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+          unownedProviderEventRejects: this.unownedProviderEventRejects,
           turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
           turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
           turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -5660,6 +6560,7 @@ export class AgentRuntime implements Runtime {
         autoCompactConsecutiveRapidRearmsMax: this.autoCompact.consecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompact.nextTurnOverThreshold,
         proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
+        unownedProviderEventRejects: this.unownedProviderEventRejects,
         turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
         turnFinalizationDegradedScopes: finalizationHealth.degradedScopes,
         turnFinalizationRetryAttempts: finalizationHealth.retryAttempts,
@@ -5702,26 +6603,26 @@ export class AgentRuntime implements Runtime {
       // Create or reuse control session
       if (!this.controlSession) {
         const toolScopeKey = this.createToolScopeKey('control@heal.internal');
-        this.controlSession = this.createSessionManager({
+        let controlSession!: SessionManager;
+        controlSession = this.createSessionManager({
           chatJid: syntheticJid,
           cwd: controlCwd,
-          onEvent: (event) => this.handleEventPerChat('control@heal.internal', event, toolScopeKey),
+          onEvent: (event) => this.handleEventPerChat(controlSession, event, toolScopeKey),
           onCrash: (info) => {
+            const crashedReportId = this.activeControlReportId ?? reportId;
             log.warn({
               exitCode: info.exitCode,
               signal: info.signal,
               sessionId: info.sessionId,
-              reportId: this.activeControlReportId ?? reportId,
+              reportId: crashedReportId,
             }, 'control session crashed');
-            if (this.controlSessionTimeout) {
-              clearTimeout(this.controlSessionTimeout);
-              this.controlSessionTimeout = null;
-            }
-            this.activeControlReportId = null;
+            this.releaseControlSession(crashedReportId, controlSession);
           },
           notifyUser: () => {},
           onResumeFailed: () => {},
+          eventToolScopeKey: toolScopeKey,
         });
+        this.controlSession = controlSession;
 
         // Use ControlQueue instead of OutboundQueue so output is not forwarded as WhatsApp messages
         const controlQueue = new ControlQueue(syntheticJid, this.messenger);
@@ -5770,22 +6671,9 @@ export class AgentRuntime implements Runtime {
             .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
         }
 
-        if (this.controlSession) {
-          void this.controlSession.shutdown().catch(() => {});
-        }
-        this.clearControlReport();
-
-        // Dequeue next report if any
-        const next = dequeueNextReport(this.db);
-        if (next) {
-          const context = parseHealContext(next.context);
-          void this.handleControlTurn(next.report_id, JSON.stringify({
-            ...context,
-            reportId: next.report_id,
-            errorClass: next.error_class,
-          })).catch(err => {
-            log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
-          });
+        const timedOutSession = this.controlSession;
+        if (timedOutSession) {
+          void this.finishTimedOutControlReport(reportId, timedOutSession);
         }
       }, CONTROL_SESSION_TIMEOUT_MS);
     } catch (err) {
@@ -5796,6 +6684,8 @@ export class AgentRuntime implements Runtime {
       }
 
       this.activeControlReportId = null;
+      this.controlProtocolCompletedReportId = null;
+      this.controlTerminalizingReportId = null;
       const controlSession = this.controlSession;
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
@@ -5819,6 +6709,24 @@ export class AgentRuntime implements Runtime {
         }
       }
     }
+  }
+
+  private async finishTimedOutControlReport(
+    reportId: string,
+    sourceSession: SessionManager,
+  ): Promise<void> {
+    try {
+      await sourceSession.shutdown(false);
+    } catch (err) {
+      log.error(
+        { err, reportId },
+        'timed-out control teardown failed — repair lane remains closed',
+      );
+      return;
+    }
+    if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+    this.releaseControlSession(reportId, sourceSession);
+    this.dispatchNextControlReport();
   }
 
   async handleAgentCommand(request: AgentCommandRequest): Promise<AgentCommandResult> {
@@ -5862,13 +6770,19 @@ export class AgentRuntime implements Runtime {
       if (silent) this.beginSilentCompact(mapKey);
       // A manual /compact is a system turn: its result must not consume a user
       // inbound seq or arm the post-turn gate. Mirror the auto-compact path.
-      this.pendingSystemResults.mark(mapKey);
+      const compactLease = this.markSystemTurn(
+        session,
+        mapKey,
+        silent ? 'manual_compact_silent' : 'manual_compact_notice',
+        request.chatJid,
+      );
       try {
+        await this.waitForSystemTurnQuarantine(mapKey);
+        await this.pendingSystemResults.waitUntilDispatchable(mapKey, compactLease);
         await session.sendTurn('/compact');
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
-        // No result will arrive for a failed send.
-        this.pendingSystemResults.unmark(mapKey);
+        await this.settleFailedSystemTurnDispatch(session, mapKey, compactLease, err);
         throw err;
       }
 
@@ -5904,14 +6818,28 @@ export class AgentRuntime implements Runtime {
     // A manual /compact is a system turn: its result must not arm the post-turn
     // gate. Mirror the auto-compact path (single/shared discriminate on this in
     // handleEvent's result case).
-    this.pendingSystemResults.mark(GLOBAL_TOOL_SCOPE_KEY);
+    const compactLease = this.markSystemTurn(
+      session,
+      GLOBAL_TOOL_SCOPE_KEY,
+      silent ? 'manual_compact_silent' : 'manual_compact_notice',
+      targetChatJid,
+    );
     try {
+      await this.waitForSystemTurnQuarantine(GLOBAL_TOOL_SCOPE_KEY);
+      await this.pendingSystemResults.waitUntilDispatchable(
+        GLOBAL_TOOL_SCOPE_KEY,
+        compactLease,
+      );
       await session.sendTurn('/compact');
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
-      // No result will arrive for a failed send.
-      this.pendingSystemResults.unmark(GLOBAL_TOOL_SCOPE_KEY);
+      await this.settleFailedSystemTurnDispatch(
+        session,
+        GLOBAL_TOOL_SCOPE_KEY,
+        compactLease,
+        err,
+      );
       throw err;
     }
 
@@ -5931,6 +6859,8 @@ export class AgentRuntime implements Runtime {
   /** Clear the in-flight repair slot so the next report can be dispatched. */
   clearControlReport(): void {
     this.activeControlReportId = null;
+    this.controlProtocolCompletedReportId = null;
+    this.controlTerminalizingReportId = null;
   }
 
   async shutdown(): Promise<void> {
@@ -6262,6 +7192,106 @@ export class AgentRuntime implements Runtime {
     return managerId;
   }
 
+  private captureSystemTurnOwner(
+    session: SessionManager,
+    scopeKey: string,
+  ): PendingSystemTurnOwner {
+    const managerId = this.sessionManagerIds.get(session);
+    const toolScopeKey = this.sessionEventToolScopes.get(session);
+    if (!managerId || !toolScopeKey) {
+      throw new Error('Cannot mark a system turn for an unregistered session manager');
+    }
+    if (scopeKey === GLOBAL_TOOL_SCOPE_KEY) {
+      if (this.session !== session) {
+        throw new Error('Cannot mark a global system turn for a non-current session');
+      }
+      return { managerId, generation: 1, toolScopeKey };
+    }
+    const owned = this.sessionOwnership.get(scopeKey);
+    if (
+      this.chatSessions.get(scopeKey) !== session
+      || !owned
+      || !this.sessionOwnership.isCurrent(scopeKey, managerId, owned.generation)
+    ) {
+      throw new Error('Cannot mark a per-chat system turn for a non-current session');
+    }
+    return { managerId, generation: owned.generation, toolScopeKey };
+  }
+
+  private publishLegacyProviderTurn(
+    session: SessionManager,
+    scopeKey: string,
+    routeChatJid: string,
+  ): LegacyProviderTurnOwner {
+    if (this.legacyProviderTurnOwners.has(scopeKey)) {
+      throw new Error(`Legacy provider turn already owns scope "${scopeKey}"`);
+    }
+    const turn = Object.freeze({
+      owner: Object.freeze(this.captureSystemTurnOwner(session, scopeKey)),
+      routeChatJid,
+    });
+    this.legacyProviderTurnOwners.set(scopeKey, turn);
+    return turn;
+  }
+
+  private legacyProviderTurnMatches(
+    scopeKey: string,
+    managerId: string,
+    generation: number,
+    toolScopeKey: string,
+  ): LegacyProviderTurnOwner | null {
+    const turn = this.legacyProviderTurnOwners.get(scopeKey);
+    if (
+      !turn
+      || turn.owner.managerId !== managerId
+      || turn.owner.generation !== generation
+      || turn.owner.toolScopeKey !== toolScopeKey
+    ) return null;
+    return turn;
+  }
+
+  private clearLegacyProviderTurn(
+    scopeKey: string,
+    expected?: LegacyProviderTurnOwner,
+  ): boolean {
+    const current = this.legacyProviderTurnOwners.get(scopeKey);
+    if (!current || (expected !== undefined && current !== expected)) return false;
+    this.legacyProviderTurnOwners.delete(scopeKey);
+    return true;
+  }
+
+  private markSystemTurn(
+    session: SessionManager,
+    scopeKey: string,
+    purpose: SystemTurnPurpose,
+    routeChatJid?: string,
+  ): SystemTurnLeaseToken {
+    return this.pendingSystemResults.mark({
+      scopeKey,
+      purpose,
+      owner: this.captureSystemTurnOwner(session, scopeKey),
+      ...(routeChatJid !== undefined ? { routeChatJid } : {}),
+      ...(purpose === 'auto_compact_silent'
+        ? {}
+        : {
+            timeoutMs: SYSTEM_TURN_TIMEOUT_MS,
+            onTimeout: async (lease: SystemTurnLeaseToken): Promise<boolean> => {
+              log.error(
+                { scopeKey, leaseId: lease.id, purpose, timeoutMs: SYSTEM_TURN_TIMEOUT_MS },
+                'system provider request timed out — quarantining source generation',
+              );
+              const provedClosed = await this.quarantineTimedOutSystemTurn(
+                session,
+                scopeKey,
+                lease,
+              );
+              if (provedClosed) this.releaseSystemTurnExecutingActorByLease(lease);
+              return provedClosed;
+            },
+          }),
+    });
+  }
+
   private setOwnedPerChatSession(mapKey: string, session: SessionManager): void {
     const managerId = this.managerIdFor(session);
     const current = this.sessionOwnership.get(mapKey);
@@ -6463,7 +7493,9 @@ export class AgentRuntime implements Runtime {
     let oldTreeProvedEmpty = false;
 
     try {
+      await this.waitForRejectedTerminalTeardown(session);
       await session.shutdown(false);
+      this.rejectedTerminalTeardowns.delete(session);
       oldTreeProvedEmpty = true;
       await this.awaitProcessExit(oldPid);
 
@@ -6523,6 +7555,49 @@ export class AgentRuntime implements Runtime {
         throw new AggregateError([err, cleanupError], `Failed to reset and clean up per-chat session "${mapKey}"`);
       }
       throw err;
+    }
+  }
+
+  private removeFailedExecutingActor(
+    mapKey: string,
+    actorJid: string | undefined,
+    systemTurnLease?: SystemTurnLeaseToken,
+  ): void {
+    if (systemTurnLease) this.systemTurnExecActors.delete(systemTurnLease.id);
+    const queue = this.perChatExecActorQueue.get(mapKey);
+    if (!queue) return;
+    if (queue.at(-1) === actorJid) queue.pop();
+    else {
+      log.error({ mapKey }, 'executing actor FIFO drift on failed dispatch — clearing fail-closed');
+      queue.length = 0;
+    }
+    if (queue.length === 0) this.perChatExecActorQueue.delete(mapKey);
+  }
+
+  private releaseSystemTurnExecutingActor(systemTurn: PendingSystemTurnSnapshot): void {
+    this.releaseSystemTurnExecutingActorByLease(systemTurn.lease);
+  }
+
+  private releaseSystemTurnExecutingActorByLease(lease: SystemTurnLeaseToken): void {
+    const binding = this.systemTurnExecActors.get(lease.id);
+    if (!binding) return;
+    this.systemTurnExecActors.delete(lease.id);
+    const queue = this.perChatExecActorQueue.get(binding.scopeKey);
+    if (!queue) return;
+    if (queue[0] === binding.actorJid) queue.shift();
+    else {
+      log.error(
+        { scopeKey: binding.scopeKey, leaseId: lease.id },
+        'system executing actor FIFO drift — clearing fail-closed',
+      );
+      queue.length = 0;
+    }
+    if (queue.length === 0) this.perChatExecActorQueue.delete(binding.scopeKey);
+  }
+
+  private clearSystemTurnExecutingActors(scopeKey: string): void {
+    for (const [leaseId, binding] of this.systemTurnExecActors) {
+      if (binding.scopeKey === scopeKey) this.systemTurnExecActors.delete(leaseId);
     }
   }
 
@@ -8713,20 +9788,14 @@ export class AgentRuntime implements Runtime {
       cwd: workspace?.workspacePath ?? this.cwd,
       actorJid,
       mcpSocketPath: workspace?.socketPath,
-      onEvent: (event) => {
-        const currentMapKey = resolveSessionMapKey();
-        if (!currentMapKey) {
-          log.debug({ mapKey, chatJid, eventType: event.type }, 'event dropped — fallback session key missing');
-          return;
-        }
-        this.handleEventPerChat(currentMapKey, event, toolScopeKey);
-      },
+      onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
       onCrash: (info) => {
         const currentMapKey = resolveSessionMapKey() ?? mapKey;
         this.handlePerChatCrash(currentMapKey, chatJid, info, session);
       },
       notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
+      eventToolScopeKey: toolScopeKey,
     });
     this.setOwnedPerChatSession(mapKey, session);
     if (!this.chatQueues.has(mapKey)) {
@@ -8742,12 +9811,13 @@ export class AgentRuntime implements Runtime {
   private recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void {
     this.operationTracker?.shutdown();
     this.operationTracker = null;
-    this.session = this.createSessionManager({
+    let replacementSession!: SessionManager;
+    replacementSession = this.createSessionManager({
       chatJid,
       cwd: this.cwd,
       actorJid,
       trackSingletonMcpSession: true,
-      onEvent: (event) => this.handleEvent(event),
+      onEvent: (event) => this.handleEvent(replacementSession, event),
       onCrash: (info) => {
         this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
         const queue = this.getActiveQueue();
@@ -8766,6 +9836,7 @@ export class AgentRuntime implements Runtime {
       notifyUser: (msg) => this.handleCrashNotify(msg),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
     });
+    this.session = replacementSession;
     this.activeChatJid = chatJid;
     if (this.shared) {
       this.ensureOutboundQueue(chatJid);
@@ -9049,6 +10120,7 @@ export class AgentRuntime implements Runtime {
     onResumeFailed?: () => void;
     mcpSocketPath?: string;
     providerConfigOverride?: Record<string, unknown>;
+    eventToolScopeKey?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     // Slice-2 routing wiring (flag-gated): preferences steer the session being
@@ -9115,6 +10187,10 @@ export class AgentRuntime implements Runtime {
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
     });
     this.sessionManagerIds.set(session, randomUUID());
+    this.sessionEventToolScopes.set(
+      session,
+      opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,
+    );
     if (this.durability) {
       session.setDurability(this.durability);
     }
@@ -9231,9 +10307,6 @@ export class AgentRuntime implements Runtime {
           });
         }
 
-        // Check for resumable session
-        const resumable = getResumableSessionForChat(this.db, workspaceKey);
-
         // Create SessionManager with workspace-scoped cwd
         const toolScopeKey = this.createToolScopeKey(workspaceKey);
         let session!: SessionManager;
@@ -9242,13 +10315,19 @@ export class AgentRuntime implements Runtime {
           cwd: workspacePath,  // scoped cwd instead of this.cwd
           actorJid,
           mcpSocketPath: socketPath,
-          onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
+          onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info, session),
           notifyUser: (msg) => {
             this.handleCrashNotify(msg, chatJid);
           },
           onResumeFailed: () => this.handleResumeFailed(chatJid),
+          eventToolScopeKey: toolScopeKey,
         });
+        const resumable = getResumableSessionForChat(
+          this.db,
+          workspaceKey,
+          session.getProviderId(),
+        );
         log.info({ chatJid, workspaceKey, workspacePath }, 'created sandbox per-chat session manager');
         this.setOwnedPerChatSession(workspaceKey, session);
         const chatQ = this.createOutboundQueue(chatJid, 'sandbox per-chat session init');
@@ -9322,14 +10401,7 @@ export class AgentRuntime implements Runtime {
           chatJid,
           cwd: this.cwd,
           actorJid,
-          onEvent: (event) => {
-            const mapKey = resolveSessionMapKey();
-            if (!mapKey) {
-              log.debug({ initialMapKey, chatJid, eventType: event.type }, 'event dropped — session key missing for per-chat callback');
-              return;
-            }
-            this.handleEventPerChat(mapKey, event, toolScopeKey);
-          },
+          onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
           onCrash: (info) => {
             const mapKey = resolveSessionMapKey() ?? initialMapKey;
             this.handlePerChatCrash(mapKey, chatJid, info, session);
@@ -9337,6 +10409,7 @@ export class AgentRuntime implements Runtime {
           notifyUser: (msg) => {
             this.handleCrashNotify(msg, chatJid);
           },
+          eventToolScopeKey: toolScopeKey,
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
         this.setOwnedPerChatSession(initialMapKey, session);
@@ -9359,12 +10432,13 @@ export class AgentRuntime implements Runtime {
     // single/shared: singleton session
     if (!this.session) {
       this.activeChatJid = chatJid;
-      this.session = this.createSessionManager({
+      let singletonSession!: SessionManager;
+      singletonSession = this.createSessionManager({
         chatJid,
         cwd: this.cwd,
         actorJid,
         trackSingletonMcpSession: true,
-        onEvent: (event) => this.handleEvent(event),
+        onEvent: (event) => this.handleEvent(singletonSession, event),
         onCrash: (info) => {
           this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
           const queue = this.getActiveQueue();
@@ -9388,6 +10462,7 @@ export class AgentRuntime implements Runtime {
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
       });
+      this.session = singletonSession;
       log.info({ chatJid, shared: this.shared, sessionScope: this.sessionScope }, 'created shared/single session manager');
       if (this.shared) {
         this.ensureOutboundQueue(chatJid);
@@ -9656,18 +10731,40 @@ export class AgentRuntime implements Runtime {
         return;
       }
       clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      let contextLease: SystemTurnLeaseToken | null = null;
+      let continuationLease: SystemTurnLeaseToken | null = null;
       try {
         if (args.chatJid) {
-          this.pendingSystemResults.mark(activeMapKey);
+          contextLease = this.markSystemTurn(
+            args.session,
+            activeMapKey,
+            'respawn_context',
+            args.chatJid,
+          );
           const injected = await this.injectMissedMessages(args.session, args.chatJid, args.crashedAtSec);
-          if (!injected) this.pendingSystemResults.unmark(activeMapKey);
+          if (!injected) this.pendingSystemResults.cancel(contextLease);
+          else {
+            await this.pendingSystemResults.waitUntilEmpty(activeMapKey);
+            await this.waitForSystemTurnQuarantine(activeMapKey);
+            if (!args.session.getStatus().active) return;
+          }
         }
-        this.pendingSystemResults.mark(activeMapKey);
+        continuationLease = this.markSystemTurn(
+          args.session,
+          activeMapKey,
+          'respawn_continuation',
+          args.chatJid,
+        );
         await args.session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
       } catch (err) {
         log.warn({ err, mapKey: activeMapKey }, 'failed to send continuation turn after auto-respawn');
-        this.pendingSystemResults.unmark(activeMapKey);
+        await this.settleFailedSystemTurnDispatch(
+          args.session,
+          activeMapKey,
+          continuationLease ?? contextLease,
+          err,
+        );
       }
     } catch (err) {
       const currentMapKey = this.findMapKeyForSession(args.session, mapKey);
@@ -9739,6 +10836,7 @@ export class AgentRuntime implements Runtime {
 
   private cleanupSharedCrashTurnState(): void {
     this.pendingSystemResults.clearScope(GLOBAL_TOOL_SCOPE_KEY);
+    this.legacyProviderTurnOwners.delete(GLOBAL_TOOL_SCOPE_KEY);
     this.activeToolNames.clear();
     this.turnHadToolActivity.clear();
     this.singleTurnHadToolActivity = false;
@@ -9766,6 +10864,7 @@ export class AgentRuntime implements Runtime {
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
     this.pendingSystemResults.clearScope(mapKey);
+    this.legacyProviderTurnOwners.delete(mapKey);
     // F-STICKY-ACTOR (QR-247, S-CRASH): a crash discards ALL of the subprocess's
     // in-flight turns (executing + buffered), so clear the WHOLE executing-actor
     // queue — NOT shift-one. This runs synchronously in handlePerChatCrash BEFORE
@@ -9869,19 +10968,24 @@ export class AgentRuntime implements Runtime {
     chatJid: string,
     sinceUnixSec: number,
   ): Promise<boolean> {
+    let lines: string;
+    let messageCount: number;
     try {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-
-      const lines = this.formatContextLines(missed);
-      await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
-      log.info({ chatJid, messageCount: missed.length, sinceUnixSec }, 'injected missed messages after resume');
-      return true;
+      lines = this.formatContextLines(missed);
+      messageCount = missed.length;
     } catch (err) {
-      log.warn({ err, chatJid }, 'missed message injection failed — agent continues without context');
+      log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
       return false;
     }
+    // Dispatch errors propagate so the caller can distinguish a proven
+    // pre-dispatch failure from an ambiguous accepted write and quarantine the
+    // provider generation before releasing this system lease.
+    await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+    log.info({ chatJid, messageCount, sinceUnixSec }, 'injected missed messages after resume');
+    return true;
   }
 
   /**
@@ -9952,6 +11056,7 @@ export class AgentRuntime implements Runtime {
           // sendTurnToSession calls may inject normally.
           if (mapKey) this.resumeFailedHandling.delete(mapKey);
 
+          let contextLease: SystemTurnLeaseToken | null = null;
           try {
             const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
             if (recent.length > 0) {
@@ -9961,13 +11066,25 @@ export class AgentRuntime implements Runtime {
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise
               // the '[CONTEXT RECOVERY]' system turn's result leaks to the user.
               // No-op in per_chat (mapKey defined, consumed per-chat).
-              this.pendingSystemResults.mark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+              contextLease = this.markSystemTurn(
+                session,
+                mapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+                'resume_failure_context',
+                chatJid,
+              );
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
+              await this.pendingSystemResults.waitUntilEmpty(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+              await this.waitForSystemTurnQuarantine(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+              if (!session.getStatus().active) return;
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
-            // Context-recovery send failed — no result will arrive for its mark.
-            this.pendingSystemResults.unmark(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+            await this.settleFailedSystemTurnDispatch(
+              session,
+              mapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              contextLease,
+              err,
+            );
           }
 
           // Replay the pending turn that was lost during the failed resume
@@ -9977,8 +11094,8 @@ export class AgentRuntime implements Runtime {
               await session.sendTurn(pendingText);
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
-              this.pendingTurnText.delete(mapKey);
-              this.pendingTurnActorJid.delete(mapKey);
+              // Retain the replay evidence. A failed or ambiguously accepted
+              // write must never silently discard the user's original turn.
             }
           }
         }).catch((err) => {
@@ -10023,13 +11140,151 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private handleEvent(event: AgentEvent): void {
-    // Route to current turn's chat in shared mode, or the single queue in non-shared mode
-    const queue = this.shared
-      ? (this.currentTurnChatJid ? this.outboundQueues.get(this.currentTurnChatJid) ?? null : null)
-      : this.queue;
+  private handleEvent(sourceSession: SessionManager, event: AgentEvent): void {
+    if (
+      sourceSession !== this.session
+      || this.sessionEventToolScopes.get(sourceSession) !== GLOBAL_TOOL_SCOPE_KEY
+    ) {
+      this.rejectProviderEvent(
+        event.type,
+        'singleton_shared',
+        'none',
+        'source_session_not_current',
+        sourceSession,
+      );
+      return;
+    }
+    const managerId = this.sessionManagerIds.get(sourceSession);
+    if (!managerId) {
+      this.rejectProviderEvent(
+        event.type,
+        'singleton_shared',
+        'none',
+        'source_generation_not_current',
+        sourceSession,
+      );
+      return;
+    }
+    const runtimeContext = this.runtimeTurnCoordinator.runtimeTurnContext();
+    const runtimeOwnerMatches = runtimeContext !== null
+      && runtimeContext.identity.managerId === managerId
+      && runtimeContext.identity.generation === 1
+      && runtimeContext.toolScopeKey === GLOBAL_TOOL_SCOPE_KEY;
+    const legacyOwner = this.legacyProviderTurnMatches(
+      GLOBAL_TOOL_SCOPE_KEY,
+      managerId,
+      1,
+      GLOBAL_TOOL_SCOPE_KEY,
+    );
+    const logicalOwnerMatches = runtimeOwnerMatches || legacyOwner !== null;
+    const systemTurn = this.pendingSystemResults.peek(GLOBAL_TOOL_SCOPE_KEY);
+    const systemOwnerMatches = systemTurn?.owner != null
+      && systemTurn.owner.managerId === managerId
+      && systemTurn.owner.generation === 1
+      && systemTurn.owner.toolScopeKey === GLOBAL_TOOL_SCOPE_KEY;
+    const resolved = this.resolveProviderEventOwner(
+      event,
+      logicalOwnerMatches,
+      systemOwnerMatches ? systemTurn : null,
+    );
+    const decision = decideProviderEventAdmission(event, resolved.owner);
+    if (!decision.admit) {
+      this.rejectProviderEvent(
+        event.type,
+        'singleton_shared',
+        resolved.owner.kind,
+        decision.reason,
+        sourceSession,
+      );
+      return;
+    }
+    if (event.type === 'ignored') return;
 
-    if (!queue) return;
+    const routeChatJid = resolved.owner.kind === 'logical_turn'
+      ? (runtimeOwnerMatches
+          ? runtimeContext!.identity.deliveryJid
+          : legacyOwner?.routeChatJid)
+      : resolved.systemTurn?.routeChatJid;
+    let queue = this.shared
+      ? (routeChatJid
+          ? this.outboundQueues.get(routeChatJid)
+            ?? this.outboundQueues.get(canonicalizeChatJid(routeChatJid, this.db))
+            ?? null
+          : null)
+      : this.queue;
+    if (!queue && event.type === 'result' && routeChatJid) {
+      queue = this.createOutboundQueue(routeChatJid, 'provider terminal route recovery');
+      if (this.shared) this.outboundQueues.set(routeChatJid, queue);
+      else this.queue = queue;
+      log.warn(
+        { routeChatJid, ownerKind: resolved.owner.kind, shared: this.shared },
+        'reconstructed missing output route for an owned provider terminal',
+      );
+    }
+    const resultNeedsRoute = event.type === 'result'
+      && (
+        resolved.owner.kind === 'logical_turn'
+        || (resolved.systemTurn !== null && systemPurposeAllowsOutput(resolved.systemTurn.purpose))
+      );
+    if (resultNeedsRoute && !queue) {
+      this.rejectProviderEvent(
+        event.type,
+        'singleton_shared',
+        resolved.owner.kind,
+        'owner_queue_missing',
+        sourceSession,
+      );
+      return;
+    }
+
+    if (
+      event.type === 'result'
+      && resolved.owner.kind === 'logical_turn'
+      && legacyOwner !== null
+    ) {
+      this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
+    }
+
+    let consumedSystemTurn: PendingSystemTurnSnapshot | null = null;
+    if (event.type === 'result' && resolved.systemTurn) {
+      consumedSystemTurn = this.pendingSystemResults.consumeResult(resolved.systemTurn.lease);
+      if (!consumedSystemTurn) {
+        this.rejectProviderEvent(
+          event.type,
+          'singleton_shared',
+          'system_request',
+          'system_owner_race',
+          sourceSession,
+        );
+        return;
+      }
+      this.releaseSystemTurnExecutingActor(consumedSystemTurn);
+      if (!systemPurposeAllowsOutput(consumedSystemTurn.purpose)) {
+        this.handleRestrictedSystemResult(
+          sourceSession,
+          GLOBAL_TOOL_SCOPE_KEY,
+          consumedSystemTurn,
+          event,
+          this.operationTracker,
+        );
+        return;
+      }
+    }
+
+    if (!queue) {
+      if (event.type === 'init') {
+        log.debug('session init observed without an active output route');
+        return;
+      }
+      this.rejectProviderEvent(
+        event.type,
+        'singleton_shared',
+        resolved.owner.kind,
+        'owner_queue_missing',
+        sourceSession,
+      );
+      return;
+    }
 
     const tracker = this.operationTracker;
 
@@ -10203,6 +11458,7 @@ export class AgentRuntime implements Runtime {
         handleGlobalRuntimeResult(this.runtimeTurnHost, {
           event,
           queue,
+          systemTurnPurpose: consumedSystemTurn?.purpose ?? null,
           tracker: tracker ?? undefined,
           extractUsageLimitResetTime,
         });
@@ -10224,7 +11480,6 @@ export class AgentRuntime implements Runtime {
         }
         break;
 
-      case 'ignored':
       case 'unknown_block':
       case 'unknown':
       case 'parse_error':
