@@ -27,9 +27,11 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
+    getDbRowId: vi.fn(() => null),
   };
 
   const mockQueue = {
@@ -321,6 +323,7 @@ describe('control session hard timeout', () => {
 
     expect(getTimeout(runtime)).not.toBeNull();
     expect(runtime.currentControlReportId).toBe('r-003');
+    const controlQueue = runtime.getControlQueue();
 
     // Advance time by 15 minutes to fire the timeout
     await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
@@ -330,7 +333,7 @@ describe('control session hard timeout', () => {
 
     // activeControlReportId should be cleared after timeout fires
     expect(runtime.currentControlReportId).toBeNull();
-    expect(runtime.getControlQueue()?.sendControlMessage).toHaveBeenCalledWith(
+    expect(controlQueue?.sendControlMessage).toHaveBeenCalledWith(
       '15559990001@s.whatsapp.net',
       'HEAL_ESCALATE',
       {
@@ -368,6 +371,40 @@ describe('control session hard timeout', () => {
     expect(mockDequeueNextReport).toHaveBeenCalledTimes(1);
     // handleControlTurn was called again for the next report — sendTurn is called
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the control slot closed until timed-out process teardown is proved', async () => {
+    let proveShutdown!: () => void;
+    mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      proveShutdown = resolve;
+    }));
+    mockDequeueNextReport.mockReturnValueOnce({
+      report_id: 'r-AFTER-PROOF',
+      error_class: 'crash__next',
+      error_type: 'crash',
+      state: 'queued',
+      attempt_count: 1,
+      cooldown_until: null,
+      context: null,
+      created_at: new Date().toISOString(),
+    });
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+    await runtime.handleControlTurn('r-HUNG', JSON.stringify({ reportId: 'r-HUNG' }));
+    mockSession.sendTurn.mockClear();
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
+    expect(runtime.currentControlReportId).toBe('r-HUNG');
+    expect(mockDequeueNextReport).not.toHaveBeenCalled();
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+    proveShutdown();
+    await vi.waitFor(() => expect(runtime.currentControlReportId).toBe('r-AFTER-PROOF'));
+    expect(mockDequeueNextReport).toHaveBeenCalledOnce();
+    expect(mockSession.sendTurn).toHaveBeenCalledOnce();
   });
 
   it('does not set timeout when sendTurn throws', async () => {

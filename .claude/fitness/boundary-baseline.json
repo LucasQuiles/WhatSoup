@@ -15,42 +15,42 @@
   },
   {
     "file": "src/core/agent-config-validator.ts",
-    "line": 23,
+    "line": 24,
     "specifier": "../transport/registry.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
   {
     "file": "src/core/agent-config-validator.ts",
-    "line": 25,
+    "line": 26,
     "specifier": "../transport/twilio/types.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
   {
     "file": "src/core/health.ts",
-    "line": 31,
+    "line": 36,
     "specifier": "../runtimes/types.ts",
     "fromLayer": "core",
     "toLayer": "runtimes"
   },
   {
     "file": "src/core/health.ts",
-    "line": 10,
+    "line": 13,
     "specifier": "../transport/auth-disconnect-policy.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
   {
     "file": "src/core/health.ts",
-    "line": 32,
+    "line": 37,
     "specifier": "../transport/connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
   {
     "file": "src/core/health.ts",
-    "line": 9,
+    "line": 12,
     "specifier": "../transport/runtime-connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
@@ -105,13 +105,6 @@
     "toLayer": "fleet"
   },
   {
-    "file": "src/core/scheduler.ts",
-    "line": 6,
-    "specifier": "../transport/runtime-connection.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
-  },
-  {
     "file": "src/core/substrate/time.ts",
     "line": 2,
     "specifier": "../../fleet/time-utils.ts",
@@ -141,7 +134,7 @@
   },
   {
     "file": "src/mcp/tools/media.ts",
-    "line": 481,
+    "line": 461,
     "specifier": "../../runtimes/chat/providers/whisper.ts",
     "fromLayer": "mcp",
     "toLayer": "runtimes"
@@ -155,14 +148,14 @@
   },
   {
     "file": "src/mcp/tools/messaging.ts",
-    "line": 27,
+    "line": 35,
     "specifier": "../../runtimes/agent/runtime.ts",
     "fromLayer": "mcp",
     "toLayer": "runtimes"
   },
   {
     "file": "src/mcp/tools/scheduling.ts",
-    "line": 10,
+    "line": 7,
     "specifier": "../../fleet/time-utils.ts",
     "fromLayer": "mcp",
     "toLayer": "fleet"
@@ -211,14 +204,14 @@
   },
   {
     "file": "src/memory/consolidation.ts",
-    "line": 4,
+    "line": 6,
     "specifier": "../runtimes/chat/providers/types.ts",
     "fromLayer": "memory",
     "toLayer": "runtimes"
   },
   {
     "file": "src/transport/connection.ts",
-    "line": 40,
+    "line": 28,
     "specifier": "../fleet/time-utils.ts",
     "fromLayer": "transport",
     "toLayer": "fleet"

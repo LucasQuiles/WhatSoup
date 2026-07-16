@@ -104,7 +104,9 @@ export function createSession(
 /** Backfill provider on existing sessions that have no provider set. Idempotent. */
 export function backfillSessionProvider(db: Database, provider: string): void {
   const result = db.raw.prepare(
-    `UPDATE agent_sessions SET provider = ? WHERE provider IS NULL`
+    `UPDATE agent_sessions
+     SET provider = ?
+     WHERE provider IS NULL AND session_id IS NULL`
   ).run(provider);
   const changes = (result as { changes: number }).changes;
   if (changes > 0) {
@@ -125,31 +127,43 @@ export function backfillSessionProvider(db: Database, provider: string): void {
 /**
  * Return the single active session, or null if none exists.
  */
-export function getActiveSession(db: Database): {
+export function getActiveSession(db: Database, provider: string): {
   id: number;
   session_id: string | null;
   claude_pid: number;
   status: string;
   chat_jid: string | null;
+  workspace_key: string | null;
   started_at: string;
   last_message_at: string | null;
   message_count: number;
 } | null {
   const row = db.raw
     .prepare(
-      `SELECT id, session_id, claude_pid, status, chat_jid, started_at, last_message_at, message_count
-       FROM agent_sessions
-       WHERE status IN ('active', 'suspended') AND session_id IS NOT NULL
-       ORDER BY id DESC
+      `SELECT candidate.id, candidate.session_id, candidate.claude_pid,
+              candidate.status, candidate.chat_jid, candidate.workspace_key,
+              candidate.started_at, candidate.last_message_at, candidate.message_count
+       FROM agent_sessions AS candidate
+       WHERE candidate.status IN ('active', 'suspended')
+         AND candidate.session_id IS NOT NULL
+         AND candidate.provider = ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM agent_sessions AS conflicting
+           WHERE conflicting.session_id = candidate.session_id
+             AND (conflicting.provider IS NULL OR conflicting.provider != ?)
+         )
+       ORDER BY candidate.id DESC
        LIMIT 1`,
     )
-    .get() as
+    .get(provider, provider) as
     | {
         id: number;
         session_id: string | null;
         claude_pid: number;
         status: string;
         chat_jid: string | null;
+        workspace_key: string | null;
         started_at: string;
         last_message_at: string | null;
         message_count: number;
@@ -348,6 +362,43 @@ export function updateSessionStatus(db: Database, rowId: number, status: string)
   }
 }
 
+/** Update a resumed row only while its immutable provider/session identity still matches. */
+export function updateResumedSessionStatus(
+  db: Database,
+  rowId: number,
+  providerSessionId: string,
+  provider: string,
+  status: string,
+): void {
+  let result: { changes: number | bigint };
+  if (TERMINAL_STATUSES.has(status)) {
+    const endedAt = new Date().toISOString();
+    result = db.raw.prepare(
+      `UPDATE agent_sessions
+       SET status = ?, ended_at = ?
+       WHERE id = ? AND session_id = ? AND provider = ?`,
+    ).run(status, endedAt, rowId, providerSessionId, provider);
+    if (Number(result.changes) === 1) {
+      log.info({ agentSessionId: rowId, status, endedAt }, 'session.ended');
+    }
+  } else if (status === 'active') {
+    result = db.raw.prepare(
+      `UPDATE agent_sessions
+       SET status = ?, ended_at = NULL
+       WHERE id = ? AND session_id = ? AND provider = ?`,
+    ).run(status, rowId, providerSessionId, provider);
+  } else {
+    result = db.raw.prepare(
+      `UPDATE agent_sessions
+       SET status = ?
+       WHERE id = ? AND session_id = ? AND provider = ?`,
+    ).run(status, rowId, providerSessionId, provider);
+  }
+  if (Number(result.changes) !== 1) {
+    throw new Error('Exact resumed agent session provider identity no longer matches');
+  }
+}
+
 /** Persist the local transcript file path on an existing session row. */
 export function updateTranscriptPath(db: Database, rowId: number, path: string): void {
   db.raw.prepare('UPDATE agent_sessions SET transcript_path = ? WHERE id = ?').run(path, rowId);
@@ -412,18 +463,127 @@ export function markOrphaned(db: Database, id: number): void {
 export function getResumableSessionForChat(
   db: Database,
   workspaceKey: string,
+  provider: string,
 ): { id: number; session_id: string; chat_jid: string } | null {
   const row = db.raw
     .prepare(
-      `SELECT id, session_id, chat_jid FROM agent_sessions
-       WHERE workspace_key = ?
-         AND status IN ('suspended', 'orphaned')
-         AND session_id IS NOT NULL
-       ORDER BY id DESC
+      `SELECT candidate.id, candidate.session_id, candidate.chat_jid
+       FROM agent_sessions AS candidate
+       WHERE candidate.workspace_key = ?
+         AND candidate.provider = ?
+         AND candidate.status IN ('suspended', 'orphaned')
+         AND candidate.session_id IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM agent_sessions AS conflicting
+           WHERE conflicting.session_id = candidate.session_id
+             AND (conflicting.provider IS NULL OR conflicting.provider != ?)
+         )
+       ORDER BY candidate.id DESC
        LIMIT 1`,
     )
-    .get(workspaceKey) as
+    .get(workspaceKey, provider, provider) as
     | { id: number; session_id: string; chat_jid: string }
     | undefined;
   return row ?? null;
+}
+
+export interface ResolveResumableAgentSessionInput {
+  provider: string;
+  providerSessionId: string;
+  agentSessionRowId?: number;
+  workspaceKey?: string;
+}
+
+export interface ResolvedResumableAgentSession {
+  id: number;
+  provider: string;
+  workspace_key: string | null;
+}
+
+/**
+ * Resolve the immutable persisted identity for a resume before any provider I/O.
+ * Checkpoints deliberately have no provider column, so an opaque session ID
+ * present in another (or unknown) provider namespace is never resumable.
+ */
+export function resolveResumableAgentSession(
+  db: Database,
+  input: ResolveResumableAgentSessionInput,
+): ResolvedResumableAgentSession {
+  if (input.provider.length === 0) {
+    throw new Error('Resume provider must not be empty');
+  }
+  if (input.providerSessionId.length === 0) {
+    throw new Error('Provider session ID must not be empty');
+  }
+  if (
+    input.agentSessionRowId !== undefined
+    && (!Number.isSafeInteger(input.agentSessionRowId) || input.agentSessionRowId <= 0)
+  ) {
+    throw new RangeError('Agent session row ID must be a positive safe integer');
+  }
+  if (input.workspaceKey !== undefined && input.workspaceKey.length === 0) {
+    throw new Error('Resume conversation identity must not be empty');
+  }
+
+  const namespaces = db.raw.prepare(
+    `SELECT DISTINCT provider
+     FROM agent_sessions
+     WHERE session_id = ?`,
+  ).all(input.providerSessionId) as Array<{ provider: string | null }>;
+  if (namespaces.length === 0) {
+    throw new Error('No persisted agent session matches the resume identity');
+  }
+  if (
+    namespaces.length !== 1
+    || namespaces[0]!.provider === null
+    || namespaces[0]!.provider !== input.provider
+  ) {
+    throw new Error('Provider session ownership is foreign, unknown, or ambiguous');
+  }
+
+  const rowPredicates = [
+    `session_id = ?`,
+    `provider = ?`,
+    `status IN ('active', 'suspended', 'orphaned', 'crashed')`,
+  ];
+  const rowBindings: Array<string | number> = [input.providerSessionId, input.provider];
+  if (input.agentSessionRowId !== undefined) {
+    rowPredicates.push('id = ?');
+    rowBindings.push(input.agentSessionRowId);
+  }
+  if (input.workspaceKey !== undefined) {
+    rowPredicates.push('workspace_key = ?');
+    rowBindings.push(input.workspaceKey);
+  }
+
+  const rows = db.raw.prepare(
+    `SELECT id, provider, workspace_key
+     FROM agent_sessions
+     WHERE ${rowPredicates.join('\n       AND ')}
+     ORDER BY id`,
+  ).all(...rowBindings) as unknown as ResolvedResumableAgentSession[];
+  if (rows.length !== 1) {
+    throw new Error(
+      `Expected exactly one resumable agent row for the provider and conversation, found ${rows.length}`,
+    );
+  }
+
+  const row = rows[0]!;
+  const conversationKey = input.workspaceKey ?? row.workspace_key;
+  if (conversationKey === null || conversationKey.length === 0) {
+    throw new Error('Resumable agent row has no conversation provenance');
+  }
+  const checkpoint = db.raw.prepare(
+    `SELECT id
+     FROM session_checkpoints
+     WHERE conversation_key = ?
+       AND session_id = ?
+       AND session_status IN ('active', 'suspended', 'orphaned')`,
+  ).get(conversationKey, input.providerSessionId) as { id: number } | undefined;
+  if (checkpoint === undefined) {
+    throw new Error('No resumable checkpoint matches the provider session and conversation');
+  }
+
+  return row;
 }

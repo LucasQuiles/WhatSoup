@@ -4,6 +4,7 @@ import { buildMcpLaunchCommand } from './mcp-launcher.ts';
 import { SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { writePrivateFileSync } from '../lib/private-fs.ts';
 import { createChildLogger } from '../logger.ts';
+import { REQUIRED_DENY } from './settings-template.ts';
 
 const log = createChildLogger('provider-mcp-config');
 
@@ -29,6 +30,64 @@ export interface AdditionalMcpServerConfig {
 }
 
 const DEFAULT_OPENCODE_PROVIDER_ID = 'whatsoup-cloud';
+
+/** Reserved OpenCode primary agent used only by WhatSoup's headless launcher. */
+export const WHATSOUP_OPENCODE_AGENT_ID = 'whatsoup-headless';
+
+function translateClaudeMcpPermissionToOpencodeTool(permission: string): string {
+  const qualifiedName = permission.startsWith('mcp__')
+    ? permission.slice('mcp__'.length)
+    : '';
+  const separator = qualifiedName.indexOf('__');
+  const serverName = separator > 0 ? qualifiedName.slice(0, separator) : '';
+  const toolName = separator > 0 ? qualifiedName.slice(separator + 2) : '';
+  if (!serverName || !toolName) {
+    throw new Error(`Invalid Claude MCP permission identifier: ${permission}`);
+  }
+  return [serverName, toolName]
+    .map((component) => component.replace(/[^a-zA-Z0-9_-]/g, '_'))
+    .join('_');
+}
+
+const translatedRequiredDeny = REQUIRED_DENY.map(translateClaudeMcpPermissionToOpencodeTool);
+if (new Set(translatedRequiredDeny).size !== translatedRequiredDeny.length) {
+  throw new Error('OpenCode REQUIRED_DENY translation produced duplicate tool names');
+}
+
+/** OpenCode tool names corresponding one-for-one with the Claude MCP deny floor. */
+export const OPENCODE_REQUIRED_DENY: readonly string[] = Object.freeze(translatedRequiredDeny);
+
+/**
+ * Build the repo-managed OpenCode primary agent used for unattended turns.
+ * This is an OpenCode permission policy, not an operating-system isolation
+ * boundary: explicit denials contain known interactive, external-directory,
+ * environment-file, and connector-mutation surfaces while local work remains
+ * usable without the CLI's blanket --auto switch.
+ */
+export function buildManagedOpencodeAgentConfig(): Record<string, unknown> {
+  const permission: Record<string, unknown> = {
+    '*': 'allow',
+    question: 'deny',
+    plan_enter: 'deny',
+    plan_exit: 'deny',
+    external_directory: 'deny',
+    doom_loop: 'allow',
+    read: {
+      '*': 'allow',
+      '*.env': 'deny',
+      '*.env.*': 'deny',
+      '*.env.example': 'allow',
+    },
+  };
+
+  for (const toolName of OPENCODE_REQUIRED_DENY) permission[toolName] = 'deny';
+
+  return {
+    description: 'WhatSoup unattended primary agent with managed permission boundaries',
+    mode: 'primary',
+    permission,
+  };
+}
 
 export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
   switch (providerId) {
@@ -122,10 +181,10 @@ export function writeMcpConfigToPath(
 }
 
 /**
- * Merge the generated opencode `mcp` block into a possibly-existing
- * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
- * key (model, provider catalog, watcher, …) and every sibling MCP server,
- * overwriting only generated MCP entries so stale socket paths are refreshed.
+ * Merge the generated opencode `mcp` block and WhatSoup's reserved headless
+ * agent into a possibly-existing opencode.json object. Pure — does no IO.
+ * Preserves every unrelated top-level key, sibling MCP server, and user agent;
+ * overwrites only generated MCP entries and the reserved agent id.
  */
 export function mergeOpencodeConfig(
   existing: Record<string, unknown> | null,
@@ -139,6 +198,14 @@ export function mergeOpencodeConfig(
     ? (base.mcp as Record<string, unknown>)
     : {};
   base.mcp = { ...existingMcp, ...generatedMcp };
+
+  const existingAgents = (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent))
+    ? (base.agent as Record<string, unknown>)
+    : {};
+  base.agent = {
+    ...existingAgents,
+    [WHATSOUP_OPENCODE_AGENT_ID]: buildManagedOpencodeAgentConfig(),
+  };
 
   if (providerConfig?.baseUrl) {
     const providerId = providerConfig.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
@@ -194,9 +261,9 @@ export function mergeOpencodeConfig(
  *
  * - claude/gemini/codex -> `<agentCwd>/.mcp.json` (claude `mcpServers` shape,
  *   deterministic overwrite, exactly as before).
- * - opencode-cli -> `<agentCwd>/opencode.json` (opencode `mcp` shape), MERGED
- *   with any pre-existing user opencode.json so a hand-authored config is never
- *   clobbered.
+ * - opencode-cli -> `<agentCwd>/opencode.json` (opencode `mcp` shape plus the
+ *   reserved WhatSoup headless agent), merged with any pre-existing user config
+ *   while preserving unrelated keys and user-owned agents.
  *
  * Both paths go through {@link writePrivateFileSync} (0600, symlink-safe).
  */

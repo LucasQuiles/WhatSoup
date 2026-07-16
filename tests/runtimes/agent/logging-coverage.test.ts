@@ -17,10 +17,10 @@ describe('critical path logging coverage', () => {
     expect(source).toContain("'AgentRuntime started'");
     expect(source).toContain('instanceName: this.instanceName');
     expect(source).toContain("'control session crashed'");
-    expect(source).toContain('reportId: this.activeControlReportId');
+    expect(source).toContain('reportId: crashedReportId');
     expect(source).toContain("'resetting session and queue for /new'");
     expect(source).toContain("'created outbound queue'");
-    expect(source).toContain("'event dropped — no queue for chat'");
+    expect(source).toContain("'provider event rejected before runtime effects'");
     expect(source).toContain("'workspace resources stopped in shutdown'");
     expect(source).toContain('workspaceSocketServersStopped');
     expect(source).toContain("'context recovery turn failed after resume failure'");

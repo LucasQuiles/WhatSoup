@@ -4,6 +4,10 @@ import type { AgentFailureClass } from './failure-taxonomy.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 
 const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
+const OPENCODE_PERMISSION_PATTERN_RE =
+  /permission requested:\s*[^\r\n]*?(?=\s*;\s*auto-rejecting|[\r\n]|$)/gi;
+const OPENCODE_PERMISSION_REJECTION_REDACTED =
+  'permission requested: [REDACTED_PERMISSION_PATTERN]; auto-rejecting';
 
 export interface ProviderCrashMetadata {
   provider: string;
@@ -12,7 +16,11 @@ export interface ProviderCrashMetadata {
 }
 
 export function sanitizeProviderCrashText(text: string): string {
-  return sanitizeProviderPreviewText(text);
+  const normalized = text.replace(
+    OPENCODE_PERMISSION_PATTERN_RE,
+    'permission requested: [REDACTED_PERMISSION_PATTERN]',
+  );
+  return sanitizeProviderPreviewText(normalized);
 }
 
 export function appendProviderCrashPreview(
@@ -38,7 +46,13 @@ export function classifyProviderCrash(text: string): AgentFailureClass | undefin
   const lower = text.toLowerCase();
   if (!lower.trim()) return undefined;
   if (lower.includes('enoent') || lower.includes('command not found')) return 'provider_binary_missing';
-  if (lower.includes('permission denied') || lower.includes('eacces')) return 'provider_permission_denied';
+  if (
+    lower.includes('permission denied') ||
+    lower.includes('eacces') ||
+    lower.includes(OPENCODE_PERMISSION_REJECTION_REDACTED.toLowerCase())
+  ) {
+    return 'provider_permission_denied';
+  }
   if (
     lower.includes('not logged in') ||
     lower.includes('please run /login') ||

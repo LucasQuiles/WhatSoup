@@ -1236,6 +1236,11 @@ describe('runtime terminal coordinator integration', () => {
       const replacementManagerId = state.managerIdFor(replacement);
       const queue = queueStub(queuedContext.identity.deliveryJid);
       state.session = replacement;
+      const sourceBoundState = state as unknown as {
+        sessionEventToolScopes: WeakMap<object, string>;
+        handleEvent(sourceSession: object, event: AgentEvent): void;
+      };
+      sourceBoundState.sessionEventToolScopes.set(replacement, GLOBAL_CONVERSATION_KEY);
       state.durability = durabilityMock();
       state.replyGuarantee = replyGuaranteeMock();
       state.outboundQueues.set(queuedContext.identity.deliveryJid, queue);
@@ -1260,7 +1265,7 @@ describe('runtime terminal coordinator integration', () => {
         generation: 1,
       });
 
-      state.handleEvent({ type: 'result', text: null });
+      sourceBoundState.handleEvent(replacement, { type: 'result', text: null });
       await processing;
     } finally {
       db.close();
@@ -1412,14 +1417,27 @@ describe('runtime terminal coordinator integration', () => {
           `${conversationKey}#session`,
         );
       } else {
-        state.currentRuntimeTurnContext = runtimeContext;
+        const sourceBoundState = state as unknown as {
+          sessionEventToolScopes: WeakMap<object, string>;
+          handleEvent(sourceSession: object, event: AgentEvent): void;
+        };
+        (state as unknown as { session: ReturnType<typeof sessionStub> }).session = session;
+        const sourceManagerId = state.managerIdFor(session);
+        sourceBoundState.sessionEventToolScopes.set(session, GLOBAL_CONVERSATION_KEY);
+        state.currentRuntimeTurnContext = {
+          ...runtimeContext,
+          identity: {
+            ...runtimeContext.identity,
+            managerId: sourceManagerId,
+            generation: 1,
+          },
+        };
         state.currentInboundSeq = seq;
         state.currentTurnChatJid = chatJid;
         state.activeChatJid = chatJid;
         state.turnHadVisibleOutput = !error;
         state.outboundQueues.set(chatJid, queue);
-        (state as unknown as { session: ReturnType<typeof sessionStub> }).session = session;
-        state.handleEvent(event);
+        sourceBoundState.handleEvent(session, event);
       }
 
       await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());

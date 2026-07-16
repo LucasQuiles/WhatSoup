@@ -11,8 +11,17 @@ import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { WHATSOUP_OPENCODE_AGENT_ID } from '../../core/provider-mcp-config.ts';
 import { createChildLogger } from '../../logger.ts';
-import { createSession, incrementMessageCount, updateSessionId, updateSessionStatus, updateTranscriptPath } from './session-db.ts';
+import {
+  createSession,
+  incrementMessageCount,
+  resolveResumableAgentSession,
+  updateResumedSessionStatus,
+  updateSessionId,
+  updateSessionStatus,
+  updateTranscriptPath,
+} from './session-db.ts';
 import { parseEvents } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
@@ -424,6 +433,7 @@ function resolveProviderArgs(
         'run',
         '--format', 'json',
         '--pure',
+        '--agent', WHATSOUP_OPENCODE_AGENT_ID,
         ...(model && !opencodeUsesConfigModel(providerConfig) ? ['-m', model] : []),
       ];
     case 'openai-api':
@@ -549,6 +559,17 @@ export class SessionManager {
   private watchdogSoft: ReturnType<typeof setTimeout> | null = null;
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Synchronous ownership token for the provider request boundary. Watchdog
+   * timers are deliberately separate: provider activity rearms those timers,
+   * but only an admitted terminal result or a proven-dead provider may release
+   * this token.
+   */
+  private providerTurnInFlight = false;
+  private nextProviderTurnToken = 0;
+  private activeProviderTurnToken: number | null = null;
+  private providerTurnTerminalPromise: Promise<void> = Promise.resolve();
+  private providerTurnTerminalResolve: (() => void) | null = null;
   /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
   private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
   private pendingToolIds: Set<string> = new Set();
@@ -1024,6 +1045,7 @@ export class SessionManager {
             'run',
             '--format', 'json',
             '--pure',
+            '--agent', WHATSOUP_OPENCODE_AGENT_ID,
             '--session', this.sessionId,
             ...modelArgs,
             prompt,
@@ -1034,6 +1056,7 @@ export class SessionManager {
           'run',
           '--format', 'json',
           '--pure',
+          '--agent', WHATSOUP_OPENCODE_AGENT_ID,
           ...modelArgs,
           prompt,
         ];
@@ -1113,6 +1136,7 @@ export class SessionManager {
       return this.durability.reactivateSessionLifecycle({
         ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
         providerSessionId: resumeSessionId,
+        provider: this.provider,
         pid,
       });
     }
@@ -1127,7 +1151,19 @@ export class SessionManager {
           this.provider,
         )
       : existingRowId;
-    if (existingRowId !== undefined) updateSessionStatus(this.db, rowId, 'active');
+    if (existingRowId !== undefined) {
+      if (resumeSessionId === undefined) {
+        updateSessionStatus(this.db, rowId, 'active');
+      } else {
+        updateResumedSessionStatus(
+          this.db,
+          rowId,
+          resumeSessionId,
+          this.provider,
+          'active',
+        );
+      }
+    }
     if (this.durability) {
       if (
         resumeSessionId === undefined
@@ -1145,7 +1181,7 @@ export class SessionManager {
   }
 
   private resetFailedSessionStart(preservedChild: ReturnType<typeof spawn> | null = null): void {
-    this.clearTurnWatchdog();
+    this.completeProviderTurn();
     this.active = false;
     this.child = preservedChild;
     this.managedProviderSession = null;
@@ -1169,15 +1205,25 @@ export class SessionManager {
 
   private retireUnsupportedResume(
     providerSessionId: string,
-    existingRowId: number | undefined,
+    existingRowId: number,
   ): void {
     if (
       this.durability
       && typeof this.durability.retireSessionLifecycle === 'function'
     ) {
-      this.durability.retireSessionLifecycle(existingRowId, providerSessionId);
+      this.durability.retireSessionLifecycle({
+        agentSessionRowId: existingRowId,
+        providerSessionId,
+        provider: this.provider,
+      });
     } else {
-      if (existingRowId !== undefined) updateSessionStatus(this.db, existingRowId, 'ended');
+      updateResumedSessionStatus(
+        this.db,
+        existingRowId,
+        providerSessionId,
+        this.provider,
+        'ended',
+      );
       this.updateCheckpointStatus('ended', providerSessionId);
     }
     this.durableFailureClosed = true;
@@ -1196,11 +1242,24 @@ export class SessionManager {
       this.durability.closeSessionLifecycleFailure({
         agentSessionRowId: exactRowId,
         providerSessionId: exactSessionId,
+        provider: this.provider,
         conversationKey: this.conversationKey,
         agentStatus: rowStatus,
       });
     } else {
-      if (exactRowId !== null) updateSessionStatus(this.db, exactRowId, rowStatus);
+      if (exactRowId !== null) {
+        if (exactSessionId === null) {
+          updateSessionStatus(this.db, exactRowId, rowStatus);
+        } else {
+          updateResumedSessionStatus(
+            this.db,
+            exactRowId,
+            exactSessionId,
+            this.provider,
+            rowStatus,
+          );
+        }
+      }
       this.updateCheckpointStatus('orphaned', exactSessionId);
     }
     this.durableFailureClosed = true;
@@ -1270,8 +1329,17 @@ export class SessionManager {
       return;
     }
     const provider = this.assertKnownProvider('spawnSession');
+    let resolvedRowId = existingRowId;
+    if (resumeSessionId !== undefined) {
+      resolvedRowId = resolveResumableAgentSession(this.db, {
+        provider,
+        providerSessionId: resumeSessionId,
+        ...(existingRowId === undefined ? {} : { agentSessionRowId: existingRowId }),
+        workspaceKey: this.conversationKey,
+      }).id;
+    }
     if (resumeSessionId !== undefined && !providerSupportsResume(provider)) {
-      this.retireUnsupportedResume(resumeSessionId, existingRowId);
+      this.retireUnsupportedResume(resumeSessionId, resolvedRowId!);
       throw new Error(`Provider '${provider}' does not support persisted session resume`);
     }
     this.durableFailureClosed = false;
@@ -1301,7 +1369,7 @@ export class SessionManager {
           0,
           cwd,
           resumeSessionId,
-          existingRowId,
+          resolvedRowId,
         );
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
@@ -1336,7 +1404,7 @@ export class SessionManager {
               crashedSessionId ?? resumeSessionId ?? null,
               crashedDbRowId,
             );
-            this.clearTurnWatchdog();
+            this.completeProviderTurn();
             this.active = false;
             this.managedProviderSession = null;
             this.managedProviderGeneration = null;
@@ -1358,7 +1426,7 @@ export class SessionManager {
           this.sessionId ?? resumeSessionId ?? null,
           this.dbRowId,
         );
-        this.clearTurnWatchdog();
+        this.completeProviderTurn();
         this.active = false;
         this.managedProviderSession = null;
         this.managedProviderGeneration = null;
@@ -1377,7 +1445,7 @@ export class SessionManager {
         chatJid: this.chatJid,
         cwd,
         rowId: this.dbRowId,
-        existingRowId: existingRowId ?? null,
+        existingRowId: resolvedRowId ?? null,
         resumeSessionId: resumeSessionId ?? null,
       }, 'managed-loop provider session initialized');
       return;
@@ -1398,7 +1466,7 @@ export class SessionManager {
           0,
           cwd,
           resumeSessionId,
-          existingRowId,
+          resolvedRowId,
         );
       } catch (err) {
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist spawn-per-turn provider');
@@ -1410,7 +1478,7 @@ export class SessionManager {
         chatJid: this.chatJid,
         cwd,
         rowId: this.dbRowId,
-        existingRowId: existingRowId ?? null,
+        existingRowId: resolvedRowId ?? null,
         resumeSessionId: resumeSessionId ?? null,
       }, 'spawn-per-turn session armed');
       // Emit a synthetic init event so the runtime knows the session is ready
@@ -1470,10 +1538,10 @@ export class SessionManager {
         pid,
         cwd,
         resumeSessionId,
-        existingRowId,
+        resolvedRowId,
       );
     } catch (err) {
-      log.error({ err, pid, chatJid: this.chatJid, existingRowId: existingRowId ?? null }, 'session: failed to persist spawned child lifecycle');
+      log.error({ err, pid, chatJid: this.chatJid, existingRowId: resolvedRowId ?? null }, 'session: failed to persist spawned child lifecycle');
       let cleanupError: unknown = null;
       try {
         await this.killFailedSpawnAndWait(child);
@@ -1538,6 +1606,7 @@ export class SessionManager {
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+      this.completeProviderTurn();
       const failedSessionId = this.sessionId ?? this.resumeAttemptId;
       this.closeDurableFailureLifecycle(failedSessionId, this.dbRowId);
       this.resumeAttemptId = null;
@@ -1552,7 +1621,6 @@ export class SessionManager {
         return;
       }
       log.error({ err, chatJid: this.chatJid }, 'claude process spawn error');
-      this.clearTurnWatchdog();
       this.active = false;
       this.child = null;
       this.sessionId = null;
@@ -1582,6 +1650,7 @@ export class SessionManager {
       }
       const lines = this.appendStdoutChunk(chunk);
       for (const line of lines) {
+        if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
         if (this.provider === 'codex-cli' && line[0] === '{' && line.includes('"jsonrpc"')) {
@@ -1627,7 +1696,9 @@ export class SessionManager {
         }
 
         for (const event of parse(line)) {
+          if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
           this.handleProviderEvent(event);
+          if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
         }
       }
     });
@@ -1682,7 +1753,12 @@ export class SessionManager {
       const bufferedLines = this.drainBufferedStdoutLines();
       if (bufferedLines.length > 0) {
         for (const line of bufferedLines) {
-          for (const event of parse(line)) this.handleProviderEvent(event);
+          if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+          for (const event of parse(line)) {
+            if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+            this.handleProviderEvent(event);
+            if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
+          }
         }
       }
 
@@ -1715,7 +1791,7 @@ export class SessionManager {
       const crashedSessionId = this.sessionId;
       const crashedDbRowId = this.dbRowId;
 
-      this.clearTurnWatchdog();
+      this.completeProviderTurn();
       this.active = false;
       this.child = null;
       this.sessionId = null;
@@ -1785,6 +1861,28 @@ export class SessionManager {
     this.watchdogWarn = null;
     this.watchdogHard = null;
     this.pendingToolIds.clear();
+  }
+
+  /**
+   * Release the exact provider request owner after its terminal result has been
+   * admitted, or after the owning provider has been proven dead.
+   */
+  completeProviderTurn(expectedToken?: number): void {
+    if (
+      expectedToken !== undefined
+      && this.activeProviderTurnToken !== expectedToken
+    ) return;
+    const resolveTerminal = this.providerTurnTerminalResolve;
+    this.providerTurnInFlight = false;
+    this.activeProviderTurnToken = null;
+    this.providerTurnTerminalResolve = null;
+    resolveTerminal?.();
+    this.clearTurnWatchdog();
+  }
+
+  /** Wait for the exact request that currently owns this provider lane. */
+  waitForProviderTurnToTerminalize(): Promise<void> {
+    return this.providerTurnTerminalPromise;
   }
 
   /**
@@ -1930,7 +2028,7 @@ export class SessionManager {
       return false;
     }
 
-    this.clearTurnWatchdog();
+    this.completeProviderTurn();
     this.active = false;
     this.managedProviderSession = null;
     this.managedProviderGeneration = null;
@@ -1980,6 +2078,13 @@ export class SessionManager {
       throw new Error('No active session. Call spawnSession() first.');
     }
 
+    // Persistent provider streams do not expose a request identifier that can
+    // be carried through every event. Acquire synchronously, before the first
+    // await, so even a blocked stdin write cannot admit a second request.
+    if (this.providerTurnInFlight) {
+      throw new Error('PROVIDER_TURN_IN_FLIGHT: wait for the current provider request to terminalize');
+    }
+
     // Budget enforcement: check rate/spend limits before dispatching the turn
     if (this.budget) {
       const check = this.budget.checkBudget(this.chatJid);
@@ -1990,10 +2095,35 @@ export class SessionManager {
       }
     }
 
-    if (this.isManagedLoopProvider) {
-      if (this.managedProviderSession === null) {
-        throw new Error('Managed provider session is not initialized. Call spawnSession() first.');
+    // Reject deterministic configuration/state failures before taking the
+    // request token. No provider boundary can have accepted work yet.
+    if (this.isManagedLoopProvider && this.managedProviderSession === null) {
+      throw new Error('Managed provider session is not initialized. Call spawnSession() first.');
+    }
+    if (!this.isManagedLoopProvider && !this.isSpawnPerTurn) {
+      const child = this.child;
+      if (child === null) {
+        throw new Error('No active session. Call spawnSession() first.');
       }
+      const generation = this.childGenerations.get(child) ?? null;
+      if (!this.isCurrentPersistentChild(child, generation)) {
+        throw new Error('Session generation was superseded before turn dispatch.');
+      }
+      if (!child.stdin) {
+        throw new Error('Child process stdin is not available');
+      }
+    }
+
+    this.providerTurnInFlight = true;
+    const providerTurnToken = ++this.nextProviderTurnToken;
+    this.activeProviderTurnToken = providerTurnToken;
+    this.providerTurnTerminalPromise = new Promise<void>((resolve) => {
+      this.providerTurnTerminalResolve = resolve;
+    });
+
+    if (this.isManagedLoopProvider) {
+      // Pre-dispatch validation above proves this is non-null.
+      if (this.managedProviderSession === null) throw new Error('Managed provider session is not initialized.');
       const providerSession = this.managedProviderSession;
       const generationIdentity = this.managedProviderGeneration;
 
@@ -2017,10 +2147,6 @@ export class SessionManager {
           this.notifyUser?.('Agent provider request failed — send any message to start a new session.');
         }
         throw err;
-      } finally {
-        if (this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
-          this.clearTurnWatchdog();
-        }
       }
 
       if (!this.isCurrentManagedProviderSession(providerSession, generationIdentity)) {
@@ -2056,6 +2182,7 @@ export class SessionManager {
         try {
           await this.killChildTree(child, 'SIGTERM');
         } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
           throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
             cause: err,
@@ -2066,26 +2193,49 @@ export class SessionManager {
 
       const cwd = this.configuredCwd ?? homedir();
 
-      const args = this.buildSpawnPerTurnArgs(cwd, text);
-      const binary = this.getProviderBinary();
-      const parse = this.getParser();
+      let args: string[];
+      let binary: string;
+      let parse: ProviderEventParser;
+      try {
+        args = this.buildSpawnPerTurnArgs(cwd, text);
+        binary = this.getProviderBinary();
+        parse = this.getParser();
+      } catch (err) {
+        this.completeProviderTurn(providerTurnToken);
+        throw err;
+      }
+      let sawResult = false;
+      let boundarySettled = false;
 
-      const child = spawn(binary, args, {
-        cwd,
-        detached: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: buildChildEnv(
-          this.provider,
-          {
-            allowM365Mutations: this.allowM365Mutations,
-            whatsoupInstance: this.whatsoupInstance,
-            whatsoupMcpSocket: this.whatsoupMcpSocket,
-            configRoot: this.configRoot,
-          },
-          this.model,
-          this.providerConfig,
-        ),
-      });
+      const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
+        if (this.activeProviderTurnToken !== providerTurnToken) return;
+        if (event.type === 'result') sawResult = true;
+        this.handleProviderEvent(event);
+      };
+
+      const child = (() => {
+        try {
+          return spawn(binary, args, {
+            cwd,
+            detached: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: buildChildEnv(
+              this.provider,
+              {
+                allowM365Mutations: this.allowM365Mutations,
+                whatsoupInstance: this.whatsoupInstance,
+                whatsoupMcpSocket: this.whatsoupMcpSocket,
+                configRoot: this.configRoot,
+              },
+              this.model,
+              this.providerConfig,
+            ),
+          });
+        } catch (err) {
+          this.completeProviderTurn(providerTurnToken);
+          throw err;
+        }
+      })();
 
       const childGeneration = this.resolveGenerationOwnership?.() ?? null;
       this.childGenerations.set(child, childGeneration);
@@ -2103,7 +2253,13 @@ export class SessionManager {
       child.stdin.end();
 
       child.on('error', (err: NodeJS.ErrnoException) => {
-        if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+        if (!this.isCurrentPersistentChild(child, childGeneration) || boundarySettled) return;
+        if (
+          this.activeProviderTurnToken !== null
+          && this.activeProviderTurnToken !== providerTurnToken
+        ) return;
+        boundarySettled = true;
+        this.completeProviderTurn(providerTurnToken);
         // Release the pessimistic budget reservation — response will never arrive
         this.budget?.cancelPending();
         const failedSessionId = this.sessionId ?? this.resumeAttemptId;
@@ -2121,7 +2277,6 @@ export class SessionManager {
           return;
         }
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'provider process spawn error');
-        this.clearTurnWatchdog();
         this.active = false;
         this.child = null;
         this.notifyUser?.('_Agent failed to start — will retry on your next message._');
@@ -2137,14 +2292,33 @@ export class SessionManager {
 
       child.stdout.on('data', (chunk: Buffer) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+        if (this.activeProviderTurnToken !== providerTurnToken) return;
         const lines = this.appendStdoutChunk(chunk);
         for (const line of lines) {
-          for (const event of parse(line)) this.handleProviderEvent(event);
+          if (
+            !this.active
+            || !this.isCurrentPersistentChild(child, childGeneration)
+            || this.activeProviderTurnToken !== providerTurnToken
+          ) return;
+          for (const event of parse(line)) {
+            if (
+              !this.active
+              || !this.isCurrentPersistentChild(child, childGeneration)
+              || this.activeProviderTurnToken !== providerTurnToken
+            ) return;
+            dispatchSpawnPerTurnEvent(event);
+            if (
+              !this.active
+              || !this.isCurrentPersistentChild(child, childGeneration)
+              || this.activeProviderTurnToken !== providerTurnToken
+            ) return;
+          }
         }
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
         if (!this.isCurrentPersistentChild(child, childGeneration)) return;
+        if (this.activeProviderTurnToken !== providerTurnToken) return;
         const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
         if (nextPreview === this.crashStderrPreview) return;
         this.crashStderrPreview = nextPreview;
@@ -2157,14 +2331,19 @@ export class SessionManager {
         }, 'provider stderr');
       });
 
-      // For spawn-per-turn, process exit is normal (one turn = one process).
-      // Emit any remaining buffered output, then mark the turn as complete.
-      // Use setImmediate to let pending stdout data chunks drain before we process.
-      child.on('exit', (code, signal) => {
+      // For spawn-per-turn, classify the turn only after the process and all of
+      // its stdio streams have closed. This makes the final unterminated record
+      // part of the same atomic boundary decision.
+      child.on('close', (code, signal) => {
         const superseded = this.child !== child;
         this.clearShutdownKillTimer(child, childGeneration);
         if (superseded) return;
+        if (
+          this.activeProviderTurnToken !== null
+          && this.activeProviderTurnToken !== providerTurnToken
+        ) return;
         if (!this.active) {
+          boundarySettled = true;
           this.child = null;
           return;
         }
@@ -2172,28 +2351,50 @@ export class SessionManager {
 
         this.clearStalledOpKill();
 
-        // Defer drain to next tick — stdout 'data' events may still be queued
-        // in the event loop after the 'exit' event fires.
-        setImmediate(() => {
-          if (!this.isCurrentPersistentChild(child, childGeneration)) return;
-
         // Drain buffered output
         const bufferedLines = this.drainBufferedStdoutLines();
         if (bufferedLines.length > 0) {
+          drainBufferedEvents:
           for (const line of bufferedLines) {
+            if (
+              !this.active
+              || !this.isCurrentPersistentChild(child, childGeneration)
+            ) {
+              boundarySettled = true;
+              return;
+            }
+            if (this.activeProviderTurnToken !== providerTurnToken) break drainBufferedEvents;
             for (const event of parse(line)) {
-              if (this.provider !== 'claude-cli') {
-                log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn exit drain');
+              if (
+                !this.active
+                || !this.isCurrentPersistentChild(child, childGeneration)
+              ) {
+                boundarySettled = true;
+                return;
               }
-              this.handleProviderEvent(event);
+              if (this.activeProviderTurnToken !== providerTurnToken) break drainBufferedEvents;
+              if (this.provider !== 'claude-cli') {
+                log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn close drain');
+              }
+              dispatchSpawnPerTurnEvent(event);
             }
           }
         }
 
-        this.clearTurnWatchdog();
+        if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) {
+          boundarySettled = true;
+          return;
+        }
 
-        // Non-clean exit deactivates the manager so the owning runtime can recover it.
-        if ((code !== 0 && code !== null) || signal !== null) {
+        if (boundarySettled) return;
+        boundarySettled = true;
+        this.clearTurnWatchdog();
+        this.child = null;
+
+        const exitedWithError = (code !== 0 && code !== null) || signal !== null;
+        const missingTerminalResult = code === 0 && signal === null && !sawResult;
+        if (exitedWithError || missingTerminalResult) {
+          this.completeProviderTurn(providerTurnToken);
           const crashedSessionId = this.sessionId;
           const crashedDbRowId = this.dbRowId;
           this.closeDurableFailureLifecycle(
@@ -2202,38 +2403,67 @@ export class SessionManager {
           );
           this.resumeAttemptId = null;
           this.active = false;
-          this.child = null;
           this.sessionId = null;
           // Release pessimistic budget reservation if the turn crashed without a result event
           this.budget?.cancelPending();
-          log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
+          if (missingTerminalResult) {
+            log.warn({
+              exitCode: code,
+              signal,
+              provider: this.provider,
+              chatJid: this.chatJid,
+              reason: 'provider_terminal_result_missing',
+            }, 'provider turn process closed without terminal result');
+          } else {
+            log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
+          }
           this.onCrash?.({
             exitCode: code,
             signal,
             sessionId: crashedSessionId,
             dbRowId: crashedDbRowId,
             generationIdentity: childGeneration,
-            ...this.buildCrashMetadata(),
+            ...(missingTerminalResult
+              ? this.buildCrashMetadata(
+                  'provider_stream_corrupt',
+                  'provider process closed before a terminal result event',
+                )
+              : this.buildCrashMetadata()),
           });
-          this.notifyUnexpectedExit(code, signal, childGeneration);
+          if (missingTerminalResult) {
+            this.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
+          } else {
+            this.notifyUnexpectedExit(code, signal, childGeneration);
+          }
+        } else {
+          // The exact per-turn child has fully closed, so its process tree can
+          // no longer emit provider events. Release ownership even when the
+          // runtime rejected the observed result before calling the normal
+          // terminal API; otherwise a clean code-0 close leaves the lane armed
+          // forever with no watchdog or child left to recover it.
+          this.completeProviderTurn(providerTurnToken);
         }
-        }); // end setImmediate
       });
     } else {
       // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex/Gemini)
       if (this.child === null) {
+        this.completeProviderTurn();
         throw new Error('No active session. Call spawnSession() first.');
       }
       persistentTurnChild = this.child;
       persistentTurnGeneration = this.childGenerations.get(persistentTurnChild) ?? null;
       if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+        this.completeProviderTurn();
         throw new Error('Session generation was superseded before turn dispatch.');
       }
+
+      let payload: string;
 
       // Gemini ACP: wait for sessionId from session/new response, then write session/prompt
       if (this.provider === 'gemini-cli') {
         if (!this.geminiSessionId) {
           if (!this.providerReadyPromise) {
+            this.completeProviderTurn();
             throw new Error('Gemini provider ready promise not initialized. Call spawnSession() first.');
           }
           let timer: ReturnType<typeof setTimeout> | null = null;
@@ -2242,37 +2472,32 @@ export class SessionManager {
           });
           try {
             await Promise.race([this.providerReadyPromise, timeout]);
+          } catch (err) {
+            this.completeProviderTurn();
+            throw err;
           } finally {
             if (timer !== null) clearTimeout(timer);
           }
           if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+            this.completeProviderTurn();
             throw new Error('Session generation was superseded before turn dispatch.');
           }
           if (!this.geminiSessionId) {
+            this.completeProviderTurn();
             throw new Error('Gemini sessionId not captured after 15s.');
           }
         }
         if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+          this.completeProviderTurn();
           throw new Error('Session generation was superseded before turn dispatch.');
         }
-        const req = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
-        persistentTurnChild.stdin!.write(req);
-        if (this.dbRowId !== null) {
-          incrementMessageCount(this.db, this.dbRowId);
-        }
-        this.clearTurnWatchdog();
-        this.armWatchdog();
-        this.messageCount += 1;
-        this.lastMessageAt = new Date().toISOString();
-        return;
-      }
-
-      let payload: string;
-      if (this.provider === 'codex-cli') {
+        payload = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
+      } else if (this.provider === 'codex-cli') {
         // Codex app-server: wait for threadId from thread/started response
         // (spawnSession sends initialize + thread/start, response arrives async on stdout)
         if (!this.codexThreadId) {
           if (!this.providerReadyPromise) {
+            this.completeProviderTurn();
             throw new Error('Codex provider ready promise not initialized. Call spawnSession() first.');
           }
           let timer: ReturnType<typeof setTimeout> | null = null;
@@ -2281,13 +2506,18 @@ export class SessionManager {
           });
           try {
             await Promise.race([this.providerReadyPromise, timeout]);
+          } catch (err) {
+            this.completeProviderTurn();
+            throw err;
           } finally {
             if (timer !== null) clearTimeout(timer);
           }
           if (!this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)) {
+            this.completeProviderTurn();
             throw new Error('Session generation was superseded before turn dispatch.');
           }
           if (!this.codexThreadId) {
+            this.completeProviderTurn();
             throw new Error('Codex threadId not captured after 15s. app-server may have failed to initialize.');
           }
         }
@@ -2310,13 +2540,17 @@ export class SessionManager {
       }
 
       const stdin = persistentTurnChild.stdin;
-      if (!stdin) throw new Error('Child process stdin is not available');
+      if (!stdin) {
+        this.completeProviderTurn();
+        throw new Error('Child process stdin is not available');
+      }
 
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       try {
         await Promise.race([
           new Promise<void>((resolve, reject) => {
-            stdin.write(payload + '\n', 'utf8', (err) => {
+            const framedPayload = payload.endsWith('\n') ? payload : `${payload}\n`;
+            stdin.write(framedPayload, 'utf8', (err) => {
               if (err) reject(err);
               else resolve();
             });
@@ -2328,6 +2562,19 @@ export class SessionManager {
             );
           }),
         ]);
+      } catch (writeErr) {
+        try {
+          // A callback error or timeout cannot prove whether the provider
+          // accepted the bytes. End the exact session and await process-tree
+          // proof before reopening the lane; resuming could duplicate a turn.
+          await this.shutdown(false);
+        } catch (shutdownErr) {
+          throw new AggregateError(
+            [writeErr, shutdownErr],
+            'Provider stdin write failed and exact process-tree teardown was inconclusive',
+          );
+        }
+        throw writeErr;
       } finally {
         if (timeoutHandle !== null) clearTimeout(timeoutHandle);
       }
@@ -2374,11 +2621,7 @@ export class SessionManager {
       messageCount: this.messageCount,
       lastMessageAt: this.lastMessageAt,
       durableFailureClosed: this.durableFailureClosed,
-      // Derived signal: the turn watchdog is armed for the duration of an
-      // in-flight turn (armWatchdog on dispatch, tickWatchdog on progress,
-      // clearTurnWatchdog at turn end), so an armed hard watchdog == a turn is
-      // running. The idle-session sweep uses this to never suspend mid-turn.
-      turnInFlight: this.watchdogHard !== null,
+      turnInFlight: this.providerTurnInFlight,
     };
   }
 
@@ -2459,12 +2702,23 @@ export class SessionManager {
         this.durability.closeSessionLifecycle({
           agentSessionRowId: this.dbRowId,
           providerSessionId: closingSessionId,
+          provider: this.provider,
           conversationKey: this.conversationKey,
           status: lifecycleStatus,
         });
       } else {
         if (this.dbRowId !== null) {
-          updateSessionStatus(this.db, this.dbRowId, lifecycleStatus);
+          if (closingSessionId === null) {
+            updateSessionStatus(this.db, this.dbRowId, lifecycleStatus);
+          } else {
+            updateResumedSessionStatus(
+              this.db,
+              this.dbRowId,
+              closingSessionId,
+              this.provider,
+              lifecycleStatus,
+            );
+          }
         }
         this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
       }
@@ -2485,6 +2739,9 @@ export class SessionManager {
     this.codexResumeThreadStartReqId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
+    // Only a fully successful teardown (process proof plus lifecycle closure)
+    // may reopen a lane closed by an ambiguous provider write.
+    this.completeProviderTurn();
   }
 }
 

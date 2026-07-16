@@ -106,6 +106,7 @@ function makeHarness(options: {
   };
   const session = {
     clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
     shutdown: vi.fn(() => {
       timeline.push('shutdown');
     }),
@@ -228,6 +229,7 @@ describe('runtime result terminal provider notices', () => {
             expect.stringContaining(testCase.noticeFragment),
           );
           expect(harness.queue.enqueueResultText).not.toHaveBeenCalled();
+          expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
           expect(harness.notifyProviderFallbackActivated).not.toHaveBeenCalled();
           expect(harness.session.shutdown).toHaveBeenCalledOnce();
           expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
@@ -247,6 +249,7 @@ describe('runtime result terminal provider notices', () => {
         driveResult('scoped', harness, testCase.text);
 
         expect(harness.queue.enqueueText).not.toHaveBeenCalled();
+        expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
         expect(harness.notifyProviderFallbackActivated).toHaveBeenCalledOnce();
         expect(harness.notifyProviderFallbackActivated).toHaveBeenCalledWith(
           harness.queue,
@@ -296,6 +299,7 @@ describe('journaled result without runtime turn context (invariant-violation pat
 
     expect(host.pendingTurnText.has('15550190050')).toBe(false);
     expect(host.pendingTurnActorJid.has('15550190050')).toBe(false);
+    expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
   });
 
   it('preserves the replay latch on the invariant path when the turn did not complete cleanly', () => {
@@ -332,5 +336,6 @@ describe('journaled result without runtime turn context (invariant-violation pat
 
     expect(host.pendingTurnText.get('15550190050')).toBe('queued user turn');
     expect(host.pendingTurnActorJid.get('15550190050')).toBe('user@s.whatsapp.net');
+    expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
   });
 });
