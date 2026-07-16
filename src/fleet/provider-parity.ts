@@ -189,12 +189,41 @@ function evaluateProbeReasons(
   };
 }
 
+// A provider-status snapshot proves the service is live when its health signal
+// reports online (mirrors the `!== 'online'` degraded test at the reason stage)
+// or its transport line is reachable. Either condition means the process is
+// actually up, regardless of what the checked-in fleet declaration expects.
+function isActiveStatus(status: ProviderStatusSnapshot | null | undefined): status is ProviderStatusSnapshot {
+  if (!status) return false;
+  return status.signal.status === 'online' || status.lineReachable === true;
+}
+
 function evaluateRow(
   item: ProviderParityExpectedInstance,
   status: ProviderStatusSnapshot | null | undefined,
   probes: ProviderProbeSnapshot[],
 ): ProviderParityRow {
   if (item.type !== 'agent' || item.expected === 'no_bot' || item.expected === 'blocked' || item.expected === 'owner_deferred') {
+    // #1866: a restored agent can be active (running, transport-reachable,
+    // online) while its declaration still says expected=blocked. Such a
+    // service must not be silently excluded from monitoring — surface it as a
+    // failing row so the post-cutover gate fails immediately instead of
+    // short-circuiting to not_applicable. A genuinely blocked service (no live
+    // status) stays not_applicable.
+    if (item.type === 'agent' && item.expected === 'blocked' && isActiveStatus(status)) {
+      return {
+        host: item.host,
+        instance: item.instance,
+        verdict: 'blocked',
+        reasons: ['restored_service_expected_blocked'],
+        primaryProvider: status.primary.provider,
+        fallbackProviders: [],
+        credentialState: 'unknown',
+        probeState: item.providerProbeExpected ? 'unknown' : 'not_required',
+        fallbackActive: status.fallback.active,
+        evidenceRefs: [],
+      };
+    }
     return {
       host: item.host,
       instance: item.instance,
