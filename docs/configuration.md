@@ -882,8 +882,9 @@ requires `baseUrl` (see
 
 **Headless permissions (opencode-cli):** WhatSoup's startup merge owns only the
 generated MCP and optional custom-endpoint blocks. It preserves every existing
-`agent` entry verbatim and never creates or replaces `whatsoup-headless`; the
-fleet-policy package owns that artifact. A route with
+unrelated `agent` entry, removes the obsolete inline `whatsoup-headless` entry,
+and never creates or replaces that reserved profile; the fleet-policy package
+owns the external artifact. A route with
 `providerConfig.executionProfile: "whatsoup-headless"` selects the externally
 provisioned profile explicitly for every fresh, resumed, and model-usability
 turn. Any other configured profile name is rejected.

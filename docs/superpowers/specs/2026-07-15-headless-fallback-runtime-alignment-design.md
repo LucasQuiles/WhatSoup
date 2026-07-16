@@ -123,8 +123,9 @@ armed. An exit from a superseded generation cannot clear a newer child.
 Operational and probe argv select one configured execution profile explicitly. The
 fleet baseline name is `whatsoup-headless`; WhatSoup accepts exactly that reserved name
 as configuration and does not depend on the account's `default_agent`. The fleet-policy
-package owns the versioned agent artifact. WhatSoup preserves the `agent` map while
-merging its MCP/custom-endpoint blocks and never provisions an inline policy.
+package owns the versioned agent artifact. WhatSoup preserves unrelated entries in the
+`agent` map while merging its MCP/custom-endpoint blocks, removes the obsolete reserved
+inline entry, and never provisions a replacement inline policy.
 
 The profile contract is:
 
