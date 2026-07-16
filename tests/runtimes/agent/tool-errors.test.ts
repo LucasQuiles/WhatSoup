@@ -60,12 +60,29 @@ describe('classifyToolError', () => {
     ['zero-width space', '\u200B'],
     ['ASCII controls', '\u0000\t\r\n'],
     ['format controls', '\u200B\u2060\uFEFF'],
+    ['combining grapheme joiner', '\u034F'],
+    ['variation selector-16', '\uFE0F'],
+    ['supplementary variation selector', '\u{E0100}'],
+    ['Hangul filler', '\u3164'],
+    ['halfwidth Hangul filler', '\uFFA0'],
   ])('uses a visible bounded fallback for %s-only error content', (_label, content) => {
     const result = classifyToolError('edit', content);
     expect(result.category).toBe('error');
     expect(result.detail).toContain('Request failed with an unknown error.');
     expect(result.detail.length).toBeLessThanOrEqual(100);
-    expect(result.detail).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u200B\u2060\uFEFF]/u);
+    expect(result.detail).not.toContain(content);
+  });
+
+  it('treats a default-ignorable-only tool name as unknown', () => {
+    const result = classifyToolError('\u034F\uFE0F\u{E0100}\u3164\uFFA0', 'Something broke');
+
+    expect(result.detail).toBe('Something broke');
+  });
+
+  it('preserves legitimate combining text in tool names and error detail', () => {
+    const result = classifyToolError('e\u0301dit', 'cafe\u0301 failed');
+
+    expect(result.detail).toBe('e\u0301dit — cafe\u0301 failed');
   });
 
   it('normalizes and bounds a hostile tool name before composing the update', () => {

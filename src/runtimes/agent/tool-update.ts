@@ -16,8 +16,8 @@ import type { ToolUpdate } from './outbound-queue.ts';
 const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 const TOOL_UPDATE_DETAIL_CHARS = 100;
 const TOOL_NAME_DISPLAY_CHARS = 48;
-const NON_VISIBLE_OR_CONTROL = /[\p{Cc}\p{Cf}\p{Z}\s]/gu;
-const NON_VISIBLE_OR_CONTROL_RUN = /[\p{Cc}\p{Cf}\p{Z}\s]+/gu;
+const NON_VISIBLE_OR_CONTROL = /[\p{Cc}\p{Cf}\p{Z}\p{Default_Ignorable_Code_Point}\s]/gu;
+const NON_VISIBLE_OR_CONTROL_RUN = /[\p{Cc}\p{Cf}\p{Z}\p{Default_Ignorable_Code_Point}\s]+/gu;
 
 function truncateDisplayText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;

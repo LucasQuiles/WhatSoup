@@ -226,6 +226,7 @@ describe('OpenCode parser — tool_use branch', () => {
     ['empty object', {}],
     ['empty array', []],
     ['whitespace-only nested message', { message: '  \t\n ' }],
+    ['default-ignorable-only nested message', { message: '\u034F\uFE0F\u{E0100}\u3164\uFFA0' }],
   ])('falls through a structurally empty %s error to useful output', (_label, error) => {
     const event = createOpenCodeParser().parse(JSON.stringify({
       type: 'tool_use',
