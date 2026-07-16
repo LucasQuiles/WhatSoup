@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   contentFingerprint,
@@ -10,6 +12,10 @@ import {
 } from '../../scripts/experiments/semantic-boundary-eval.ts';
 
 const DECISIONS = new Set<BoundaryDecision>(['pass', 'warn', 'block', 'inconclusive']);
+const EVALUATOR_SOURCE = readFileSync(
+  fileURLToPath(new URL('../../scripts/experiments/semantic-boundary-eval.ts', import.meta.url)),
+  'utf8',
+);
 
 describe('semantic boundary experiment baseline', () => {
   it('loads a locked corpus with sourced labels and unique case ids', () => {
@@ -41,6 +47,19 @@ describe('semantic boundary experiment baseline', () => {
 });
 
 describe('semantic boundary experiment candidate', () => {
+  it('delegates graph and receipt decisions to the production semantic-quality engine', () => {
+    expect(EVALUATOR_SOURCE).toMatch(/from '..\/lib\/semantic-quality\/module-graph\.ts'/);
+    expect(EVALUATOR_SOURCE).toContain('buildModuleGraph');
+    expect(EVALUATOR_SOURCE).toContain('analyzeReachability');
+    expect(EVALUATOR_SOURCE).toMatch(/from '..\/lib\/semantic-quality\/receipt\.ts'/);
+    expect(EVALUATOR_SOURCE).toContain('aggregateBoundaryDecision');
+    expect(EVALUATOR_SOURCE).toContain('isBoundaryFindingComplete');
+    expect(EVALUATOR_SOURCE).not.toContain('function runtimeSpecifiers');
+    expect(EVALUATOR_SOURCE).not.toContain('function resolveSpecifier');
+    expect(EVALUATOR_SOURCE).not.toContain('function reachableModules');
+    expect(EVALUATOR_SOURCE).not.toContain('function isFindingComplete');
+  });
+
   it('distinguishes production edges from tests, comments, strings, and unresolved imports', () => {
     const corpus = loadCorpus();
     const roots = corpus.productionRoots;

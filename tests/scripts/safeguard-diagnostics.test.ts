@@ -31,6 +31,7 @@ const requiredPackageScripts = {
   'guard:lint:src': 'node scripts/eslint-fitness-check.ts',
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
+  'guard:semantic-quality': 'node scripts/semantic-quality-check.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
   'guard:fleet-bot-hardening-parity': 'node scripts/check-fleet-bot-hardening-parity.ts',
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
@@ -58,6 +59,8 @@ const requiredPackageScripts = {
     'npm run test:browser',
     'npm run test:browser:motion',
   ].join(' && '),
+  'verify:semantic': 'npm run guard:semantic-quality -- --mode enforce',
+  'verify:semantic:shadow': 'npm run guard:semantic-quality -- --mode shadow',
   'verify:push:branch': [
     'npm run guard:repo:staged',
     'npm run guard:repo:branch-diff',
@@ -74,6 +77,7 @@ const requiredPackageScripts = {
     'npm run guard:claude-settings',
     'npm run guard:agent-decision-polls',
     'npm run guard:safeguard-diagnostics',
+    'npm run verify:semantic:shadow',
     'npm run guard:test-integrity',
     'npm run guard:boundaries',
     'npm run guard:lint:src',
@@ -99,6 +103,7 @@ const requiredPackageScripts = {
     'npm run guard:claude-settings',
     'npm run guard:agent-decision-polls',
     'npm run guard:safeguard-diagnostics',
+    'npm run verify:semantic:shadow',
     'npm run guard:test-integrity:required',
     'npm run guard:boundaries',
     'npm run guard:fail-closed-gate',
@@ -186,6 +191,8 @@ const requiredQualityWorkflow = [
   'name: Quality',
   'on:',
   '  pull_request:',
+  'permissions:',
+  '  contents: read',
   'jobs:',
   '  quality:',
   '    runs-on: ubuntu-latest',
@@ -198,6 +205,22 @@ const requiredQualityWorkflow = [
   '      matrix:',
   "        node: ['24.x', '25.x']",
   '    steps:',
+  '      - name: Semantic quality (shadow)',
+  "        if: matrix.node == '24.x'",
+  '        env:',
+  '          SEMANTIC_RECEIPT: ${{ runner.temp }}/semantic-quality.json',
+  '        run: |',
+  '          if [ -n "${GITHUB_BASE_REF:-}" ]; then',
+  '            base="origin/$GITHUB_BASE_REF"',
+  '          else',
+  '            base="HEAD^"',
+  '          fi',
+  '          npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
+  '          node -e \'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\\n\\nDecision: **${r.decision}**\\n\\nFindings: ${r.findings.length}\\n`)\' >> "$GITHUB_STEP_SUMMARY"',
+  '      - name: Install test-integrity plugin',
+  '        run: install-test-integrity',
+  '      - name: Test integrity baseline check',
+  '        run: npm run guard:test-integrity',
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Design-system hygiene changed files',
@@ -217,6 +240,8 @@ const requiredQualityWorkflow = [
   '        run: npm run test:browser',
   '      - name: Browser motion test suite',
   '        run: npm run test:browser:motion',
+  '      - name: Test suite + coverage thresholds',
+  '        run: npm run coverage:check -- --pool=forks',
   '      - name: Upload browser artifacts',
   '        uses: actions/upload-artifact@v4',
   '        with:',
@@ -510,8 +535,8 @@ describe('safeguard diagnostics', () => {
       scripts: {
         'verify:release': requiredPackageScripts['verify:release']
           .replace(
-            'npm run guard:safeguard-diagnostics && npm run guard:test-integrity:required',
-            'npm run guard:test-integrity:required && npm run guard:safeguard-diagnostics',
+            'npm run verify:semantic:shadow && npm run guard:test-integrity:required',
+            'npm run guard:test-integrity:required && npm run verify:semantic:shadow',
           ),
       },
     });
@@ -791,6 +816,66 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when local verification omits semantic shadow feedback', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:push:branch': requiredPackageScripts['verify:push:branch']
+          .replace('npm run verify:semantic:shadow && ', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'branch-push-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['missing npm run verify:semantic:shadow']) });
+  });
+
+  it('fails when Quality loses the semantic shadow receipt step', () => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = workflow.replace(
+      /      - name: Semantic quality \(shadow\)[\s\S]*?(?=      - name: Install test-integrity plugin)/,
+      '',
+    );
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-semantic-shadow'))
+      .toMatchObject({ status: 'fail' });
+  });
+
+  it.each([
+    {
+      name: 'expands workflow permissions',
+      mutate: (workflow: string) => workflow.replace('  contents: read', '  contents: write'),
+      evidence: 'quality workflow permissions must be exactly contents: read',
+    },
+    {
+      name: 'uses a non-candidate main fallback',
+      mutate: (workflow: string) => workflow.replace('base="HEAD^"', 'base="origin/main"'),
+      evidence: 'Semantic quality (shadow) run script is missing base="HEAD^"',
+    },
+    {
+      name: 'uploads the semantic receipt',
+      mutate: (workflow: string) => workflow.replace(
+        '      - name: Upload browser artifacts',
+        '      - name: Upload semantic receipt\n        uses: actions/upload-artifact@v4\n        with:\n          path: semantic-quality.json\n      - name: Upload browser artifacts',
+      ),
+      evidence: 'semantic quality receipts must not be uploaded as artifacts',
+    },
+  ])('fails when Quality $name', ({ mutate, evidence }) => {
+    const workflow = requiredFiles['.github/workflows/quality.yml'];
+    const mutated = mutate(workflow);
+    expect(mutated).not.toBe(workflow);
+    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-semantic-shadow'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
   it('fails when the quality job loses its bounded timeout', () => {

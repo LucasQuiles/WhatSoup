@@ -128,11 +128,35 @@ function findingFromPolicy(
   };
 }
 
-function aggregateDecision(findings: SemanticPolicyFinding[]): BoundaryDecision {
+export function aggregateBoundaryDecision(
+  findings: ReadonlyArray<{ decision: BoundaryDecision }>,
+): BoundaryDecision {
   if (findings.some((finding) => finding.decision === 'block')) return 'block';
   if (findings.some((finding) => finding.decision === 'inconclusive')) return 'inconclusive';
   if (findings.some((finding) => finding.decision === 'warn')) return 'warn';
   return 'pass';
+}
+
+export function isBoundaryFindingComplete(item: {
+  ruleId: string;
+  action: string;
+  summary: string;
+  why: string;
+  observed: ReadonlyArray<unknown>;
+  correction: ReadonlyArray<string>;
+  rerun: string;
+  sourceRefs: ReadonlyArray<string>;
+}): boolean {
+  return Boolean(
+    item.ruleId
+      && item.action
+      && item.summary
+      && item.why
+      && item.observed.length > 0
+      && item.correction.length > 0
+      && item.rerun
+      && item.sourceRefs.length > 0,
+  );
 }
 
 export function buildSemanticReceipt(input: BuildSemanticReceiptInput): BoundaryReceipt {
@@ -141,7 +165,7 @@ export function buildSemanticReceipt(input: BuildSemanticReceiptInput): Boundary
     repository: 'LucasQuiles/WhatSoup',
     invocation: 'semantic-quality',
     enforcementMode: input.enforcementMode,
-    decision: aggregateDecision(input.policyFindings),
+    decision: aggregateBoundaryDecision(input.policyFindings),
     base: {
       headOid: input.tree.headOid || null,
       baseOid: input.tree.baseOid,

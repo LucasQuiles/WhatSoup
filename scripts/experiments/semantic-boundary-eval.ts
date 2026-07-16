@@ -1,13 +1,21 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { dirname, posix, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
 
-import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import {
+  analyzeReachability,
+  buildModuleGraph,
+  type ModuleSource,
+} from '../lib/semantic-quality/module-graph.ts';
+import { readCandidateTree } from '../lib/semantic-quality/git-tree.ts';
+import {
+  aggregateBoundaryDecision,
+  isBoundaryFindingComplete,
+  type BoundaryDecision as SemanticBoundaryDecision,
+} from '../lib/semantic-quality/receipt.ts';
 
-export type BoundaryDecision = 'pass' | 'warn' | 'block' | 'inconclusive';
+export type BoundaryDecision = SemanticBoundaryDecision;
 
 export interface EvaluationCase {
   id: string;
@@ -200,79 +208,8 @@ export function evaluateBaseline(corpus: Corpus): EvaluationSummary {
   };
 }
 
-function runtimeSpecifiers(sourceText: string, filePath: string): string[] {
-  const source = ts.createSourceFile(
-    filePath,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    filePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
-  const specifiers = new Set<string>();
-
-  function visit(node: ts.Node): void {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      const clause = node.importClause;
-      const namedBindings = clause?.namedBindings;
-      const onlyTypeSpecifiers =
-        namedBindings &&
-        ts.isNamedImports(namedBindings) &&
-        namedBindings.elements.length > 0 &&
-        namedBindings.elements.every((element) => element.isTypeOnly);
-      if (!clause?.isTypeOnly && !(onlyTypeSpecifiers && !clause?.name)) {
-        specifiers.add(node.moduleSpecifier.text);
-      }
-    } else if (
-      ts.isExportDeclaration(node) &&
-      !node.isTypeOnly &&
-      node.moduleSpecifier &&
-      ts.isStringLiteral(node.moduleSpecifier)
-    ) {
-      specifiers.add(node.moduleSpecifier.text);
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteral(node.arguments[0])
-    ) {
-      specifiers.add(node.arguments[0].text);
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(source);
-  return [...specifiers];
-}
-
-function resolveSpecifier(fromPath: string, specifier: string, files: Set<string>): string | null {
-  if (!specifier.startsWith('.')) return null;
-  const joined = posix.normalize(posix.join(posix.dirname(fromPath), specifier));
-  const candidates = [joined];
-  if (/\.m?js$/i.test(joined)) {
-    candidates.push(joined.replace(/\.m?js$/i, '.ts'), joined.replace(/\.m?js$/i, '.tsx'));
-  } else if (!/\.[a-z0-9]+$/i.test(joined)) {
-    candidates.push(`${joined}.ts`, `${joined}.tsx`, `${joined}/index.ts`, `${joined}/index.tsx`);
-  }
-  return candidates.find((candidate) => files.has(candidate)) ?? null;
-}
-
-function reachableModules(
-  files: Set<string>,
-  roots: string[],
-  loadSource: (path: string) => string,
-): Set<string> {
-  const reachable = new Set<string>();
-  const pending = roots.filter((root) => files.has(root));
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (reachable.has(current)) continue;
-    reachable.add(current);
-    for (const specifier of runtimeSpecifiers(loadSource(current), current)) {
-      const resolved = resolveSpecifier(current, specifier, files);
-      if (resolved && !reachable.has(resolved)) pending.push(resolved);
-    }
-  }
-  return reachable;
+function moduleSources(sources: Record<string, string>): ModuleSource[] {
+  return Object.entries(sources).map(([path, text]) => ({ path, text }));
 }
 
 export function findUnreachableModules(
@@ -280,9 +217,8 @@ export function findUnreachableModules(
   roots: string[],
   changedModules: string[],
 ): string[] {
-  const files = new Set(Object.keys(sources).filter((path) => /\.tsx?$/.test(path)));
-  const reachable = reachableModules(files, roots, (path) => sources[path] ?? '');
-  return changedModules.filter((path) => !reachable.has(path)).sort();
+  const graph = buildModuleGraph(moduleSources(sources));
+  return analyzeReachability(graph, roots, changedModules).unreachableCandidates;
 }
 
 function findGitUnreachableModules(
@@ -291,33 +227,12 @@ function findGitUnreachableModules(
   changedModules: string[],
   cwd: string,
 ): string[] {
-  const listed = execFileSync('git', ['ls-tree', '-r', '--name-only', revision, '--', 'src'], {
-    cwd,
-    encoding: 'utf8',
-    env: cleanGitEnv(),
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const files = new Set(
-    listed
-      .split(/\r?\n/)
-      .filter((path) => /\.tsx?$/.test(path)),
-  );
-  const sourceCache = new Map<string, string>();
-  const reachable = reachableModules(files, roots, (path) => {
-    const cached = sourceCache.get(path);
-    if (cached !== undefined) return cached;
-    const source = execFileSync('git', ['show', `${revision}:${path}`], {
-      cwd,
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      maxBuffer: 16 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    sourceCache.set(path, source);
-    return source;
-  });
-  return changedModules.filter((path) => !reachable.has(path)).sort();
+  const tree = readCandidateTree({ cwd, head: revision, scope: 'tree' });
+  if (!tree.headOid || tree.limitations.length > 0) {
+    throw new Error(`could not inspect ${revision}: ${tree.limitations.join('; ')}`);
+  }
+  const graph = buildModuleGraph(tree.sources);
+  return analyzeReachability(graph, roots, changedModules).unreachableCandidates;
 }
 
 export function contentFingerprint(records: PathBlobRecord[]): string {
@@ -691,13 +606,7 @@ function candidateReceipt(
     );
   }
 
-  const decision = findings.some((item) => item.decision === 'block')
-    ? 'block'
-    : findings.some((item) => item.decision === 'inconclusive')
-      ? 'inconclusive'
-      : findings.some((item) => item.decision === 'warn')
-        ? 'warn'
-        : 'pass';
+  const decision = aggregateBoundaryDecision(findings);
   return {
     schemaVersion: 1,
     caseId: item.id,
@@ -707,19 +616,6 @@ function candidateReceipt(
     findings,
     limitations: verifyGit ? [] : ['Git-backed visible cases require --verify-git.'],
   };
-}
-
-function isFindingComplete(item: BoundaryFinding): boolean {
-  return Boolean(
-    item.ruleId &&
-      item.action &&
-      item.summary &&
-      item.why &&
-      item.observed.length > 0 &&
-      item.correction.length > 0 &&
-      item.rerun &&
-      item.sourceRefs.length > 0,
-  );
 }
 
 export function evaluateCandidate(
@@ -765,7 +661,7 @@ export function evaluateCandidate(
     (item) => item.expected === 'block' && predicted.get(item.id) !== 'block',
   ).length;
   const interventionFindings = receipts.flatMap((receipt) => receipt.findings);
-  const completeFindings = interventionFindings.filter(isFindingComplete).length;
+  const completeFindings = interventionFindings.filter(isBoundaryFindingComplete).length;
   const accuracy = correct / corpus.cases.length;
   const predict = (item: EvaluationCase): BoundaryDecision => predicted.get(item.id)!;
   return {

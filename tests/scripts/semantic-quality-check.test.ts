@@ -19,7 +19,9 @@ import { cleanGitEnv } from '../../src/lib/git-env.ts';
 import type { CandidateTree } from '../../scripts/lib/semantic-quality/git-tree.ts';
 import type { SemanticPolicyFinding } from '../../scripts/lib/semantic-quality/policy.ts';
 import {
+  aggregateBoundaryDecision,
   buildSemanticReceipt,
+  isBoundaryFindingComplete,
   renderSemanticReceipt,
   semanticExitCode,
   writeLocalReceipt,
@@ -153,6 +155,17 @@ afterEach(() => {
 });
 
 describe('semantic quality receipt', () => {
+  it('shares decision aggregation and feedback-completeness semantics with experiment adapters', () => {
+    expect(aggregateBoundaryDecision([])).toBe('pass');
+    expect(aggregateBoundaryDecision([{ decision: 'warn' }, { decision: 'inconclusive' }])).toBe('inconclusive');
+    expect(aggregateBoundaryDecision([{ decision: 'block' }, { decision: 'inconclusive' }])).toBe('block');
+    expect(isBoundaryFindingComplete(receipt('warn').findings[0]!)).toBe(true);
+    expect(isBoundaryFindingComplete({
+      ...receipt('warn').findings[0]!,
+      correction: [],
+    })).toBe(false);
+  });
+
   it('aggregates block over inconclusive over warn over pass', () => {
     const build = (decisions: Array<Exclude<BoundaryDecision, 'pass'>>) =>
       buildSemanticReceipt({
