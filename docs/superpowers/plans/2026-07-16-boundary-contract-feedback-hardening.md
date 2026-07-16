@@ -1010,7 +1010,11 @@ the source directory is location-only and is never identity. The single environm
 variables above are placeholders for one row of those repeatable declarations, not a one-value
 limit. `--profile` is singular and must be the closed profile authorized for the supplied task ID.
 Each child pin is a closed `alias,head,run-id,manifest-sha256` record; task/profile/kind/head relation
-come from the profile and cannot be overridden.
+come from the profile and cannot be overridden. `init` parses those records into the manifest's
+canonical `run.requiredChildPins` array, sorted by alias, and requires its alias set to equal
+`run.requiredChildAliases`. The caller-facing hyphenated field names map only to the exact wire keys
+`alias`, `head`, `runId`, and `manifestSha256`; no sidecar, environment value, or later import option
+may replace or edit the manifest-bound pins.
 
 `reconciledBase` is never caller-supplied. Observation and reconciliation init store the explicit
 state `not-observed`. Only reconciliation's successful helper-owned merge transition may atomically
@@ -1046,7 +1050,7 @@ The exact schema-1 object key sets are:
 | Object | Exact keys |
 |---|---|
 | `RunManifest` | `schemaVersion`, `manifestState`, `run`, `entrySnapshot`, `currentSnapshot`, `attempts`, `artifacts`, `children`, `predecessor`, `entryTestRoster`, `reviews`, `lifecycle`, `documentHashes`, `upstream`, `overallVerdict` |
-| `run` | `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `finalizedAtUtc`, `entryHead`, `terminalHead`, `reconciledBase`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `transitionCount`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots` |
+| `run` | `runId`, `taskId`, `profileId`, `phase`, `createdAtUtc`, `finalizedAtUtc`, `entryHead`, `terminalHead`, `reconciledBase`, `helperCommit`, `helperSha256`, `allowedPaths`, `allowedUntrackedPaths`, `preservedOwnerPaths`, `requiredAttemptIds`, `requiredChildAliases`, `requiredChildPins`, `transitionCount`, `mayComplete`, `chainAppend`, `requestedTools`, `observedTools`, `reservedDerivedRoots` |
 | `snapshot` | `head`, `indexTreeOid`, `trackedPatchSha256`, `unstagedPatchSha256`, `allowedUntracked`, `preservedOwner`, `digestSha256` |
 | `snapshotPath` | `path`, `type`, `mode`, `bytes`, `sha256` |
 | `attempt` | `id`, `operation`, `headAnchor`, `argv`, `cwd`, `startedAtUtc`, `endedAtUtc`, `expectedExit`, `rawExit`, `rawSignal`, `expectationMet`, `watchdogOwner`, `innerTimeoutOwner`, `deadlineMs`, `killGraceMs`, `preSnapshot`, `postSnapshot`, `stdout`, `stderr`, `declaredOutputs`, `outputAdmissions`, `structuredResult`, `verdict` |
@@ -1054,6 +1058,7 @@ The exact schema-1 object key sets are:
 | `outputAdmission` | `path`, `state`, `role`, `sha256`, `bytes` |
 | `artifact` | `path`, `role`, `producerAttemptId`, `sha256`, `bytes` |
 | `child` | `alias`, `kind`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `snapshotDigestSha256`, `sourceManifestSha256`, `importedFiles`, `treeDigestSha256`, `overallVerdict`, `dedupeKey` |
+| `childPin` | `alias`, `head`, `runId`, `manifestSha256` |
 | `importedFile` | `path`, `sha256`, `bytes` |
 | `predecessor` | `pin`, `sourceManifestSha256`, `importedFiles`, `treeDigestSha256`, `overallVerdict` |
 | `predecessorPin` | `taskId`, `profileId`, `runId`, `terminalHead`, `manifestSha256`, `completionReceiptSha256`, `ledgerSha256` |
@@ -1717,7 +1722,11 @@ dedupe key; `record-review` enforces that identity, and one child run ID or mani
 registered under multiple direct aliases or roles in the same parent. The BCF-08C direct-versus-
 recursive equality check below is the sole required recurrence and is not a second direct alias.
 `record-child-run` later requires the source to match
-that pin and the fixed table row. The only permitted depth-three closure is the exact
+the exact manifest-bound `run.requiredChildPins` row and the fixed table row. Init rejects a
+missing, extra, duplicate, malformed, or relation-inconsistent pin before creating the run; import
+rejects any invocation whose expected head/run/digest differs from the frozen row. Finalization and
+read-only verification require every frozen pin to have exactly one matching imported child and
+reject a pin-array mutation even if the imported child remains otherwise valid. The only permitted depth-three closure is the exact
 `bcf08-final/docs` → `bcf08b-docs/docs-precommit` → `bcf08a-docs/{review-contract,
 review-redaction,review-integration,lead-reproduction}` chain; every other closure above depth two
 and every closure above depth three is rejected. BCF-08B finalization recursively verifies BCF-08A's
