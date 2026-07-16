@@ -8,6 +8,17 @@ import { isRecord } from '../src/lib/type-guards.ts';
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
   'docs/reliability-runner/fleet-bot-hardening-parity.json';
 
+// Documented freshness backstop for the source-side parity manifest. The fleet
+// hardening standard expires rows on runtime events (restart, re-cut, config or
+// credential change); this age budget is a coarse fail-closed floor so a manifest
+// that is never refreshed cannot stay green forever. It is deliberately generous
+// (the tracked manifest ages out ~90 days after its `updated` date) so it never
+// second-guesses a manifest that is being actively maintained. Event-based
+// expiry is tracked separately from this age check.
+export const FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS = 90;
+const FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS =
+  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
 export const REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES = [
   'turn-capability-health',
   'primary-model-usability-probe',
@@ -55,6 +66,8 @@ export type FleetBotHardeningParityFindingCode =
   | 'manifest-not-object'
   | 'unsupported-schema'
   | 'invalid-updated'
+  | 'future-updated'
+  | 'stale-updated'
   | 'missing-standard'
   | 'invalid-scope'
   | 'summary-not-object'
@@ -67,6 +80,10 @@ export type FleetBotHardeningParityFindingCode =
   | 'invalid-row-id'
   | 'duplicate-row-id'
   | 'invalid-row-status'
+  | 'missing-row-verified-at'
+  | 'invalid-row-verified-at'
+  | 'future-row-verified-at'
+  | 'stale-row-verified-at'
   | 'row-capabilities-not-object'
   | 'missing-row-capability'
   | 'unknown-row-capability'
@@ -118,6 +135,15 @@ function arrayOfStrings(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
     : null;
+}
+
+// Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
+// value is not that exact shape or is not a real calendar date, so callers can
+// distinguish a malformed date from a freshness violation.
+function parseManifestDateMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 function recordPrivateLabelFindings(
@@ -199,6 +225,7 @@ function validateCapabilities(payload: Record<string, unknown>, findings: FleetB
 function validateRows(
   payload: Record<string, unknown>,
   findings: FleetBotHardeningParityFinding[],
+  now: Date,
 ): Array<Record<string, unknown>> {
   const rawRows = payload['rows'];
   if (!Array.isArray(rawRows)) {
@@ -263,6 +290,35 @@ function validateRows(
     const evidence = arrayOfStrings(rawRow['evidence']);
     if (evidence === null) {
       findings.push(finding('evidence-not-list', `${context}.evidence must be an array of strings`));
+    }
+
+    // Per-row runtime verification date. A hardened row asserts current runtime
+    // parity, so it must carry a `verifiedAt` (fail closed with
+    // missing-row-verified-at otherwise). Non-hardened rows may omit it, but
+    // whenever it is present it must be a real YYYY-MM-DD, not in the future,
+    // and within the freshness budget, so no row can carry a stale runtime
+    // timestamp. (An immutable runtime-receipt digest that would upgrade this
+    // operator-written assertion into captured proof is producer-gated and not
+    // validated here.)
+    const verifiedAt = rawRow['verifiedAt'];
+    if (verifiedAt === undefined) {
+      if (status === 'hardened') {
+        findings.push(finding('missing-row-verified-at', `${context} is hardened but has no verifiedAt runtime-verification date`));
+      }
+    } else if (typeof verifiedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(verifiedAt)) {
+      findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be YYYY-MM-DD`));
+    } else {
+      const verifiedMs = parseManifestDateMs(verifiedAt);
+      if (verifiedMs === null) {
+        findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be a valid calendar date`));
+      } else if (verifiedMs > now.getTime()) {
+        findings.push(finding('future-row-verified-at', `${context}.verifiedAt ${verifiedAt} is in the future`));
+      } else if (now.getTime() - verifiedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+        findings.push(finding(
+          'stale-row-verified-at',
+          `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+        ));
+      }
     }
 
     if (status === 'hardened') {
@@ -349,6 +405,7 @@ function validateSourceAnchors(
 export function checkFleetBotHardeningParity(
   cwd = process.cwd(),
   manifestPath = DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
+  now: Date = new Date(),
 ): FleetBotHardeningParityResult {
   let payload: unknown;
   try {
@@ -375,8 +432,21 @@ export function checkFleetBotHardeningParity(
   if (payload['schemaVersion'] !== 1) {
     findings.push(finding('unsupported-schema', `unsupported schemaVersion=${String(payload['schemaVersion'])}`));
   }
-  if (typeof payload['updated'] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(payload['updated'])) {
+  const updated = payload['updated'];
+  if (typeof updated !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(updated)) {
     findings.push(finding('invalid-updated', 'parity manifest updated must be YYYY-MM-DD'));
+  } else {
+    const updatedMs = parseManifestDateMs(updated);
+    if (updatedMs === null) {
+      findings.push(finding('invalid-updated', 'parity manifest updated must be a valid calendar date'));
+    } else if (updatedMs > now.getTime()) {
+      findings.push(finding('future-updated', `parity manifest updated ${updated} is in the future`));
+    } else if (now.getTime() - updatedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+      findings.push(finding(
+        'stale-updated',
+        `parity manifest updated ${updated} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget; refresh the runtime parity evidence`,
+      ));
+    }
   }
   if (typeof payload['standard'] !== 'string' || !isSafeRepoRelativePath(payload['standard'])) {
     findings.push(finding('missing-standard', 'parity manifest standard must be a safe repo-relative path'));
@@ -390,7 +460,7 @@ export function checkFleetBotHardeningParity(
 
   recordPrivateLabelFindings(findings, payload, '$');
   validateCapabilities(payload, findings);
-  const rows = validateRows(payload, findings);
+  const rows = validateRows(payload, findings, now);
   validateSummary(payload, rows, findings);
   if (isRecord(scope) && typeof scope['cohortSize'] === 'number' && scope['cohortSize'] !== rows.length) {
     findings.push(finding(
