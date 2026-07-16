@@ -83,7 +83,9 @@ For every user turn, resolve the actor using the existing LID-to-phone mapping a
 
 Pass only that enum into the session turn envelope. A final server-owned system-prompt contract authenticates the first bounded metadata block prepended to each real user turn and rejects later lookalikes. Persistent CLI protocols carry the dynamic block in the user-turn payload, so the stable system contract explicitly defines that first block as transport metadata rather than user-authored content. It never includes the actor's phone number, JID, configured admin list, or tool inventory.
 
-This signal informs conversational behavior only. MCP/tool authorization continues to use the existing actor-bound `SessionContext` and server-side admin checks. If identity resolution is ambiguous or unavailable, classification fails closed to `untrusted_or_unknown`.
+`administrator` means the transport has verified that the actor is a member of the instance's configured administrator list. That role may be distinct from the instance owner or principal. The model must acknowledge the verified administrator role and must not demand separate owner confirmation merely to recognize it.
+
+This signal informs conversational behavior only. It does not bypass tool authorization, risky-action confirmation, or a narrower instance policy. MCP/tool authorization continues to use the existing actor-bound `SessionContext` and server-side admin checks. If identity resolution is ambiguous or unavailable, classification fails closed to `untrusted_or_unknown`.
 
 Shared and per-chat sessions must compute the classification per executing turn. It must not be stored as mutable session-global state that can bleed from an administrator's turn into another sender's turn.
 
@@ -232,7 +234,7 @@ Runtime code rolls back by deploying the recorded prior revision, after the same
 ## Acceptance criteria
 
 - A missing instruction file cannot survive CREATE, PATCH, live lint, or restart preflight.
-- The configured secondary administrator is identified as `administrator` through both phone-JID and LID delivery without identifier disclosure.
+- The configured secondary administrator is identified and acknowledged as `administrator` through both phone-JID and LID delivery without identifier disclosure or an owner-confirmation demand merely to recognize the role.
 - Identical streamed/result payloads produce one outbound operation and one WhatsApp message.
 - A replied inbound event cannot complete without one linked terminal echoed operation.
 - Any historical safe nonterminal outbound operation blocks restart.
