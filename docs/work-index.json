@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-16T04:27:43Z",
+  "generated_at": "2026-07-16T05:39:41Z",
   "repo": "WhatSoup",
-  "git_head": "fdd7612ea3555f3a89784df3614247078b3bf26a",
+  "git_head": "a15b3d953589641c81fd8c228e34afeb1cba2d39",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 64,
+  "total": 66,
   "schema_version": 5,
   "rows": [
     {
@@ -77,6 +77,18 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-16",
       "size_bytes": 19081
+    },
+    {
+      "path": "docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md",
+      "kind": "handoff",
+      "topic_raw": "2026-07-16-boundary-core-history-mining",
+      "topic": "boundary-core-history-mining",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/handoffs",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-16",
+      "size_bytes": 12685
     },
     {
       "path": "docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md",
@@ -461,6 +473,18 @@
       "supersedes_hint": null,
       "last_modified": "2026-07-16",
       "size_bytes": 41974
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md",
+      "kind": "plan",
+      "topic_raw": "2026-07-16-boundary-core-history-provenance",
+      "topic": "boundary-core-history-provenance",
+      "status": "pending",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-07-16",
+      "size_bytes": 140471
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",

@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 64
+**Total entries:** 66
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | handoff=5, plan=32, review=3, spec=23, state=1 |
-| Status | active=9, closed=4, completed=32, deferred=7, pending=11, unknown=1 |
-| Status source | body-marker=63, state-md-status=1 |
+| Kind | handoff=6, plan=33, review=3, spec=23, state=1 |
+| Status | active=9, closed=4, completed=32, deferred=7, pending=12, unknown=2 |
+| Status source | body-marker=65, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -48,10 +48,11 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | tasks | body-marker |
 
-### Unknown-status — triage needed (1)
+### Unknown-status — triage needed (2)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
+| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | boundary-core-history-mining | 2026-07-16 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
 
 ### Cross-tree topic clusters (4)
@@ -94,7 +95,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | deferred | state-md-status | fleet-charts | 2026-04-23 |  |
 
-### docs/superpowers/handoffs  _(5 entries)_
+### docs/superpowers/handoffs  _(6 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -103,8 +104,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 | `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md` | handoff | completed | body-marker | semantic-boundary-hygiene-implementation-notes | 2026-07-16 |  |
+| `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | unknown | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 
-### docs/superpowers/plans  _(32 entries)_
+### docs/superpowers/plans  _(33 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -140,6 +142,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
 | `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
 | `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | plan | pending | body-marker | semantic-boundary-foundation | 2026-07-16 |  |
+| `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | plan | pending | body-marker | boundary-core-history-provenance | 2026-07-16 |  |
 
 ### docs/superpowers/reviews  _(3 entries)_
 
@@ -190,4 +193,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-07-16T04:27:43Z from commit `fdd7612ea3555f3a89784df3614247078b3bf26a`
+- Generated at 2026-07-16T05:39:41Z from commit `a15b3d953589641c81fd8c228e34afeb1cba2d39`
