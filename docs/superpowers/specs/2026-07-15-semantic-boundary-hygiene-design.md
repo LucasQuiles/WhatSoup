@@ -1,7 +1,8 @@
 # Semantic Boundary Hygiene Specification
 
 **Status:** Active — approved for semantic-foundation implementation planning
-**Review:** Owner-approved direction on 2026-07-15; production enforcement has not started
+**Review:** Owner-approved direction on 2026-07-15; rule-catalog and diagnostic extension approved
+on 2026-07-16; production enforcement has not started
 **Date:** 2026-07-15
 **Owner:** Lucas Quiles
 **Scope:** WhatSoup repository quality boundaries and the read-only contract used by external PR/issue producers
@@ -56,6 +57,40 @@ GitHub provider behavior was not exercised end-to-end, and structural feedback c
 not prove that an agent understands or acts on the feedback. Shadow observation and agent
 correction-rate measurement remain mandatory promotion gates.
 
+### 2026-07-16 parser, renderer, and stress calibration
+
+The approved extension was probed read-only at exact branch head
+`83a55b131b2fa51f9d3c6c8f3f2494140ae4fd03`. Remote `main` was
+`2545115c628f3d84c8c5e16cc891b583bbda2812`; two pull requests and 31 issues were open at the
+`2026-07-16T08:27:58Z` observation. The repository and GitHub state were not mutated.
+
+The focused six-suite run passed 134/134 tests, both script and repository typechecks exited zero,
+the candidate evaluator remained 39/40 with zero false blocks and zero missed critical cases, and
+the holdout remained 18/18. Two independent holdout runs were byte-identical. Those positive
+controls establish the current baseline; they do not override the following direct falsifiers:
+
+- an enforce-mode receipt with one warning plus incomplete history evidence retained decision
+  `warn`, exited zero, and omitted the limitation from human output;
+- an unknown runtime finding decision aggregated to `pass`, and a push receipt with a non-Git head
+  identity also rendered `PASS`;
+- whitespace-only finding fields passed the pre-canonical completeness check and became empty
+  diagnostic fields;
+- a 1,000-finding synthetic receipt expanded to roughly 85 MB of JSON and human output; a separate
+  200-finding/10,000-evidence/5,000-limitation probe produced roughly 20 MB and about 59 MiB of heap
+  growth;
+- two findings with the same rule ID were order-dependent while retaining the same correlation ID;
+- a history provider that ignored cancellation remained pending after the signal was aborted;
+- stale, future-dated, zero-page, and complete-with-limitations history observations could authorize
+  an empty finding set, while provenance accepted a syntactically valid foreign repository;
+- omitting a re-entry packet reduced an exact-task, disposition-bearing resubmission to a path-overlap
+  warning; supplying the incomplete packet produced the intended re-entry block.
+
+Current exact-head semantic analysis itself produced 45 warning findings, 513 observations, 90
+correction entries, and about 57 KB of human output, including repeated guidance. This proves that
+bounded grouping and deduplication are needed for ordinary repository scale, not only adversarial
+payloads. The stress result fails promotion criteria until the fail-open decision, evidence binding,
+deadline, and feedback-volume cases have executable unsafe and safe controls.
+
 ## Normative Requirements
 
 - **SBH-001 — Exact candidate identity:** Every decision records the exact candidate head and the
@@ -85,6 +120,30 @@ correction-rate measurement remain mandatory promotion gates.
   full immutable identifiers plus a reviewable provenance record.
 - **SBH-012 — Bounded execution:** Boundary processes have an external deadline and owned
   process-group cleanup. A deadline expiry is `inconclusive` and boundary-blocking once enforced.
+- **SBH-013 — Runtime contract validation:** Runtime input is validated after canonicalization.
+  Unknown decisions/actions/modes, duplicate singleton options, invalid identities, empty required
+  fields, and contradictory metadata are `inconclusive`; TypeScript types are not runtime proof.
+- **SBH-014 — Temporal and target binding:** Current-state claims bind evidence to the exact
+  repository, action target, trusted clock, observation window, and rule version. Stale, future,
+  replayed, foreign-target, or temporally incoherent evidence cannot authorize a clean result.
+- **SBH-015 — Postcondition-preserving fallback:** Every success return, including fallback and
+  disabled/degraded paths, preserves the original postcondition or returns a typed unrepresentable
+  outcome. A fallback is not safe merely because it terminates.
+- **SBH-016 — Independent proof and explicit states:** A verifier may not derive its expected roster,
+  identity, or completeness claim solely from the producer being verified. `absent`, `valid`,
+  `corrupt`, `unavailable`, `stale`, and `unknown` remain distinct when they affect safety.
+- **SBH-017 — Emitted and tree-accurate identity:** Runtime reachability follows emitted behavior
+  under the effective compiler configuration. Git identity includes path, status, object type, and
+  old/new tree modes where those can change behavior.
+- **SBH-018 — Bounded deterministic feedback:** Findings, evidence arrays, artifacts, corrections,
+  tests, sources, JSON, and human output have deterministic cardinality and byte bounds. Overflow is
+  an explicit `inconclusive` finding with counts and digests, never silent truncation or log flooding.
+- **SBH-019 — Corrective feedback quality:** Feedback completeness requires an observed state,
+  expected invariant, consequence, actionable correction, unsafe and neighboring-safe controls,
+  verification command, evidence source, and visible limitations. Nonempty placeholders do not pass.
+- **SBH-020 — Final-seam and terminal-outcome proof:** Safety and durability rules evaluate the final
+  assembled payload or committed state and require a terminal success/failure outcome. Intermediate
+  checks, transport success, process exit, or swallowed errors cannot substitute for the final seam.
 
 ## Evidence Behind the Design
 
@@ -307,6 +366,244 @@ annotations and a structured `$GITHUB_STEP_SUMMARY`; local rendering writes acti
 stderr so the driving agent receives it in the same tool context. `--format json` supports an
 external producer's preflight without scraping prose.
 
+## Approved Rule-Catalog and Diagnostic Extension
+
+The 2026-07-16 extension keeps SBH-007's single pure engine and adds typed rule metadata and
+action-specific observation adapters. It does not authorize a second evaluator, an LLM-only blocker,
+or independent shell implementations of policy. A model may summarize or rank already-proven
+findings, but it may not create the blocking verdict.
+
+### Rule and observation contracts
+
+```ts
+type BoundaryActionV2 =
+  | BoundaryAction
+  | 'update-pr'
+  | 'merge'
+  | 'tag'
+  | 'release'
+  | 'config-write';
+
+type EvidenceState =
+  | 'observed'
+  | 'absent'
+  | 'invalid'
+  | 'unavailable'
+  | 'stale'
+  | 'unknown';
+
+type RuleDisposition = 'shadow' | 'warning' | 'block-candidate';
+
+interface RuleContext {
+  action: BoundaryActionV2;
+  targetRepository: string;
+  targetIdentity: string;
+  now: Date;
+  ruleCatalogDigestSha256: string;
+  enforcementMode: EnforcementMode;
+}
+
+interface BoundaryRule<Observation> {
+  ruleId: string;
+  ruleVersion: number;
+  category: 'contract' | 'semantic' | 'history' | 'provenance' | 'supply-chain';
+  applicableActions: BoundaryActionV2[];
+  defaultDisposition: RuleDisposition;
+  requiredEvidence: string[];
+  evaluate(observation: Observation, context: RuleContext): RuleEvaluation;
+  unsafeControl: string;
+  neighboringSafeControl: string;
+  falsePositiveControl: string;
+  rollback: string;
+}
+
+interface RuleEvaluation {
+  decision: BoundaryDecision;
+  evidenceState: EvidenceState;
+  observed: BoundaryEvidenceRecord[];
+  expected: string[];
+  impact: string[];
+  correction: string[];
+  verification: string[];
+  limitations: string[];
+}
+
+interface BoundaryFindingV2 extends BoundaryFinding {
+  ruleVersion: number;
+  evidenceState: EvidenceState;
+  expected: string[];
+  impact: string[];
+  safeControls: string[];
+  verification: string[];
+  limitations: string[];
+  findingDigestSha256: string;
+}
+```
+
+Adapters collect evidence for a real action and convert it into an observation. Pure rules consume
+only observations and an injected context containing the exact target, trusted clock, rule catalog
+version, and enforcement mode. Renderers consume only validated evaluations and receipts. Network,
+Git, filesystem, compiler, and GitHub access remain outside rule evaluation.
+
+The initial observation families are deliberately small and reusable:
+
+- `RuntimeEdgeObservation`: base/head module graphs, effective compiler options, emitted import
+  edges, source tree modes, and changed path records;
+- `HistorySnapshotObservation`: exact candidate tree entries, task identities, provider repository,
+  page sequence, snapshot/watermark identity, observation times, bounds, and prior dispositions;
+- `ProvenanceObservationV2`: requested repository, observed repository, remote/local/head/merge-base
+  identities, structured path changes including rename/copy sources, counts, and freshness;
+- `PostconditionObservation`: original invariant, normal/fallback exit, before/after values, bound,
+  and typed failure outcome;
+- `ProofObservation`: claimed invariant, every required field, evidence subject, clock/lifetime, and
+  source independence;
+- `TargetPreflightObservation`: requested target, resolved configuration identity, side-effect-free
+  validation stages, and the first permitted mutation;
+- `StateVocabularyObservation`: all persistent statuses, terminal failure values, and reachable
+  production writers;
+- `ConsumerParityObservation`: a config key or enum and its loader, validator, API, fleet, docs,
+  monitoring, and explicit-not-applicable consumers.
+
+Source-specific adapters may add evidence, but they may not invent a source-specific variant of the
+same rule. A rule that cannot obtain its required observation returns `inconclusive` through a
+specific evidence rule such as `history.snapshot-incoherent`; it does not guess from raw prose.
+
+### Runtime validation and decision algebra
+
+The receipt boundary validates values at runtime after trimming, redaction, canonical path handling,
+and enum normalization. It rejects or converts to `inconclusive`:
+
+- decisions outside `warn | block | inconclusive` for findings;
+- unknown actions or enforcement modes, repeated singleton CLI options, and missing option values;
+- invalid or missing Git identities required by commit, push, PR, merge, tag, or release actions;
+- missing exact task identity for issue creation and missing resolved target identity for mutations;
+- whitespace-only rule IDs, summaries, reasons, evidence labels/values, corrections, tests, reruns,
+  and source references after sanitization;
+- duplicate finding identities or nondeterministic sort ties;
+- a claimed-complete collection with zero pages, no observation time, nonempty limitations,
+  regressing page times, an excessive page span, or an unproven snapshot/watermark;
+- fingerprints whose algorithm, length, or subject does not match the declared evidence field.
+
+Decision aggregation is evidence-aware:
+
+1. a deterministic block remains a block only when its own required evidence is complete;
+2. a limitation relevant to a rule converts that rule to `inconclusive`;
+3. top-level incomplete evidence outranks warnings, so `warn + limitation` exits as
+   `inconclusive` in enforce mode;
+4. unrelated limitations remain visible even when an independently proven block is retained;
+5. `pass` requires zero findings, zero limitations, a valid action contract, and all action-required
+   identities.
+
+Shadow mode may keep process exit zero, but it never rewrites the recorded decision. Enforce mode
+retains distinct nonzero exits for `block` and `inconclusive`. Invalid mode input can never fall back
+to shadow.
+
+### Receipt identity and compatibility
+
+The existing `correlationIdSha256` remains a grouping key; it is not promoted into an evidence
+attestation. A versioned receipt extension adds:
+
+```ts
+interface BoundaryReceiptV2 extends Omit<BoundaryReceipt, 'schemaVersion'> {
+  schemaVersion: 2;
+  target: { repository: string; actionTarget: string; headOid: string | null };
+  observedAt: string;
+  validUntil: string | null;
+  ruleCatalogDigestSha256: string;
+  evidenceDigestSha256: string;
+  findings: BoundaryFindingV2[];
+  overflow: null | {
+    rejectedFindingCount: number;
+    rejectedEvidenceCount: number;
+    rejectedByteCount: number;
+    rejectedEvidenceDigestSha256: string;
+  };
+}
+```
+
+`evidenceDigestSha256` covers the canonical target, identities, observation times, evidence states,
+limitations, rule IDs and versions, and all retained observation values. A head, target, observation,
+rule version, or limitation change therefore invalidates the evidence receipt even when the
+correlation group stays the same. Schema version 1 remains readable during migration; new producer
+behavior is not emitted as version 1 until consumer compatibility is proven.
+
+### Bounded contextual diagnostic contract
+
+Every warning, block, and inconclusive result renders in this order:
+
+1. decision, rule ID/version, actual action, target, and exact head/base when applicable;
+2. observed values and evidence state;
+3. expected invariant;
+4. why the difference matters and the unsafe direction;
+5. matched artifacts and exact source locations;
+6. neighboring-safe or false-positive control;
+7. two to four situational correction steps;
+8. tests to add or run, including the unsafe edge;
+9. exact rerun command;
+10. limitations and what the check did **not** determine;
+11. bounded receipt path, correlation ID, and evidence digest.
+
+Limitations are always rendered, including alongside findings. A limitations-only result receives
+the same why/correction/test/rerun/source sections; it may not collapse into a short observation with
+no recovery guidance. Generic passes name their actual invocation and action instead of always
+saying `semantic quality`.
+
+Initial receipt construction limits are policy constants with direct boundary tests: no more than
+128 canonical findings, 64 observations per finding, 16 matched artifacts, eight corrections,
+eight verification steps, 16 source references, or 1 MiB of JSON. Human rendering groups repeated
+guidance, shows at most 12 detailed findings, and stays within 64 KiB; it reports every omitted
+group/count and points to the bounded JSON receipt and evidence digest. Input beyond the canonical
+JSON cardinality or byte budget is rejected before semantic aggregation and becomes
+`boundary.evidence-volume-exceeded:inconclusive` with counts and a streaming digest. Human
+summarization alone does not change the semantic decision because the retained JSON evidence remains
+complete. These initial numbers accommodate the measured 45-finding current-head run while rejecting
+the 200- and 1,000-finding stress cases. They are calibration values, not permanent doctrine;
+changing them requires measured repository and CI evidence.
+
+All fields pass centralized redaction. Local paths are detected after quotes, equals signs,
+parentheses, and other punctuation; `file:` URLs are local-path references. Provider exceptions are
+classified into stable public error categories instead of copying raw messages. Raw GitHub comment
+bodies, credentials, query strings, emails, ANSI/control sequences, and operator-local paths do not
+enter receipts.
+
+### Example postcondition feedback
+
+```text
+WARN [semantic.fallback-postcondition@1] while updating PR #1887
+Target: LucasQuiles/WhatSoup head=<exact-head> base=<exact-base>
+Evidence state: observed
+
+Observed:
+  - exit_path: marker-fallback
+  - estimated_tokens: 106.25
+  - token_budget: 100
+
+Expected invariant:
+  - every successful return satisfies estimated_tokens <= token_budget
+
+Why this matters:
+  - the fallback recreates the oversized request that trimming was meant to prevent
+
+Neighboring safe control:
+  - estimated_tokens=81.25 with token_budget=100 remains successful
+
+Correction:
+  - reserve marker cost before trimming or trim again after marker insertion
+  - return a typed unrepresentable result when no valid payload fits
+
+Verification:
+  - unsafe edge 106.25/100 must not return success
+  - neighboring edge 81.25/100 must remain successful
+
+Rerun: npm run <targeted-check>
+Limitations: synthetic control-flow measurement; provider request behavior was not observed
+Evidence: <repo-relative source>; receipt=<bounded path>; digest=<sha256>
+```
+
+The example is a measured synthetic control-flow case, not evidence that an automatic producer
+already exists. A rule is not implemented until a real adapter produces the observation from the
+changed code or execution seam.
+
 ### Example feedback
 
 **Production island block**
@@ -402,6 +699,171 @@ false-positive rate:
 Warnings graduate to blockers only after a negative control, positive control, false-positive
 fixture, actionable remediation message, and rollback/override policy are present.
 
+## Evidence-Ranked Rule Catalog
+
+The catalog below deduplicates the 2026-07-16 audits against SBH-001 through SBH-020 and the
+existing history/provenance rules. “Block-candidate” still means shadow-first under SBH-008. A
+contract failure described as “inconclusive” blocks only at a boundary whose enforcement promotion
+has separately been authorized.
+
+### Immediate fail-closed contract corrections
+
+| Rule | Observed unsafe case | Required behavior |
+|---|---|---|
+| `boundary.contract-invalid` | Unknown runtime decision or malformed mode can aggregate/fall back to pass/shadow; whitespace fields survive pre-canonical validation | Runtime-validate after canonicalization; invalid contract is inconclusive and nonzero in enforce mode |
+| `boundary.action-identity-unproven` | A push receipt with `headOid=not-a-git-object` rendered pass | Require action-specific head/task/target identities before pass |
+| `boundary.evidence-incomplete` | `warn + limitation` exited zero; limitations alongside findings were hidden | Relevant incompleteness outranks warn; always render limitations and recovery guidance |
+| `boundary.receipt-evidence-unbound` | Correlation identity is unchanged when evidence source/limitations change | Add a separate digest over target, observations, limitations, and rule versions |
+| `boundary.feedback-contract-incomplete` | Empty/generic evidence and “fix it” satisfy structural completeness | Require expected invariant, consequence, controls, verification, and meaningful fields |
+| `boundary.evidence-volume-exceeded` | Ordinary output reached 57 KB; synthetic output reached 20–85 MB | Reject over-budget input as bounded inconclusive evidence with counts/digest |
+| `boundary.finding-identity-conflict` | Duplicate rule IDs are input-order-dependent with one correlation ID | Reject duplicate finding identities or sort by a full canonical evidence key |
+| `boundary.renderer-action-mismatch` | A generic history pass renders `PASS semantic quality` | Render the actual invocation, action, target, and exact identity |
+| `boundary.provider-deadline-unowned` | A provider ignoring `AbortSignal` remains pending | Enforce an owned deadline/watchdog outside cooperative cancellation |
+| `boundary.local-reference-unredacted` | Quoted/assigned local paths and `file:` URLs survive current redaction | Centralize punctuation-aware local-path and URI classification |
+| `history.collection-contract-invalid` | Complete-with-limitations, zero-page complete, and empty-observation collections can return no findings | Validate complete collection metadata independently before comparison |
+| `provenance.target-mismatch` | A syntactically valid foreign repository can return no findings | Bind observation repository to the exact requested target |
+| `semantic.policy-path-noncanonical` | Active allowlist `src/./feature.ts` misses canonical `src/feature.ts` and false-blocks | Canonicalize once or reject aliases during policy validation |
+
+These are corrections to the meaning of the existing boundary contract, not evidence that any new
+domain detector is complete. Their first tests must reproduce the exact unsafe case before changing
+implementation.
+
+### Deterministic shadow and blocker candidates
+
+| Rule | Unsafe control | Neighboring safe/false-positive control | Placement |
+|---|---|---|---|
+| `semantic.erased-import-edge` | Value-syntax import used only in a type position is erased by the effective compiler but counted as runtime reachability | Side-effect import or value-position runtime use emits an edge | semantic pre-push/PR |
+| `semantic.reachability-regression` | Deleting the sole bridge/import or root registration orphans unchanged production modules | Deleting an already-unreachable file creates no new regression | semantic pre-push/PR |
+| `semantic.nonregular-source-entry` | A committed `120000` `.ts` symlink is parsed as link-target text and appears clean | Regular `100644`/`100755` TypeScript source is analyzed; unsupported tree entries are inconclusive | exact-tree adapter |
+| `history.tree-entry-evidence-incomplete` | Opposite executable-bit transitions share path/blob/status identity | Same old/new mode and object type preserve exact identity | fingerprint/history |
+| `history.renamed-patch-open-pr` | Same stable patch under renamed paths has an existing open PR but returns no finding | Different patch remains clean | PR producer/history |
+| `history.reentry-packet-omitted` | Exact task identity plus prior disposition becomes warning-only when the packet is omitted | Material delta with independently discovered disposition and complete packet passes re-entry | PR reopen/update producer |
+| `boundary.evidence-observation-freshness` | Internally consistent 2000/2099 observations authorize clean history/provenance | Observation within declared trusted-clock age/skew budget | history/provenance adapters |
+| `history.snapshot-incoherent` | Page times regress or span years yet terminal cursor marks complete | Monotonic bounded page acquisition under one snapshot/watermark | history provider |
+| `provenance.rename-path-incomplete` | Rename destination only makes an upstream source-path change appear disjoint | Structured change record contains both source and destination | pre-push/PR provenance |
+| `semantic.health-receipt-incomplete` | HTTP 200 with malformed, stale, wrong-identity, or semantically unhealthy body is green | Current schema-valid body with expected identity and healthy semantics | health/release preflight |
+| `semantic.observation-collapsed` | Corrupt/unavailable/stale becomes cached `0`, `false`, `null`, or empty | Explicit unavailable/corrupt state remains distinguishable from measured zero/absence | persistence/aggregation |
+| `semantic.circular-oracle` | Producer and verifier share one mutable roster, allowing omitted members to disappear | Independent expected roster/digest with expected/observed/unknown counts | fleet/collection proof |
+| `semantic.fallback-postcondition` | Fallback success returns a value outside the original bound | Normal and fallback success both preserve the bound; unrepresentable is typed | changed fallback seam |
+| `semantic.target-unproven` | Named mutation preflight does not load or validate the named target configuration | Exact target/config identity is resolved before the first mutation | config/restart/release |
+| `semantic.failure-unrepresentable` | Durability table has no terminal failure value or no production writer | Terminal failure exists and a tested production path writes it | migrations/persistence |
+| `semantic.final-seam-unprotected` | Per-fragment/path checks allow a split or sibling payload through final send | Final assembled payload passes the same policy at the send/commit seam | egress/state mutation |
+
+For exact history, task identity is discovered independently from the candidate's optional re-entry
+packet. A packet cannot be the only source that tells the verifier which prior disposition to
+enforce. Candidate path/blob records become tree-entry records containing old/new path, old/new
+mode, object type, and blob identity. Missing required mode/type evidence is inconclusive rather
+than an exact match.
+
+Runtime reachability compares base and head, not merely changed head files. It loads the effective
+project compiler configuration and follows emitted runtime edges. Deleting or changing a bridge can
+therefore surface a reachable-to-unreachable transition in otherwise unchanged modules. Source
+inventory retains Git tree mode/type; non-regular TypeScript entries do not become source text by
+accident.
+
+### Warning-only candidates
+
+The following remain warnings until separate evidence proves a deterministic unsafe boundary:
+
+- `history.renamed-patch-merged-pr`: stable-patch equivalence to merged work asks for current-main
+  reachability/reuse proof;
+- `history.task-layout-similarity`: whitespace-relaxed task identity warns, while blocker-grade
+  task identity preserves Markdown-significant newlines/indentation after only CRLF normalization;
+- `semantic.proof-evidence-incomplete`: a claim omits a required field, such as explicit zero
+  reconnect attempts;
+- `semantic.proof-source-mismatch`: a process-lifetime clock is used to prove a connection-lifetime
+  claim, or evidence describes the wrong subject;
+- `semantic.consumer-parity`: a new config key or enum lacks a loader, validator, API, fleet, docs,
+  monitoring, or explicit-not-applicable record;
+- `semantic.numeric-domain-unproven`: numeric logic lacks NaN, positive/negative infinity,
+  negative, zero, fractional, and platform-ceiling controls appropriate to its type;
+- `semantic.timeout-work-unowned`: caller latency is bounded, but underlying work, cancellation,
+  cost, or late side effects are not owned;
+- `semantic.identifier-log-unclassified`: a persistent identifier enters structured logs without
+  classification, sanitization, and bounded retention;
+- `semantic.outcome-dimension-collapsed`: OS exit mechanism, transport connection, health, and
+  terminal operation outcome are represented as one status;
+- `semantic.high-cadence-side-effect`: a polling loop repeatedly performs credential/OS reads or
+  emits steady-state warnings without cache, invalidation, and transition telemetry;
+- `semantic.state-transition-unreconciled`: a state change does not reconcile dependent durable
+  records under a controlled interleaving;
+- `semantic.error-feedback-swallowed`: swallowed errors erase breaker, administrator, or terminal
+  operation feedback;
+- `semantic.nested-timeout-budget-unproven`: sequential/nested deadlines can exceed the enclosing
+  supervisor or shutdown budget;
+- `semantic.scope-ownership-mismatch`: claimed PR scope, changed ownership domain, and executed
+  tests do not align. Raw line/file counts alone never block.
+
+### Parsing and filtering rules
+
+Canonicalization is domain-specific and happens once:
+
+- CLI singleton arguments reject duplicates, missing values, case typos, and unknown values;
+- receipt enums and nested fields are runtime-validated after sanitization;
+- repository paths reject noncanonical policy aliases or canonicalize them through the same path
+  function used for graph and fingerprint evidence;
+- blocker-grade task fingerprints preserve Markdown structure; relaxed whitespace fingerprints are
+  stored separately and warning-only;
+- history pages prove repository, terminal pagination, monotonic bounded observation times, one
+  snapshot/watermark, and no limitations;
+- provenance compares the observed repository to the requested repository and accepts structured
+  path changes rather than a destination-only string set;
+- base/head reachability, tree modes, symlinks, submodules, deletions, copies, and renames remain
+  explicit instead of being filtered away before evaluation;
+- state values never use truthiness to collapse `0`, `false`, absence, corruption, unavailability,
+  stale evidence, and unknown evidence;
+- evidence filters report rejected counts/reasons and cannot silently turn a nonempty unsafe input
+  into an empty clean set.
+
+## Validation and Feedback-Efficacy Extension
+
+Every block candidate has an unsafe fixture, neighboring-safe fixture, and false-positive control.
+Every warning has a false-positive fixture. Parser and filter tests mutate one field at a time and
+assert both decision and complete rendered guidance. At minimum, the next plan includes:
+
+- unknown/missing/duplicate CLI options and runtime enum values;
+- post-canonical empty fields and invalid action-specific identities;
+- warning plus limitation, block plus unrelated limitation, and limitations-only rendering;
+- stale/future/foreign-target/zero-page/complete-with-limitations evidence;
+- monotonic and regressing pagination plus snapshot-span bounds;
+- tree modes, symlink/submodule source entries, rename/copy source paths, and chmod-only changes;
+- explicit type import, erased value-syntax type import, emitted value use, side-effect import, and
+  base-to-head orphan transitions;
+- stable patches against open, closed-unmerged, merged, and unrelated artifacts;
+- omitted, incomplete, material, and owner-overridden re-entry packets discovered independently;
+- punctuation-delimited local paths, `file:` URLs, secret/query URLs, ANSI, control characters, and
+  oversized arrays;
+- deterministic repeated runs, duplicate finding identities, JSON/human semantic equivalence, and
+  exact receipt digest invalidation when head/evidence/rule version changes;
+- providers that honor cancellation, throw timeout, and ignore cancellation under an owned
+  watchdog.
+
+Feedback usefulness is measured with matched correction trials. A fresh agent receives the same
+unsafe action with either the current or candidate diagnostic. Record whether its next attempt:
+
+1. changes the cited unsafe condition;
+2. preserves the neighboring-safe behavior;
+3. avoids introducing another boundary finding;
+4. uses the supplied test/rerun path without rediscovering the failure source;
+5. requests missing evidence when the result is inconclusive instead of guessing.
+
+Retain the verbose diagnostic only when it improves exact next-attempt correction without adding
+false blocks or causing material context overflow. Record raw counts and durations, not claims of
+token, latency, or capability savings inferred from role or message length.
+
+Implementation priority is fail-open-first:
+
+1. runtime contract parsing, action identity, decision aggregation, limitations rendering,
+   evidence digest, deterministic finding identity, output bounds, redaction, and owned deadline;
+2. history/provenance freshness, target binding, collection coherence, structured path changes,
+   tree-entry identity, stable-patch state matrix, and omitted re-entry discovery;
+3. emitted-edge and base/head reachability plus non-regular tree-entry handling;
+4. real observation producers for fallback postconditions, proof completeness, consumer parity,
+   state vocabulary, health semantics, and final-seam controls.
+
+No generic receipt fixture counts as implementation of a rule producer. Each priority begins with a
+failing behavioral fixture and remains shadow-only until its own promotion packet is complete.
+
 ## Local and CI Composition
 
 `verify:semantic` becomes the semantic source of truth. A later `verify:boundary` composes
@@ -476,6 +938,14 @@ can move to blocking only when all of the following are recorded:
 6. a rule-scoped rollback and owner-authored override path;
 7. an agent-feedback trial that records whether the next attempt corrected the cited condition;
 8. explicit owner authorization for ruleset or required-check mutation.
+9. runtime schema tests proving unknown enums, invalid identities, contradictory completeness, and
+   post-canonical empty values cannot yield pass;
+10. evidence receipts bind the exact target, head, observation lifetime, and rule version, and a
+    one-field change invalidates the evidence digest;
+11. output/cardinality bounds and an ignored-cancellation provider complete with explicit
+    inconclusive results under the owned deadline;
+12. human and JSON renderers expose the same decision, limitations, correction, verification, and
+    evidence identity.
 
 Exact duplicate evidence may reach blocking before heuristic similarity, but it is not exempt from
 the observation, feedback, rollback, and authorization requirements. Supply-chain enforcement also
@@ -501,6 +971,17 @@ failures.
 - A reopen equivalent to #1857 is blocked until the architectural disposition is addressed.
 - A stale local `origin/main` cannot produce a clean duplicate or overlap verdict.
 - Mutable action/image references produce contextual findings and immutable pins pass.
+- A value-syntax import erased by the effective TypeScript compiler does not prove runtime
+  reachability, while an emitted value/side-effect import passes.
+- Removing the sole composition edge surfaces the newly orphaned unchanged modules.
+- Chmod-only and non-regular tree entries cannot collide with regular path/blob identity or appear
+  as clean TypeScript source.
+- A stable patch already present in an open PR routes work to that PR even when paths changed.
+- Stale, future, foreign-repository, zero-page, complete-with-limitations, and temporally incoherent
+  observations are inconclusive.
+- Warning plus incomplete evidence exits inconclusive in enforce mode and renders the limitation.
+- Unknown runtime decisions/modes, invalid action identities, whitespace-only feedback, duplicate
+  finding identities, and over-budget evidence cannot produce pass.
 - The same finding has equivalent human and JSON meaning in pre-commit, pre-push, CI, and external
   producer contexts.
 - Feedback names the attempted action, actual evidence, prior artifacts, correction, and rerun
@@ -514,3 +995,8 @@ The semantic-foundation plan is ready for execution only after this specificatio
 the implementation notes are committed together. Completion of those documents does not mean the
 production guard exists. The first implementation task must begin with a failing fixture and may
 reuse experiment logic only after moving it behind the production interfaces named in the plan.
+
+The 2026-07-16 extension requires its own reviewed implementation plan before code changes. That
+plan starts with the current-core fail-open contract cases and must distinguish a receipt renderer
+from a real rule producer. No hook, workflow, ruleset, GitHub provider, or external producer is
+promoted by approval or commitment of this design document.

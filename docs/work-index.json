@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-16T07:14:45Z",
+  "generated_at": "2026-07-16T08:46:55Z",
   "repo": "WhatSoup",
-  "git_head": "eee2032dd6081a4004550eac09eeca40b1615f46",
+  "git_head": "83a55b131b2fa51f9d3c6c8f3f2494140ae4fd03",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 66,
   "schema_version": 5,
@@ -724,7 +724,7 @@
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-07-15",
-      "size_bytes": 28565
+      "size_bytes": 59826
     },
     {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",
