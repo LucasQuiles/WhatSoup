@@ -11021,7 +11021,7 @@ export class AgentRuntime implements Runtime {
 
           let contextLease: SystemTurnLeaseToken | null = null;
           try {
-            const recent = excludeCurrentInboundMessage(getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), this.perChatTurnSourceMessageId.get(mapKey));
+            const recent = excludeCurrentInboundMessage(getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), mapKey === undefined ? this.currentTurnSourceMessageId : this.perChatTurnSourceMessageId.get(mapKey));
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
               // QR-095: same fix as the sendTurnToSession injection — in single/
