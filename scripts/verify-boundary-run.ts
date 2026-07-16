@@ -37,6 +37,7 @@ import {
   createBoundaryDerivedRoot,
   parseBoundaryChildPins,
   parseBoundaryJsonBytes,
+  parseBoundaryMergePreviewStdout,
   reserveBoundaryDerivedRoot,
   resolveBoundaryToolCapability,
   runBoundaryAttemptProcess,
@@ -2858,12 +2859,9 @@ async function recordGitTransition(
       const source = JSON.parse(sourceBytes.toString('utf8')) as BoundaryRunManifest;
       observationUpstream = source.upstream;
       const preview = acceptedAttemptStdout(source, path.join(runDir, 'predecessor'), 'merge-preview');
-      previewConflictPaths = canonicalSet(preview.split('\n').flatMap((line) => {
-        const conflict = /CONFLICT \([^)]*\): .* in (.+)$/.exec(line);
-        if (conflict !== null) return [conflict[1]!];
-        const stage = /^[0-7]{6} [0-9a-f]{40} [123]\t(.+)$/.exec(line);
-        return stage === null ? [] : [stage[1]!];
-      }));
+      const parsedPreview = parseBoundaryMergePreviewStdout(preview);
+      if (parsedPreview === null) throw new Error('merge preview is malformed');
+      previewConflictPaths = parsedPreview.conflictPaths;
       if (
         source.run.profileId !== 'bcf00-observation'
         || source.manifestState !== 'finalized'

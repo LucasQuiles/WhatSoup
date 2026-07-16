@@ -271,7 +271,7 @@ async function finalizeSyntheticObservation(
   const attempts = attemptIds.map((id) => {
     const attemptDir = path.join(runDir, 'attempts', id);
     mkdirSync(attemptDir);
-    const stdout = id === 'merge-preview' ? options.mergePreviewStdout ?? '' : '';
+    const stdout = id === 'merge-preview' ? options.mergePreviewStdout ?? OID : '';
     writeFileSync(path.join(attemptDir, 'stdout.log'), stdout);
     writeFileSync(path.join(attemptDir, 'stderr.log'), '');
     return {
@@ -282,7 +282,7 @@ async function finalizeSyntheticObservation(
       cwd: repo,
       startedAtUtc: TIME,
       endedAtUtc: TIME,
-      expectedExit: '0',
+      expectedExit: boundaryRun.RUN_ATTEMPT_CONTRACTS[id]!.expectedExit,
       rawExit: 0,
       rawSignal: null,
       expectationMet: true,
@@ -3342,6 +3342,7 @@ describe('boundary run validator', () => {
       '[BCF07-S01]', '[BCF07-S02]',
       '[BCF07-N01]', '[BCF07-N02]', '[BCF07-N03]', '[BCF07-N04]',
     ]);
+    expect(boundaryRun.RUN_ATTEMPT_CONTRACTS['merge-preview']?.expectedExit).toBe('0,1');
   });
 
   it('accepts only the exact RED unsafe sentinels paired with passing safe controls', () => {
@@ -3621,6 +3622,35 @@ describe('boundary run validator', () => {
     for (const [predicate, stdout, allowedPaths] of valid) {
       expect(api.validateBoundaryStdoutPredicate(predicate, stdout, allowedPaths), String(predicate))
         .toMatchObject({ ok: true, verdict: 'Pass' });
+    }
+    const conflictPreview = [
+      OID,
+      `100644 ${'1'.repeat(40)} 1\tdocs/work-index.json`,
+      `100644 ${'2'.repeat(40)} 2\tdocs/work-index.json`,
+      `100644 ${'3'.repeat(40)} 3\tdocs/work-index.json`,
+      `100644 ${'4'.repeat(40)} 1\tdocs/work-index.md`,
+      `100644 ${'5'.repeat(40)} 2\tdocs/work-index.md`,
+      `100644 ${'6'.repeat(40)} 3\tdocs/work-index.md`,
+      '',
+      'Auto-merging docs/public-surface.md',
+      'Auto-merging docs/work-index.json',
+      'CONFLICT (content): Merge conflict in docs/work-index.json',
+      'Auto-merging docs/work-index.md',
+      'CONFLICT (content): Merge conflict in docs/work-index.md',
+      '',
+    ].join('\n');
+    expect(api.validateBoundaryStdoutPredicate('merge-preview', conflictPreview, []))
+      .toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
+    for (const invalid of [
+      conflictPreview.replace(`100644 ${'3'.repeat(40)} 3\tdocs/work-index.json\n`, ''),
+      conflictPreview.replace(
+        'CONFLICT (content): Merge conflict in docs/work-index.md',
+        'CONFLICT (content): Merge conflict in docs/foreign.md',
+      ),
+      `${conflictPreview}unparsed diagnostic\n`,
+    ]) {
+      expect(api.validateBoundaryStdoutPredicate('merge-preview', invalid, []).issues.map((entry) => entry.code))
+        .toContain('attempt-stdout-predicate-mismatch');
     }
     for (const [predicate, stdout, allowedPaths] of [
       ['oid', `${OID}\nextra\n`, []],

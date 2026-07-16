@@ -510,7 +510,9 @@ const attemptEntries: Array<readonly [string, BoundaryAttemptContract]> = [
   ['upstream-ahead-behind', commandContract(['git', 'rev-list', '--left-right', '--count', 'origin/main...HEAD'], { stdoutPredicate: 'ahead-behind' })],
   ['upstream-remote-diff', commandContract(['git', 'diff', '--name-status', '<observed-merge-base>...origin/main'])],
   ['upstream-local-diff', commandContract(['git', 'diff', '--name-status', '<observed-merge-base>...HEAD'])],
-  ['merge-preview', commandContract(['git', 'merge-tree', '--write-tree', 'HEAD', 'origin/main'], { stdoutPredicate: 'merge-preview' })],
+  ['merge-preview', commandContract(['git', 'merge-tree', '--write-tree', 'HEAD', 'origin/main'], {
+    expectedExit: '0,1', stdoutPredicate: 'merge-preview',
+  })],
 
   ['merge-transition', transitionContract('merge', null)],
   ['postmerge-validator-suite', commandContract(VALIDATOR_TEST, { deadlineMs: 900_000, headAnchor: 'terminal', resultPredicate: 'bcf00-green' })],
@@ -2866,8 +2868,10 @@ export function validateBoundaryStdoutPredicate(
   let valid = false;
   switch (predicate) {
     case 'oid':
-    case 'merge-preview':
       valid = /^[0-9a-f]{40}$/.test(trimmed);
+      break;
+    case 'merge-preview':
+      valid = parseBoundaryMergePreviewStdout(stdout) !== null;
       break;
     case 'ssh-origin':
       valid = /^git@[^:\s]+:[^\s]+$/.test(trimmed);
@@ -2889,6 +2893,53 @@ export function validateBoundaryStdoutPredicate(
   return valid
     ? snapshotResult([])
     : snapshotResult([issue('attempt-stdout-predicate-mismatch', `stdout failed predicate: ${predicate}`)]);
+}
+
+export function parseBoundaryMergePreviewStdout(stdout: string): {
+  treeOid: string;
+  conflictPaths: string[];
+} | null {
+  const trimmed = stdout.trim();
+  if (/^[0-9a-f]{40}$/.test(trimmed)) return { treeOid: trimmed, conflictPaths: [] };
+  const lines = stdout.replace(/\n$/, '').split('\n');
+  if (!/^[0-9a-f]{40}$/.test(lines[0] ?? '')) return null;
+  const stages = new Map<string, Set<number>>();
+  const conflictPaths = new Set<string>();
+  for (const line of lines.slice(1)) {
+    if (line === '') continue;
+    const stage = /^([0-7]{6}) ([0-9a-f]{40}) ([123])\t(.+)$/.exec(line);
+    if (stage !== null) {
+      const relativePath = stage[4]!;
+      if (!isSafePath(relativePath)) return null;
+      const values = stages.get(relativePath) ?? new Set<number>();
+      const stageNumber = Number(stage[3]);
+      if (values.has(stageNumber)) return null;
+      values.add(stageNumber);
+      stages.set(relativePath, values);
+      continue;
+    }
+    const autoMerge = /^Auto-merging (.+)$/.exec(line);
+    if (autoMerge !== null) {
+      if (!isSafePath(autoMerge[1]!)) return null;
+      continue;
+    }
+    const conflict = /^CONFLICT \(content\): Merge conflict in (.+)$/.exec(line);
+    if (conflict !== null) {
+      if (!isSafePath(conflict[1]!)) return null;
+      conflictPaths.add(conflict[1]!);
+      continue;
+    }
+    return null;
+  }
+  if (stages.size === 0 || conflictPaths.size === 0) return null;
+  for (const values of stages.values()) {
+    if (values.size !== 3 || !values.has(1) || !values.has(2) || !values.has(3)) return null;
+  }
+  const orderedStages = [...stages.keys()].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  const orderedConflicts = [...conflictPaths].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  return canonicalizeBoundaryRun(orderedStages) === canonicalizeBoundaryRun(orderedConflicts)
+    ? { treeOid: lines[0]!, conflictPaths: orderedConflicts }
+    : null;
 }
 
 export function validateAndAppendBoundaryPredecessor(input: Record<string, unknown>): {
