@@ -46,39 +46,35 @@ plan-review receipt and a local commit frozen as operator-observed `BCF_VALIDATO
 permitted action is a fresh advisory BCF-00A RED against the amended contract, followed by its
 three-file implementation.
 
+The revived TDD lane later exposed one additional wire contradiction before predecessor code was
+written: `CompletionReceipt` hashes the completed ledger, but the `ChainRow` table still named that
+same completion-receipt digest even though the adjacent prose prohibited the reverse edge. The
+closed row now uses `previousLedgerSha256`—null only for the genesis row and equal to the exact
+predecessor ledger digest thereafter—so receipt-to-ledger hashing is acyclic. The prior planning
+receipt and planning-base commit predate this correction and cannot authorize the bootstrap parent;
+the operator must bind fresh exact-input review to a successor planning commit before resuming the
+bootstrap lane.
+
 ## Planning Review Evidence
 
 The 27-pass deterministic plan review completed under the external artifact root recorded in the
 local operator handoff as `PLAN_REVIEW_ARTIFACTS`. The machine-local value is intentionally not
 published in this repository.
 
-The unfiltered closeout command exited zero and reported `valid: true`, 27 ordered passes, nine
-supported artifact contracts, and seven passing cross-artifact consistency rules. The final
-manifest status is `completed`. The review preserves its failed attempts, including invalid manifest
-arguments, the first pass-18 artifact contract, a masked capability-version probe, the first final
-consistency check, and the first wrapper-level closeout attempt. None is counted as clean evidence.
+The pre-commit review must report `valid: true`, 27 ordered passes, nine legacy artifact contracts,
+seven cross-artifact consistency rules, all 15 current contracts through a separate `--all`
+receipt, and final manifest status `completed`. Its unique root must preserve every failed attempt;
+none is converted to clean evidence by a later passing neighbor.
 
-That closeout applied to the reviewed input bytes before the history/provenance amendment described
-below. The amended plan is **Inconclusive until exact-hash re-closeout**. Even after a clean plan
-closeout, execution is `Not Ready` for BCF-01: A-08 upstream/predecessor reconciliation, A-09
-immutable artifact identity, and A-10 lifecycle/oracle disposition must pass first. A-02 remains due
-before BCF-02, A-03 before BCF-05, and A-06 before BCF-08C. This does not claim that any production
-change, schema-2 receipt, provider deadline, feedback budget, test, hook, workflow, hosted check, or
-agent-correction trial passes.
-
-The installed review runtime now exposes 15 artifact contracts rather than the nine used by that
-historical closeout. Its local self-test run on July 16 reported 156 passing tests and one unmasked
-stale-fixture failure: the legacy complete-run fixture omits the five structured review artifacts
-that support six newer contracts. Fresh closeout must satisfy all 15 live contracts and preserve
-this tool-integrity gap; the older nine-contract result cannot be promoted as current evidence.
-The shared installation then changed during this review; a later exact rerun observed 164 tests with
-five failures and five errors in JSON-schema/native-contract parity checks. The final review must
-therefore execute from one hash-locked copied tool snapshot and preserve those installed-runtime
-attempts as historical, inconclusive evidence. A subsequent fresh copied candidate snapshot ran
-185 unfiltered tests clean. Its complete-run helper intentionally embeds the nine legacy contracts,
-so fresh closeout requires two direct receipts: the separate `--all` validator must prove all 15
-live contracts, while the complete-run validator must prove 27 ordered passes, nine legacy
-contracts, and seven consistency rules. Neither receipt may stand in for the other.
+The hash-locked copied tool snapshot's unfiltered suite currently runs 185 tests with three failures:
+bundle synchronization plus native/source parity for `task-graph.v1.schema.json` and
+`policy-decisions.v1.schema.json` against a changing external source tree. That lane is
+Inconclusive, not clean. The direct 15-contract receipt and complete-run 27/9/7 receipt remain
+separate and both are required. Even after those direct receipts pass, execution is `Not Ready` for
+BCF-01: A-08 upstream/predecessor reconciliation, A-09 immutable artifact identity, and A-10
+lifecycle/oracle disposition must pass first. A-02 remains due before BCF-02, A-03 before BCF-05,
+and A-06 before BCF-08C. This does not claim that any production change, schema-2 receipt, provider
+deadline, feedback budget, test, hook, workflow, hosted check, or agent-correction trial passes.
 
 Three bounded read-only reviewers audited the older calibration head
 `83a55b131b2fa51f9d3c6c8f3f2494140ae4fd03`. Their advisory findings were preserved in the plan
@@ -238,7 +234,9 @@ The current plan also requires a hash-chained predecessor ledger across BCF-00 t
 clean task-path entry snapshots, helper-owned process-group watchdogs for every external child,
 structured U/S/N test markers and per-case evaluator receipts, content-independent overflow
 descriptors, review-finding verdict aggregation, and an authoritative negative-control matrix before
-accepted closeout. These are planning contracts only; none is implemented or passing yet.
+accepted closeout. These are planning contracts only; none is committed or authoritative yet.
+Uncommitted validator TDD may exist in the working tree, but it is advisory until the exact
+three-file bootstrap commit and post-commit replay.
 
 The plan intentionally commits the eventual tracked handoff while its post-commit final gate is
 still pending. A unique ignored helper-owned final manifest and sibling hash-locked closeout receipt

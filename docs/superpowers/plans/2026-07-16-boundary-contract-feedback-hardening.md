@@ -1131,7 +1131,7 @@ The sibling completion and final-closeout objects are equally closed:
 |---|---|
 | `CompletionReceipt` | `schemaVersion`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `manifestSha256`, `manifestLockSha256`, `ledgerSha256`, `predecessorReceiptSha256`, `predecessorLedgerSha256`, `reconciledBase`, `upstreamObservedOid`, `corpusDigests`, `oracleDigest`, `lifecycleStatus`, `finalGate`, `overallVerdict` |
 | `ChainLedger` | `schemaVersion`, `rows`, `reconciledBase`, `upstreamObservedOid`, `corpusDigests`, `oracleDigest` |
-| `ChainRow` | `ordinal`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `manifestSha256`, `completionReceiptSha256`, `overallVerdict` |
+| `ChainRow` | `ordinal`, `taskId`, `profileId`, `runId`, `entryHead`, `terminalHead`, `manifestSha256`, `previousLedgerSha256`, `overallVerdict` |
 | `corpusDigests` | `cases`, `holdout` |
 | `CloseoutCore` | `schemaVersion`, `runId`, `taskId`, `profileId`, `terminalHead`, `snapshotDigestSha256`, `helperCommit`, `helperSha256`, `runManifestSha256`, `runManifestLockSha256`, `finalizeRawExit`, `finalizeRawSignal`, `verifyRawExit`, `verifyRawSignal`, `completionReceiptSha256`, `completionReceiptLockSha256`, `ledgerSha256`, `ledgerLockSha256`, `startedAtUtc`, `endedAtUtc`, `lifecycleStatus`, `requiredAttemptIds`, `requiredChildAliases`, `internalStatus`, `overallVerdict` |
 | `CloseoutInternalStatus` | `stage`, `rawExit`, `rawSignal`, `expectationMet`, `verdict` |
@@ -1143,8 +1143,11 @@ Completion/ledger `schemaVersion` is integer `1`. Receipt IDs/tasks/profiles and
 verdict fields use their closed types; heads are `Oid`; manifest/lock/ledger/corpus/oracle values are
 `Sha256`; predecessor receipt/ledger values are null only for the BCF-00 genesis; reconciled/upstream
 values are `Oid`; and `corpusDigests` is exactly two `Sha256` fields. Ledger rows use contiguous
-positive integer ordinals, closed IDs, two heads, three hashes, and `Verdict`; row order is the
-implementation-chain order and is never sorted after append.
+positive integer ordinals, closed IDs, two heads, a manifest `Sha256`, nullable
+`previousLedgerSha256`, and `Verdict`; the first row alone uses null, while every later row names
+the exact predecessor ledger digest. Row order is the implementation-chain order and is never
+sorted after append. A row never names its own completion-receipt digest: the receipt hashes the
+completed ledger, so that reverse edge would create an uncomputable hash cycle.
 
 Closeout/core/report `schemaVersion` is integer `1`; IDs/tasks/profiles, lifecycle, required arrays,
 and verdicts use their closed types; heads/helper commits are `Oid`; every named digest is `Sha256`;
