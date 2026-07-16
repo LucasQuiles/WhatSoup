@@ -1694,8 +1694,9 @@ supplied at invocation. Extra environment assignments, unlisted shell wrappers, 
 or arguments exit 2. `record-internal-check --run-dir <run> --attempt <id>` accepts no arbitrary
 argv and exclusively owns `internal-check` IDs; `record-git-transition` exclusively owns
 `git-transition` IDs. Each subcommand rejects IDs owned by either other operation. The RED contracts expect `nonzero`, the
-watchdog canary expects `124,137`, the three liveness probes expect `nonzero`, and all other
-required commands/transitions expect `0`; only the canary and branch gate add inner timeout owner
+merge preview expects `0,1` under its result predicate, the watchdog canary expects `124,137`, the
+three liveness probes expect `nonzero`, and all other required commands/transitions expect `0`;
+only the canary and branch gate add inner timeout owner
 `gnu-timeout` inside the mandatory helper watchdog. Exit status alone never satisfies a RED contract. Every RED and GREEN Vitest entry
 appends the fixed `--reporter=json --outputFile <run-relative-result-path>` arguments to its displayed
 selection prefix and predeclares that ignored helper-owned result path. Its closed
@@ -2520,6 +2521,22 @@ validator suite and typecheck through `record-command`; register their logs. Run
 foreign-head, expectation, review-join, and lifecycle mutation controls on sibling copies and
 require their declared nonzero statuses. Record exact spec/plan/notes/helper hashes. Only after
 those controls pass, record through the helper:
+
+The direct `git merge-tree --write-tree HEAD origin/main` preview has the closed expected-exit set
+`0,1`: exit 0 requires stdout to be exactly one tree OID, while exit 1 requires a leading tree OID,
+one or more complete stage-1/2/3 rows, and conflict diagnostics whose canonical path set equals the
+stage-row path set. A signal, any other exit, missing stage, malformed row, path disagreement, or
+unparseable diagnostic is Inconclusive. The helper records the conflict preview as accepted
+evidence; it does not treat exit 1 as a clean merge or mutate the worktree.
+
+Recovery note for preserved run `bcf00-observation-e781ae26b`: the first committed helper correctly
+preserved its direct exit-1 preview but incorrectly declared `merge-preview` as exit-0/OID-only, so
+that run remains Inconclusive. Commit this plan/notes correction first, set `BCF_VALIDATOR_BASE` to
+that documentation commit, then make one three-validator-file corrective commit with subject
+`fix(quality): accept conflict merge previews`. Re-run the complete postcommit validator suite and
+typecheck from a new observation run; never edit or reuse the failed run. For lineage purposes the
+corrective interval `BCF_VALIDATOR_BASE..BCF_VALIDATOR_COMMIT` must still contain exactly the three
+validator paths and no documentation path.
 
 ```bash
 git rev-parse --show-toplevel

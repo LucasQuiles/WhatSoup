@@ -374,6 +374,18 @@ The first follow-on must not add a second receipt path, history scanner, or work
 Patch identity alone never authorizes branch deletion; a fresh `git cherry -v` and `git range-diff`
 must explain every changed or dropped patch before any supersession cleanup.
 
+## 2026-07-16 committed-helper recovery
+
+Bootstrap validator commit `e781ae26bccad5f9af6c6cdc1c6f232c16213de4` passed its recorded
+57-test postcommit suite and `typecheck:scripts`. Its first immutable observation run,
+`bcf00-observation-e781ae26b`, then preserved the planned generated-index preview with direct Git
+exit 1, leading tree `0cb7789cf68a84e8d653906e40ab3007ba2d7fc6`, complete stage-1/2/3 rows,
+and conflicts only in `docs/work-index.json` and `docs/work-index.md`. The attempt remained
+Inconclusive because the bootstrap contract incorrectly required exit 0 and OID-only stdout. Do not
+reuse or overwrite that run. The approved recovery is one plan/notes commit followed by the exact
+three-validator-file correction `fix(quality): accept conflict merge previews`, then a fresh full
+observation run.
+
 ## Authorization Boundary
 
 The current approval authorizes writing and committing the local specification, plan, and
