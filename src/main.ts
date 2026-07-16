@@ -31,6 +31,8 @@ import {
 } from './core/database-compatibility-early.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
+import { createCapabilityGrantManager, type CapabilityGrantManager } from './lib/capability-grant.ts';
+import { createSettingsPolicyAdapter, createFileGrantStore, assertGroupsRespectDenyFloor } from './core/capability-grant-adapter.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
@@ -296,6 +298,9 @@ const connectionManager: RuntimeConnection = createConnection(config);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
+// Capability-grant manager (#1835) — agent instances only; groups are
+// config-driven (empty by default). reconcile() runs at startup (see start()).
+let grantManager: CapabilityGrantManager | undefined;
 if (instanceType === 'agent') {
   const agentOpts = instanceConfig?.agentOptions as {
     sessionScope?: string;
@@ -343,6 +348,23 @@ if (instanceType === 'agent') {
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
   });
+  // Wire the capability-grant manager over this agent's .claude/settings.json.
+  // Groups are config-driven (empty by default → /grant reports "unknown group").
+  // Fail closed to "grants disabled" on a floor-violating group config rather
+  // than crashing the instance at startup.
+  if (cwdResolved) {
+    try {
+      assertGroupsRespectDenyFloor(config.capabilityGrantGroups);
+      const claudeDir = join(cwdResolved, '.claude');
+      grantManager = createCapabilityGrantManager({
+        groups: config.capabilityGrantGroups,
+        policy: createSettingsPolicyAdapter(claudeDir),
+        store: createFileGrantStore(join(claudeDir, 'capability-grant.json')),
+      });
+    } catch (err) {
+      log.error({ err }, 'capability-grant disabled: group config intersects the REQUIRED_DENY floor');
+    }
+  }
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {
     name: config.botName,
@@ -451,6 +473,7 @@ connectionManager.onMessage = createIngestHandler(
   () => connectionManager.botLid,
   durability,
   instanceType,  // pass instance type for passive short-circuit
+  grantManager,
 );
 
 connectionManager.on('chatCleared', (jid: string) => {
@@ -962,6 +985,10 @@ triggerPoller.start();
 async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
+  // Reconcile persisted capability grants BEFORE the connection delivers any
+  // messages (and thus any /grant command): revert an expired grant left by a
+  // crash so a privileged window never outlives its TTL across a restart.
+  if (grantManager) await grantManager.reconcile();
   await connectionManager.connect();
 
   // Wait for history sync or timeout, then allow echo grace before recovery so
