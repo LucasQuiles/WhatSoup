@@ -339,6 +339,7 @@ type RuntimeView = {
   currentRuntimeTurnContext: RuntimeTurnContext | null;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
+  perChatTurnSourceMessageId: Map<string, string>;
   perChatTurnContentType: Map<string, string>;
   perChatTurnText: Map<string, string>;
   perChatAssistantItemText: Map<string, Map<string, string>>;
@@ -1905,6 +1906,7 @@ describe('AgentRuntime edge coverage', () => {
     state.sessionEventToolScopes.set(session, toolScopeKey);
     state.pendingTurnText.set(mapKey, 'lost user turn after rejected resume');
     state.pendingTurnActorJid.set(mapKey, 'actor-recovery@s.whatsapp.net');
+    state.perChatTurnSourceMessageId.set(mapKey, 'current-inbound');
     state.imageCoalesce.buffers.set(mapKey, {
       timer: coalesceTimer,
       msg: { chatJid },
@@ -1927,6 +1929,12 @@ describe('AgentRuntime edge coverage', () => {
         content: null,
         contentType: 'image',
         timestamp: 1_781_095_200,
+      }),
+      makeStoredMessage({
+        pk: 3,
+        messageId: 'current-inbound',
+        content: 'lost user turn after rejected resume',
+        timestamp: 1_781_095_300,
       }),
     ]);
 
@@ -1952,6 +1960,7 @@ describe('AgentRuntime edge coverage', () => {
     const sendTurnCalls = session.sendTurn.mock.calls as unknown as Array<[string]>;
     expect(sendTurnCalls[0]![0]).toContain('[media]');
     expect(sendTurnCalls[0]![0]).toContain('Ada: older context');
+    expect(sendTurnCalls[0]![0]).not.toContain('lost user turn after rejected resume');
     expect(session.sendTurn).toHaveBeenCalledTimes(1);
     const contextTurn = state.pendingSystemResults.peek(mapKey);
     expect(contextTurn).toEqual(expect.objectContaining({

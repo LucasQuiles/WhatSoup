@@ -100,7 +100,7 @@ import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
-import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
+import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter, type StoredMessage } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
@@ -4377,7 +4377,7 @@ export class AgentRuntime implements Runtime {
         let contextLease: SystemTurnLeaseToken | null = null;
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
-          const recent = getRecentMessages(this.db, convKey, 20);
+          const recent = this.excludeCurrentInboundFromContext(getRecentMessages(this.db, convKey, 20), effectiveMapKey);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
             // QR-095: mark under the SAME scope the single/shared result handler
@@ -10901,6 +10901,10 @@ export class AgentRuntime implements Runtime {
     return d.toTimeString().slice(0, 5); // HH:MM
   }
 
+  private excludeCurrentInboundFromContext(messages: StoredMessage[], mapKey?: string): StoredMessage[] {
+    const sourceMessageId = mapKey === undefined ? this.currentTurnSourceMessageId : this.perChatTurnSourceMessageId.get(mapKey);
+    return sourceMessageId ? messages.filter((message) => message.messageId !== sourceMessageId) : messages;
+  }
   /**
    * Format chat messages into the `[HH:MM] sender: content` lines injected as
    * recent-context into a fresh/stand-in session. Single source of truth for
@@ -11028,7 +11032,7 @@ export class AgentRuntime implements Runtime {
 
           let contextLease: SystemTurnLeaseToken | null = null;
           try {
-            const recent = getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30);
+            const recent = this.excludeCurrentInboundFromContext(getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), mapKey);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
               // QR-095: same fix as the sendTurnToSession injection — in single/

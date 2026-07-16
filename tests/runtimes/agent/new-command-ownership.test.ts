@@ -365,7 +365,21 @@ describe('per-chat /new ownership transition', () => {
         await spawnRelease;
       };
 
-      turn = state._handleMessageInner(makeMessage(lidJid, 'turn crossing a LID rekey'));
+      const currentTurn = makeMessage(lidJid, 'turn crossing a LID rekey');
+      storeMessageIfNew(db, {
+        chatJid: currentTurn.chatJid,
+        conversationKey,
+        senderJid: currentTurn.senderJid,
+        senderName: currentTurn.senderName,
+        messageId: currentTurn.messageId,
+        content: currentTurn.content,
+        contentType: currentTurn.contentType,
+        isFromMe: currentTurn.isFromMe,
+        timestamp: currentTurn.timestamp,
+        quotedMessageId: currentTurn.quotedMessageId,
+        contentText: currentTurn.contentText,
+      });
+      turn = state._handleMessageInner(currentTurn);
       await spawned;
       runtime.handleJidAliasChanged(conversationKey, canonicalJid);
 
@@ -407,6 +421,8 @@ describe('per-chat /new ownership transition', () => {
         mapKey: canonicalKey,
         text: expect.stringContaining('[Recent chat context'),
       });
+      expect(routedTurns[0]?.text).toContain('history that must be injected after the rekeyed spawn');
+      expect(routedTurns[0]?.text).not.toContain('turn crossing a LID rekey');
       expect(routedTurns[1]).toMatchObject({
         mapKey: canonicalKey,
         text: expect.stringContaining('turn crossing a LID rekey'),
