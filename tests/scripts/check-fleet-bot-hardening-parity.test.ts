@@ -101,6 +101,34 @@ describe('fleet bot hardening parity guard', () => {
     expect(result.sourceAnchors).toBeGreaterThanOrEqual(1);
   });
 
+  it('fails when the parity manifest updated timestamp is older than the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-06-15' });
+
+    // Inject a clock far past the documented max age so the age math is
+    // unambiguous and independent of the real wall clock or the constant.
+    const staleNow = new Date('2027-01-01T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, staleNow);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'stale-updated' }),
+    ]));
+  });
+
+  it('accepts a parity manifest whose updated timestamp is within the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-06-15' });
+
+    const freshNow = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, freshNow);
+
+    expect(result.ok).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
   it('fails when a hardened row has an unproven capability', () => {
     const root = makeRoot();
     writeFixtureStandard(root);

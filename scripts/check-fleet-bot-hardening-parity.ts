@@ -8,6 +8,17 @@ import { isRecord } from '../src/lib/type-guards.ts';
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
   'docs/reliability-runner/fleet-bot-hardening-parity.json';
 
+// Documented freshness backstop for the source-side parity manifest. The fleet
+// hardening standard expires rows on runtime events (restart, re-cut, config or
+// credential change); this age budget is a coarse fail-closed floor so a manifest
+// that is never refreshed cannot stay green forever. It is deliberately generous
+// (the tracked manifest ages out ~90 days after its `updated` date) so it never
+// second-guesses a manifest that is being actively maintained. Event-based
+// expiry is tracked separately from this age check.
+export const FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS = 90;
+const FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS =
+  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
 export const REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES = [
   'turn-capability-health',
   'primary-model-usability-probe',
@@ -55,6 +66,7 @@ export type FleetBotHardeningParityFindingCode =
   | 'manifest-not-object'
   | 'unsupported-schema'
   | 'invalid-updated'
+  | 'stale-updated'
   | 'missing-standard'
   | 'invalid-scope'
   | 'summary-not-object'
@@ -349,6 +361,7 @@ function validateSourceAnchors(
 export function checkFleetBotHardeningParity(
   cwd = process.cwd(),
   manifestPath = DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
+  now: Date = new Date(),
 ): FleetBotHardeningParityResult {
   let payload: unknown;
   try {
@@ -375,8 +388,19 @@ export function checkFleetBotHardeningParity(
   if (payload['schemaVersion'] !== 1) {
     findings.push(finding('unsupported-schema', `unsupported schemaVersion=${String(payload['schemaVersion'])}`));
   }
-  if (typeof payload['updated'] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(payload['updated'])) {
+  const updated = payload['updated'];
+  if (typeof updated !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(updated)) {
     findings.push(finding('invalid-updated', 'parity manifest updated must be YYYY-MM-DD'));
+  } else {
+    const updatedMs = Date.parse(`${updated}T00:00:00Z`);
+    if (Number.isNaN(updatedMs)) {
+      findings.push(finding('invalid-updated', 'parity manifest updated must be a valid calendar date'));
+    } else if (now.getTime() - updatedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+      findings.push(finding(
+        'stale-updated',
+        `parity manifest updated ${updated} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget; refresh the runtime parity evidence`,
+      ));
+    }
   }
   if (typeof payload['standard'] !== 'string' || !isSafeRepoRelativePath(payload['standard'])) {
     findings.push(finding('missing-standard', 'parity manifest standard must be a safe repo-relative path'));
