@@ -907,84 +907,27 @@ def remote_failure_context(host: str, error: str = "") -> tuple[list[str], dict[
     return lines, diagnostics
 
 
-def reachability_probe_port() -> int:
-    """SSH port used by the offline-confirmation TCP probe. 0 disables probing."""
-    raw = os.environ.get("BOT_ERRORS_REACHABILITY_PROBE_PORT", "22")
+def tailscale_ping_command(host: str) -> list[str] | None:
+    raw = os.environ.get("BOT_ERRORS_TAILSCALE_PING_COMMAND")
+    if raw is not None and not raw.strip():
+        return None  # explicitly disabled
+    if raw:
+        return [*shlex.split(raw), host]
+    return ["tailscale", "ping", "--c", "1", "--timeout", "3s", host]
+
+
+def tailscale_ping_timeout() -> float:
+    raw = os.environ.get("BOT_ERRORS_TAILSCALE_PING_TIMEOUT_SECONDS", "4")
     try:
-        return int(raw)
+        timeout = float(raw)
     except ValueError:
-        return 22
+        timeout = 4
+    return max(timeout, 0.5)
 
 
-def reachability_probe_timeout() -> float:
-    raw = os.environ.get("BOT_ERRORS_REACHABILITY_PROBE_TIMEOUT_SECONDS", "2")
-    try:
-        return max(float(raw), 0.1)
-    except ValueError:
-        return 2.0
-
-
-def tcp_probe_reachable(summary: dict[str, Any]) -> bool:
-    """Best-effort TCP connect to the peer's SSH port across its Tailscale IPs.
-
-    Tailscale's ``Online`` field reflects the coordination server's view, which can
-    transiently flip a peer to ``False`` during a control-plane / DERP reconnect
-    even while the direct peer-to-peer path is still up. A successful TCP connect
-    proves the path is live, so we must NOT declare the host unreachable on the
-    control-plane flag alone. Set ``BOT_ERRORS_REACHABILITY_PROBE_PORT=0`` to
-    disable the probe (restores trust-the-flag behaviour).
-    """
-    port = reachability_probe_port()
-    if port <= 0:
-        return False
-    ips = summary.get("tailscaleIPs")
-    if not isinstance(ips, list):
-        return False
-    timeout = reachability_probe_timeout()
-    for ip in ips:
-        if not isinstance(ip, str) or not ip:
-            continue
-        try:
-            with socket.create_connection((ip, port), timeout=timeout):
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
-    tailscale = tailscale_peer_summary(host)
-    if tailscale.get("status") == "found" and tailscale.get("online") is False:
-        # Control plane reports offline — confirm with a fast TCP probe before
-        # skipping SSH, so a transient Tailscale flip does not page a false
-        # CRITICAL across every still-reachable host.
-        if tcp_probe_reachable(tailscale):
-            return None
-        return tailscale
-    return None
-
-
-def reachability_diagnosis(diagnostics: dict[str, Any]) -> str | None:
-    value = diagnostics.get("reachabilityDiagnosis")
-    return value if isinstance(value, str) and value else None
-
-
-_TRANSIENT_UNREACHABLE_DIAGNOSES: frozenset[str] = frozenset({
-    "tailscale_offline",
-    "tailscale_online_ssh_timeout",
-    "tailscale_online_ssh_failed",
-})
-
-
-def is_transient_unreachable(diagnostics: dict[str, Any]) -> bool:
-    """Return True when the reachability diagnosis indicates a known-transient
-    unreachable state (laptop sleep, Tailscale blip, SSH transport timeout).
-
-    These are expected remote states that must NOT generate critical pages
-    before the backoff threshold is crossed.  Genuine failures — e.g.
-    tailscale_online_ssh_remote_error — return False and keep critical severity.
-    """
-    return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
+def liveness_probe_enabled() -> bool:
+    raw = os.environ.get("BOT_ERRORS_PREFLIGHT_LIVENESS_PROBE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def best_effort_info_tier_enabled() -> bool:
@@ -1001,8 +944,97 @@ def best_effort_info_tier_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def probe_target_for(host: str, tailscale: dict[str, Any] | None = None) -> str:
+    """Pick the address ``tailscale ping`` can actually resolve.
+
+    ``tailscale ping`` resolves only Tailscale IPs and MagicDNS names — NOT
+    arbitrary ssh host aliases. The collector keys remotes by their ssh alias,
+    which ``tailscale ping`` cannot look up (``error looking up IP of
+    "<alias>"``), so probing the bare alias always
+    errored → fail-closed → the liveness probe could never clear a stale
+    ``Online: false`` and the false-positive storm it was meant to suppress
+    fired anyway.
+
+    Prefer the peer's Tailscale IPv4, then any Tailscale IP, then the matched
+    token, then the alias itself as a last resort.
+    """
+    summary = tailscale if tailscale is not None else tailscale_peer_summary(host)
+    ips = summary.get("tailscaleIPs") if isinstance(summary, dict) else None
+    if isinstance(ips, list):
+        for ip in ips:
+            if isinstance(ip, str) and "." in ip and ":" not in ip:
+                return ip  # IPv4 — most universally pingable
+        for ip in ips:
+            if isinstance(ip, str) and ip:
+                return ip  # IPv6 fallback
+    matched = summary.get("matched") if isinstance(summary, dict) else None
+    if isinstance(matched, str) and matched:
+        return matched
+    return host
+
+
+def remote_liveness_probe_ok(host: str, probe_target: str | None = None) -> bool:
+    """Confirm a peer is actually reachable via a direct probe.
+
+    The Tailscale control-plane ``Online`` flag goes stale for idle peers that
+    hold a direct (LAN) path — they stop refreshing the coordination-server
+    heartbeat while remaining fully reachable over WireGuard. Trusting that flag
+    alone produced correlated false-positive ``relay_host_down`` storms (the
+    whole relay fleet flagged offline while every node answered ssh in <10ms).
+
+    ``probe_target`` is the address actually handed to ``tailscale ping`` — it
+    MUST be a Tailscale-resolvable IP/MagicDNS name, not the ssh host alias.
+    Callers pass the peer's Tailscale IP via :func:`probe_target_for`. When
+    omitted (unit tests) it falls back to ``host``.
+
+    Returns True only on a positive pong. Fail-closed: a disabled, timed-out, or
+    erroring probe returns False so the caller preserves the conservative
+    skip-on-offline behaviour rather than hanging on a genuinely dead host.
+    """
+    if not liveness_probe_enabled():
+        return False
+    cmd = tailscale_ping_command(probe_target or host)
+    if cmd is None:
+        return False
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=tailscale_ping_timeout(),
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return proc.returncode == 0 and "pong" in proc.stdout.lower()
+
+
+def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
+    tailscale = tailscale_peer_summary(host)
+    if tailscale.get("status") == "found" and tailscale.get("online") is False:
+        # The Online flag is a stale-prone control-plane heartbeat; confirm with
+        # a real liveness probe before skipping ssh. A node that answers a direct
+        # ping is reachable regardless of the flag — do not suppress its claim.
+        # Probe the peer's Tailscale IP, never the bare ssh alias (which
+        # ``tailscale ping`` cannot resolve).
+        if remote_liveness_probe_ok(host, probe_target_for(host, tailscale)):
+            return None
+        return tailscale
+    return None
+
+
+def reachability_diagnosis(diagnostics: dict[str, Any]) -> str | None:
+    value = diagnostics.get("reachabilityDiagnosis")
+    return value if isinstance(value, str) and value else None
+
+
 def skip_writefail_after_outbox_failure(diagnostics: dict[str, Any]) -> bool:
-    return reachability_diagnosis(diagnostics) in _TRANSIENT_UNREACHABLE_DIAGNOSES
+    return reachability_diagnosis(diagnostics) in {
+        "tailscale_offline",
+        "tailscale_online_ssh_timeout",
+        "tailscale_online_ssh_failed",
+    }
 
 
 def legacy_open_record(state: dict[str, Any], key: str, remote: str, source: str) -> dict[str, Any] | None:
@@ -1045,12 +1077,10 @@ def enqueue_meta_alert(
     state: dict[str, Any],
     cooldown: int,
     extra_diagnostics: dict[str, Any] | None = None,
-    severity: str = "critical",
     best_effort: bool = False,
 ) -> None:
     current = int(time.time())
-    # Pattern I: best-effort wins over transient; gate off restores prior behavior.
-    effective_severity = "info" if (best_effort and best_effort_info_tier_enabled()) else severity
+    effective_severity = "info" if (best_effort and best_effort_info_tier_enabled()) else "critical"
     alerts = state.setdefault("alerts", {})
     open_alerts = state.setdefault("openAlerts", {})
     key = alert_key(remote, source)
@@ -1938,7 +1968,6 @@ def run_once(
                     state,
                     alert_cooldown,
                     reachability_diagnostics,
-                    severity="warning" if is_transient_unreachable(reachability_diagnostics or {}) else "critical",
                     best_effort=is_best_effort,
                 )
             records = []
@@ -2053,7 +2082,6 @@ def run_once(
                         state,
                         alert_cooldown,
                         reachability_diagnostics,
-                        severity="warning" if is_transient_unreachable(reachability_diagnostics or {}) else "critical",
                     )
         if outbox_claim_succeeded and not writefail_claim_failed:
             remotes_succeeded += 1

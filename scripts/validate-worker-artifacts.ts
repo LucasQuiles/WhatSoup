@@ -88,14 +88,21 @@ function metadataPathFor(reportPath: string): string {
   return path.join(path.dirname(reportPath), `${path.basename(reportPath, ext)}.meta.json`);
 }
 
-function listReportFiles(dir: string): string[] {
+function listReportFiles(dir: string, rootDir = dir, skipNestedManifestDirs = false): string[] {
   const entries = readdirSync(dir, { withFileTypes: true });
   const files: string[] = [];
 
   for (const entry of entries) {
     const filePath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...listReportFiles(filePath));
+      if (
+        skipNestedManifestDirs
+        && path.resolve(filePath) !== path.resolve(rootDir)
+        && existsSync(path.join(filePath, MANIFEST_FILE_NAME))
+      ) {
+        continue;
+      }
+      files.push(...listReportFiles(filePath, rootDir, skipNestedManifestDirs));
     } else if (entry.isFile() && isReportFile(filePath)) {
       files.push(filePath);
     }
@@ -252,7 +259,7 @@ function validateManifestCompleteness(
 export function validateWorkerArtifacts(options: WorkerArtifactOptions): WorkerArtifactResult {
   const now = options.now ?? new Date();
   const issues: WorkerArtifactIssue[] = [];
-  const files = listReportFiles(options.dir);
+  const files = listReportFiles(options.dir, options.dir, options.requireManifest ?? false);
   const manifest = readManifest(options.dir, options.requireManifest ?? false, issues);
 
   validateManifestCompleteness(manifest, files, issues);
