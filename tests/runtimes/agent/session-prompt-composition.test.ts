@@ -9,7 +9,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 970;
+const BASE_TRANSPORT_PROMPT_BYTES = 1_503;
 
 const tempRoots: string[] = [];
 
@@ -66,6 +66,7 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt).toContain('Configured instruction.');
     expect(prompt).toContain('File instruction.');
     expect(prompt.indexOf('Configured instruction.')).toBeLessThan(prompt.indexOf('File instruction.'));
+    expect(prompt.indexOf('File instruction.')).toBeLessThan(prompt.indexOf('Trusted actor contract:'));
     expect(prompt.match(new RegExp(identityLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
   });
 

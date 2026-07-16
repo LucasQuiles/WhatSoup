@@ -535,7 +535,9 @@ if (wasSilentCompact || hadCompactBoundary) {
   // Capture voice reply context before flush (SP4)
   const chatJidForVoice = queue.targetChatJid;
   const inboundContentType = mapKey !== undefined ? (host.perChatTurnContentType.get(mapKey) ?? null) : null;
-  const responseText = !wasSilentCompact && mapKey !== undefined ? (host.perChatTurnText.get(mapKey) ?? '') : '';
+  const responseText = !wasSilentCompact && mapKey !== undefined && !queue.hasToolReplyClaimed?.()
+    ? (host.perChatTurnText.get(mapKey) ?? '')
+    : '';
   const hadSuppressedReplySatisfaction = mapKey !== undefined
     ? host.perChatTurnSuppressedReplySatisfaction.delete(mapKey)
     : false;

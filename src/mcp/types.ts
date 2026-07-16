@@ -1,6 +1,7 @@
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+import type { TurnReplySink } from '../core/turn-reply.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -66,6 +67,8 @@ export interface SessionContext {
   allowedRoot?: string;
   /** Abort signal tied to the MCP client connection. Fires when the client disconnects. */
   abortSignal?: AbortSignal;
+  /** Routes an admitted agent-turn reply through the durable outbound queue. */
+  turnReplySink?: TurnReplySink;
 }
 
 export interface ToolDeclaration {

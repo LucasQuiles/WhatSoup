@@ -168,6 +168,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
+import { createActiveTurnReplySink } from './turn-reply-sink.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -2859,7 +2860,6 @@ export class AgentRuntime implements Runtime {
         const claudeDir = join(agentCwd, '.claude');
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
         const socketPath = join(claudeDir, 'whatsoup.sock');
-
         // Fail-closed file boundary (audit #1094): the global session must carry
         // an explicit allowedRoot or file-capable tools (post_status/send_media/
         // schedule_message) would be denied. agentCwd is the agent's working root
@@ -2872,7 +2872,7 @@ export class AgentRuntime implements Runtime {
             'agent cwd unset; global MCP file boundary falls back to home directory',
           );
         }
-        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
+        const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd, turnReplySink: createActiveTurnReplySink(({ conversationKey }) => this.chatQueues.get(conversationKey) ?? this.queue) };
         this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -7640,7 +7640,7 @@ export class AgentRuntime implements Runtime {
     const socketServer = new WhatSoupSocketServer(
       socketPath,
       this.registry,
-      perChatActorSession(chatJid, this.cwd ?? homedir(), this.perChatConversationBound),
+      Object.assign(perChatActorSession(chatJid, this.cwd ?? homedir(), this.perChatConversationBound), { turnReplySink: createActiveTurnReplySink(() => this.chatQueues.get(mapKey)) }),
       () => this.resolveExecutingActor(chatJid),
     );
     socketServer.start();
@@ -10149,6 +10149,7 @@ export class AgentRuntime implements Runtime {
       handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
     });
+    providerToolSession.turnReplySink = createActiveTurnReplySink(() => this.chatQueues.get(this.findMapKeyForSession(session) ?? '') ?? this.queue);
     this.sessionManagerIds.set(session, randomUUID());
     this.sessionEventToolScopes.set(
       session,
@@ -10242,6 +10243,7 @@ export class AgentRuntime implements Runtime {
               deliveryJid: chatJid,
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
+              turnReplySink: createActiveTurnReplySink(() => this.chatQueues.get(workspaceKey)),
             };
             socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
             socketServer.start();

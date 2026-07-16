@@ -81,7 +81,7 @@ For every user turn, resolve the actor using the existing LID-to-phone mapping a
 - `untrusted_or_unknown`
 - `system`
 
-Pass only that enum into the session turn envelope. The provider-facing prelude states the classification as trusted transport metadata and explicitly says it is not user-authored content. It never includes the actor's phone number, JID, configured admin list, or tool inventory.
+Pass only that enum into the session turn envelope. A final server-owned system-prompt contract authenticates the first bounded metadata block prepended to each real user turn and rejects later lookalikes. Persistent CLI protocols carry the dynamic block in the user-turn payload, so the stable system contract explicitly defines that first block as transport metadata rather than user-authored content. It never includes the actor's phone number, JID, configured admin list, or tool inventory.
 
 This signal informs conversational behavior only. MCP/tool authorization continues to use the existing actor-bound `SessionContext` and server-side admin checks. If identity resolution is ambiguous or unavailable, classification fails closed to `untrusted_or_unknown`.
 

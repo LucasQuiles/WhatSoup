@@ -15,6 +15,7 @@ import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts'
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
+import type { TurnReplySinkResult } from '../../core/turn-reply.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -264,6 +265,10 @@ export interface IOutboundQueue {
   enqueueStreamingText(text: string, role?: OutboundMessageRole): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
   enqueueResultText(text: string, role?: OutboundMessageRole): void;
+  /** Claim the active turn's single answer channel for an MCP send_message reply. */
+  enqueueToolReplyText?(text: string): TurnReplySinkResult;
+  /** Whether the current admitted turn's answer channel belongs to an MCP reply. */
+  hasToolReplyClaimed?(): boolean;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -284,6 +289,8 @@ export interface IOutboundQueue {
   abortTurn(options?: { preserveEvidence?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
+  /** Canonical conversation identity retained across LID/phone delivery changes. */
+  readonly targetConversationKey?: string;
   /** Opaque echo-guard token. Exposed so a replacement queue can INHERIT the
    *  prior queue's token (QR-069) — without this, a queue replaced within the
    *  group cooldown window gets a fresh random token and its legitimate reply is
@@ -664,6 +671,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Track whether the current turn has already sent visible text to the user. */
   private turnHasVisibleText = false;
+  private turnAnswerOwner: 'provider' | 'tool' | null = null;
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
   private streamBufferParts: BufferedStreamPart[] = [];
@@ -673,6 +681,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
+    if (role === 'answer' && !this.claimProviderAnswer()) return;
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
@@ -706,6 +715,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text) return;
+    if (role === 'answer' && !this.claimProviderAnswer()) return;
     if (role === 'answer') this.activeStreamedAnswerText += text;
     this.turnHasVisibleText = true;
     this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
@@ -755,12 +765,30 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!text || text.trim() === '') return;
+    if (role === 'answer' && !this.claimProviderAnswer()) return;
     if (role === 'answer' && this.suppressDuplicateSameTurnFinalPayload(text)) return;
     if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
       // Suppress — the user already got the real response during the turn
       return;
     }
     this.enqueueText(text, role);
+  }
+
+  enqueueToolReplyText(text: string): TurnReplySinkResult {
+    if (!this.activeTurnEvidence) return { disposition: 'inactive' };
+    if (!text || text.trim() === '' || this.turnAnswerOwner !== null) {
+      return { disposition: 'suppressed', reason: 'answer_already_claimed' };
+    }
+    this.turnAnswerOwner = 'tool';
+    const attribution = this.snapshotAttribution('answer');
+    this.flushStreamBuffer();
+    this.turnHasVisibleText = true;
+    this.enqueuePreparedText(text, attribution);
+    return { disposition: 'queued' };
+  }
+
+  hasToolReplyClaimed(): boolean {
+    return this.turnAnswerOwner === 'tool';
   }
 
   /**
@@ -1063,6 +1091,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   get targetChatJid(): string { return this.deliveryJid; }
+  get targetConversationKey(): string { return this.conversationKey; }
 
   hasPendingWork(): boolean {
     return this.drainFailure !== undefined
@@ -1524,11 +1553,19 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private resetSameTurnFinalPayloadTracking(): void {
+    this.turnAnswerOwner = null;
     this.activeStreamedAnswerPayloadHashes.clear();
     this.activeStreamedAnswerText = '';
     this.completedStreamedAnswerPayloadHashes.clear();
     this.completedStreamedTurnId = undefined;
     this.completedStreamSnapshotReady = false;
+  }
+
+  private claimProviderAnswer(): boolean {
+    if (!this.activeTurnEvidence) return true;
+    if (this.turnAnswerOwner === 'tool') return false;
+    this.turnAnswerOwner ??= 'provider';
+    return true;
   }
 
   private sameTurnFinalPayloadHash(text: string): string {

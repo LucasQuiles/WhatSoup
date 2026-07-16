@@ -46,6 +46,13 @@ function makeDb(): DatabaseSync {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+  db.exec(`
+    CREATE TABLE lid_mappings (
+      lid TEXT PRIMARY KEY,
+      phone_jid TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
   return db;
 }
 
@@ -203,6 +210,104 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.jid).toBe('main-chat@s.whatsapp.net');
       expect(call.content.text).toBe('Hello world');
+    });
+
+    it('routes an admitted turn reply through the durable reply sink instead of direct transport', async () => {
+      const turnReplySink = vi.fn(() => ({ disposition: 'queued' as const }));
+      const session = { ...chatSession('main-chat', 'main-chat@s.whatsapp.net'), turnReplySink };
+
+      const result = await registry.call('send_message', { text: 'One durable reply' }, session);
+
+      expect(result.isError).toBeUndefined();
+      expect(turnReplySink).toHaveBeenCalledWith({
+        chatJid: 'main-chat@s.whatsapp.net',
+        conversationKey: 'main-chat',
+        text: 'One durable reply',
+      });
+      expect(calls).toHaveLength(0);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ sent: true, queued: true });
+    });
+
+    it('canonicalizes a mapped LID before routing a global-session active-turn reply', async () => {
+      db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run('opaque-lid', '15555550123@s.whatsapp.net');
+      const turnReplySink = vi.fn(() => ({ disposition: 'queued' as const }));
+      const session: SessionContext = { tier: 'global', turnReplySink };
+
+      const result = await registry.call('send_message', {
+        chatJid: 'opaque-lid@lid',
+        text: 'Mapped durable reply',
+      }, session);
+
+      expect(result.isError).toBeUndefined();
+      expect(turnReplySink).toHaveBeenCalledWith({
+        chatJid: 'opaque-lid@lid',
+        conversationKey: '15555550123',
+        text: 'Mapped durable reply',
+      });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('canonicalizes a mapped LID even when the chat session retains its raw LID key', async () => {
+      db.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run('opaque-lid', '15555550123@s.whatsapp.net');
+      const turnReplySink = vi.fn(() => ({ disposition: 'queued' as const }));
+      const session = {
+        ...chatSession('opaque-lid', 'opaque-lid@lid'),
+        turnReplySink,
+      };
+
+      const result = await registry.call('send_message', { text: 'Mapped chat reply' }, session);
+
+      expect(result.isError).toBeUndefined();
+      expect(turnReplySink).toHaveBeenCalledWith({
+        chatJid: 'opaque-lid@lid',
+        conversationKey: '15555550123',
+        text: 'Mapped chat reply',
+      });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('reports a repeated admitted-turn tool reply as suppressed without direct transport', async () => {
+      const turnReplySink = vi.fn(() => ({
+        disposition: 'suppressed' as const,
+        reason: 'answer_already_claimed' as const,
+      }));
+      const session = { ...chatSession('main-chat', 'main-chat@s.whatsapp.net'), turnReplySink };
+
+      const result = await registry.call('send_message', { text: 'Duplicate reply' }, session);
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        sent: false,
+        suppressed: true,
+        reason: 'answer_already_claimed',
+      });
+    });
+
+    it('preserves direct transport when the durable reply sink has no admitted turn', async () => {
+      const turnReplySink = vi.fn(() => ({ disposition: 'inactive' as const }));
+      const session = { ...chatSession('main-chat', 'main-chat@s.whatsapp.net'), turnReplySink };
+
+      const result = await registry.call('send_message', { text: 'Proactive message' }, session);
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ sent: true, text: 'Proactive message' });
+    });
+
+    it('fails closed when an active reply sink belongs to another conversation', async () => {
+      const turnReplySink = vi.fn(() => ({
+        disposition: 'rejected' as const,
+        reason: 'turn_target_mismatch' as const,
+      }));
+      const session = { ...chatSession('main-chat', 'main-chat@s.whatsapp.net'), turnReplySink };
+
+      const result = await registry.call('send_message', { text: 'Wrong lane' }, session);
+
+      expect(result.isError).toBe(true);
+      expect(calls).toHaveLength(0);
     });
 
     // ── client-safety guardrail (Lane 2) ───────────────────────────────────

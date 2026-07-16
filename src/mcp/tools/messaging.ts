@@ -8,6 +8,7 @@ import type { ToolRegistry } from '../registry.ts';
 import { errorResult, toolError, type SessionContext } from '../types.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { DOMAIN_LID } from '../../core/jid-constants.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -130,6 +131,23 @@ export interface MessagingDeps {
   instanceName?: string;
 }
 
+function resolvePreparedConversationKey(
+  chatJid: string,
+  session: SessionContext,
+  db: DatabaseSync,
+): string {
+  const atIndex = chatJid.indexOf('@');
+  if (atIndex > 0 && chatJid.slice(atIndex + 1) === DOMAIN_LID) {
+    const lid = chatJid.slice(0, atIndex).split(':', 1)[0];
+    const row = db.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(lid) as
+      | { phone_jid: string }
+      | undefined;
+    if (row) return toConversationKey(row.phone_jid);
+  }
+  if (session.conversationKey) return session.conversationKey;
+  return toConversationKey(chatJid);
+}
+
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;
 
@@ -211,6 +229,7 @@ export function registerMessagingTools(
     handler: async (params, session: SessionContext) => {
       let formattedText = '';
       let guardDecision: OutboundMessageSafetyDecision | null = null;
+      let turnReplyDisposition: 'queued' | 'suppressed' | null = null;
       try {
         await sendPipeline.executeSend(params, async (prepared) => {
           const viewOnce = params['viewOnce'] as boolean | undefined;
@@ -226,6 +245,18 @@ export function registerMessagingTools(
             : { text: formatted };
           if (prepared.linkPreviewMode === 'off') content['linkPreview'] = null;
           if (viewOnce) content['viewOnce'] = true;
+          const turnReply = session.turnReplySink?.({
+            chatJid: prepared.chatJid,
+            conversationKey: resolvePreparedConversationKey(prepared.chatJid, session, db),
+            text: formatted,
+          });
+          if (turnReply?.disposition === 'queued' || turnReply?.disposition === 'suppressed') {
+            turnReplyDisposition = turnReply.disposition;
+            return;
+          }
+          if (turnReply?.disposition === 'rejected') {
+            throw new Error('Active turn reply target does not match the admitted conversation');
+          }
           const receipt = await connection.sendRaw(prepared.chatJid, content);
           return { transportId: receipt.waMessageId };
         }, {
@@ -287,6 +318,12 @@ export function registerMessagingTools(
       }
 
       routeDivertToOps(guardDecision, deps.instanceName);
+      if (turnReplyDisposition === 'suppressed') {
+        return { sent: false, suppressed: true, reason: 'answer_already_claimed' };
+      }
+      if (turnReplyDisposition === 'queued') {
+        return { sent: true, queued: true, text: formattedText };
+      }
       return { sent: true, text: formattedText };
     },
   });

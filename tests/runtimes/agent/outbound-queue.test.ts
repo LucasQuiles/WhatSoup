@@ -1841,6 +1841,57 @@ describe('OutboundQueue', () => {
     expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
   });
 
+  it('routes one active-turn tool reply through durable answer evidence and suppresses later answer paths', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.setInboundSeq(45);
+    queue.beginTurnEvidence('turn-tool-reply');
+
+    expect(queue.enqueueToolReplyText('Tool-delivered answer.')).toEqual({ disposition: 'queued' });
+    expect(queue.enqueueToolReplyText('Second tool answer.')).toEqual({
+      disposition: 'suppressed',
+      reason: 'answer_already_claimed',
+    });
+    queue.enqueueStreamingText('Later streamed answer.');
+    queue.endTurn();
+    queue.enqueueResultText('Later terminal answer.');
+    await vi.runAllTimersAsync();
+
+    const evidence = await queue.flushTurnEvidence('turn-tool-reply');
+    expect(calls).toEqual(['Tool-delivered answer.']);
+    expect(evidence.answerOpIds).toEqual([1]);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves direct tool transport available when no admitted turn owns the queue', () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    expect(queue.enqueueToolReplyText('Out-of-turn message.')).toEqual({ disposition: 'inactive' });
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps provider output when it claims the answer before a tool send', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setInboundSeq(46);
+    queue.beginTurnEvidence('turn-provider-reply');
+
+    queue.enqueueStreamingText('Provider answer.');
+    expect(queue.enqueueToolReplyText('Late tool answer.')).toEqual({
+      disposition: 'suppressed',
+      reason: 'answer_already_claimed',
+    });
+    queue.endTurn();
+    await vi.runAllTimersAsync();
+    await queue.flushTurnEvidence('turn-provider-reply');
+
+    expect(calls).toEqual(['Provider answer.']);
+  });
+
   it('allows the same answer in a later inbound turn', async () => {
     const { messenger, calls } = makeMessenger();
     const durability = makeDurabilityStub();

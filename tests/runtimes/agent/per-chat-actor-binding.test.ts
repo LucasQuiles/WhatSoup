@@ -723,11 +723,17 @@ describe('#1785 rec-3: createPerChatActorSocket binds conversationKey (closes th
     expect(sessionArg).toMatchObject({ tier: 'global', conversationKey: CHAT });
   });
 
-  it('default (perChatConversationBound unset) -> the actor socket session carries NO binding (status quo preserved)', () => {
+  it('default actor socket adds durable reply routing without acquiring a conversation binding', () => {
     priv().wirePerChatActorSocket(CHAT, 'claude-cli');
     const sessionArg = (WhatSoupSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
-    // Exact #1785 rec-3 shape — no binding, no deliveryJid, nothing else.
-    expect(sessionArg).toEqual({ tier: 'global', allowedRoot: expect.any(String), conversationKey: CHAT });
+    expect(sessionArg).toEqual({
+      tier: 'global',
+      allowedRoot: expect.any(String),
+      conversationKey: CHAT,
+      turnReplySink: expect.any(Function),
+    });
+    expect(sessionArg).not.toHaveProperty('binding');
+    expect(sessionArg).not.toHaveProperty('deliveryJid');
   });
 });
 

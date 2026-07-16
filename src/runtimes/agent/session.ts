@@ -49,6 +49,7 @@ import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '..
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
 import {
+  TRUSTED_ACTOR_SYSTEM_CONTRACT,
   composeTrustedActorTurn,
   type TrustedActorAccessClass,
 } from './trusted-actor-envelope.ts';
@@ -767,6 +768,8 @@ export class SessionManager {
         sources.push(instructionsContent);
       }
     }
+
+    sources.push(TRUSTED_ACTOR_SYSTEM_CONTRACT);
 
     const systemPrompt = composeWithExactLineDedup(sources);
     if (systemPrompt.trim().length === 0) {
