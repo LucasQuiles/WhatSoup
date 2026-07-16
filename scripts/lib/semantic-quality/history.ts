@@ -5,6 +5,7 @@ import type {
   BoundaryFinding,
 } from './boundary-types.ts';
 import {
+  canonicalRepositoryPath,
   canonicalPathBlobRecords,
   contentFingerprintSha256,
   type PathBlobRecord,
@@ -248,6 +249,8 @@ function reentryFinding(input: {
   reentry: ReentryPacket;
   matches: PreparedArtifact[];
   now: Date;
+  verifiedOverrideOwners: ReadonlySet<string>;
+  candidatePaths: ReadonlySet<string>;
 }): BoundaryFinding | null {
   const observed: BoundaryEvidenceRecord[] = dispositionEvidence(input.matches);
   const packet = input.reentry as Partial<ReentryPacket>;
@@ -270,13 +273,21 @@ function reentryFinding(input: {
   );
 
   observed.push({ label: 'delta_kind', value: String(packet.deltaKind ?? 'missing') });
+  let productionOwnerPath: string | null = null;
+  if (typeof packet.productionOwner === 'string' && packet.productionOwner.trim().length > 0) {
+    try {
+      productionOwnerPath = canonicalRepositoryPath(packet.productionOwner, 'productionOwner');
+    } catch {
+      observed.push({ label: 'packet_error', value: 'productionOwner invalid' });
+    }
+  }
+  const productionOwnerChanged =
+    productionOwnerPath !== null && input.candidatePaths.has(productionOwnerPath);
   observed.push({
     label: 'production_owner',
-    value:
-      typeof packet.productionOwner === 'string' && packet.productionOwner.trim().length > 0
-        ? packet.productionOwner
-        : 'missing',
+    value: productionOwnerPath ?? 'missing',
   });
+  observed.push({ label: 'production_owner_changed', value: String(productionOwnerChanged) });
   if (!priorRefsValid) observed.push({ label: 'packet_error', value: 'priorArtifactRefs invalid' });
   if (!conditionsValid) {
     observed.push({ label: 'packet_error', value: 'addressedConditions invalid' });
@@ -289,6 +300,8 @@ function reentryFinding(input: {
     const overrideFailures: string[] = [];
     if (typeof override.owner !== 'string' || override.owner.trim().length === 0) {
       overrideFailures.push('owner is missing');
+    } else if (!input.verifiedOverrideOwners.has(override.owner)) {
+      overrideFailures.push('owner authority is unverified');
     }
     if (override.ruleId !== 'history.incomplete-reentry') {
       overrideFailures.push('rule scope does not match');
@@ -322,11 +335,9 @@ function reentryFinding(input: {
     if (overrideFailures.length === 0) return null;
     observed.push(...overrideFailures.map((value) => ({ label: 'override_error', value })));
   } else {
-    const ownerPresent =
-      typeof packet.productionOwner === 'string' && packet.productionOwner.trim().length > 0;
     const materialPacketComplete =
       packet.deltaKind === 'material' &&
-      ownerPresent &&
+      productionOwnerChanged &&
       priorRefsValid &&
       conditionsValid &&
       missingRefs.length === 0 &&
@@ -355,6 +366,7 @@ export function evaluateHistory(input: {
   candidate: ProposalIdentity & { pathBlobSet: PathBlobRecord[] };
   collection: HistoryCollection;
   reentry?: ReentryPacket | null;
+  verifiedOverrideOwners?: string[];
   now: Date;
 }): BoundaryFinding[] {
   if (!input.collection.complete) {
@@ -363,6 +375,17 @@ export function evaluateHistory(input: {
   if (!(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
     return [incompleteFinding(input.action, input.collection, ['history policy clock is invalid'])];
   }
+  if (
+    input.verifiedOverrideOwners !== undefined &&
+    !validStringArray(input.verifiedOverrideOwners)
+  ) {
+    return [
+      incompleteFinding(input.action, input.collection, [
+        'verified override owner evidence is invalid',
+      ]),
+    ];
+  }
+  const verifiedOverrideOwners = new Set(input.verifiedOverrideOwners ?? []);
 
   let candidateRecords: PathBlobRecord[];
   let candidateFingerprint: string;
@@ -551,6 +574,8 @@ export function evaluateHistory(input: {
         reentry: input.reentry,
         matches: disposed,
         now: input.now,
+        verifiedOverrideOwners,
+        candidatePaths: new Set(candidateRecords.map((record) => record.path)),
       });
       if (dispositionFinding) findings.push(dispositionFinding);
     }

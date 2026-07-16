@@ -11,7 +11,6 @@ import { readCandidateTree } from '../lib/semantic-quality/git-tree.ts';
 import {
   buildProposalIdentity,
   contentFingerprintSha256,
-  taskFingerprintSha256,
   type PathBlobRecord as ProductionPathBlobRecord,
   type PathBlobStatus,
   type ProposalIdentity,
@@ -255,12 +254,8 @@ function findGitUnreachableModules(
 }
 
 function fixtureOid(value: string): string {
-  return GIT_OID_RE.test(value)
-    ? value.toLowerCase()
-    : taskFingerprintSha256({
-        title: 'semantic-boundary-fixture-oid',
-        body: value,
-      });
+  if (!GIT_OID_RE.test(value)) throw new Error('invalid fixture Git object identity');
+  return value.toLowerCase();
 }
 
 function fixturePathBlobRecords(records: PathBlobRecord[]): ProductionPathBlobRecord[] {
@@ -359,6 +354,7 @@ function evaluateHistoryFixtures(
     candidate: CandidateIdentity;
     artifacts: HistoryArtifactRecord[];
     reentry?: ReentryPacket;
+    verifiedOverrideOwners?: string[];
   }> = [];
 
   if (item.proposal) {
@@ -498,16 +494,14 @@ function evaluateHistoryFixtures(
           }),
         ],
       });
-    } else if (history.exactIssue || history.similarIssue) {
+    } else if (history.exactIssue) {
       const task = {
         title: 'Deterministic boundary fixture',
         body: 'Prove exact task identity through the production history evaluator.',
       };
       const candidate = fixtureCandidate({ records: [], task });
       inputs.push({
-        // The production core intentionally makes exact issue identity warning-only for a
-        // code proposal; the holdout uses that path to calibrate contextual issue feedback.
-        action: history.exactIssue ? 'open-issue' : 'open-pr',
+        action: 'open-issue',
         candidate,
         artifacts: [
           historyArtifact({
@@ -532,6 +526,15 @@ function evaluateHistoryFixtures(
           path: 'src/reentry-new.ts',
           blobOid: FIXTURE_OIDS.candidateBlob,
         },
+        ...(item.reentry.delta === 'material'
+          ? [
+              {
+                status: 'modified' as const,
+                path: 'src/main.ts',
+                blobOid: FIXTURE_OIDS.extraBlob,
+              },
+            ]
+          : []),
       ],
     });
     const packet: ReentryPacket = {
@@ -574,6 +577,7 @@ function evaluateHistoryFixtures(
         }),
       ],
       reentry: packet,
+      verifiedOverrideOwners: item.reentry.ownerOverride ? ['repository-owner'] : undefined,
     });
   }
 
@@ -585,6 +589,7 @@ function evaluateHistoryFixtures(
         candidate: input.candidate,
         collection: completeHistory(corpus, input.artifacts),
         reentry: input.reentry,
+        verifiedOverrideOwners: input.verifiedOverrideOwners,
         now: new Date(corpus.lockedAt),
       }),
     ),

@@ -15,12 +15,24 @@ function artifact(
   number: number,
   overrides: Partial<HistoryArtifactRecord> = {},
 ): HistoryArtifactRecord {
+  const kind = overrides.kind ?? 'pull-request';
   return {
     repository: REPOSITORY,
-    kind: 'pull-request',
+    kind,
     number,
     state: 'closed-unmerged',
     url: `https://github.com/${REPOSITORY}/pull/${number}`,
+    ...(kind === 'pull-request'
+      ? {
+          pathBlobSet: [
+            {
+              status: 'modified' as const,
+              path: `src/history/${number}.ts`,
+              blobOid: BLOB_OID,
+            },
+          ],
+        }
+      : {}),
     taskFingerprintSha256: TASK_FINGERPRINT,
     ...overrides,
   };
@@ -257,6 +269,29 @@ describe('semantic history provider collection', () => {
     expect(result.artifacts).toEqual([]);
     expect(result.limitations).toEqual([expect.stringMatching(/^history\.invalid-artifact:/)]);
     expectBoundedLimitations(result.limitations);
+  });
+
+  it.each([
+    ['pull request content evidence', artifact(1838, { pathBlobSet: undefined })],
+    [
+      'issue task identity',
+      artifact(31, {
+        kind: 'issue',
+        state: 'open',
+        url: `https://github.com/${REPOSITORY}/issues/31`,
+        taskFingerprintSha256: undefined,
+      }),
+    ],
+  ])('fails closed when an artifact omits required %s', async (_label, incomplete) => {
+    const fixture = providerFor([page([incomplete], null)]);
+
+    const result = await collectHistory({ repository: REPOSITORY, provider: fixture.provider });
+
+    expect(result.complete).toBe(false);
+    expect(result.artifacts).toEqual([]);
+    expect(result.limitations).toEqual([
+      expect.stringMatching(/^history\.invalid-artifact:/),
+    ]);
   });
 
   it.each([

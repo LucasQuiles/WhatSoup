@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 
+import { assertNoSecretLike } from '../../artifact-redaction.ts';
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { fsyncDirectory, privateWriteError } from '../../../src/lib/private-fs.ts';
 import type {
@@ -207,11 +208,59 @@ function sortedUnique(values: ReadonlyArray<string>): string[] {
   return [...new Set(values)].sort();
 }
 
+function receiptText(value: string): string {
+  const text = value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 2_000);
+  try {
+    assertNoSecretLike(text, 'boundary receipt');
+    return text;
+  } catch {
+    return 'redacted-sensitive-value';
+  }
+}
+
+function receiptReference(value: string): string {
+  const text = receiptText(value);
+  if (text === 'redacted-sensitive-value' || text.length === 0 || path.isAbsolute(text)) {
+    return 'boundary-reference:redacted';
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    try {
+      const parsed = new URL(text);
+      if (parsed.username || parsed.password || parsed.search) {
+        return 'boundary-reference:redacted';
+      }
+    } catch {
+      return 'boundary-reference:redacted';
+    }
+  }
+  return text;
+}
+
+function receiptDiagnostic(value: string): string {
+  const text = receiptText(value);
+  return /(?:^|\s)\/(?:Users|home|private|tmp|var\/folders)\/\S+/.test(text)
+    ? 'redacted-local-path'
+    : text;
+}
+
+function receiptIdentity(value: string): string {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)
+    ? value.toLowerCase()
+    : receiptText(value);
+}
+
 function sortedFingerprints(
   fingerprints: Record<string, string | null> | undefined,
 ): Record<string, string | null> {
   return Object.fromEntries(
-    Object.entries(fingerprints ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+    Object.entries(fingerprints ?? {})
+      .map(([key, value]) =>
+        [receiptText(key), value === null ? null : receiptIdentity(value)] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 
@@ -226,10 +275,28 @@ function compareArtifacts(left: BoundaryArtifact, right: BoundaryArtifact): numb
 function canonicalFinding(item: BoundaryFinding): BoundaryFinding {
   return {
     ...item,
-    observed: item.observed.map((evidence) => ({ ...evidence })),
-    matchedArtifacts: item.matchedArtifacts.map((artifact) => ({ ...artifact })).sort(compareArtifacts),
-    correction: [...item.correction],
-    sourceRefs: sortedUnique(item.sourceRefs),
+    ruleId: receiptText(item.ruleId),
+    summary: receiptText(item.summary),
+    why: receiptText(item.why),
+    observed: item.observed.map((evidence) => ({
+      label: receiptText(evidence.label),
+      value: receiptDiagnostic(evidence.value),
+    })),
+    matchedArtifacts: item.matchedArtifacts
+      .map((artifact) => ({
+        ...artifact,
+        repository: receiptText(artifact.repository),
+        id: receiptText(artifact.id),
+        ...(artifact.url === undefined ? {} : { url: receiptReference(artifact.url) }),
+        ...(artifact.state === undefined ? {} : { state: receiptText(artifact.state) }),
+        ...(artifact.fingerprintSha256 === undefined
+          ? {}
+          : { fingerprintSha256: receiptIdentity(artifact.fingerprintSha256) }),
+      }))
+      .sort(compareArtifacts),
+    correction: item.correction.map(receiptText),
+    rerun: receiptText(item.rerun),
+    sourceRefs: sortedUnique(item.sourceRefs.map(receiptReference)),
   };
 }
 
@@ -276,25 +343,35 @@ export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): Boundary
   const findings = input.findings
     .map(canonicalFinding)
     .sort((left, right) => left.ruleId.localeCompare(right.ruleId));
+  const limitations = sortedUnique((input.limitations ?? []).map(receiptDiagnostic));
+  const findingDecision = aggregateBoundaryDecision(findings);
+  const base = {
+    headOid: input.base.headOid === null ? null : receiptIdentity(input.base.headOid),
+    baseOid: input.base.baseOid === null ? null : receiptIdentity(input.base.baseOid),
+    mergeBaseOid:
+      input.base.mergeBaseOid === null ? null : receiptIdentity(input.base.mergeBaseOid),
+    evidenceSource: receiptReference(input.base.evidenceSource),
+  };
   return {
     schemaVersion: 1,
     repository: 'LucasQuiles/WhatSoup',
-    invocation: input.invocation,
+    invocation: receiptText(input.invocation),
     action: input.action,
     correlationIdSha256: correlationIdSha256({
-      invocation: input.invocation,
+      invocation: receiptText(input.invocation),
       action: input.action,
       enforcementMode: input.enforcementMode,
-      base: input.base,
+      base,
       fingerprints,
       findings,
     }),
     enforcementMode: input.enforcementMode,
-    decision: aggregateBoundaryDecision(findings),
-    base: { ...input.base },
+    decision:
+      findingDecision === 'pass' && limitations.length > 0 ? 'inconclusive' : findingDecision,
+    base,
     fingerprints,
     findings,
-    limitations: sortedUnique(input.limitations ?? []),
+    limitations,
   };
 }
 

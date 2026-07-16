@@ -215,6 +215,53 @@ describe('ordered upstream provenance classification', () => {
     ]);
   });
 
+  it('blocks a stale tracking ref before validating downstream path evidence', () => {
+    const findings = evaluateProvenance({
+      action: 'push',
+      observation: observation({
+        ...stale,
+        localTrackingOid: 'dddddddddddddddddddddddddddddddddddddddd',
+        candidatePaths: ['src/../outside.ts'],
+        upstreamPaths: null,
+      }),
+    });
+
+    expect(findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'provenance.stale-tracking-ref',
+        decision: 'block',
+      }),
+    ]);
+  });
+
+  it.each([
+    [
+      'positive behind count with the remote tip as merge base',
+      { mergeBaseOid: REMOTE, headOid: HEAD, aheadCount: 2, behindCount: 3 },
+    ],
+    [
+      'positive ahead count with the head as merge base',
+      { mergeBaseOid: HEAD, headOid: HEAD, aheadCount: 2, behindCount: 3 },
+    ],
+  ])('is inconclusive for inconsistent revision evidence: %s', (_label, change) => {
+    const findings = evaluateProvenance({
+      action: 'push',
+      observation: observation({
+        ...change,
+        candidatePaths: ['src/local.ts'],
+        upstreamPaths: ['src/upstream.ts'],
+      }),
+    });
+
+    expect(findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'provenance.unavailable',
+        decision: 'inconclusive',
+        observed: [expect.objectContaining({ value: expect.stringMatching(/count|merge base/i) })],
+      }),
+    ]);
+  });
+
   it('warns when an older base has a proven disjoint upstream delta', () => {
     const findings = evaluateProvenance({
       action: 'push',

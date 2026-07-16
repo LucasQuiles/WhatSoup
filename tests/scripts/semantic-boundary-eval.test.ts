@@ -112,6 +112,14 @@ describe('semantic boundary experiment candidate', () => {
     expect(contentFingerprint(left)).toBe(contentFingerprintSha256(left));
   });
 
+  it('rejects malformed fixture object identities instead of inventing replacements', () => {
+    expect(() =>
+      contentFingerprint([
+        { status: 'modified', path: 'src/a.ts', blobOid: 'short-fixture-oid' },
+      ]),
+    ).toThrow(/object identity/i);
+  });
+
   it('meets the target on the locked synthetic cases without false blocks', () => {
     const corpus = loadCorpus();
     const syntheticCorpus = {
@@ -162,7 +170,7 @@ describe('semantic boundary experiment candidate', () => {
       'synthetic-history-path-overlap': ['history.path-overlap:warn'],
       'synthetic-reentry-cosmetic': ['history.incomplete-reentry:block'],
       'synthetic-issue-exact': ['history.exact-issue:block'],
-      'synthetic-issue-similar': ['history.exact-issue:warn'],
+      'synthetic-issue-similar': [],
       'synthetic-provenance-stale-tracking': ['provenance.stale-tracking-ref:block'],
       'synthetic-provenance-stale-disjoint': ['provenance.stale-disjoint:warn'],
       'synthetic-provenance-stale-overlap': ['provenance.stale-overlap:block'],

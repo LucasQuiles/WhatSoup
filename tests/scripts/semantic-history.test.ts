@@ -93,6 +93,7 @@ function evaluate(input: {
   candidate: Candidate;
   artifacts: HistoryArtifactRecord[];
   reentry?: ReentryPacket | null;
+  verifiedOverrideOwners?: string[];
   collectionOverrides?: Partial<HistoryCollection>;
 }) {
   return evaluateHistory({
@@ -100,6 +101,7 @@ function evaluate(input: {
     candidate: input.candidate,
     collection: collection(input.artifacts, input.collectionOverrides),
     reentry: input.reentry,
+    verifiedOverrideOwners: input.verifiedOverrideOwners,
     now: NOW,
   });
 }
@@ -498,6 +500,36 @@ describe('disposition-aware re-entry', () => {
     ]);
   });
 
+  it('blocks a self-declared material delta when the named production owner did not change', () => {
+    const selfDeclaredMaterial = candidate({
+      records: [
+        {
+          status: 'modified',
+          path: 'src/lib/unowned-reentry.ts',
+          blobOid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      ],
+    });
+
+    const findings = evaluate({
+      action: 'reopen-pr',
+      candidate: selfDeclaredMaterial,
+      artifacts: [prior],
+      reentry: packet(),
+    });
+
+    expect(findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'history.incomplete-reentry',
+        decision: 'block',
+        observed: expect.arrayContaining([
+          { label: 'production_owner', value: 'src/runtimes/agent/runtime.ts' },
+          { label: 'production_owner_changed', value: 'false' },
+        ]),
+      }),
+    ]);
+  });
+
   it('accepts material re-entry only when every condition, artifact, and owner is named', () => {
     const findings = evaluate({
       action: 'reopen-pr',
@@ -521,9 +553,35 @@ describe('disposition-aware re-entry', () => {
         productionOwner: null,
         override: scopedOverride(),
       }),
+      verifiedOverrideOwners: ['repository-owner'],
     });
 
     expect(ruleIds(findings)).not.toContain('history.incomplete-reentry');
+  });
+
+  it('rejects an otherwise scoped override whose owner authority was not verified', () => {
+    const findings = evaluate({
+      action: 'reopen-pr',
+      candidate: materialCandidate,
+      artifacts: [prior],
+      reentry: packet({
+        addressedConditions: [],
+        deltaKind: 'fixture-hygiene',
+        productionOwner: null,
+        override: scopedOverride({ owner: 'self-declared-owner' }),
+      }),
+    });
+
+    expect(findings).toEqual([
+      expect.objectContaining({ ruleId: 'history.blob-subset', decision: 'warn' }),
+      expect.objectContaining({
+        ruleId: 'history.incomplete-reentry',
+        decision: 'block',
+        observed: expect.arrayContaining([
+          { label: 'override_error', value: 'owner authority is unverified' },
+        ]),
+      }),
+    ]);
   });
 
   it.each([

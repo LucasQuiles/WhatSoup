@@ -237,6 +237,9 @@ export function canonicalHistoryArtifact(
     state: record.state as HistoryArtifactRecord['state'],
     url: record.url,
   };
+  if (record.kind === 'pull-request' && record.pathBlobSet === undefined) {
+    throw new Error('pull request content path/blob evidence is required');
+  }
   if (record.pathBlobSet !== undefined) {
     if (record.kind !== 'pull-request')
       throw new Error('only pull requests can advertise path blobs');
@@ -258,6 +261,9 @@ export function canonicalHistoryArtifact(
       throw new Error('task fingerprint is not a SHA-256 identity');
     }
     result.taskFingerprintSha256 = record.taskFingerprintSha256?.toLowerCase() ?? null;
+  }
+  if (record.kind === 'issue' && !result.taskFingerprintSha256) {
+    throw new Error('issue task fingerprint evidence is required');
   }
   if (record.disposition !== undefined) {
     result.disposition =

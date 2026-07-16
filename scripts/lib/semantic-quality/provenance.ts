@@ -178,22 +178,9 @@ export function evaluateProvenance(input: {
 
   let remoteTipOid: string;
   let localTrackingOid: string;
-  let headOid: string;
-  let mergeBaseOid: string | null;
-  let candidatePaths: string[];
-  let upstreamPaths: string[];
-  let highCouplingPaths: string[];
   try {
     remoteTipOid = canonicalOid(observation.remoteTipOid, 'remote tip');
     localTrackingOid = canonicalOid(observation.localTrackingOid, 'local tracking tip');
-    headOid = canonicalOid(observation.headOid, 'head');
-    mergeBaseOid =
-      observation.mergeBaseOid == null
-        ? null
-        : canonicalOid(observation.mergeBaseOid, 'merge base');
-    candidatePaths = canonicalPaths(observation.candidatePaths, 'candidate');
-    upstreamPaths = canonicalPaths(observation.upstreamPaths, 'upstream');
-    highCouplingPaths = canonicalPaths(observation.highCouplingPaths, 'high-coupling');
   } catch (error) {
     return [
       unavailable(input.action, observation, [
@@ -226,13 +213,17 @@ export function evaluateProvenance(input: {
     ];
   }
 
-  if (mergeBaseOid === null) {
+  if (observation.mergeBaseOid === null) {
     return [unavailable(input.action, observation, ['merge base was not proven'])];
   }
 
+  let headOid: string;
+  let mergeBaseOid: string;
   let aheadCount: number;
   let behindCount: number;
   try {
+    headOid = canonicalOid(observation.headOid, 'head');
+    mergeBaseOid = canonicalOid(observation.mergeBaseOid, 'merge base');
     aheadCount = canonicalCount(observation.aheadCount, 'ahead');
     behindCount = canonicalCount(observation.behindCount, 'behind');
   } catch (error) {
@@ -249,11 +240,36 @@ export function evaluateProvenance(input: {
   if (aheadCount === 0 && mergeBaseOid !== headOid) {
     consistencyLimitations.push('zero ahead count requires the head to be the merge base');
   }
-  if (behindCount === 0 && upstreamPaths.length > 0) {
-    consistencyLimitations.push('zero behind count cannot advertise upstream delta paths');
+  if (behindCount > 0 && mergeBaseOid === remoteTipOid) {
+    consistencyLimitations.push('positive behind count requires a merge base older than the remote tip');
+  }
+  if (aheadCount > 0 && mergeBaseOid === headOid) {
+    consistencyLimitations.push('positive ahead count requires a merge base older than the head');
   }
   if (consistencyLimitations.length > 0) {
     return [unavailable(input.action, observation, consistencyLimitations)];
+  }
+
+  let candidatePaths: string[];
+  let upstreamPaths: string[];
+  let highCouplingPaths: string[];
+  try {
+    candidatePaths = canonicalPaths(observation.candidatePaths, 'candidate');
+    upstreamPaths = canonicalPaths(observation.upstreamPaths, 'upstream');
+    highCouplingPaths = canonicalPaths(observation.highCouplingPaths, 'high-coupling');
+  } catch (error) {
+    return [
+      unavailable(input.action, observation, [
+        `provenance path evidence validation failed: ${bounded(error)}`,
+      ]),
+    ];
+  }
+  if (behindCount === 0 && upstreamPaths.length > 0) {
+    return [
+      unavailable(input.action, observation, [
+        'zero behind count cannot advertise upstream delta paths',
+      ]),
+    ];
   }
 
   if (behindCount === 0) return [];

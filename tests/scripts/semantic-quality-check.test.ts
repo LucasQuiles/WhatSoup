@@ -427,6 +427,69 @@ describe('generic boundary receipt', () => {
     ).toThrow(/action/i);
   });
 
+  it('treats nonempty limitations without findings as inconclusive in enforce mode', () => {
+    const built = buildBoundaryReceipt({
+      invocation: 'boundary-history',
+      action: 'open-pr',
+      enforcementMode: 'enforce',
+      base: {
+        headOid: TREE.headOid,
+        baseOid: TREE.baseOid,
+        mergeBaseOid: TREE.mergeBaseOid,
+        evidenceSource: 'fixture:truncated-history',
+      },
+      findings: [],
+      limitations: ['history collection stopped before a terminal cursor'],
+    });
+
+    expect(built.decision).toBe('inconclusive');
+    expect(semanticExitCode(built)).toBe(2);
+    expect(renderSemanticReceipt(built)).toContain(
+      'INCONCLUSIVE [boundary.evidence-incomplete] while open-pr',
+    );
+  });
+
+  it('redacts secret-like values, credential references, queries, and absolute local paths', () => {
+    const secret = ['token', 'abcdefghijklmnop'].join('=');
+    const operatorPath = ['', 'Users', 'q', 'private', 'config.json'].join('/');
+    const credentialReference = [
+      'https://agent:',
+      secret,
+      '@',
+      'github.com/LucasQuiles/WhatSoup/pull/1838?auth=present',
+    ].join('');
+    const built = buildBoundaryReceipt({
+      invocation: 'boundary-history',
+      action: 'open-pr',
+      enforcementMode: 'enforce',
+      base: {
+        headOid: TREE.headOid,
+        baseOid: TREE.baseOid,
+        mergeBaseOid: TREE.mergeBaseOid,
+        evidenceSource: `/private/tmp/${secret}`,
+      },
+      fingerprints: { candidate: secret },
+      findings: [
+        genericFinding('open-pr', {
+          observed: [
+            { label: 'provider_error', value: `remote failed with ${secret}` },
+            { label: 'local_error', value: `cannot read ${operatorPath}` },
+          ],
+          sourceRefs: [credentialReference],
+        }),
+      ],
+      limitations: [`provider failed with ${secret}`],
+    });
+    const receiptText = JSON.stringify(built);
+
+    expect(receiptText).not.toContain('abcdefghijklmnop');
+    expect(receiptText).not.toContain('?auth=');
+    expect(receiptText).not.toContain('/private/tmp');
+    expect(built.findings[0]?.observed[0]?.value).toBe('redacted-sensitive-value');
+    expect(built.findings[0]?.observed[1]?.value).toBe('redacted-local-path');
+    expect(built.findings[0]?.sourceRefs).toEqual(['boundary-reference:redacted']);
+  });
+
   it('keeps the additive action and correlation fields optional for legacy receipt literals', () => {
     const legacy: BoundaryReceipt = {
       schemaVersion: 1,
@@ -449,6 +512,8 @@ describe('generic boundary receipt', () => {
       action: legacy.action ?? null,
       correlationIdSha256: legacy.correlationIdSha256 ?? null,
     }).toEqual({ action: null, correlationIdSha256: null });
+    expect(renderSemanticReceipt(legacy)).toBe(`PASS semantic quality head=${TREE.headOid}\n`);
+    expect(semanticExitCode(legacy)).toBe(0);
   });
 });
 
