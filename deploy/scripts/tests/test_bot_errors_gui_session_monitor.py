@@ -18,6 +18,7 @@ Module loader mirrors test_bot_errors_collector_reachability.py.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -1025,6 +1026,64 @@ def test_missing_policy_non_launchagent_still_excluded(mod):
               instances=[_inst("primary", service="whatsoup-primary.service")]),
     ]}
     assert mod.gui_targets_from_fleet(fleet) == []
+
+
+# ---------------------------------------------------------------------------
+# Test 20b: best_effort policy — an intentionally intermittent (expected-
+# sleeping) host is a KNOWN, EXPLICITLY-EXCLUDING policy. It must NOT fall
+# through to the fail-closed default and be re-enrolled. Regression for #1874.
+# ---------------------------------------------------------------------------
+
+
+def _declares_best_effort(host_entry: dict) -> bool:
+    if host_entry.get("guiSessionExpected") == "best_effort":
+        return True
+    return any(
+        isinstance(inst, dict) and inst.get("guiSessionExpected") == "best_effort"
+        for inst in (host_entry.get("instances") or [])
+    )
+
+
+def test_policy_for_target_reads_best_effort(mod):
+    # best_effort resolves to itself, NOT to None (the old unknown-value path).
+    host = _host("gupta", policy="best_effort", instances=[_inst("clanka")])
+    assert mod.policy_for_target(host, host["instances"][0]) == "best_effort"
+
+
+def test_best_effort_is_a_known_excluding_policy(mod):
+    assert "best_effort" in mod.KNOWN_GUI_SESSION_POLICIES
+    assert "best_effort" in mod._EXCLUDING_POLICIES
+
+
+def test_best_effort_overrides_launchagent_label(mod):
+    # An intentionally intermittent host carrying an always_on com.whatsoup.*
+    # LaunchAgent used to be re-enrolled by the fail-closed default (#1874).
+    # The explicit best_effort exclusion must win over the label shape.
+    fleet = {"hosts": [
+        _host("gupta", role="bot-host", policy="best_effort",
+              instances=[_inst("clanka", expected="always_on",
+                               service="com.whatsoup.clanka")]),
+    ]}
+    assert mod.gui_targets_from_fleet(fleet) == []
+
+
+def test_tracked_manifest_best_effort_row_not_reenrolled(mod):
+    # Regression against the checked-in SSOT (deploy/bot-errors-expected-fleet.json):
+    # every declared best_effort host must be absent from the GUI-session targets.
+    manifest = json.loads(
+        (mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    best_effort_hosts = {
+        mod._norm(h.get("host"))
+        for h in manifest.get("hosts", [])
+        if isinstance(h, dict) and _declares_best_effort(h)
+    }
+    assert best_effort_hosts, "tracked manifest should carry a best_effort row (#1874 fixture)"
+    target_hosts = {t["host"] for t in mod.gui_targets_from_fleet(manifest)}
+    overlap = best_effort_hosts & target_hosts
+    assert not overlap, f"best_effort hosts re-enrolled as GUI targets: {overlap}"
 
 
 # ---------------------------------------------------------------------------

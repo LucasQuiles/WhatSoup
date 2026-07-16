@@ -291,11 +291,16 @@ GUI_LABEL_PREFIX = "com.whatsoup."
 POLICY_ALWAYS_AQUA = "always_aqua"      # GUI LaunchAgent must have an Aqua session -> monitor
 POLICY_HEADLESS_OK = "headless_ok"      # headless/on_demand, no Aqua session -> exclude
 POLICY_NOT_APPLICABLE = "not_applicable"  # systemd / no-bot / blocked -> exclude
+POLICY_BEST_EFFORT = "best_effort"      # intentionally intermittent (expected-sleeping) host -> exclude
 KNOWN_GUI_SESSION_POLICIES = frozenset(
-    {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE}
+    {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT}
 )
 # Declared policies that explicitly EXCLUDE a target from GUI-session monitoring.
-_EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE)
+# best_effort is intentionally intermittent (declared expected-sleeping, e.g. a
+# laptop that sleeps): a valid, auditable exclusion — NOT a missing/unknown policy
+# that must fail closed. Excluding it keeps GUI-session membership in agreement
+# with the collector, which already treats such a host as expected-offline (#1874).
+_EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT)
 
 # Public manifests may use sanitized placeholder labels for private hosts. Those
 # hosts must declare this marker and provide their live labels via a hub-private
@@ -331,6 +336,8 @@ def gui_targets_from_fleet(fleet: dict) -> list[dict]:
       - policy ``always_aqua``   -> monitored
       - policy ``headless_ok``   -> excluded
       - policy ``not_applicable``-> excluded
+      - policy ``best_effort``   -> excluded (intentionally intermittent /
+        expected-sleeping host; an auditable exclusion, not a forgotten policy)
       - policy missing/unknown   -> FAIL-CLOSED default: a plausible GUI
         LaunchAgent (``always_on`` + ``com.whatsoup.*`` label) is STILL
         monitored so a profile that forgot the policy is never silently dropped;
