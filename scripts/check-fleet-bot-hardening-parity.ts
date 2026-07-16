@@ -4,9 +4,18 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
 
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
   'docs/reliability-runner/fleet-bot-hardening-parity.json';
+
+// Conventional path of the committed fleet roster SSOT, same file
+// `deploy/scripts/lib/bot_errors_roster.py`'s `default_roster_path()` resolves
+// to by default. The inventory-epoch binding check (#1867 criterion 3)
+// recomputes the roster digest/inventory from this file independently,
+// mirroring how `bot-errors-heartbeat-watchdog.py` never trusts the
+// sentinel's declared digest without recomputing it from disk first.
+export const FLEET_ROSTER_PATH = 'deploy/bot-errors-expected-fleet.json';
 
 // Documented freshness backstop for the source-side parity manifest. The fleet
 // hardening standard expires rows on runtime events (restart, re-cut, config or
@@ -101,7 +110,12 @@ export type FleetBotHardeningParityFindingCode =
   | 'source-anchor-missing-file'
   | 'source-anchor-unsafe-path'
   | 'source-anchor-anchors-not-list'
-  | 'source-anchor-missing-anchor';
+  | 'source-anchor-missing-anchor'
+  | 'invalid-inventory-binding'
+  | 'roster-unreadable'
+  | 'roster-digest-mismatch'
+  | 'roster-instance-count-mismatch'
+  | 'future-roster-epoch';
 
 export interface FleetBotHardeningParityFinding {
   code: FleetBotHardeningParityFindingCode;
@@ -408,6 +422,92 @@ function validateSourceAnchors(
   return checked;
 }
 
+// Inventory-epoch / membership validation (#1867 criterion 3, design §7.4).
+//
+// `inventoryBinding` is manifest-level (a property of the whole redacted
+// cohort, not one row) and validate-when-present: absent -> no finding at
+// all, so the guard stays green on the tracked manifest
+// (`docs/reliability-runner/fleet-bot-hardening-parity.json`), which does not
+// yet declare this field (populating it is a deferred, separate change).
+// Whenever a manifest *does* declare it, the guard never trusts the declared
+// values -- it independently recomputes the roster digest/inventory from the
+// committed roster file and rejects on mismatch, mirroring the existing
+// sentinel/watchdog split (`bot-errors-heartbeat-watchdog.py`'s
+// `declared_digest != independent_digest`) so membership drift cannot pass
+// through self-consistent row counts.
+function validateInventoryBinding(
+  cwd: string,
+  payload: Record<string, unknown>,
+  findings: FleetBotHardeningParityFinding[],
+): void {
+  const inventoryBinding = payload['inventoryBinding'];
+  if (inventoryBinding === undefined) return;
+
+  if (!isRecord(inventoryBinding)) {
+    findings.push(finding('invalid-inventory-binding', 'inventoryBinding must be an object'));
+    return;
+  }
+
+  const declaredDigest = inventoryBinding['rosterDigest'];
+  const declaredEpoch = inventoryBinding['rosterEpoch'];
+  const declaredCount = inventoryBinding['expectedInstanceCount'];
+
+  const digestOk = typeof declaredDigest === 'string' && /^[0-9a-f]{64}$/.test(declaredDigest);
+  const epochOk = typeof declaredEpoch === 'number' && Number.isInteger(declaredEpoch) && declaredEpoch >= 0;
+  const countOk = typeof declaredCount === 'number' && Number.isInteger(declaredCount) && declaredCount >= 0;
+
+  if (!digestOk || !epochOk || !countOk) {
+    findings.push(finding(
+      'invalid-inventory-binding',
+      'inventoryBinding.rosterDigest must be 64-hex, rosterEpoch and expectedInstanceCount must be non-negative integers',
+    ));
+    return;
+  }
+
+  const rosterPath = path.resolve(cwd, FLEET_ROSTER_PATH);
+  let rosterData: unknown;
+  try {
+    rosterData = JSON.parse(readFileSync(rosterPath, 'utf8'));
+  } catch (err) {
+    findings.push(finding(
+      'roster-unreadable',
+      `cannot read fleet roster ${FLEET_ROSTER_PATH} to independently recompute inventoryBinding: ${(err as Error).message}`,
+    ));
+    return;
+  }
+
+  let inventory: ReturnType<typeof rosterInventory>;
+  try {
+    inventory = rosterInventory(rosterData);
+  } catch (err) {
+    findings.push(finding(
+      'roster-unreadable',
+      `cannot recompute roster inventory from ${FLEET_ROSTER_PATH}: ${(err as Error).message}`,
+    ));
+    return;
+  }
+  const independentEpoch = rosterEpoch(rosterPath);
+
+  if (declaredDigest !== inventory.digest) {
+    findings.push(finding(
+      'roster-digest-mismatch',
+      `inventoryBinding.rosterDigest=${declaredDigest} does not match independently recomputed roster digest=${inventory.digest}`,
+    ));
+  }
+  if (declaredCount !== inventory.expectedInstanceCount) {
+    findings.push(finding(
+      'roster-instance-count-mismatch',
+      `inventoryBinding.expectedInstanceCount=${declaredCount} does not match roster_inventory().expectedInstanceCount=${inventory.expectedInstanceCount}`,
+    ));
+  }
+  if (independentEpoch !== null && declaredEpoch > independentEpoch) {
+    findings.push(finding(
+      'future-roster-epoch',
+      `inventoryBinding.rosterEpoch=${declaredEpoch} is later than the roster file's current mtime epoch=${independentEpoch}`,
+    ));
+  }
+}
+
 export function checkFleetBotHardeningParity(
   cwd = process.cwd(),
   manifestPath = DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
@@ -488,6 +588,7 @@ export function checkFleetBotHardeningParity(
       `scope cohortSize=${scope['cohortSize']} does not match row count ${rows.length}`,
     ));
   }
+  validateInventoryBinding(cwd, payload, runtimeFindings);
   const sourceAnchors = validateSourceAnchors(cwd, payload, sourceAnchorFindings);
 
   return {
