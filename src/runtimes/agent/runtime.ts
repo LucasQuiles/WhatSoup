@@ -160,6 +160,7 @@ import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
+import { classifyTrustedActorAccess } from '../../core/access-policy.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
@@ -4144,12 +4145,20 @@ export class AgentRuntime implements Runtime {
   }
 
   private sharedRuntimeTurnText(turn: Pick<QueuedTurn, 'chatJid' | 'senderJid' | 'senderName' | 'text' | 'isGroup'>): string {
-    const phone = resolvePhoneFromJid(turn.senderJid, this.db);
-    const displayName = turn.senderName ?? phone;
+    const displayName = turn.senderName ?? 'unknown sender';
     const prefix = turn.isGroup
-      ? `[Group: ${turn.chatJid} — ${displayName}]`
-      : `[DM from ${displayName} (${phone})]`;
+      ? `[Group message from ${displayName}]`
+      : `[Direct message from ${displayName}]`;
     return `${prefix}\n${turn.text}`;
+  }
+
+  private sendTrustedActorTurn(
+    session: SessionManager,
+    text: string,
+    actorJid: string | undefined,
+  ): Promise<void> {
+    const actorAccess = classifyTrustedActorAccess(actorJid, this.db, config.adminPhones);
+    return session.sendTrustedActorTurn(text, actorAccess);
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
@@ -4249,7 +4258,7 @@ export class AgentRuntime implements Runtime {
       : null;
     try {
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(prefixedText);
+      await this.sendTrustedActorTurn(this.session!, prefixedText, senderJid);
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4438,7 +4447,7 @@ export class AgentRuntime implements Runtime {
     if (queue) queue.indicateTyping();
 
     try {
-      await session.sendTurn(text);
+      await this.sendTrustedActorTurn(session, text, actorJid);
     } catch (err) {
       if (actorPushed && effectiveMapKey !== undefined) {
         this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);

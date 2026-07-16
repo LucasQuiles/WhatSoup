@@ -462,9 +462,13 @@ type RuntimeView = {
 
 function makeSession() {
   let resolveGenerationOwnership: (() => SessionGenerationIdentity | null) | null = null;
+  const sendTurn = vi.fn(async (_text: string) => {});
   return {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn,
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await sendTurn(text);
+    }),
     // QR-105: maybeStartAutoCompact is provider-gated to claude-cli sessions.
     getProviderId: vi.fn(() => 'claude-cli'),
     handleNew: vi.fn(async () => {}),

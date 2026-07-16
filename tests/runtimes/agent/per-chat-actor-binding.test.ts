@@ -16,7 +16,10 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({
       active: false,
@@ -498,7 +501,10 @@ describe('F-STICKY-ACTOR F6: dispatch to an INACTIVE session clears stale entrie
       getStatus: () => ({ active: false, sessionId: null, pid: null, startedAt: null, messageCount: 0, lastMessageAt: null }),
       spawnSession: vi.fn(async () => {}),
       shutdown: vi.fn(async () => {}),
-      sendTurn: vi.fn(async () => {}),
+      sendTurn: vi.fn(async (_text: string) => {}),
+      sendTrustedActorTurn: vi.fn(async (text: string) => {
+        await inactive.sendTurn(text);
+      }),
     };
     setOwnedTestSession(runtime, mapKey, inactive);
     priv().chatQueues.set(mapKey, mockQueue);

@@ -17,6 +17,37 @@ export interface TriggerResult {
   accessStatus?: string; // 'allowed' | 'blocked' | 'pending' | 'unknown'
 }
 
+export type TrustedActorAccessClass =
+  | 'administrator'
+  | 'authorized_user'
+  | 'untrusted_or_unknown'
+  | 'system';
+
+/**
+ * Derive the model-visible actor class from transport-authenticated identity.
+ * This is deliberately narrower than shouldRespond(): permissive modes may
+ * admit a message, but they do not make an unknown sender an authorized user.
+ */
+export function classifyTrustedActorAccess(
+  senderJid: string | null | undefined,
+  db: Database,
+  adminPhones: Set<string>,
+): TrustedActorAccessClass {
+  if (!senderJid || !isWhatsAppAuthenticatedJid(senderJid)) return 'untrusted_or_unknown';
+
+  const effectivePhone = resolvePhoneFromJid(senderJid, db);
+  const lidLocal = normalizeLid(bareNumber(senderJid));
+  if (isLidJid(senderJid) && effectivePhone === lidLocal) {
+    return 'untrusted_or_unknown';
+  }
+
+  if (isAdminPhone(effectivePhone, adminPhones)) return 'administrator';
+  if (lookupAccess(db, 'phone', effectivePhone)?.status === 'allowed') {
+    return 'authorized_user';
+  }
+  return 'untrusted_or_unknown';
+}
+
 /**
  * Decide whether the bot should respond to an incoming message.
  *

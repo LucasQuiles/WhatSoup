@@ -50,7 +50,10 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
@@ -1058,6 +1061,9 @@ describe('AgentRuntime', () => {
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    mockSession.sendTrustedActorTurn.mockReset().mockImplementation(async (text: string) => {
+      await mockSession.sendTurn(text);
+    });
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
       turnId,
@@ -1151,6 +1157,31 @@ describe('AgentRuntime', () => {
       statusOpIds: [],
     }));
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
+  });
+
+  it('derives trusted actor access independently for each dispatched turn', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'line-a');
+    const sendTrustedActorTurn = (runtime as unknown as {
+      sendTrustedActorTurn(
+        session: typeof mockSession,
+        text: string,
+        actorJid: string | undefined,
+      ): Promise<void>;
+    }).sendTrustedActorTurn.bind(runtime);
+
+    await sendTrustedActorTurn(mockSession, 'admin request', '15550100001@s.whatsapp.net');
+    await sendTrustedActorTurn(mockSession, 'unknown request', 'unknown-actor@s.whatsapp.net');
+
+    expect(mockSession.sendTrustedActorTurn).toHaveBeenNthCalledWith(
+      1,
+      'admin request',
+      'administrator',
+    );
+    expect(mockSession.sendTrustedActorTurn).toHaveBeenNthCalledWith(
+      2,
+      'unknown request',
+      'untrusted_or_unknown',
+    );
   });
 
   it('start() calls ensureAgentSchema', async () => {
@@ -8604,7 +8635,7 @@ describe('AgentRuntime', () => {
     }))).resolves.toBeUndefined();
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: chat-timeout@g.us — Taylor]'),
+      expect.stringContaining('[Group message from Taylor]'),
     );
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
       expect.stringContaining('wake up'),
@@ -8701,7 +8732,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: DM turn prefixed with [DM from <name> (<phone>)]', async () => {
+  it('shared: DM turn prefix includes the display name without transport identifiers', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -8718,7 +8749,10 @@ describe('AgentRuntime', () => {
     }));
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[DM from Jason (15550100001)]'),
+      expect.stringContaining('[Direct message from Jason]'),
+    );
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
+      expect.stringContaining('15550100001'),
     );
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
       expect.stringContaining('test message'),
@@ -8727,7 +8761,7 @@ describe('AgentRuntime', () => {
 
   // @check CHK-064
 // @traces REQ-012.AC-02
-  it('shared: group turn prefixed with [Group: <chatJid> — <senderName>]', async () => {
+  it('shared: group turn prefix includes the display name without transport identifiers', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -8744,7 +8778,10 @@ describe('AgentRuntime', () => {
     }));
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[Group: the-group@g.us — Jason]'),
+      expect.stringContaining('[Group message from Jason]'),
+    );
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith(
+      expect.stringContaining('the-group@g.us'),
     );
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
       expect.stringContaining('group message'),
@@ -8907,7 +8944,10 @@ describe('AgentRuntime', () => {
         await spawnBlocked;
         active = true;
       }),
-      sendTurn: vi.fn(async () => {}),
+      sendTurn: vi.fn(async (_text: string) => {}),
+      sendTrustedActorTurn: vi.fn(async (text: string) => {
+        await localSession.sendTurn(text);
+      }),
       shutdown: vi.fn(async () => {}),
     };
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
@@ -9827,9 +9867,13 @@ describe('AgentRuntime', () => {
       function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
         const key = opts.chatJid.replace('@s.whatsapp.net', '');
         sessionEvents.set(key, opts.onEvent);
+        const sendTurn = vi.fn(async (_text: string) => {});
         const perChatSession = {
           spawnSession: vi.fn(async () => {}),
-          sendTurn: vi.fn(async () => {}),
+          sendTurn,
+          sendTrustedActorTurn: vi.fn(async (text: string) => {
+            await sendTurn(text);
+          }),
           handleNew: vi.fn(async () => {}),
           getStatus: vi.fn(() => ({
             active: true,
@@ -9927,9 +9971,13 @@ describe('AgentRuntime', () => {
       function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
         const key = opts.chatJid.replace('@s.whatsapp.net', '');
         sessionEvents.set(key, opts.onEvent);
+        const sendTurn = vi.fn(async (_text: string) => {});
         return {
           spawnSession: vi.fn(async () => { spawnSessionCalls.push(key); }),
-          sendTurn: vi.fn(async () => {}),
+          sendTurn,
+          sendTrustedActorTurn: vi.fn(async (text: string) => {
+            await sendTurn(text);
+          }),
           handleNew: vi.fn(async () => {}),
           getStatus: vi.fn(() => ({
             active: true, pid: null, sessionId: `session-${key}`,

@@ -53,7 +53,10 @@ const {
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),

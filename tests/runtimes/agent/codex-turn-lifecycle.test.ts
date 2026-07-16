@@ -122,7 +122,10 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedGenerationOwnershipR
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn: vi.fn(async (_text: string) => {}),
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await mockSession.sendTurn(text);
+    }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({
       active: false,

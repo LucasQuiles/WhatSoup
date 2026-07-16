@@ -306,11 +306,15 @@ export function queueStub(chatJid: string): IOutboundQueue {
 }
 
 export function sessionStub() {
+  const sendTurn = vi.fn(async (_text: string) => {});
   return {
     clearTurnWatchdog: vi.fn(),
     completeProviderTurn: vi.fn(),
     tickWatchdog: vi.fn(),
-    sendTurn: vi.fn(async () => {}),
+    sendTurn,
+    sendTrustedActorTurn: vi.fn(async (text: string) => {
+      await sendTurn(text);
+    }),
     spawnSession: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
     getDbRowId: vi.fn(() => 41),

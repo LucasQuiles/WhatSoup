@@ -281,7 +281,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   const safeContent = content !== null ? stripLoneSurrogates(content) : null;
   const safeContentText = contentText !== null ? stripLoneSurrogates(contentText) : null;
   // QR-056: senderName (pushName) is attacker-controlled and is embedded verbatim
-  // into the agent prompt prefix (`[DM from ${senderName} …]`). Sanitize it the same
+  // into the agent prompt prefix (`[Direct message from ${senderName}]`). Sanitize it the same
   // as content so a crafted pushName cannot smuggle a lone surrogate into the agent's
   // API request (which strict server-side JSON parsers reject → turn DoS). The HTTP
   // providers re-sanitize, but the spawned-CLI path does not.

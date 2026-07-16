@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Database } from '../../src/core/database.ts';
-import { shouldRespond } from '../../src/core/access-policy.ts';
+import { classifyTrustedActorAccess, shouldRespond } from '../../src/core/access-policy.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
@@ -833,5 +833,45 @@ describe('LID resolver', () => {
     hydrateLidMappings(lidDb, tmpAuthDir);
     // The upserted value (19998887777) should persist — hydrate doesn't overwrite
     expect(resolveLid(lidDb, ADMIN_LID_NUM)).toBe('19998887777');
+  });
+});
+
+describe('trusted actor access classification', () => {
+  const ADMIN_LID_NUM = '72638194015577';
+
+  it('classifies an authenticated phone JID in adminPhones as administrator', () => {
+    expect(classifyTrustedActorAccess(
+      `${ALLOWED_ADMIN}@s.whatsapp.net`,
+      db,
+      new Set([ALLOWED_ADMIN]),
+    )).toBe('administrator');
+  });
+
+  it('classifies an authenticated mapped LID in adminPhones as administrator', () => {
+    upsertLidMapping(db, ADMIN_LID_NUM, `${ALLOWED_ADMIN}@s.whatsapp.net`);
+
+    expect(classifyTrustedActorAccess(
+      `${ADMIN_LID_NUM}@lid`,
+      db,
+      new Set([ALLOWED_ADMIN]),
+    )).toBe('administrator');
+  });
+
+  it('classifies an authenticated allowlisted non-admin as authorized_user', () => {
+    expect(classifyTrustedActorAccess(
+      `${ALLOWED_USER}@s.whatsapp.net`,
+      db,
+      new Set([ALLOWED_ADMIN]),
+    )).toBe('authorized_user');
+  });
+
+  it.each([
+    [`${ALLOWED_ADMIN}@sms`, 'spoofable SMS admin identity'],
+    ['unmapped-actor@lid', 'unmapped LID'],
+    [`${UNKNOWN_USER}@s.whatsapp.net`, 'unknown authenticated sender'],
+    [undefined, 'missing actor identity'],
+  ])('fails closed for %s (%s)', (senderJid, _description) => {
+    expect(classifyTrustedActorAccess(senderJid, db, new Set([ALLOWED_ADMIN])))
+      .toBe('untrusted_or_unknown');
   });
 });

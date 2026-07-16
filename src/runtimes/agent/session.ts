@@ -48,6 +48,10 @@ import {
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
+import {
+  composeTrustedActorTurn,
+  type TrustedActorAccessClass,
+} from './trusted-actor-envelope.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -2079,6 +2083,14 @@ export class SessionManager {
   }
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
+  async sendTrustedActorTurn(
+    text: string,
+    actorAccess: TrustedActorAccessClass,
+  ): Promise<void> {
+    await this.sendTurn(composeTrustedActorTurn(text, actorAccess));
+  }
+
+  /** Write a system or already-composed turn to the agent. */
   async sendTurn(text: string): Promise<void> {
     this.db.assertWritableCompatibility();
     if (!this.active) {

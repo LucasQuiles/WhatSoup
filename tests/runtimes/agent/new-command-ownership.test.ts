@@ -407,10 +407,11 @@ describe('per-chat /new ownership transition', () => {
         mapKey: canonicalKey,
         text: expect.stringContaining('[Recent chat context'),
       });
-      expect(routedTurns[1]).toEqual({
+      expect(routedTurns[1]).toMatchObject({
         mapKey: canonicalKey,
-        text: 'turn crossing a LID rekey',
+        text: expect.stringContaining('turn crossing a LID rekey'),
       });
+      expect(routedTurns[1]?.text).toContain('actor_access=untrusted_or_unknown');
     } finally {
       releaseSpawn();
       releaseContextResult();
