@@ -56,6 +56,7 @@ function writeFixtureManifest(root: string, overrides: Record<string, unknown> =
           'fallback-chain': 'proven',
         },
         evidence: ['fixture evidence'],
+        verifiedAt: '2026-06-15',
       },
       {
         id: 'peer-agent-bot-1',
@@ -250,6 +251,50 @@ describe('fleet bot hardening parity guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
+  });
+
+  it('fails closed when a hardened row omits verifiedAt', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing-row-verified-at' }),
+    ]));
+  });
+
+  it('fails when the manifest updated timestamp is in the future', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-12-31' });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'future-updated' }),
+    ]));
   });
 
   it('fails when a hardened row has an unproven capability', () => {

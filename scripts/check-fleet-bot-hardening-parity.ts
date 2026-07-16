@@ -66,6 +66,7 @@ export type FleetBotHardeningParityFindingCode =
   | 'manifest-not-object'
   | 'unsupported-schema'
   | 'invalid-updated'
+  | 'future-updated'
   | 'stale-updated'
   | 'missing-standard'
   | 'invalid-scope'
@@ -79,6 +80,7 @@ export type FleetBotHardeningParityFindingCode =
   | 'invalid-row-id'
   | 'duplicate-row-id'
   | 'invalid-row-status'
+  | 'missing-row-verified-at'
   | 'invalid-row-verified-at'
   | 'future-row-verified-at'
   | 'stale-row-verified-at'
@@ -290,27 +292,32 @@ function validateRows(
       findings.push(finding('evidence-not-list', `${context}.evidence must be an array of strings`));
     }
 
-    // Optional per-row runtime verification date. When present, it must be a
-    // real YYYY-MM-DD, not in the future, and within the freshness budget, so a
-    // row cannot carry a stale runtime-parity timestamp. Making it required on
-    // hardened rows is a separate, migration-gated decision (see the guard's
-    // freshness backstop note): the tracked manifest does not yet declare it.
+    // Per-row runtime verification date. A hardened row asserts current runtime
+    // parity, so it must carry a `verifiedAt` (fail closed with
+    // missing-row-verified-at otherwise). Non-hardened rows may omit it, but
+    // whenever it is present it must be a real YYYY-MM-DD, not in the future,
+    // and within the freshness budget, so no row can carry a stale runtime
+    // timestamp. (An immutable runtime-receipt digest that would upgrade this
+    // operator-written assertion into captured proof is producer-gated and not
+    // validated here.)
     const verifiedAt = rawRow['verifiedAt'];
-    if (verifiedAt !== undefined) {
-      if (typeof verifiedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(verifiedAt)) {
-        findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be YYYY-MM-DD`));
-      } else {
-        const verifiedMs = parseManifestDateMs(verifiedAt);
-        if (verifiedMs === null) {
-          findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be a valid calendar date`));
-        } else if (verifiedMs > now.getTime()) {
-          findings.push(finding('future-row-verified-at', `${context}.verifiedAt ${verifiedAt} is in the future`));
-        } else if (now.getTime() - verifiedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
-          findings.push(finding(
-            'stale-row-verified-at',
-            `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
-          ));
-        }
+    if (verifiedAt === undefined) {
+      if (status === 'hardened') {
+        findings.push(finding('missing-row-verified-at', `${context} is hardened but has no verifiedAt runtime-verification date`));
+      }
+    } else if (typeof verifiedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(verifiedAt)) {
+      findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be YYYY-MM-DD`));
+    } else {
+      const verifiedMs = parseManifestDateMs(verifiedAt);
+      if (verifiedMs === null) {
+        findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be a valid calendar date`));
+      } else if (verifiedMs > now.getTime()) {
+        findings.push(finding('future-row-verified-at', `${context}.verifiedAt ${verifiedAt} is in the future`));
+      } else if (now.getTime() - verifiedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+        findings.push(finding(
+          'stale-row-verified-at',
+          `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+        ));
       }
     }
 
@@ -432,6 +439,8 @@ export function checkFleetBotHardeningParity(
     const updatedMs = parseManifestDateMs(updated);
     if (updatedMs === null) {
       findings.push(finding('invalid-updated', 'parity manifest updated must be a valid calendar date'));
+    } else if (updatedMs > now.getTime()) {
+      findings.push(finding('future-updated', `parity manifest updated ${updated} is in the future`));
     } else if (now.getTime() - updatedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
       findings.push(finding(
         'stale-updated',
