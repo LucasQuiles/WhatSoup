@@ -63,6 +63,35 @@ values. The plan now permits only `watchdog-parent-pid`, `watchdog-child-pid`, a
 from callers. This correction likewise requires a fresh exact-input review and successor planning
 commit before the bootstrap validator commit.
 
+The next revived implementation pass stopped again before inventing four completion-critical
+internal-check contracts. The plan named readiness, producer inventory/version decision, feedback
+measurements, and documentation lineage checks but did not freeze exhaustive result keysets,
+canonical row order, exact producer/token/hash relations, or a caller-independent source for every
+lineage endpoint. The authoritative plan now defines closed `ReadinessRecord`,
+`ConsumerVersionDecision`, `FeedbackMeasurements`, and `DocsLineageReport` objects and makes each a
+helper-derived result. No caller-authored JSON, endpoint environment variable, or result path can
+satisfy those checks. This amendment requires a fresh never-reused 27-pass plan-review closeout plus the
+repository documentation guards before validator implementation resumes.
+
+The same pass refreshed the SSH remote and observed `origin/main`
+`5d16cd401e1250f417f7bde481a4cc8b0ad1df55`. Read-only `git merge-tree` and an isolated detached
+merge probe from feature head `ea9a3dcb37f7b349cf0cbd4aaac5278dd4dfed5c` both reported exactly
+two conflicts: `docs/work-index.json` and `docs/work-index.md`. In the isolated probe, the canonical
+pinned work-index generator produced 68 rows; staging only the regenerated pair left no unmerged
+entries or conflict markers, `git diff --check` passed, and `guard:work-index` reported clean. The
+plan therefore authorizes only that exact helper-owned generated-index recovery, with recorded
+stage OIDs, direct generator/guard statuses, exact-path checks, and full abort/restoration on any
+neighboring failure. A different upstream OID or conflict set still stops for another explicit
+amendment; no general auto-resolution policy exists.
+
+Before this amendment, the committed feature state through
+`ea9a3dcb37f7b349cf0cbd4aaac5278dd4dfed5c` was pushed to the SSH remote without bypassing hooks.
+The full pre-push chain passed 39 test files/742 tests, 14 design-guard files/182 tests, 87 tokenomics
+tests, both TypeScript checks, documentation/publication/work-index guards, test-integrity with no
+new findings, and console lint/build. The sibling ARC full-content comparison was unavailable and
+only its clean vendored pin was observed, so full ARC parity remains unclaimed. The untracked
+validator scaffold remains outside that pushed commit and is not accepted evidence.
+
 ## Planning Review Evidence
 
 The 27-pass deterministic plan review completed under the external artifact root recorded in the
@@ -74,11 +103,14 @@ seven cross-artifact consistency rules, all 15 current contracts through a separ
 receipt, and final manifest status `completed`. Its unique root must preserve every failed attempt;
 none is converted to clean evidence by a later passing neighbor.
 
-The hash-locked copied tool snapshot's unfiltered suite currently runs 185 tests with three failures:
+The prior hash-locked copied tool snapshot's unfiltered suite ran 185 tests with three failures:
 bundle synchronization plus native/source parity for `task-graph.v1.schema.json` and
-`policy-decisions.v1.schema.json` against a changing external source tree. That lane is
-Inconclusive, not clean. The direct 15-contract receipt and complete-run 27/9/7 receipt remain
-separate and both are required. Even after those direct receipts pass, execution is `Not Ready` for
+`policy-decisions.v1.schema.json` against a changing external source tree. That historical lane
+remains Inconclusive, not clean. Before this amendment's snapshot was created, the live installation
+exposed the 33-pass inventory and its unfiltered suite ran 239 tests with zero failures; that live
+observation is preliminary only. The amendment review must copy the complete selected tool closure,
+make it read-only, and rerun the suite there before using its result. The direct 15-contract receipt
+and legacy complete-run 27/9/7 receipt remain separate and both are required. Even after those direct receipts pass, execution is `Not Ready` for
 BCF-01: A-08 upstream/predecessor reconciliation, A-09 immutable artifact identity, and A-10
 lifecycle/oracle disposition must pass first. A-02 remains due before BCF-02, A-03 before BCF-05,
 and A-06 before BCF-08C. This does not claim that any production change, schema-2 receipt, provider

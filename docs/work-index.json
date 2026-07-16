@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-16T19:35:21Z",
+  "generated_at": "2026-07-16T20:51:36Z",
   "repo": "WhatSoup",
-  "git_head": "32d41b888106ca3cde29aef3b01c952126223d31",
+  "git_head": "ea9a3dcb37f7b349cf0cbd4aaac5278dd4dfed5c",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 68,
   "schema_version": 5,
@@ -88,7 +88,7 @@
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
       "last_modified": "2026-07-16",
-      "size_bytes": 23358
+      "size_bytes": 26083
     },
     {
       "path": "docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md",
@@ -496,7 +496,7 @@
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-07-16",
-      "size_bytes": 336235
+      "size_bytes": 350449
     },
     {
       "path": "docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md",

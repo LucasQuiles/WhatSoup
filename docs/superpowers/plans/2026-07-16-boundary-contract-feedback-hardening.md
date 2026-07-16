@@ -442,14 +442,13 @@ with a successful rerun.
 | `Ready with Constraints` | Plan evidence is complete enough to begin, no current blocker exists, and every residual risk has an owner, checkpoint, artifact, and stop condition before its dependent task | Begin only the next action named in `readiness.json`; do not cross a constrained checkpoint |
 | `Not Ready` | Missing authority, unstable scope, unresolved critical assumption due now, unverified contract, missing execution seam, overlapping writer, or absent validation/rollback evidence | No implementation mutation; gather named evidence or amend the plan |
 
-The lead records
+The helper-owned `readiness-check` derives and records
 `artifacts/verification/boundary-contract-feedback/readiness/<run-id>/readiness.json` before Task 1
 and refreshes it in a new run after any scope, interface, tool, authority, upstream, or falsifier
-change. It contains
-`readiness_state`, UTC date, evidence reviewed, open risks, blockers, decision rationale, decision
-authority, and next allowed action. The owner authorizes scope and external actions; the lead owns
-the evidence-backed local execution decision. A worker or green test cannot self-authorize crossing
-a readiness blocker.
+change. Its complete keyset, value grammar, evidence relations, and canonical order are the closed
+`ReadinessRecord` contract below; no lead-authored prose file is accepted as readiness evidence. The
+owner authorizes scope and external actions; the lead owns the evidence-backed local execution
+decision. A worker or green test cannot self-authorize crossing a readiness blocker.
 
 Current execution state is **Not Ready for BCF-01**. The objective, scope, tasks, falsifiers,
 validation layers, telemetry, owners, and rollback are explicit, but A-08, A-09, and A-10 are due
@@ -1086,6 +1085,24 @@ The exact schema-1 object key sets are:
 | `upstream` | `remoteUrl`, `observedOid`, `mergeBase`, `ahead`, `behind`, `remotePaths`, `localPaths`, `observationManifestSha256`, `mergeCommit`, `mergeParents` |
 | `tool` | `name`, `realPath`, `version`, `sha256` |
 | `reservedDerivedRoot` | `kind`, `path`, `parentDevice`, `parentInode`, `state` |
+| `ReadinessRecord` | `schemaVersion`, `runId`, `taskId`, `profileId`, `head`, `snapshotDigestSha256`, `readinessState`, `evaluatedAtUtc`, `evidence`, `assumptions`, `risks`, `blockers`, `decisionRationale`, `decisionAuthority`, `nextAllowedAction`, `overallVerdict` |
+| `readinessEvidence` | `evidenceId`, `artifactPath`, `producerAttemptId`, `sha256`, `verdict` |
+| `readinessAssumption` | `assumptionId`, `disposition`, `evidenceRefs` |
+| `readinessRisk` | `riskId`, `owner`, `checkpoint`, `artifactPath`, `artifactSha256`, `stopCondition` |
+| `readinessBlocker` | `blockerId`, `reason`, `evidenceRefs` |
+| `ConsumerVersionDecision` | `schemaVersion`, `runId`, `taskId`, `profileId`, `head`, `snapshotDigestSha256`, `packageVersion`, `currentProducerSchema`, `proposedProducerSchema`, `supportStage`, `inventoryQuerySha256`, `inventoryMatches`, `localConsumers`, `externalConsumers`, `compatibilityReader`, `rollbackCommit`, `decision`, `releaseNoteRequired`, `limitations`, `overallVerdict` |
+| `consumerInventoryMatch` | `path`, `line`, `column`, `matchKind`, `matchedToken`, `lineSha256` |
+| `localConsumer` | `consumerId`, `kind`, `path`, `symbol`, `schemaSupport`, `matchRefs` |
+| `FeedbackMeasurements` | `schemaVersion`, `runId`, `taskId`, `profileId`, `producerAttemptId`, `head`, `snapshotDigestSha256`, `tokenSha256`, `budgets`, `scenarios`, `overallVerdict` |
+| `boundaryBudgets` | `maxFindings`, `maxObservedPerFinding`, `maxArtifactsPerFinding`, `maxLimitationsPerFinding`, `maxTopLevelLimitations`, `maxFingerprints`, `maxCanonicalRecords`, `maxCorrectionsPerFinding`, `maxVerificationPerFinding`, `maxSourcesPerFinding`, `maxPublicTextBytes`, `maxJsonBytes`, `maxHumanBytes`, `maxHumanReservedSummaryBytes`, `maxHumanDetailedFindings` |
+| `feedbackScenario` | `ordinal`, `scenario`, `subject`, `inputBytes`, `limitBytes`, `humanBytes`, `jsonBytes`, `detailedFindings`, `omittedFindings`, `renderedObservations`, `omittedObservations`, `evidenceDigestSha256`, `descriptorDigestSha256`, `expectedDisposition`, `observedDisposition` |
+| `DocsLineageReport` | `schemaVersion`, `runId`, `taskId`, `profileId`, `head`, `snapshotDigestSha256`, `anchors`, `operations`, `pathClasses`, `bEntryIdentity`, `overallVerdict` |
+| `docsLineageAnchors` | `validatorBase`, `validatorCommit`, `upstreamMerge`, `upstreamFirstParent`, `upstreamSecondParent`, `originMain`, `reconciledBase`, `docsEntryHead`, `docsCurrentHead` |
+| `docsLineageOperation` | `ordinal`, `operationId`, `argv`, `rawExit`, `rawSignal`, `stdoutSha256`, `stderrSha256`, `parsedOids`, `parsedPaths`, `expectationMet`, `verdict` |
+| `docsLineagePathClass` | `path`, `status`, `source` |
+| `docsBEntryIdentity` | `snapshotDigestSha256`, `publicSurfaceSha256`, `publicationAuditSha256`, `handoffSha256`, `workIndexJsonSha256`, `workIndexMarkdownSha256` |
+| `MergeConflictResolutionReport` | `schemaVersion`, `policy`, `beforeHead`, `expectedSecondParent`, `conflictPaths`, `indexStages`, `generatorArgv`, `generatorRawExit`, `generatorRawSignal`, `resolvedPaths`, `unmergedPaths`, `conflictMarkerPaths`, `diffCheckRawExit`, `diffCheckRawSignal`, `workIndexGuardRawExit`, `workIndexGuardRawSignal`, `preStateDigestSha256`, `resolvedStateDigestSha256`, `verdict` |
+| `mergeConflictIndexStage` | `path`, `stage`, `mode`, `oid` |
 
 The exact value grammar uses these aliases: `Id` is the operational-ID grammar already declared;
 `Path` is a normalized bounded relative path; `Sha256` and `Oid` are the lowercase hashes above;
@@ -1155,6 +1172,94 @@ types are not interchangeable.
 - `reservedDerivedRoot` uses `kind: run|completion|closeout|closeout-failure`, absolute canonical
   path, positive integer parent device/inode, and `state: reserved|created`. Set arrays everywhere
   sort by path, ID, alias, or tool name; semantic arrays retain the specifically declared order.
+
+The four completion-critical internal-check results above are helper-derived state, never
+caller-authored JSON. Their `schemaVersion` is integer `1`; their run/task/profile/head/snapshot
+fields are exact copies of the active manifest at the attempt's owned head anchor. The helper writes
+each canonical object as that internal check's `structuredResult`, atomically registers the same
+bytes under its profile-owned artifact path, and rejects a pre-existing, caller-selected, copied,
+or post-write-mutated result. There is no CLI option for any result field or result path.
+
+`ReadinessRecord` is produced only by `readiness-check` as `readiness.json`. Evidence rows sort by
+`evidenceId` and name an admitted manifest artifact, its owning required attempt, current hash, and
+direct `Verdict`. Assumption rows are exactly `A-08`, `A-09`, and `A-10` in that order, use
+`disposition: validated|blocked`, and contain sorted unique evidence IDs that resolve to the evidence
+array. Risk and blocker rows sort by ID; a risk has nonempty bounded owner/checkpoint/stop-condition
+text plus a current admitted artifact path/hash, while a blocker has a nonempty reason and evidence
+references. `decisionAuthority` is literal `implementation-lead`; `nextAllowedAction` is
+`BCF-01|null`. `Ready with Constraints` requires all three assumptions validated, no blockers,
+every required reconciliation attempt/child Pass, lifecycle `completed`, final gate `pass`, oracle
+`current`, at least one bounded risk row for every residual limitation, literal next action
+`BCF-01`, and root `overallVerdict: Pass`. `Not Ready` requires null next action, at least one blocked
+assumption or blocker, and non-pass verdict. Literal `Ready` is rejected for BCF-00 because A-02,
+A-03, and A-06 remain constrained at later checkpoints. The rationale is bounded diagnostic text
+derived from the ordered failed/pending conditions, not caller prose.
+
+`ConsumerVersionDecision` is produced only by `receipt-producer-scan` as
+`consumer-version-decision.json`. Its exact query is A-01's literal direct `rg` argv; the helper
+hashes the canonical argv and requires `inventoryQuerySha256` to match. Inventory matches sort by
+`path,line,column,matchKind,matchedToken`, use positive line/column integers,
+`matchKind: producer-call|compatibility-read|schema-reference`, a bounded literal token from the
+query match, and the SHA-256 of the complete matched source line. Every match is referenced exactly
+once by `localConsumers[].matchRefs`; consumer rows sort by `consumerId` and use
+`kind: producer|reader|test|documentation`, a normalized tracked path, bounded symbol,
+`schemaSupport: schema-1|schema-1-read-schema-2-write|schema-1-and-2`, and sorted unique references.
+The fixed scalar decision is package `0.1.0`, current schema `1`, proposed schema `2`,
+`supportStage: beta-shadow-only`, `externalConsumers: unknown`,
+`compatibilityReader: schema-1-read-render`, `rollbackCommit` equal to the verified BCF-03 terminal
+head, `decision: pre-1.0-shadow-compatible`, `releaseNoteRequired: false`, and `overallVerdict: Pass`.
+Limitations are the one-element semantic array `external-consumers-unknown`. A named external
+consumer, stable/public compatibility promise, missing/unclassified match, package/version drift,
+or rollback-head mismatch makes the check non-pass and it emits no passing decision artifact.
+
+`FeedbackMeasurements` is exclusively written through the helper-created one-use Task 5 channel
+and admitted by `feedback-green`; `feedback-budget` reparses those exact bytes and producer/hash
+relations without copying them. The `budgets` object contains the exact 15
+`DEFAULT_BOUNDARY_BUDGETS` integer values declared in Task 3. Scenario rows have contiguous
+ordinals and the semantic order `ordinary`, `human-at-limit`, `human-one-over`, `json-at-limit`,
+`json-one-over`, `multibyte`. Subject is `aggregate|public-text|canonical-json|utf8-text`; input,
+limit, output, and count fields are nonnegative safe integers; all digests are `Sha256`; and both
+dispositions are `accepted|diagnostic-inconclusive`. The two at-limit rows require input bytes equal
+the relevant limit and accepted disposition; the two one-over rows require exactly limit plus one
+and diagnostic-inconclusive; `ordinary` must be accepted; `multibyte` must prove independently
+computed UTF-8 byte rather than code-point counts. Every human result, including the diagnostic,
+is at most `maxHumanBytes` including its final LF; every JSON result is at most `maxJsonBytes`;
+detailed findings are at most 12; and rendered plus omitted counts and both digests must equal the
+independent fixture oracle. The token is never serialized; only its helper-computed `tokenSha256`
+appears. Duplicate scenario, wrong order/producer/token/head, production-derived counters, or a
+one-byte bound error is non-pass.
+
+`DocsLineageReport` is produced only by `docs-lineage-scope` as `docs-lineage.json`. No lineage
+anchor is read from an environment variable or CLI field. The helper derives validator commit from
+the verified BCF-00 reconciliation completion receipt's `entryHead`, validator base from that
+commit's sole parent, upstream merge and reconciled base from its `terminalHead`/`reconciledBase`,
+upstream second parent from `upstreamObservedOid`, docs entry/current heads from BCF-08B manifest
+state, and `originMain` from the final `git rev-parse` operation. It requires the two stored
+reconciliation heads and two derived merge parents to agree before running later operations.
+Operations have ordinals 1–10 and exact IDs `diff-check`, `status-short`, `validator-endpoints`,
+`validator-name-status`, `validator-stat`, `merge-origin`, `upstream-name-status`, `upstream-stat`,
+`authored-name-status`, `authored-stat`; argv is exactly the ten Step 5 arrays after helper-only OID
+substitution. Each row records direct status and stream hashes plus parsed OIDs/paths; rows sort only
+by ordinal. Path classifications sort by `path,source,status`, use Git name-status grammar, and
+`source: validator|upstream|authored|b-delta`; every parsed changed path has exactly one applicable
+classification. `bEntryIdentity` copies the B entry snapshot plus exact five file hashes; public
+surface, publication audit, and the A-produced bytes remain unchanged as Task 8 requires. Any
+caller endpoint, moving `origin/main`, missing/extra operation, unclassified path, nonzero/signal,
+three-file validator interval drift, parent mismatch, forbidden authored path, owner/staging change,
+or B delta outside handoff plus the two generated indexes is non-pass.
+
+`MergeConflictResolutionReport` exists only inside the reconciliation transition attempt when the
+closed generated-index exception is exercised. It has integer `schemaVersion: 1`, literal policy
+`regenerate-generated-work-index`, `beforeHead` equal the frozen transition entry head,
+`expectedSecondParent` equal literal `5d16cd401e1250f417f7bde481a4cc8b0ad1df55`, exact sorted conflict/resolved path arrays
+containing only `docs/work-index.json` and `docs/work-index.md`, and stage rows sorted by
+`path,stage`. A stage is integer `1|2|3`, mode is six-digit ASCII-octal Git mode, and OID is lowercase
+40-hex. Generator argv is the one closed array; each raw exit/signal pair follows
+`StatusOrSignal`; successful resolution requires exit 0/null for generator, diff check, and guard,
+empty unmerged/conflict-marker arrays, two snapshot `Sha256` values, and `verdict: Pass`. The report
+is nested in the transition structured result and is never an independently admitted substitute for
+the transition. On rejection it preserves every reached direct status and conflicting stage but can
+never be promoted to Pass by a later retry under the same run ID.
 
 The sibling completion and final-closeout objects are equally closed:
 
@@ -1287,15 +1392,35 @@ profile authorizes exactly one closed transition kind `merge` or `commit`; all o
 it. It verifies the current head and full snapshot before mutation, owns the direct Git child, and
 captures stdout/stderr/status/signal plus pre/post index, tree, parent, and worktree identities. For
 `merge`, the helper itself invokes `git merge --no-edit <expected-second-parent>`, requires first
-parent equal the frozen pre-head and second parent equal the declared observation OID, and on any
-nonzero/conflict records the paths, invokes `git merge --abort`, proves exact pre-state restoration,
-and leaves the transition failed. For `commit`, it verifies the exact staged allowlist and bounded
+parent equal the frozen pre-head and second parent equal the declared observation OID, and normally
+treats every nonzero/conflict as failed: it records the paths and index stages, invokes
+`git merge --abort`, and proves exact pre-state restoration. The sole closed exception is
+`merge-transition` in profile `bcf00-reconciliation` when the pinned expected second parent is
+exactly `5d16cd401e1250f417f7bde481a4cc8b0ad1df55` and both the pinned preview and direct merge report
+exactly `docs/work-index.json` and `docs/work-index.md` as the complete conflict set with no other
+path unmerged. Its attempt contract owns
+`conflictPolicy: regenerate-generated-work-index`, the literal pinned
+`bash scripts/run-with-pinned-npm.sh run work-index:regen` generator argv, and the literal pinned
+`bash scripts/run-with-pinned-npm.sh run guard:work-index` guard argv; callers cannot request the
+policy or supply resolved bytes. The helper records every stage-1/2/3 mode/OID in a
+`MergeConflictResolutionReport`, runs the generator under its existing transition watchdog, proves
+that only the two generated files changed during resolution, stages exactly those two files,
+requires zero unmerged entries and zero conflict-marker matches, then runs `git diff --check` and
+the work-index guard directly. It records every direct status and the resolved-state digest before
+allowing the original merge commit to complete. Any extra/missing conflict, generator or guard
+nonzero/signal, extra generated path, symlink/non-regular file, remaining stage/marker, index/head/
+parent drift, commit failure, or failed postcondition invokes `git merge --abort`, must restore the
+exact frozen head/index/worktree/owner snapshot, and leaves the transition non-pass. A future OID
+whose OID or conflict set differs by even one value is not covered by this amendment and stops for
+a new conflict-specific plan amendment. For `commit`, it verifies the exact staged allowlist and bounded
 `--message-subject` hygiene before invoking `git commit -m <declared-subject>`, then requires one parent
 equal the pre-head, a commit tree equal the frozen index tree, and no uncommitted allowed-path delta.
 Only a successful exact transition atomically advances the run's expected head/snapshot anchor;
 the reconciliation merge transition also single-assigns `reconciledBase` to that exact merge commit;
 foreign parents, amend/rewrite, hook bypass, index drift, extra paths, incomplete abort, or a second
-transition exit nonzero. This operation replaces bare Git mutation for the Task 0 merge, every
+transition exit nonzero. Snapshot tests cover the exact current generated-index neighbor plus an
+extra conflict, a missing conflict, generator extra-path write, marker survival, guard failure,
+parent/head drift, rollback mismatch, and a second transition. This operation replaces bare Git mutation for the Task 0 merge, every
 BCF-01–07 code commit, and the Task 8 documentation commit.
 
 `finalize` requires every declared output admitted and every admitted artifact hash-current, recursively
@@ -1714,14 +1839,14 @@ helper-owned contracts:
 | Required ID set | Operation/check contract |
 |---|---|
 | `parser-scope`, `catalog-scope`, `contract-scope`, `feedback-scope`, `provider-scope`, `integration-scope`, `reproduction-scope-check` | `internal-check: worktree-scope` recomputes head/index/staged/unstaged/untracked/mode/submodule state and requires only the profile path set plus unchanged owner paths |
-| `readiness-check` | `internal-check: readiness-contract` validates the registered closed readiness JSON, A-08–10 dispositions, required predecessor attempts/children, lifecycle/oracle row, and next action `BCF-01` |
+| `readiness-check` | `internal-check: readiness-contract` derives and atomically registers the closed `ReadinessRecord` from A-08–10 evidence, required predecessor attempts/children, lifecycle/oracle state, and the only allowed next action `BCF-01`; it accepts no caller readiness JSON |
 | `review-schema-check` | `internal-check: review-contract` validates the closed report/review/finding schema, exact review head, dedupe key, report/meta/stderr hashes, and reproduction declarations |
 | `review-scope-check` | `internal-check: read-only-scope` requires identical pre/post worktree/head and only helper-owned report artifacts |
 | `reproduction-suite` | exact `integration-focused` seven-suite pinned Vitest argv from Task 7, at the frozen review head; finding-specific generic attempts are additionally required by each `record-review` row but cannot replace this suite |
-| `feedback-budget` | `internal-check: output-budget-contract` consumes only the immutable `feedback-green` attempt's predeclared `feedback-measurements.json` artifact and producer hash; validates its closed ordinary/at-limit/one-over human and JSON byte/count/digest fields against Task 5; and rejects missing/duplicate/foreign-producer records |
-| `receipt-producer-scan` | `internal-check: producer-inventory-contract` reruns the closed A-01 `rg` query over source, tests, docs, and package metadata; validates the helper-owned sorted result against `consumer-version-decision.json`; and rejects an omitted producer/consumer, unknown external consumer mislabeled absent, unsupported version claim, or any tracked-file mutation |
+| `feedback-budget` | `internal-check: output-budget-contract` consumes only the immutable `feedback-green` attempt's predeclared `FeedbackMeasurements` artifact and producer hash, validates its exact scenario order and independent human/JSON byte/count/digest relations against Task 5, and rejects missing/duplicate/foreign-producer records |
+| `receipt-producer-scan` | `internal-check: producer-inventory-contract` reruns the closed A-01 `rg` query over source, tests, docs, and package metadata and derives/registers `ConsumerVersionDecision`; it rejects an omitted or unclassified match, unknown external consumer mislabeled absent, unsupported version claim, rollback-head drift, or any tracked-file mutation |
 | `docs-authoring-scope` | `internal-check: docs-authoring-scope` requires the BCF-07 entry/terminal head to remain identical, no staged paths, and the exact Task 8 documentation allowlist as the only changed tracked paths; it also validates the four immutable review/reproduction child joins and rejects owner-path or helper-artifact leakage |
-| `docs-lineage-scope` | `internal-check: docs-lineage-scope` recomputes and validates all ten Step 5 Git checks: diff check, short status, validator endpoints, validator name-status/stat, merge parents/origin identity, upstream-brought name-status/stat, and reconciled authored name-status/stat; it enforces the three-file validator interval, pinned upstream second parent, classified upstream paths, exact Required File Interface authored paths, untouched/unstaged owner paths, and B-entry delta limited to handoff plus two generated indexes with A's public-surface/audit bytes unchanged |
+| `docs-lineage-scope` | `internal-check: docs-lineage-scope` derives every endpoint from verified completion/manifest state, recomputes all ten Step 5 Git operations, and registers `DocsLineageReport`; it enforces the three-file validator interval, pinned upstream second parent, classified upstream paths, exact Required File Interface authored paths, untouched/unstaged owner paths, and B-entry delta limited to handoff plus two generated indexes with A's public-surface/audit bytes unchanged |
 | `docs-staged-scope` | `internal-check: staged-scope` recomputes the index and requires the exact BCF-08B documentation allowlist, with no omission, addition, mode surprise, submodule entry, or unrelated staged path |
 
 `internal-check` emits its own bounded JSON artifact, direct internal status, snapshot, and verdict;
@@ -2438,10 +2563,12 @@ bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-git-t
   --expect-second-parent "$BCF_OBSERVED_UPSTREAM_OID"
 ```
 
-If Git reports conflicts, the helper saves the conflict path/status artifacts, runs
-`git merge --abort`, and must verify the pre-merge head/status are restored; then stop for a
-conflict-specific plan amendment. Do not auto-resolve, use a strategy override, or continue BCF
-work. On success, record the merge commit,
+If Git reports conflicts outside the exact closed generated-work-index policy, the helper saves the
+conflict path/status/stage artifacts, runs `git merge --abort`, and must verify the pre-merge
+head/status are restored; then stop for another conflict-specific plan amendment. For the currently
+pinned upstream only, an exact two-path conflict on `docs/work-index.json` and
+`docs/work-index.md` follows the helper-owned regeneration contract above; no caller content choice,
+strategy override, or other conflict resolution is authorized. On success, record the merge commit,
 both parents, new `origin/main...HEAD` count, merge-base binary-diff identity, and post-merge helper
 tests. Call `set-upstream` once with the exact joined observation manifest and merge identities. Set
 both `BCF_UPSTREAM_MERGE` and `BCF_RECONCILED_BASE` to the merge commit; its first parent must equal
@@ -2490,11 +2617,16 @@ is Inconclusive and leaves A-08 Blocked.
 Write `lifecycle.json` with one object per packet containing `planPath`, `planSha256`, `status`,
 `completionCommit`, `finalGateState`, `finalGateArtifactSha256`, `successor`, `supersededBy`, and
 `oracleDisposition`. Mark the historical 40/40 artifact `superseded-invalid-oracle`, point the
-current oracle to the raw reconciled 39/40 per-case artifact, and leave branch deletion false. Write
-run-scoped `readiness.json` with `Ready with Constraints` and next action BCF-01 only if every Step
-1–6 artifact and direct status passes; otherwise write `Not Ready` plus exact blockers.
+current oracle to the raw reconciled 39/40 per-case artifact, and leave branch deletion false. Then
+register the lifecycle and oracle artifacts under their closed producer attempts and call
+`set-lifecycle` with status `completed`, final gate `pass`, and oracle `current`; this declaration
+does not make the run Pass while required `readiness-check` is still absent. Then
+invoke `readiness-check`; it derives the closed run-scoped `ReadinessRecord` from the immutable
+manifest and emits `Ready with Constraints` plus next action BCF-01 only if every Step 1–6 artifact
+and direct status passes, otherwise `Not Ready` plus exact blockers. Do not author or import a
+readiness file outside that internal check.
 
-Register lifecycle/readiness/oracle artifacts with their producer attempts, finalize the
+After `readiness-check` atomically registers its own result, finalize the
 reconciliation manifest with every child hash, generate `run_manifest.sha256`, and rerun all
 hash/field checks. The validator and reconciled merge are separate commits;
 `BCF_VALIDATOR_BASE..BCF_VALIDATOR_COMMIT` owns only the three validator files, while
@@ -3530,11 +3662,12 @@ bash scripts/run-with-pinned-node.sh scripts/verify-boundary-run.ts record-git-t
 
 - [ ] **Step 0: Resolve consumer and version disposition before changing the producer**
 
-Run the A-01 inventory over source/tests/docs/package metadata and save exact matches. Write a
-run-scoped `consumer-version-decision.json` with package `0.1.0`, current schema 1, proposed schema 2,
-beta/shadow-only composition, the active beta CLI row and first-party workflow as named local
-consumers, external consumers `unknown`, compatibility reader, rollback commit, and decision. Apply
-the exact supported-public-producer definition in Documentation and DevOps Readiness. If a named
+Run `receipt-producer-scan`; it executes A-01's exact direct inventory argv, classifies every match,
+and derives/registers the closed `ConsumerVersionDecision` with package `0.1.0`, current schema 1,
+proposed schema 2, beta/shadow-only composition, all named local producer/reader/test/documentation
+consumers, external consumers `unknown`, compatibility reader, the verified BCF-03 terminal head as
+rollback commit, and the fixed pre-1.0 decision. No caller-written version decision is accepted.
+Apply the exact supported-public-producer definition in Documentation and DevOps Readiness. If a named
 external consumer, stable surface, or published compatibility commitment is found, stop before Task
 4 code and require the separate approved version/release-note change. Otherwise
 record the explicit pre-1.0 shadow decision and continue; BCF-08A later publishes the same decision,
@@ -3901,7 +4034,8 @@ budget counters. On `feedback-green` only, the helper exclusively creates the pr
 artifact `feedback-measurements.json` and passes its canonical path plus one-use token as
 `BCF_MEASUREMENT_PATH`/`BCF_MEASUREMENT_TOKEN` through the exact pinned npm wrapper. The test opens
 that existing non-symlink file without following links, verifies it is empty, and writes exactly one
-closed-schema JSON object containing the token. After the child exits, the helper proves the same
+closed `FeedbackMeasurements` object in the required six-scenario semantic order; the token itself
+is used for the write handshake but only `tokenSha256` is serialized. After the child exits, the helper proves the same
 device/inode/mode, fsyncs, parses it, and consumes the token. Only after the reporter predicate and
 measurement schema both pass does the helper bind both artifact hashes under the same immutable
 attempt record and register measurement path/hash/bytes with producer `feedback-green`. Missing,
@@ -4378,6 +4512,10 @@ The validator interval may contain only the three Task 0 validator files. The me
 must show that its first parent is `BCF_VALIDATOR_COMMIT`, its second parent is the hash-bound
 upstream OID, and separately classify every upstream-brought path. Only Required File Interface
 paths may appear after `BCF_RECONCILED_BASE`; owner paths remain untouched and unstaged.
+The uppercase endpoint names in the displayed commands are explanatory aliases, not environment
+inputs: `docs-lineage-scope` derives them from the verified BCF-00 completion receipt, Git parents,
+and BCF-08B manifest exactly as specified by `DocsLineageReport`, executes the ten direct operations,
+and atomically registers that report. A caller-supplied endpoint or report is rejected.
 
 Stage the exact documentation allowlist, verify there is no staged path outside it, then commit:
 
