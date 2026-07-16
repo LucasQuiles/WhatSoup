@@ -79,6 +79,9 @@ export type FleetBotHardeningParityFindingCode =
   | 'invalid-row-id'
   | 'duplicate-row-id'
   | 'invalid-row-status'
+  | 'invalid-row-verified-at'
+  | 'future-row-verified-at'
+  | 'stale-row-verified-at'
   | 'row-capabilities-not-object'
   | 'missing-row-capability'
   | 'unknown-row-capability'
@@ -130,6 +133,15 @@ function arrayOfStrings(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
     : null;
+}
+
+// Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
+// value is not that exact shape or is not a real calendar date, so callers can
+// distinguish a malformed date from a freshness violation.
+function parseManifestDateMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 function recordPrivateLabelFindings(
@@ -211,6 +223,7 @@ function validateCapabilities(payload: Record<string, unknown>, findings: FleetB
 function validateRows(
   payload: Record<string, unknown>,
   findings: FleetBotHardeningParityFinding[],
+  now: Date,
 ): Array<Record<string, unknown>> {
   const rawRows = payload['rows'];
   if (!Array.isArray(rawRows)) {
@@ -275,6 +288,30 @@ function validateRows(
     const evidence = arrayOfStrings(rawRow['evidence']);
     if (evidence === null) {
       findings.push(finding('evidence-not-list', `${context}.evidence must be an array of strings`));
+    }
+
+    // Optional per-row runtime verification date. When present, it must be a
+    // real YYYY-MM-DD, not in the future, and within the freshness budget, so a
+    // row cannot carry a stale runtime-parity timestamp. Making it required on
+    // hardened rows is a separate, migration-gated decision (see the guard's
+    // freshness backstop note): the tracked manifest does not yet declare it.
+    const verifiedAt = rawRow['verifiedAt'];
+    if (verifiedAt !== undefined) {
+      if (typeof verifiedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(verifiedAt)) {
+        findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be YYYY-MM-DD`));
+      } else {
+        const verifiedMs = parseManifestDateMs(verifiedAt);
+        if (verifiedMs === null) {
+          findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be a valid calendar date`));
+        } else if (verifiedMs > now.getTime()) {
+          findings.push(finding('future-row-verified-at', `${context}.verifiedAt ${verifiedAt} is in the future`));
+        } else if (now.getTime() - verifiedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+          findings.push(finding(
+            'stale-row-verified-at',
+            `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+          ));
+        }
+      }
     }
 
     if (status === 'hardened') {
@@ -392,8 +429,8 @@ export function checkFleetBotHardeningParity(
   if (typeof updated !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(updated)) {
     findings.push(finding('invalid-updated', 'parity manifest updated must be YYYY-MM-DD'));
   } else {
-    const updatedMs = Date.parse(`${updated}T00:00:00Z`);
-    if (Number.isNaN(updatedMs)) {
+    const updatedMs = parseManifestDateMs(updated);
+    if (updatedMs === null) {
       findings.push(finding('invalid-updated', 'parity manifest updated must be a valid calendar date'));
     } else if (now.getTime() - updatedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
       findings.push(finding(
@@ -414,7 +451,7 @@ export function checkFleetBotHardeningParity(
 
   recordPrivateLabelFindings(findings, payload, '$');
   validateCapabilities(payload, findings);
-  const rows = validateRows(payload, findings);
+  const rows = validateRows(payload, findings, now);
   validateSummary(payload, rows, findings);
   if (isRecord(scope) && typeof scope['cohortSize'] === 'number' && scope['cohortSize'] !== rows.length) {
     findings.push(finding(
