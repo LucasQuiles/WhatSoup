@@ -9,9 +9,14 @@ import {
   DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
   run,
 } from '../../scripts/check-fleet-bot-hardening-parity.ts';
+import { rosterEpoch, rosterInventory } from '../../scripts/lib/fleet-roster-inventory.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const tempRoots: string[] = [];
+
+// Same conventional path the guard resolves against `cwd` (mirrors
+// `deploy/scripts/lib/bot_errors_roster.py`'s `default_roster_path()`).
+const FLEET_ROSTER_FIXTURE_PATH = 'deploy/bot-errors-expected-fleet.json';
 
 function makeRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-fleet-hardening-parity-'));
@@ -84,6 +89,23 @@ function writeFixtureManifest(root: string, overrides: Record<string, unknown> =
     `${JSON.stringify(manifest, null, 2)}\n`,
     'utf8',
   );
+}
+
+function writeFixtureRoster(root: string, hosts: unknown[]): string {
+  const rosterPath = path.join(root, FLEET_ROSTER_FIXTURE_PATH);
+  writeFixtureFile(root, FLEET_ROSTER_FIXTURE_PATH, `${JSON.stringify({ schemaVersion: 1, hosts }, null, 2)}\n`);
+  return rosterPath;
+}
+
+function makeFixtureHosts(n: number): Array<Record<string, unknown>> {
+  return Array.from({ length: n }, (_, index) => ({
+    host: `fixture-host-${index}`,
+    role: 'bot-host',
+    collectorRemote: false,
+    instances: [
+      { name: `fixture-bot-${index}`, service: `fixture-bot-${index}.service`, expected: 'always_on' },
+    ],
+  }));
 }
 
 afterEach(() => {
@@ -587,5 +609,131 @@ describe('fleet bot hardening parity guard', () => {
         chain.indexOf('npm run guard:bot-errors-runtime-manifest'),
       );
     }
+  });
+
+  describe('inventory-epoch binding (#1867 criterion 3)', () => {
+    it('emits no finding when inventoryBinding is absent (validate-when-present; protects the tracked manifest)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root);
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(true);
+      expect(result.findings).toEqual([]);
+      expect(result.runtimeParity.findings).toEqual([]);
+    });
+
+    it('accepts inventoryBinding whose declared digest/count/epoch match the independently recomputed roster', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      const rosterPath = writeFixtureRoster(root, makeFixtureHosts(2));
+      const rosterData = JSON.parse(readFileSync(rosterPath, 'utf8'));
+      const inventory = rosterInventory(rosterData);
+      const epoch = rosterEpoch(rosterPath);
+      expect(epoch).not.toBeNull();
+
+      writeFixtureManifest(root, {
+        inventoryBinding: {
+          rosterDigest: inventory.digest,
+          rosterEpoch: epoch,
+          expectedInstanceCount: inventory.expectedInstanceCount,
+        },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(true);
+      expect(result.runtimeParity.findings).toEqual([]);
+      expect(result.sourceAnchorParity.ok).toBe(true);
+    });
+
+    it('fails with roster-digest-mismatch and roster-instance-count-mismatch when membership changed (declared binding computed from an N-1 fixture)', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      // The real/current roster has 3 hosts...
+      const rosterPath = writeFixtureRoster(root, makeFixtureHosts(3));
+      // ...but the manifest declares a binding computed from a stale 2-host roster.
+      const staleInventory = rosterInventory({ schemaVersion: 1, hosts: makeFixtureHosts(2) });
+      const epoch = rosterEpoch(rosterPath);
+      expect(epoch).not.toBeNull();
+
+      writeFixtureManifest(root, {
+        inventoryBinding: {
+          rosterDigest: staleInventory.digest,
+          rosterEpoch: epoch,
+          expectedInstanceCount: staleInventory.expectedInstanceCount,
+        },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'roster-digest-mismatch' }),
+        expect.objectContaining({ code: 'roster-instance-count-mismatch' }),
+      ]));
+    });
+
+    it('fails with future-roster-epoch when the declared rosterEpoch is later than the roster file mtime', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      const rosterPath = writeFixtureRoster(root, makeFixtureHosts(2));
+      const rosterData = JSON.parse(readFileSync(rosterPath, 'utf8'));
+      const inventory = rosterInventory(rosterData);
+      const epoch = rosterEpoch(rosterPath);
+      expect(epoch).not.toBeNull();
+
+      writeFixtureManifest(root, {
+        inventoryBinding: {
+          rosterDigest: inventory.digest,
+          rosterEpoch: (epoch as number) + 1_000_000,
+          expectedInstanceCount: inventory.expectedInstanceCount,
+        },
+      });
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'future-roster-epoch' }),
+      ]));
+    });
+
+    it('fails closed with invalid-inventory-binding when the field is present but malformed', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        inventoryBinding: { rosterDigest: 'not-hex', rosterEpoch: 'not-a-number', expectedInstanceCount: -1 },
+      });
+
+      const result = checkFleetBotHardeningParity(root);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid-inventory-binding' }),
+      ]));
+    });
+
+    it('fails closed with roster-unreadable when inventoryBinding is present but the fleet roster file cannot be read', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      // Deliberately do not write deploy/bot-errors-expected-fleet.json.
+      writeFixtureManifest(root, {
+        inventoryBinding: { rosterDigest: 'a'.repeat(64), rosterEpoch: 0, expectedInstanceCount: 1 },
+      });
+
+      const result = checkFleetBotHardeningParity(root);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'roster-unreadable' }),
+      ]));
+    });
   });
 });
