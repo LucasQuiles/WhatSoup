@@ -650,7 +650,9 @@ describe('database compatibility health drain', () => {
   it('keeps the compatibility gate before external readiness, recovery, runtime, and timers', () => {
     const mainSource = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
     const gate = mainSource.indexOf('await openDatabaseForStartup({');
+    const markerCleanup = mainSource.indexOf('clearInitialDatabaseCreateMarker(');
     expect(gate).toBeGreaterThanOrEqual(0);
+    expect(markerCleanup).toBeGreaterThan(gate);
     for (const laterOperation of [
       'getPineconeReadiness(',
       'seedChatAliases(',
@@ -660,6 +662,7 @@ describe('database compatibility health drain', () => {
       'setInterval(',
     ]) {
       expect(mainSource.indexOf(laterOperation), laterOperation).toBeGreaterThan(gate);
+      expect(mainSource.indexOf(laterOperation), laterOperation).toBeGreaterThan(markerCleanup);
     }
   });
 });

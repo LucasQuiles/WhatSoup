@@ -883,11 +883,24 @@ describe('handleCreateLine', () => {
     expect(res._status).toBe(201);
     const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'mode-agent', 'config.json');
     const claudeMdPath = path.join(agentCwd, '.claude', 'CLAUDE.md');
+    const initialDatabaseMarker = path.join(
+      process.env.XDG_DATA_HOME!,
+      'whatsoup',
+      'instances',
+      'mode-agent',
+      '.initial-database-create-approved',
+    );
     const modes = {
       configJson: fileMode(configPath),
       claudeMd: fileMode(claudeMdPath),
+      initialDatabaseMarker: fileMode(initialDatabaseMarker),
     };
-    expect(modes).toEqual({ configJson: 0o600, claudeMd: 0o600 });
+    expect(modes).toEqual({
+      configJson: 0o600,
+      claudeMd: 0o600,
+      initialDatabaseMarker: 0o600,
+    });
+    expect(fs.readFileSync(initialDatabaseMarker, 'utf8')).toBe('mode-agent\n');
   });
 
   it('defaults an empty agent cwd to a home-confined workspace during create', async () => {

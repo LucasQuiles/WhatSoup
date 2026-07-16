@@ -69,6 +69,7 @@ import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
+import { clearInitialDatabaseCreateMarker } from './core/initial-database-marker.ts';
 
 // The restart-safety probe must link the complete static import graph without
 // executing this module's database, network, transport, health, or timer body.
@@ -182,6 +183,11 @@ if (databaseStartup.mode === 'drained') {
   process.exit(shutdownExitCode(drainSignal));
 }
 const db = databaseStartup.db;
+try {
+  clearInitialDatabaseCreateMarker(config.dataRoot, config.botName);
+} catch (err) {
+  log.warn({ err }, 'failed to clear initial database marker after successful open');
+}
 
 const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
 log.info({

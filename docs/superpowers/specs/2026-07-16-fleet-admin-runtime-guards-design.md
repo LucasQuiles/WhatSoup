@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-16
 
-**Status:** Proposed for owner review
+**Status:** Approved for implementation — owner selected the fail-closed layered approach on 2026-07-16
 
 **Scope:** WhatSoup agent instances, fleet configuration paths, restart tooling, and fleet verification
 

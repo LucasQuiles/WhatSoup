@@ -128,6 +128,63 @@ if [ -f "$REPO_ROOT/package-lock.json" ] && [ ! -d "$REPO_ROOT/node_modules" ]; 
   exit 3
 fi
 
+# Outbound replay-safety gate. A restart may replay every safe/read_only
+# nonterminal operation, regardless of its age, so inspect the live database
+# before the import probe authorizes process replacement. The checker is
+# read-only and emits counts/state only; payloads and destinations never leave
+# the database. A genuinely new instance requires the private marker written by
+# the fleet CREATE path — a missing database without that proof fails closed.
+if [ -n "$INSTANCE" ]; then
+  RESTART_SAFETY_CHECK="$REPO_ROOT/scripts/restart-safety-preflight.ts"
+  if [ ! -f "$RESTART_SAFETY_CHECK" ] || [ -L "$RESTART_SAFETY_CHECK" ]; then
+    echo "PREFLIGHT-ERROR: restart-safety checker not found or unsafe: $RESTART_SAFETY_CHECK" >&2
+    exit 1
+  fi
+
+  XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+  INSTANCE_DATA_ROOT="$XDG_DATA/whatsoup/instances/$INSTANCE"
+  RESTART_DB="$INSTANCE_DATA_ROOT/bot.db"
+  INITIAL_DATABASE_MARKER="$INSTANCE_DATA_ROOT/.initial-database-create-approved"
+
+  set +e
+  restart_safety_out="$(
+    "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$RESTART_SAFETY_CHECK" \
+      --db "$RESTART_DB" \
+      --instance "$INSTANCE" \
+      --initial-marker "$INITIAL_DATABASE_MARKER" \
+      --json
+  )"
+  restart_safety_rc=$?
+  set -e
+
+  if ! "$NODE" -e '
+    const verdict = JSON.parse(process.argv[1]);
+    if (verdict?.schemaVersion !== 1 || verdict?.decision !== "allow" || verdict?.ok !== true) {
+      process.exit(1);
+    }
+  ' "$restart_safety_out" >/dev/null 2>&1; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — outbound restart-safety gate blocked the instance."
+      [ -n "$restart_safety_out" ] && echo "  $restart_safety_out"
+      echo "  No outbound operation was replayed or modified."
+    } >&2
+    exit 3
+  fi
+  if [ "$restart_safety_rc" -ne 0 ]; then
+    {
+      echo "PREFLIGHT-FAIL: REFUSING TO START — restart-safety checker returned rc=$restart_safety_rc."
+      [ -n "$restart_safety_out" ] && echo "  $restart_safety_out"
+    } >&2
+    exit 3
+  fi
+  echo "PREFLIGHT-RESTART-SAFETY: $restart_safety_out" >&2
+  unset RESTART_SAFETY_CHECK XDG_DATA INSTANCE_DATA_ROOT RESTART_DB \
+    INITIAL_DATABASE_MARKER restart_safety_out restart_safety_rc
+fi
+
 # Import-closure probe — the authoritative landmine check. Runs an isolated import
 # of startup and lazy agent-session entrypoints under a throwaway state/config/data
 # dir so the probe is side-effect-free (no touching prod DB).
