@@ -7,11 +7,15 @@ describe('Vitest filesystem isolation', () => {
   it('routes HOME and XDG roots into a worker-owned temporary directory', () => {
     const isolatedHome = process.env['WHATSOUP_VITEST_HOME'];
     const isolatedTempRoot = process.env['WHATSOUP_VITEST_TEMP_ROOT'];
+    const isolatedTmpdir = process.env['TMPDIR'];
 
     expect(isolatedHome).toBeTruthy();
     expect(isolatedTempRoot).toBeTruthy();
+    expect(isolatedTmpdir).toBeTruthy();
     expect(isAbsolute(isolatedHome!)).toBe(true);
     expect(relative(realpathSync(isolatedTempRoot!), realpathSync(isolatedHome!))).not.toMatch(/^\.\.(?:\/|$)/);
+    expect(realpathSync(isolatedTmpdir!)).toBe(isolatedTmpdir);
+    expect(relative(realpathSync(isolatedHome!), isolatedTmpdir!)).not.toMatch(/^\.\.(?:\/|$)/);
     expect(process.env['HOME']).toBe(isolatedHome);
     expect(homedir()).toBe(isolatedHome);
     expect(process.env['XDG_CONFIG_HOME']).toBe(join(isolatedHome!, '.config'));

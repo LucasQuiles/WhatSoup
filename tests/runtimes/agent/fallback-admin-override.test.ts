@@ -100,6 +100,7 @@ const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),

@@ -370,6 +370,29 @@ describe('EnrichmentPoller', () => {
     expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
   });
 
+  it('stop aborts an in-flight cycle before any post-provider database write', async () => {
+    let resolveExtraction!: (facts: []) => void;
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 41 })]);
+    vi.mocked(extractFacts).mockReturnValue(new Promise<[]>((resolve) => {
+      resolveExtraction = resolve;
+    }));
+    const { poller, db } = makePoller();
+
+    const tick = (poller as unknown as { tick(): Promise<void> }).tick();
+    await vi.waitFor(() => expect(extractFacts).toHaveBeenCalledOnce());
+
+    poller.stop();
+    resolveExtraction([]);
+    await tick;
+
+    expect(markMessagesProcessed).not.toHaveBeenCalled();
+    expect(markMessagesWithError).not.toHaveBeenCalled();
+    expect(incrementEnrichmentRetries).not.toHaveBeenCalled();
+    expect(db._prepareFn).not.toHaveBeenCalled();
+    expect(poller.lastRunAt).toBeNull();
+    expect((poller as unknown as { timer: NodeJS.Timeout | null }).timer).toBeNull();
+  });
+
   it('self-scheduling: tick() waits for runCycle to finish before scheduling next', async () => {
     // Simulate a long-running cycle by holding extractFacts until we release it
     let resolveFirst!: () => void;

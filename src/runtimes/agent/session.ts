@@ -1325,6 +1325,7 @@ export class SessionManager {
   }
 
   async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
+    this.db.assertWritableCompatibility();
     if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
@@ -2074,6 +2075,7 @@ export class SessionManager {
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
+    this.db.assertWritableCompatibility();
     if (!this.active) {
       throw new Error('No active session. Call spawnSession() first.');
     }

@@ -16,7 +16,9 @@ import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { Database } from '../../../src/core/database.ts';
+import { DatabaseCompatibilityError } from '../../../src/core/database-compatibility.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
+import { withDatabaseCompatibility } from '../../../src/runtimes/chat/providers/database-compatibility.ts';
 
 // ---------------------------------------------------------------------------
 // Queue drain helpers — must be defined before vi.mock calls so that
@@ -65,6 +67,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
 
 vi.mock('../../../src/runtimes/chat/rate-limits-db.ts', () => ({
   recordResponse: vi.fn(),
+  recordAttempt: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({
@@ -118,7 +121,7 @@ import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { loadContext } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
-import { recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
+import { recordAttempt, recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
 import { ChatRuntime } from '../../../src/runtimes/chat/runtime.ts';
 import { jitteredDelay } from '../../../src/core/retry.ts';
@@ -155,6 +158,7 @@ const mockCheckRateLimit = vi.mocked(checkRateLimit);
 const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
 const mockLoadContext = vi.mocked(loadContext);
 const mockStoreMessage = vi.mocked(storeMessageIfNew);
+const mockRecordAttempt = vi.mocked(recordAttempt);
 const mockRecordResponse = vi.mocked(recordResponse);
 const mockProcessMedia = vi.mocked(processMedia);
 
@@ -171,6 +175,7 @@ function makeMessenger(): Messenger & { sendMessage: ReturnType<typeof vi.fn> } 
 
 function makeDb() {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       exec: vi.fn(),
       prepare: vi.fn().mockReturnValue({
@@ -251,6 +256,22 @@ function makeHandler() {
   const fallback = makeFallbackProvider();
   const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback);
   return { handler, db, messenger, pinecone, primary, fallback };
+}
+
+function makeCompatibilityGuardedHandler() {
+  const db = makeDb();
+  const messenger = makeMessenger();
+  const pinecone = makePinecone();
+  const primary = makePrimaryProvider();
+  const fallback = makeFallbackProvider();
+  const handler = new ChatRuntime(
+    db,
+    messenger,
+    pinecone,
+    withDatabaseCompatibility(db, primary),
+    withDatabaseCompatibility(db, fallback),
+  );
+  return { handler, db, messenger, primary, fallback };
 }
 
 /**
@@ -991,6 +1012,60 @@ describe('LLM retry jitter (B05)', () => {
 // ===========================================================================
 
 describe('Runtime interface', () => {
+  it('queued processing latches compatibility before rate-limit, media, attempt, or provider work', async () => {
+    const { handler, db, messenger, primary, fallback } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    const rejection = new DatabaseCompatibilityError(
+      'future_schema',
+      'database compatibility drained',
+      undefined,
+      45,
+    );
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+
+    await expect(handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 73 })))
+      .resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentPollerStop()).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+    expect(handler.getHealthSnapshot()).toMatchObject({
+      status: 'unhealthy',
+      details: {
+        databaseCompatibility: {
+          reason: 'future_schema',
+          observedMigration: 45,
+        },
+      },
+    });
+    await expect(handler.handleMessage(makeIncomingMessage({ messageId: 'msg-after-latch' })))
+      .rejects.toBe(rejection);
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockCheckRateLimit).not.toHaveBeenCalled();
+    expect(mockProcessMedia).not.toHaveBeenCalled();
+    expect(mockRecordAttempt).not.toHaveBeenCalled();
+    expect(primary.generate).not.toHaveBeenCalled();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('start() rejects before schema initialization when database compatibility is drained', async () => {
+    const { handler, db } = makeHandler();
+    const rejection = new Error('database compatibility drained');
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+
+    await expect(handler.start()).rejects.toBe(rejection);
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(db.raw.exec).not.toHaveBeenCalled();
+    expect(mockEnrichmentPollerStart()).not.toHaveBeenCalled();
+  });
+
   it('start() resolves without error', async () => {
     const { handler } = makeHandler();
     await expect(handler.start()).resolves.toBeUndefined();
@@ -1424,6 +1499,100 @@ describe('WhatSoupError non-retryable paths', () => {
     const { handler } = makeHandler();
     await handleAndDrain(handler, makeIncomingMessage());
     expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_total_failure');
+  });
+});
+
+describe('Database compatibility provider rejection', () => {
+  function rejection(): DatabaseCompatibilityError<'future_schema'> {
+    return new DatabaseCompatibilityError('future_schema', 'schema advanced during the turn');
+  }
+
+  it('latches the first primary compatibility rejection without retry, fallback, alert, or outage reply', async () => {
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(2);
+    expect(primary.generate).not.toHaveBeenCalled();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a primary-retry compatibility rejection without fallback or outage handling', async () => {
+    vi.useFakeTimers();
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValueOnce(new Error('transient primary failure'));
+
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+    await vi.runAllTimersAsync();
+    await completion;
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(3);
+    expect(primary.generate).toHaveBeenCalledOnce();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a bad-request fallback compatibility rejection without alerting or outage reply', async () => {
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('bad request', 'LLM_BAD_REQUEST'),
+    );
+
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(3);
+    expect(primary.generate).toHaveBeenCalledOnce();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a terminal fallback compatibility rejection without alerting or outage reply', async () => {
+    vi.useFakeTimers();
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    // Sequence: [0] processMessage()'s pre-turn compat gate (runtime.ts entry
+    // check, shared by every test in this describe block — see the sibling
+    // tests above), then per primary attempt a before-check + finally-check
+    // pair from withDatabaseCompatibility (database-compatibility.ts). Two
+    // primary attempts (initial + retry) means 1 + 2*2 = 5 assert calls before
+    // the terminal rejection latches from the SECOND attempt's finally-check —
+    // i.e. after both primary attempts have genuinely run, not from a
+    // before-check that preempts the second attempt's generate() call.
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValue(new Error('transient primary failure'));
+
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+    await vi.runAllTimersAsync();
+    await completion;
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(5);
+    expect(primary.generate).toHaveBeenCalledTimes(2);
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 });
 

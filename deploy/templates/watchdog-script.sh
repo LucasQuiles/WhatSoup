@@ -70,11 +70,38 @@ ensure_loaded() {
   fi
 }
 
+launchd_reports_permanent_stop() {
+  local job_label="$1" launchd_state
+  launchd_state="$(launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
+  print -r -- "$launchd_state" | awk '
+    /^[[:space:]]*state[[:space:]]*=/ {
+      state_count++
+      state_value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", state_value)
+      sub(/[[:space:]]*$/, "", state_value)
+    }
+    /^[[:space:]]*last exit (code|status)[[:space:]]*=/ {
+      exit_count++
+      exit_value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", exit_value)
+      sub(/[[:space:]]*$/, "", exit_value)
+    }
+    END {
+      if (state_count == 1 && state_value == "stopped" && exit_count == 1 && exit_value == "78") exit 0
+      exit 1
+    }
+  '
+}
+
 # Restart a job with a 5-minute cooldown to avoid restart storms.
 restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local now last
+  if launchd_reports_permanent_stop "$job_label"; then
+    log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
+    return 0
+  fi
   now=$(date +%s)
   last=0
   [ -r "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
@@ -107,20 +134,100 @@ if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
 elif [ -z "$bot_json" ]; then
   restart_label "$BOT_LABEL" "empty health body (http=$bot_code)"
 else
-  BOT_JSON="$bot_json" python3 - <<'PY' 2>>"$LOG" || restart_label "$BOT_LABEL" "unhealthy JSON response"
+  BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG" || restart_label "$BOT_LABEL" "unhealthy JSON response"
 import datetime as dt
 import json
 import os
 import sys
 
 data = json.loads(os.environ["BOT_JSON"])
+http_code = os.environ.get("BOT_CODE")
+expected_instance_name = "BOT_NAME"
 status = data.get("status")
+service_mode = data.get("service_mode")
+generated_at = data.get("generated_at")
+instance = data.get("instance") or {}
 whatsapp = data.get("whatsapp") or {}
 conn = whatsapp.get("connection") or {}
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
 auth_failure_class = conn.get("auth_failure_class")
+try:
+    generated_time = dt.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    generated_age = (dt.datetime.now(dt.timezone.utc) - generated_time).total_seconds()
+    generated_is_fresh = -5 <= generated_age <= 60
+except (AttributeError, TypeError, ValueError):
+    generated_is_fresh = False
+
+# A compatibility drain is a deliberate, health-visible stop before transport,
+# recovery, providers, or timers exist. Restarting cannot make an older binary
+# understand a future schema and must not auto-roll back a hot journal. Accept
+# only the exact fail-closed body; a forged/partial mode still fails liveness.
+if service_mode == "inspection_only":
+    startup_block = data.get("startup_block") or {}
+    sqlite = data.get("sqlite") or {}
+    runtime = data.get("runtime") or {}
+    runtime_agent = runtime.get("agent") or {}
+    admission = data.get("admission") or {}
+    reason = startup_block.get("code")
+    latest = sqlite.get("schema_migration_latest")
+    required = sqlite.get("schema_migration_required")
+    required_is_valid = type(required) is int and required > 0
+    migration_relationship_is_valid = (
+        reason == "future_schema"
+        and type(latest) is int
+        and required_is_valid
+        and latest > required
+        and sqlite.get("sql_inspection_available") is True
+    ) or (
+        reason == "engine_recovery_required"
+        and latest is None
+        and required_is_valid
+        and sqlite.get("sql_inspection_available") is False
+    )
+    exact_drain = (
+        http_code == "503"
+        and status == "unhealthy"
+        and generated_is_fresh
+        and instance.get("name") == expected_instance_name
+        and type(instance.get("pid")) is int
+        and instance.get("pid") > 0
+        and instance.get("mode") == "inspection_only"
+        and instance.get("socket_path") is None
+        and reason in ("future_schema", "engine_recovery_required")
+        and startup_block.get("retryable") is False
+        and startup_block.get("operator_action_required") is True
+        and sqlite.get("compatibility") == reason
+        and sqlite.get("schema_ready") is False
+        and sqlite.get("database_writes_allowed") is False
+        and sqlite.get("artifact_inspection_available") is True
+        and migration_relationship_is_valid
+        and admission.get("provider_turns") == "blocked"
+        and admission.get("synthetic_turns") == "blocked"
+        and runtime_agent.get("started") is False
+        and runtime_agent.get("admission") == "blocked"
+        and runtime_agent.get("reason") == reason
+        and "durability" in data
+        and data.get("durability") is None
+        and connected is False
+        and whatsapp.get("account_jid") == "not connected"
+        and state == "not_started"
+        and conn.get("reconnect_phase") is None
+        and type(conn.get("reconnect_attempts")) is int
+        and conn.get("reconnect_attempts") == 0
+        and conn.get("last_disconnect_reason") == "startup_schema_gate"
+        and conn.get("last_status_code") is None
+        and auth_failure_class == "none"
+    )
+    if exact_drain:
+        print(
+            f"database compatibility drain reason={reason!r}: operator action required, not restarting",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    print("malformed database compatibility drain health body", file=sys.stderr)
+    sys.exit(1)
 
 # Terminal auth failures cannot be fixed by a restart — the bond is gone
 # server-side (device_removed / 401), pairing is required, or the local auth

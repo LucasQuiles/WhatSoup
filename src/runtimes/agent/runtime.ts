@@ -175,7 +175,12 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { WorkspaceSweeper, type WorkspaceResource } from './workspace-sweeper.ts';
-import { fallbackProviderConfigFor, fallbackKeyPresent as fallbackKeyPresentFor } from './fallback-config.ts';
+import {
+  fallbackProviderConfigFor,
+  fallbackKeyPresent as fallbackKeyPresentFor,
+  fallbackRequiresIndependentProbe,
+  oneMessageHandoffEnabled,
+} from './fallback-config.ts';
 import { makeIdleEligibilityResolver } from './fallback-eligibility-cache.ts';
 import {
   createProviderMcpBridge,
@@ -317,39 +322,12 @@ const MODEL_USABILITY_FRESHNESS_MS = 30 * 60_000;
 // One periodic sweep enumerates active conversations and asks the runner to
 // (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
 // so the interval only sets how often that machinery is consulted.
-// Opt-in: collapse the fallback notice and the stand-in's reply into ONE
-// user-facing message. When a replay is scheduled the notice is stashed (via the
-// crash-safe standby latch) and prepended to the stand-in's first visible reply
-// instead of being sent on its own. Off → the notice is enqueued standalone
-// exactly as before (byte-identical default path).
-function oneMessageHandoffEnabled(): boolean {
-  return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
-}
-
 /** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
 function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
   return value === 'usage-limit' || value === 'rate-limit'
     || value === 'auth-required' || value === 'model-unavailable'
     || value === 'server-error' || value === 'empty-output'
     || value === 'probe-unusable';
-}
-
-/**
- * Reasons whose failover borrows the auth-required control semantics: the revert
- * is gated on a fresh primary probe AND same-provider fallback entries are
- * skipped (a re-auth/empty-primary needs an independent provider to stand in).
- *
- * `empty-output` / `probe-unusable` — the consecutive-empty-output and
- * usability-probe triggers of {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}
- * — previously reused the literal `'auth-required'` reason SOLELY to inherit
- * these two side-effects, which then leaked into the operator-facing
- * `provider_fallback_activated` alert as a false `reason=auth-required` (#1421).
- * They are now first-class reasons the alert can name honestly while this helper
- * preserves the identical control behaviour. Accepts a raw string because
- * {@link AgentRuntime.selectFallbackEntryForWindow} carries the reason untyped.
- */
-function fallbackRequiresIndependentProbe(reason: string | null | undefined): boolean {
-  return reason === 'auth-required' || reason === 'empty-output' || reason === 'probe-unusable';
 }
 
 /**
@@ -2792,6 +2770,7 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    this.db.assertWritableCompatibility();
     if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
     // Crash-safe latch table for the one-message handoff collapse. Idempotent;
@@ -3446,6 +3425,7 @@ export class AgentRuntime implements Runtime {
     beadId: number; triggerId: number; prompt: string; title: string; reportChatJid: string;
   }): { dispatched: boolean; detail?: string } {
     try {
+      this.db.assertWritableCompatibility();
       const now = Math.floor(Date.now() / 1000);
       const synthetic: IncomingMessage = {
         messageId: `agentjob-${ctx.triggerId}-${now}`,
@@ -3479,6 +3459,11 @@ export class AgentRuntime implements Runtime {
   }
 
   handleMessage(msg: IncomingMessage): Promise<void> {
+    try {
+      this.db.assertWritableCompatibility();
+    } catch (err) {
+      return Promise.reject(err);
+    }
     if (this.shutdownRequested) {
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
@@ -6563,6 +6548,7 @@ export class AgentRuntime implements Runtime {
    * the caller (heal.ts) is responsible for queuing subsequent reports.
    */
   async handleControlTurn(reportId: string, payload: string): Promise<void> {
+    this.db.assertWritableCompatibility();
     const syntheticJid = 'control@heal.internal';
     try {
       // Only non-sandboxed instances (Q) can run repairs
@@ -6715,6 +6701,7 @@ export class AgentRuntime implements Runtime {
   }
 
   async handleAgentCommand(request: AgentCommandRequest): Promise<AgentCommandResult> {
+    this.db.assertWritableCompatibility();
     if (request.command !== 'compact') {
       throw new AgentCommandRuntimeError(
         'unsupported_command',
