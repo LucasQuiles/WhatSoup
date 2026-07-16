@@ -56,6 +56,7 @@ function writeFixtureManifest(root: string, overrides: Record<string, unknown> =
           'fallback-chain': 'proven',
         },
         evidence: ['fixture evidence'],
+        verifiedAt: '2026-06-15',
       },
       {
         id: 'peer-agent-bot-1',
@@ -99,6 +100,201 @@ describe('fleet bot hardening parity guard', () => {
     expect(result.findings).toEqual([]);
     expect(result.rows).toBe(7);
     expect(result.sourceAnchors).toBeGreaterThanOrEqual(1);
+  });
+
+  it('fails when the parity manifest updated timestamp is older than the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-06-15' });
+
+    // Inject a clock far past the documented max age so the age math is
+    // unambiguous and independent of the real wall clock or the constant.
+    const staleNow = new Date('2027-01-01T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, staleNow);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'stale-updated' }),
+    ]));
+  });
+
+  it('accepts a parity manifest whose updated timestamp is within the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-06-15' });
+
+    const freshNow = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, freshNow);
+
+    expect(result.ok).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
+  it('fails when a row verifiedAt timestamp is older than the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+          verifiedAt: '2026-01-01',
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    // updated 2026-06-15 stays fresh (5 days); the row verifiedAt 2026-01-01 is ~170 days stale.
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'stale-row-verified-at' }),
+    ]));
+  });
+
+  it('fails when a row verifiedAt timestamp is in the future', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+          verifiedAt: '2026-12-31',
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'future-row-verified-at' }),
+    ]));
+  });
+
+  it('fails when a row verifiedAt is not a valid date shape', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+          verifiedAt: 'not-a-date',
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'invalid-row-verified-at' }),
+    ]));
+  });
+
+  it('accepts a row whose verifiedAt is within the freshness budget', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+          verifiedAt: '2026-06-18',
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
+  it('fails closed when a hardened row omits verifiedAt', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, {
+      rows: [
+        {
+          id: 'reference-incident-bot',
+          status: 'hardened',
+          capabilities: {
+            'turn-capability-health': 'proven',
+            'primary-model-usability-probe': 'proven',
+            'release-drift-check-job': 'proven',
+            'fallback-chain': 'proven',
+          },
+          evidence: ['fixture evidence'],
+        },
+      ],
+      scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+      summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+    });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing-row-verified-at' }),
+    ]));
+  });
+
+  it('fails when the manifest updated timestamp is in the future', () => {
+    const root = makeRoot();
+    writeFixtureStandard(root);
+    writeFixtureManifest(root, { updated: '2026-12-31' });
+
+    const now = new Date('2026-06-20T00:00:00Z');
+    const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'future-updated' }),
+    ]));
   });
 
   it('fails when a hardened row has an unproven capability', () => {
