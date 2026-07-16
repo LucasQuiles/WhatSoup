@@ -46,6 +46,7 @@ const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
+const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
@@ -174,6 +175,7 @@ function makeWrapperFixture(): WrapperFixture {
   chmodSync(wrapper, 0o755);
   copyFileSync(RESOLVE_NODE_LIB, join(lib, 'resolve-node.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
+  copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));

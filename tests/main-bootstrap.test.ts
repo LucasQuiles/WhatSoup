@@ -8,6 +8,13 @@ type HealthServerDepsForTest = {
   getEnrichmentStats: () => unknown;
 };
 
+type CapabilityGrantManagerOptionsForTest = {
+  groups: Record<string, { capabilities: string[] }>;
+  policy: unknown;
+  store: unknown;
+  onError?: (err: unknown, operation: string) => void;
+};
+
 class FakeConnection extends EventEmitter {
   botJid: string | null = 'bot@s.whatsapp.net';
   botLid: string | null = 'bot@lid';
@@ -61,6 +68,8 @@ async function importMainWithMocks(options: {
   adminPhones?: string[];
   existingPaths?: string[];
   messageCount?: number;
+  grantReconcileError?: Error;
+  expectStartupFailure?: boolean;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -108,6 +117,18 @@ async function importMainWithMocks(options: {
   const databaseRetentionTimer = { start: vi.fn(), stop: vi.fn() };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
+  const grantManager = {
+    arm: vi.fn(),
+    disarm: vi.fn(),
+    status: vi.fn(),
+    reconcile: vi.fn(async () => {
+      if (options.grantReconcileError) throw options.grantReconcileError;
+      return null;
+    }),
+    stop: vi.fn(),
+  };
+  const settingsPolicyAdapter = { read: vi.fn(), apply: vi.fn() };
+  const fileGrantStore = { read: vi.fn(), write: vi.fn() };
   const durability = {
     preConnectRecovery: vi.fn(),
     postConnectRecovery: vi.fn(),
@@ -165,6 +186,9 @@ async function importMainWithMocks(options: {
     dataRoot: '/tmp/whatsoup-main-data-root',
     startupNotifications: true,
     toolUpdateMode: 'full',
+    capabilityGrantGroups: {
+      camera: { capabilities: ['camera.snap', 'camera.clip'] },
+    },
   };
 
   const Database = vi.fn(function () {
@@ -209,6 +233,13 @@ async function importMainWithMocks(options: {
     ChatRuntime,
     PassiveRuntime,
     AgentRuntime,
+    grantManager,
+    settingsPolicyAdapter,
+    fileGrantStore,
+    createCapabilityGrantManager: vi.fn((_options: CapabilityGrantManagerOptionsForTest) => grantManager),
+    createSettingsPolicyAdapter: vi.fn(() => settingsPolicyAdapter),
+    createFileGrantStore: vi.fn(() => fileGrantStore),
+    assertGroupsRespectDenyFloor: vi.fn(),
     storeDecryptionFailure: vi.fn(),
     cleanupOldRateLimits: vi.fn(() => 1),
     deleteOldMessages: vi.fn(() => 1),
@@ -352,6 +383,14 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/transport/factory.ts', () => ({ createConnection: mocks.createConnection }));
   vi.doMock('../src/runtimes/chat/runtime.ts', () => ({ ChatRuntime }));
   vi.doMock('../src/runtimes/agent/runtime.ts', () => ({ AgentRuntime }));
+  vi.doMock('../src/lib/capability-grant.ts', () => ({
+    createCapabilityGrantManager: mocks.createCapabilityGrantManager,
+  }));
+  vi.doMock('../src/core/capability-grant-adapter.ts', () => ({
+    createSettingsPolicyAdapter: mocks.createSettingsPolicyAdapter,
+    createFileGrantStore: mocks.createFileGrantStore,
+    assertGroupsRespectDenyFloor: mocks.assertGroupsRespectDenyFloor,
+  }));
   vi.doMock('../src/runtimes/passive/runtime.ts', () => ({ PassiveRuntime }));
   vi.doMock('../src/runtimes/agent/plugin-dir-resolver.ts', () => ({ resolveLatestPluginDir: mocks.resolveLatestPluginDir }));
   vi.doMock('../src/instance-loader.ts', () => ({ resolveAgentModel: mocks.resolveAgentModel }));
@@ -457,10 +496,21 @@ async function importMainWithMocks(options: {
     releaseProcessLock: mocks.releaseProcessLock,
   }));
 
-  await import('../src/main.ts');
-  await vi.waitFor(() => expect(connection.connect).toHaveBeenCalledOnce());
+  vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  let importError: unknown;
+  try {
+    await import('../src/main.ts');
+  } catch (err) {
+    importError = err;
+  }
+  if (options.expectStartupFailure) {
+    await vi.waitFor(() => expect(grantManager.reconcile).toHaveBeenCalledOnce());
+  } else {
+    if (importError) throw importError;
+    await vi.waitFor(() => expect(connection.connect).toHaveBeenCalledOnce());
+  }
 
-  return { ...mocks, processOn, getHealthDeps };
+  return { ...mocks, processOn, getHealthDeps, importError };
 }
 
 describe('main bootstrap', () => {
@@ -798,7 +848,7 @@ describe('main bootstrap', () => {
         introSent: true,
         agentOptions: {
           sessionScope: 'shared',
-          cwd: '~/LAB/WhatSoup',
+          cwd: '~/testuser/LAB/WhatSoup',
           instructionsPath: '/tmp/instructions.md',
           sandbox: {
             allowedPaths: ['/tmp'],
@@ -806,7 +856,7 @@ describe('main bootstrap', () => {
             bash: { enabled: false },
           },
           sandboxPerChat: true,
-          pluginDirs: ['~/plugins/one'],
+          pluginDirs: ['~/testuser/plugins/one'],
           enabledPlugins: { test: true },
           allowM365Mutations: false,
           autoCompactInputTokens: 123,
@@ -832,8 +882,31 @@ describe('main bootstrap', () => {
       }),
     );
     expect(h.resolveLatestPluginDir).toHaveBeenCalledWith(expect.stringMatching(/\/plugins\/one$/));
+    expect(h.assertGroupsRespectDenyFloor).toHaveBeenCalledWith(h.config.capabilityGrantGroups);
+    expect(h.createCapabilityGrantManager).toHaveBeenCalledWith(expect.objectContaining({
+      groups: h.config.capabilityGrantGroups,
+      policy: h.settingsPolicyAdapter,
+      store: h.fileGrantStore,
+      onError: expect.any(Function),
+    }));
+    expect(h.grantManager.reconcile).toHaveBeenCalledOnce();
+    const reconcileOrder = h.grantManager.reconcile.mock.invocationCallOrder[0]!;
+    expect(reconcileOrder).toBeLessThan(h.startHealthServer.mock.invocationCallOrder[0]!);
+    expect(reconcileOrder).toBeLessThan(h.triggerPoller.start.mock.invocationCallOrder[0]!);
+    expect(reconcileOrder).toBeLessThan(h.agentInstances[0].start.mock.invocationCallOrder[0]!);
+    expect(reconcileOrder).toBeLessThan(h.connection.connect.mock.invocationCallOrder[0]!);
     expect(h.chatRuntime.start).not.toHaveBeenCalled();
     expect(h.agentInstances[0].start).toHaveBeenCalledOnce();
+
+    const onError = h.createCapabilityGrantManager.mock.calls[0]?.[0]?.onError as
+      | ((err: unknown, operation: string) => void)
+      | undefined;
+    const expiryError = new Error('expiry revert failed');
+    onError?.(expiryError, 'expiry-disarm');
+    expect(h.logger.error).toHaveBeenCalledWith(
+      { err: expiryError, operation: 'expiry-disarm' },
+      'capability-grant lifecycle error',
+    );
 
     await vi.advanceTimersByTimeAsync(3_000);
     expect(h.sendTracked).toHaveBeenCalledWith(
@@ -843,5 +916,24 @@ describe('main bootstrap', () => {
       h.durability,
       { replayPolicy: 'safe' },
     );
+  });
+
+  it('aborts before health, pollers, runtime, or transport when grant reconciliation fails', async () => {
+    const reconcileError = new Error('malformed persisted capability grant');
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: { cwd: '~/testuser/LAB/WhatSoup' },
+      },
+      grantReconcileError: reconcileError,
+      expectStartupFailure: true,
+    });
+
+    expect(h.importError).toBe(reconcileError);
+    expect(h.startHealthServer).not.toHaveBeenCalled();
+    expect(h.triggerPoller.start).not.toHaveBeenCalled();
+    expect(h.agentInstances[0].start).not.toHaveBeenCalled();
+    expect(h.connection.connect).not.toHaveBeenCalled();
   });
 });
