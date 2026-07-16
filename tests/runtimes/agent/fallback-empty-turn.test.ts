@@ -101,6 +101,10 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
+import type {
+  MarkSystemTurnInput,
+  SystemTurnLeaseToken,
+} from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -158,18 +162,36 @@ function makeFakeQueue() {
   };
 }
 
+function makeEventSession() {
+  return {
+    clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
+    getDbRowId: vi.fn(() => null),
+    getProviderId: vi.fn(() => 'claude-cli'),
+    getStatus: vi.fn(() => ({ active: true })),
+    shutdown: vi.fn(async () => {}),
+    tickWatchdog: vi.fn(),
+    trackToolStart: vi.fn(),
+    trackToolEnd: vi.fn(),
+  };
+}
+
 /** Bracket-access view exposing private fallback telemetry and handlers. */
 type RuntimeView = {
   fallbackWindow: { activeUntil: number | null };
   fallbackMetrics: { turnsServed: number; turnsEmpty: number; lastTurnAt: number | null };
   turnHadVisibleOutput: boolean;
   queue: unknown;
+  session: unknown;
+  sessionEventToolScopes: WeakMap<object, string>;
   // Private state used by isSilentCompact / isSystemResult in handleEvent.
   // silentCompactScopes (now on the extracted AutoCompactController, reached via
   // runtime.autoCompact) holds NodeJS Timeout handles; Map<string, unknown> avoids
   // the ReturnType construct that some grammars cannot parse.
   autoCompact: { silentCompactScopes: Map<string, unknown> };
-  pendingSystemResults: { counts: Map<string, number> };
+  pendingSystemResults: {
+    mark(input: MarkSystemTurnInput): SystemTurnLeaseToken;
+  };
   activateProviderFallback(resetAt: Date | null): void;
   handleEventWithContext(
     event: unknown,
@@ -181,13 +203,16 @@ type RuntimeView = {
     toolScopeKey?: string,
     isSystemResult?: boolean,
   ): void;
-  handleEvent(event: unknown): void;
+  handleEvent(sourceSession: object, event: unknown): void;
   recordFallbackTurnOutcome(
     queue: unknown,
     hadVisibleOutput: boolean,
     hadToolWork: boolean,
     session: unknown,
   ): void;
+  managerIdFor(session: object): string;
+  captureSystemTurnOwner(session: object, scopeKey: string): MarkSystemTurnInput['owner'];
+  publishLegacyProviderTurn(session: object, scopeKey: string, routeChatJid: string): unknown;
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -324,10 +349,15 @@ describe('zero-text fallback turn signal', () => {
     v(runtime).activateProviderFallback(null);
 
     const fakeQueue = makeFakeQueue();
+    const session = makeEventSession();
     v(runtime).queue = fakeQueue;
+    v(runtime).session = session;
+    v(runtime).managerIdFor(session);
+    v(runtime).sessionEventToolScopes.set(session, GLOBAL_SCOPE);
+    v(runtime).publishLegacyProviderTurn(session, GLOBAL_SCOPE, fakeQueue.targetChatJid);
     v(runtime).turnHadVisibleOutput = false;
 
-    v(runtime).handleEvent({ type: 'result', text: null });
+    v(runtime).handleEvent(session, { type: 'result', text: null });
 
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(1);
     // The per-chat "backup model returned no reply" notice must NOT be enqueued
@@ -367,14 +397,24 @@ describe('zero-text fallback turn signal', () => {
     v(runtime).activateProviderFallback(null);
 
     const fakeQueue = makeFakeQueue();
+    const session = makeEventSession();
     v(runtime).queue = fakeQueue;
+    v(runtime).session = session;
+    v(runtime).managerIdFor(session);
+    v(runtime).sessionEventToolScopes.set(session, GLOBAL_SCOPE);
     // isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) checks silentCompactScopes.has(key).
     // Inject a sentinel value (0) so the presence check is satisfied without
     // creating a real timer — the value is never used, only the key matters.
     v(runtime).autoCompact.silentCompactScopes.set(GLOBAL_SCOPE, 0);
+    v(runtime).pendingSystemResults.mark({
+      scopeKey: GLOBAL_SCOPE,
+      purpose: 'auto_compact_silent',
+      owner: v(runtime).captureSystemTurnOwner(session, GLOBAL_SCOPE),
+      routeChatJid: fakeQueue.targetChatJid,
+    });
     v(runtime).turnHadVisibleOutput = false;
 
-    v(runtime).handleEvent({ type: 'result', text: null });
+    v(runtime).handleEvent(session, { type: 'result', text: null });
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
@@ -390,13 +430,20 @@ describe('zero-text fallback turn signal', () => {
     v(runtime).activateProviderFallback(null);
 
     const fakeQueue = makeFakeQueue();
+    const session = makeEventSession();
     v(runtime).queue = fakeQueue;
-    // isSystemResult derives from pendingSystemResults.counts.get(GLOBAL_TOOL_SCOPE_KEY) > 0.
-    // Setting 1 mirrors what pendingSystemResults.mark writes before a system turn fires.
-    v(runtime).pendingSystemResults.counts.set(GLOBAL_SCOPE, 1);
+    v(runtime).session = session;
+    v(runtime).managerIdFor(session);
+    v(runtime).sessionEventToolScopes.set(session, GLOBAL_SCOPE);
+    v(runtime).pendingSystemResults.mark({
+      scopeKey: GLOBAL_SCOPE,
+      purpose: 'fresh_session_context',
+      owner: v(runtime).captureSystemTurnOwner(session, GLOBAL_SCOPE),
+      routeChatJid: fakeQueue.targetChatJid,
+    });
     v(runtime).turnHadVisibleOutput = false;
 
-    v(runtime).handleEvent({ type: 'result', text: null });
+    v(runtime).handleEvent(session, { type: 'result', text: null });
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);

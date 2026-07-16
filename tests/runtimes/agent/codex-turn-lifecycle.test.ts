@@ -134,6 +134,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedGenerationOwnershipR
     })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
@@ -324,6 +325,10 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promise<void> {
   await runtime.handleMessage(msg);
   await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+  const perChatQueue = (runtime as unknown as {
+    perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
+  }).perChatTurnQueues.get(msg.chatJid);
+  await perChatQueue?.idle();
 }
 
 function makeDurabilityMock() {
@@ -343,7 +348,11 @@ function makeDurabilityMock() {
   };
 }
 
-function runtimeContext(scope: 'per_chat' | 'shared', inboundSeq: number) {
+function runtimeContext(
+  scope: 'per_chat' | 'shared',
+  inboundSeq: number,
+  owner: { managerId?: string; generation?: number; toolScopeKey?: string } = {},
+) {
   return createRuntimeTurnContext({
     identity: {
       scope,
@@ -351,8 +360,8 @@ function runtimeContext(scope: 'per_chat' | 'shared', inboundSeq: number) {
       deliveryJid: '1234@s.whatsapp.net',
       inboundSeq,
       logicalTurnId: `turn-${scope}-${inboundSeq}`,
-      managerId: `manager-${scope}`,
-      generation: 1,
+      managerId: owner.managerId ?? `manager-${scope}`,
+      generation: owner.generation ?? 1,
     },
     recoveryOwner: {
       logicalTurnId: `turn-${scope}-${inboundSeq}:recovery`,
@@ -368,7 +377,7 @@ function runtimeContext(scope: 'per_chat' | 'shared', inboundSeq: number) {
       isGroup: false,
     },
     contentType: 'text',
-    toolScopeKey: scope === 'per_chat' ? '1234@s.whatsapp.net' : '__global__',
+    toolScopeKey: owner.toolScopeKey ?? (scope === 'per_chat' ? '1234@s.whatsapp.net' : '__global__'),
   });
 }
 
@@ -421,12 +430,26 @@ describe('Codex turn lifecycle — runtime level', () => {
     const state = runtime as unknown as {
       chatSessions: Map<string, unknown>;
       chatQueues: Map<string, unknown>;
+      sessionEventToolScopes: WeakMap<object, string>;
+      sessionManagerIds: WeakMap<object, string>;
+      sessionOwnership: { get(scopeKey: string): { managerId: string; generation: number } | undefined };
+      legacyProviderTurnOwners: Map<string, {
+        owner: { managerId: string; generation: number; toolScopeKey: string };
+      }>;
     };
     expect(state.chatSessions.get('1234@s.whatsapp.net')).toBe(mockSession);
     expect(state.chatQueues.get('1234@s.whatsapp.net')).toBe(mockQueue);
     expect(capturedGenerationOwnershipRef.current?.()).toEqual({
       managerId: expect.any(String),
       generation: 1,
+    });
+    const managerId = state.sessionManagerIds.get(mockSession);
+    const generationOwner = state.sessionOwnership.get('1234@s.whatsapp.net');
+    const toolScopeKey = state.sessionEventToolScopes.get(mockSession);
+    expect(state.legacyProviderTurnOwners.get('1234@s.whatsapp.net')?.owner).toEqual({
+      managerId,
+      generation: generationOwner?.generation,
+      toolScopeKey,
     });
 
     const onEvent = capturedOnEventRef.current;
@@ -456,7 +479,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 500, 100, 0);
 
     // Turn-completion side effects must NOT have fired
-    expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
+    expect(mockSession.completeProviderTurn).not.toHaveBeenCalled();
     expect(mockQueue.flush).not.toHaveBeenCalled();
     expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
@@ -469,7 +492,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'result', text: null });
 
     // Turn-completion side effects MUST fire
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
     expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
@@ -486,7 +509,7 @@ describe('Codex turn lifecycle — runtime level', () => {
     expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 1000, 200, 0);
 
     // Turn completion should have fired exactly once (from result, not token_usage)
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledOnce());
     expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
@@ -499,22 +522,22 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'token_usage', inputTokens: 500, outputTokens: 100 });
 
     // No turn-completion side effects yet
-    expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
+    expect(mockSession.completeProviderTurn).not.toHaveBeenCalled();
 
     // Feed result — should shift exactly once
     onEvent({ type: 'result', text: null });
 
     // Turn completed exactly once
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockQueue.flush).toHaveBeenCalledOnce();
   });
 
-  it('token_usage arriving AFTER result still records tokens without side effects', async () => {
+  it('token_usage arriving AFTER result is rejected once the logical owner is cleared', async () => {
     const onEvent = await setupSession();
 
     // Result arrives first (turn completes)
     onEvent({ type: 'result', text: null });
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockQueue.flush).toHaveBeenCalledOnce();
 
     vi.clearAllMocks();
@@ -522,11 +545,14 @@ describe('Codex turn lifecycle — runtime level', () => {
     // Late token_usage arrives after turn already completed
     onEvent({ type: 'token_usage', inputTokens: 800, outputTokens: 150 });
 
-    // Tokens should still be recorded (transactional helper)
-    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 800, 150, 0);
+    // The result terminalizes the exact logical owner. A later provider event
+    // from that completed turn is fail-closed rather than attributed to a
+    // subsequent turn or session.
+    expect(mockAccumulateTokensWithEvent).not.toHaveBeenCalled();
+    expect((runtime as unknown as { unownedProviderEventRejects: number }).unownedProviderEventRejects).toBe(1);
 
     // No additional turn-completion side effects
-    expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
+    expect(mockSession.completeProviderTurn).not.toHaveBeenCalled();
     expect(mockQueue.flush).not.toHaveBeenCalled();
     expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
   });
@@ -539,15 +565,17 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'result', text: null });
 
     // Turn 2
+    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-2', content: 'turn two' }));
     onEvent({ type: 'token_usage', inputTokens: 200, outputTokens: 40 });
     onEvent({ type: 'result', text: null });
 
     // Turn 3
+    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-3', content: 'turn three' }));
     onEvent({ type: 'token_usage', inputTokens: 300, outputTokens: 60 });
     onEvent({ type: 'result', text: null });
 
     // Each result triggers exactly one flush -> 3 total
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledTimes(3);
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledTimes(3);
     expect(mockQueue.endTurn).toHaveBeenCalledTimes(3);
     await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalledTimes(3));
     expect(mockQueue.markLastTerminal).not.toHaveBeenCalled();
@@ -577,21 +605,24 @@ describe('Codex turn lifecycle — runtime level', () => {
     // Tool-scope keys are `${mapKey}#${ordinal}` — seed one for this chat so the
     // scoped per_chat cleanup (clearToolScopeFor) clears it.
     const toolScopeKey = '1234@s.whatsapp.net#manual';
-    (runtime as any).activeToolNames.set(toolScopeKey, new Map([['tool-1', 'search_contacts']]));
-    (runtime as any).chatQueues.set('1234@s.whatsapp.net', mockQueue);
-    (runtime as any).chatSessions.set('1234@s.whatsapp.net', mockSession);
-    (runtime as any).perChatInboundSeqQueue.set('1234@s.whatsapp.net', [77]);
-    (runtime as any).perChatRuntimeTurnContexts.set(
+    const state = runtime as any;
+    state.activeToolNames.set(toolScopeKey, new Map([['tool-1', 'search_contacts']]));
+    state.chatQueues.set('1234@s.whatsapp.net', mockQueue);
+    state.setOwnedPerChatSession('1234@s.whatsapp.net', mockSession);
+    state.sessionEventToolScopes.set(mockSession, toolScopeKey);
+    const managerId = state.managerIdFor(mockSession);
+    state.perChatInboundSeqQueue.set('1234@s.whatsapp.net', [77]);
+    state.perChatRuntimeTurnContexts.set(
       '1234@s.whatsapp.net',
-      [runtimeContext('per_chat', 77)],
+      [runtimeContext('per_chat', 77, { managerId, toolScopeKey })],
     );
 
-    (runtime as any).handleEventPerChat('1234@s.whatsapp.net', {
+    state.handleEventPerChat(mockSession, {
       type: 'result',
       text: "You've reached your usage limit. Try again later.",
     }, toolScopeKey);
 
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockSession.shutdown).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
     expect(mockQueue.flushTurnEvidence).toHaveBeenCalledOnce();
@@ -616,19 +647,25 @@ describe('Codex turn lifecycle — runtime level', () => {
     });
 
     const durability = makeDurabilityMock();
-    (runtime as any).durability = durability;
-    (runtime as any).session = mockSession;
-    (runtime as any).activeChatJid = '1234@s.whatsapp.net';
-    (runtime as any).currentTurnChatJid = '1234@s.whatsapp.net';
-    (runtime as any).currentInboundSeq = 91;
-    (runtime as any).currentRuntimeTurnContext = runtimeContext('shared', 91);
-    (runtime as any).turnHadVisibleOutput = true;
-    (runtime as any).activeToolNames.set('__global__', new Map([['tool-1', 'search_contacts']]));
-    (runtime as any).outboundQueues.set('1234@s.whatsapp.net', mockQueue);
+    const state = runtime as any;
+    state.durability = durability;
+    state.session = mockSession;
+    const managerId = state.managerIdFor(mockSession);
+    state.sessionEventToolScopes.set(mockSession, '__global__');
+    state.activeChatJid = '1234@s.whatsapp.net';
+    state.currentTurnChatJid = '1234@s.whatsapp.net';
+    state.currentInboundSeq = 91;
+    state.currentRuntimeTurnContext = runtimeContext('shared', 91, {
+      managerId,
+      toolScopeKey: '__global__',
+    });
+    state.turnHadVisibleOutput = true;
+    state.activeToolNames.set('__global__', new Map([['tool-1', 'search_contacts']]));
+    state.outboundQueues.set('1234@s.whatsapp.net', mockQueue);
 
-    (runtime as any).handleEvent({ type: 'result', text: "You've reached your usage limit. Try again later." });
+    state.handleEvent(mockSession, { type: 'result', text: "You've reached your usage limit. Try again later." });
 
-    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     expect(mockSession.shutdown).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
     expect(mockQueue.flushTurnEvidence).toHaveBeenCalledOnce();

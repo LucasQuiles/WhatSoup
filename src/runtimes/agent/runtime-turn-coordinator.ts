@@ -261,9 +261,21 @@ markRuntimeTurnDegraded(context: RuntimeTurnContext): void {
   this.host.runtimeTurnSupervisor.markDegraded(context);
 }
 
-rejectRuntimeTurnCompletion(error: unknown, mapKey?: string): void {
-  if (mapKey === undefined) this.host.currentRuntimeTurnCompletion?.reject(error);
-  else this.host.perChatRuntimeTurnCompletions.get(mapKey)?.reject(error);
+rejectRuntimeTurnCompletion(
+  error: unknown,
+  mapKey?: string,
+  expectedContext?: RuntimeTurnContext,
+): boolean {
+  const completion = mapKey === undefined
+    ? this.host.currentRuntimeTurnCompletion
+    : this.host.perChatRuntimeTurnCompletions.get(mapKey);
+  if (!completion) return false;
+  if (
+    expectedContext
+    && completion.context.identity.logicalTurnId !== expectedContext.identity.logicalTurnId
+  ) return false;
+  completion.reject(error);
+  return true;
 }
 
 runtimeTurnScopeKey(context: RuntimeTurnContext): string {

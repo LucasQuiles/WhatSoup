@@ -20,6 +20,7 @@ import {
   backfillWorkspaceKeys,
   markOrphaned,
   getResumableSessionForChat,
+  resolveResumableAgentSession,
   backfillSessionProvider,
   listActiveSessionRows,
 } from '../../../src/runtimes/agent/session-db.ts';
@@ -50,6 +51,7 @@ afterAll(() => {
 describe('agent session-db', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM agent_token_events').run();
+    db.raw.prepare('DELETE FROM session_checkpoints').run();
     db.raw.prepare('DELETE FROM agent_sessions').run();
   });
 
@@ -86,24 +88,60 @@ describe('agent session-db', () => {
   });
 
   it('getActiveSession returns the active session with new fields', () => {
-    const id = createSession(db, 99999, '/tmp/test');
+    const id = createSession(
+      db,
+      99999,
+      '/tmp/test',
+      'active@s.whatsapp.net',
+      'active-conversation',
+      'claude-cli',
+    );
     // getActiveSession requires a session_id (only resumable sessions qualify)
     updateSessionId(db, id, 'ses-abc123');
-    const session = getActiveSession(db);
+    const session = getActiveSession(db, 'claude-cli');
     expect(session).not.toBeNull();
     expect(session?.id).toBe(id);
     expect(session?.claude_pid).toBe(99999);
     expect(session?.status).toBe('active');
     expect(session?.session_id).toBe('ses-abc123');
-    expect(session?.chat_jid).toStrictEqual(null);
+    expect(session?.chat_jid).toBe('active@s.whatsapp.net');
     expect(session?.started_at).toMatch(sqliteTimestampPattern);
     expect(session?.last_message_at).toStrictEqual(null);
     expect(session?.message_count).toBe(0);
+    expect(session?.workspace_key).toBe('active-conversation');
   });
 
   it('getActiveSession returns null when no active session exists', () => {
-    const session = getActiveSession(db);
+    const session = getActiveSession(db, 'claude-cli');
     expect(session).toStrictEqual(null);
+  });
+
+  it('getActiveSession fails closed for a foreign or ambiguous provider namespace', () => {
+    const claudeRow = createSession(
+      db,
+      99990,
+      '/tmp/claude',
+      'provider-active@s.whatsapp.net',
+      'provider-active',
+      'claude-cli',
+    );
+    updateSessionId(db, claudeRow, 'shared-opaque-id');
+
+    expect(getActiveSession(db, 'opencode-cli')).toBeNull();
+    expect(getActiveSession(db, 'claude-cli')?.id).toBe(claudeRow);
+
+    const opencodeRow = createSession(
+      db,
+      99991,
+      '/tmp/opencode',
+      'provider-active@s.whatsapp.net',
+      'provider-active',
+      'opencode-cli',
+    );
+    updateSessionId(db, opencodeRow, 'shared-opaque-id');
+
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
+    expect(getActiveSession(db, 'opencode-cli')).toBeNull();
   });
 
   // @check CHK-022
@@ -154,13 +192,13 @@ describe('agent session-db', () => {
   it('getActiveSession returns null after session is crashed', () => {
     const id = createSession(db, 55555, '/tmp/postcr');
     updateSessionStatus(db, id, 'crashed');
-    expect(getActiveSession(db)).toBeNull();
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
   });
 
   it('getActiveSession returns null after session is ended', () => {
     const id = createSession(db, 66666, '/tmp/postend');
     updateSessionStatus(db, id, 'ended');
-    expect(getActiveSession(db)).toBeNull();
+    expect(getActiveSession(db, 'claude-cli')).toBeNull();
   });
 
   it('ensureAgentSchema called twice does not throw', () => {
@@ -285,20 +323,20 @@ describe('agent session-db', () => {
     const jid = '5550000001@s.whatsapp.net';
 
     // Older suspended session
-    const oldId = createSession(db, 50001, '/tmp/r1', jid, wk);
+    const oldId = createSession(db, 50001, '/tmp/r1', jid, wk, 'claude-cli');
     updateSessionId(db, oldId, 'ses-old');
     db.raw.prepare(`UPDATE agent_sessions SET status = 'suspended' WHERE id = ?`).run(oldId);
 
     // Newer orphaned session
-    const newId = createSession(db, 50002, '/tmp/r2', jid, wk);
+    const newId = createSession(db, 50002, '/tmp/r2', jid, wk, 'claude-cli');
     updateSessionId(db, newId, 'ses-new');
     markOrphaned(db, newId);
 
     // Active session — should NOT be returned
-    const activeId = createSession(db, 50003, '/tmp/r3', jid, wk);
+    const activeId = createSession(db, 50003, '/tmp/r3', jid, wk, 'claude-cli');
     updateSessionId(db, activeId, 'ses-active');
 
-    const result = getResumableSessionForChat(db, wk);
+    const result = getResumableSessionForChat(db, wk, 'claude-cli');
     expect(result).not.toBeNull();
     expect(result?.id).toBe(newId);
     expect(result?.session_id).toBe('ses-new');
@@ -306,7 +344,11 @@ describe('agent session-db', () => {
   });
 
   it('getResumableSessionForChat returns null when no resumable session exists', () => {
-    const result = getResumableSessionForChat(db, 'nonexistent-workspace-key');
+    const result = getResumableSessionForChat(
+      db,
+      'nonexistent-workspace-key',
+      'claude-cli',
+    );
     expect(result).toStrictEqual(null);
   });
 
@@ -320,14 +362,14 @@ describe('agent session-db', () => {
     // Simulate: session created, Codex thread ID stored via updateSessionId
     // (mirrors session.ts handleProviderEvent where codexThreadId = event.sessionId
     //  and updateSessionId(db, dbRowId, event.sessionId) is called)
-    const id = createSession(db, 70001, '/tmp/codex-thread', jid, wk);
+    const id = createSession(db, 70001, '/tmp/codex-thread', jid, wk, 'codex-cli');
     updateSessionId(db, id, codexThreadId);
 
     // Simulate crash: session marked as orphaned
     markOrphaned(db, id);
 
     // Verify: getResumableSessionForChat returns the thread ID
-    const resumable = getResumableSessionForChat(db, wk);
+    const resumable = getResumableSessionForChat(db, wk, 'codex-cli');
     expect(resumable).not.toBeNull();
     expect(resumable?.session_id).toBe(codexThreadId);
     expect(resumable?.chat_jid).toBe(jid);
@@ -337,12 +379,143 @@ describe('agent session-db', () => {
   it('getResumableSessionForChat does not return active sessions', () => {
     const wk = 'active-only-key';
     const jid = '5550000002@s.whatsapp.net';
-    const id = createSession(db, 60001, '/tmp/active-only', jid, wk);
+    const id = createSession(db, 60001, '/tmp/active-only', jid, wk, 'claude-cli');
     updateSessionId(db, id, 'ses-active-only');
     // status remains 'active'
 
-    const result = getResumableSessionForChat(db, wk);
+    const result = getResumableSessionForChat(db, wk, 'claude-cli');
     expect(result).toStrictEqual(null);
+  });
+
+  it('getResumableSessionForChat hides foreign and provider-ambiguous rows', () => {
+    const wk = 'provider-resume-selector';
+    const jid = 'provider-resume@s.whatsapp.net';
+    const claudeRow = createSession(db, 60010, '/tmp/claude', jid, wk, 'claude-cli');
+    updateSessionId(db, claudeRow, 'provider-shared-id');
+    updateSessionStatus(db, claudeRow, 'suspended');
+
+    expect(getResumableSessionForChat(db, wk, 'opencode-cli')).toBeNull();
+    expect(getResumableSessionForChat(db, wk, 'claude-cli')?.id).toBe(claudeRow);
+
+    const opencodeRow = createSession(db, 60011, '/tmp/opencode', jid, wk, 'opencode-cli');
+    updateSessionId(db, opencodeRow, 'provider-shared-id');
+    updateSessionStatus(db, opencodeRow, 'orphaned');
+
+    expect(getResumableSessionForChat(db, wk, 'claude-cli')).toBeNull();
+    expect(getResumableSessionForChat(db, wk, 'opencode-cli')).toBeNull();
+  });
+
+  function writeResumeCheckpoint(
+    conversationKey: string,
+    sessionId: string,
+    status: 'active' | 'suspended' | 'orphaned' = 'suspended',
+  ): void {
+    db.raw.prepare(
+      `INSERT INTO session_checkpoints (conversation_key, session_id, session_status)
+       VALUES (?, ?, ?)`,
+    ).run(conversationKey, sessionId, status);
+  }
+
+  function snapshotResumeState(): unknown {
+    return {
+      agentSessions: db.raw.prepare(
+        `SELECT id, session_id, workspace_key, provider, status, claude_pid, ended_at
+         FROM agent_sessions ORDER BY id`,
+      ).all(),
+      checkpoints: db.raw.prepare(
+        `SELECT conversation_key, session_id, session_status, claude_pid,
+                checkpoint_version, updated_at
+         FROM session_checkpoints ORDER BY conversation_key`,
+      ).all(),
+    };
+  }
+
+  it('resolveResumableAgentSession proves exact provider, row, and conversation composition', () => {
+    const rowId = createSession(
+      db,
+      60100,
+      '/tmp/exact-resume',
+      'exact-resume@s.whatsapp.net',
+      'exact-resume',
+      'claude-cli',
+    );
+    updateSessionId(db, rowId, 'exact-provider-session');
+    updateSessionStatus(db, rowId, 'suspended');
+    writeResumeCheckpoint('exact-resume', 'exact-provider-session');
+
+    expect(resolveResumableAgentSession(db, {
+      provider: 'claude-cli',
+      providerSessionId: 'exact-provider-session',
+      agentSessionRowId: rowId,
+      workspaceKey: 'exact-resume',
+    })).toEqual({
+      id: rowId,
+      provider: 'claude-cli',
+      workspace_key: 'exact-resume',
+    });
+  });
+
+  it.each([
+    {
+      name: 'foreign provider',
+      setup: () => {
+        const rowId = createSession(db, 60101, '/tmp/foreign', 'foreign@s.whatsapp.net', 'foreign', 'claude-cli');
+        updateSessionId(db, rowId, 'foreign-session');
+        updateSessionStatus(db, rowId, 'suspended');
+        writeResumeCheckpoint('foreign', 'foreign-session');
+        return { provider: 'opencode-cli', providerSessionId: 'foreign-session', agentSessionRowId: rowId, workspaceKey: 'foreign' };
+      },
+    },
+    {
+      name: 'null-provider persisted ID',
+      setup: () => {
+        const rowId = createSession(db, 60102, '/tmp/legacy', 'legacy@s.whatsapp.net', 'legacy');
+        updateSessionId(db, rowId, 'legacy-session');
+        updateSessionStatus(db, rowId, 'suspended');
+        writeResumeCheckpoint('legacy', 'legacy-session');
+        return { provider: 'claude-cli', providerSessionId: 'legacy-session', agentSessionRowId: rowId, workspaceKey: 'legacy' };
+      },
+    },
+    {
+      name: 'cross-provider duplicate ID',
+      setup: () => {
+        const rowId = createSession(db, 60103, '/tmp/duplicate-a', 'duplicate@s.whatsapp.net', 'duplicate', 'claude-cli');
+        updateSessionId(db, rowId, 'duplicate-session');
+        updateSessionStatus(db, rowId, 'suspended');
+        const other = createSession(db, 60104, '/tmp/duplicate-b', 'duplicate@s.whatsapp.net', 'duplicate', 'opencode-cli');
+        updateSessionId(db, other, 'duplicate-session');
+        updateSessionStatus(db, other, 'orphaned');
+        writeResumeCheckpoint('duplicate', 'duplicate-session');
+        return { provider: 'claude-cli', providerSessionId: 'duplicate-session', agentSessionRowId: rowId, workspaceKey: 'duplicate' };
+      },
+    },
+    {
+      name: 'conversation mismatch',
+      setup: () => {
+        const rowId = createSession(db, 60105, '/tmp/conversation', 'conversation@s.whatsapp.net', 'persisted-conversation', 'claude-cli');
+        updateSessionId(db, rowId, 'conversation-session');
+        updateSessionStatus(db, rowId, 'suspended');
+        writeResumeCheckpoint('persisted-conversation', 'conversation-session');
+        return { provider: 'claude-cli', providerSessionId: 'conversation-session', agentSessionRowId: rowId, workspaceKey: 'different-conversation' };
+      },
+    },
+    {
+      name: 'missing exact checkpoint',
+      setup: () => {
+        const rowId = createSession(db, 60106, '/tmp/no-checkpoint', 'no-checkpoint@s.whatsapp.net', 'no-checkpoint', 'claude-cli');
+        updateSessionId(db, rowId, 'no-checkpoint-session');
+        updateSessionStatus(db, rowId, 'suspended');
+        return { provider: 'claude-cli', providerSessionId: 'no-checkpoint-session', agentSessionRowId: rowId, workspaceKey: 'no-checkpoint' };
+      },
+    },
+  ])('resolveResumableAgentSession rejects $name without any persistence mutation', ({ setup }) => {
+    const input = setup();
+    const before = snapshotResumeState();
+
+    expect(() => resolveResumableAgentSession(db, input)).toThrow(
+      /provider|ambiguous|ownership|resumable|conversation|checkpoint/i,
+    );
+    expect(snapshotResumeState()).toEqual(before);
   });
 
   it('insertTokenEvent inserts a row in agent_token_events', () => {
@@ -560,19 +733,24 @@ describe('agent session-db', () => {
   it('backfillSessionProvider sets provider on null rows only', () => {
     const id1 = createSession(db, 90102, '/tmp/backfill-1');
     const id2 = createSession(db, 90103, '/tmp/backfill-2', undefined, undefined, 'codex-cli');
+    const persistedId = createSession(db, 90104, '/tmp/backfill-persisted');
+    updateSessionId(db, persistedId, 'opaque-legacy-id');
 
     backfillSessionProvider(db, 'claude-cli');
 
     const row1 = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(id1) as { provider: string };
     const row2 = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(id2) as { provider: string };
+    const persisted = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(persistedId) as { provider: string | null };
     expect(row1.provider).toBe('claude-cli');
     expect(row2.provider).toBe('codex-cli');
+    expect(Object.entries(persisted)).toStrictEqual([['provider', null]]);
   });
 });
 
 describe('session-db.ts uncovered-branch coverage', () => {
   beforeEach(() => {
     db.raw.prepare('DELETE FROM agent_token_events').run();
+    db.raw.prepare('DELETE FROM session_checkpoints').run();
     db.raw.prepare('DELETE FROM agent_sessions').run();
   });
 

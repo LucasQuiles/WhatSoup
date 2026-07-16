@@ -124,20 +124,22 @@ describe('SessionManager budget integration', () => {
 
     await sm.spawnSession();
 
-    // First two turns should go through (write to stdin)
+    // First two completed turns should go through (write to stdin).
     await sm.sendTurn('hello');
-    await sm.sendTurn('world');
-
-    // Simulate result events through stdout to trigger recordUsage
     const resultLine1 = JSON.stringify({
       type: 'result',
       usage: { input_tokens: 100, output_tokens: 50 },
     });
+    mockChild.stdout.emit('data', Buffer.from(resultLine1 + '\n'));
+    sm.completeProviderTurn();
+
+    await sm.sendTurn('world');
     const resultLine2 = JSON.stringify({
       type: 'result',
       usage: { input_tokens: 100, output_tokens: 50 },
     });
-    mockChild.stdout.emit('data', Buffer.from(resultLine1 + '\n' + resultLine2 + '\n'));
+    mockChild.stdout.emit('data', Buffer.from(resultLine2 + '\n'));
+    sm.completeProviderTurn();
 
     // Clear events from the result emissions
     events.length = 0;
@@ -203,7 +205,9 @@ describe('SessionManager budget integration', () => {
 
     // Should not throw or throttle
     await sm.sendTurn('hello');
+    sm.completeProviderTurn();
     await sm.sendTurn('world');
+    sm.completeProviderTurn();
     await sm.sendTurn('third');
 
     // stdin.write should have been called 3 times (once per turn)
@@ -229,6 +233,7 @@ describe('SessionManager budget integration', () => {
     await sm.spawnSession();
 
     await sm.sendTurn('hello');
+    sm.completeProviderTurn();
     await sm.sendTurn('world');
 
     expect(mockChild.stdin.write).toHaveBeenCalledTimes(2);

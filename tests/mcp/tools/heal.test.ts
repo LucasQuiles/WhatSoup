@@ -27,9 +27,11 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     })),
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
+    completeProviderTurn: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
+    getDbRowId: vi.fn(() => null),
   };
 
   const mockQueue = {
@@ -126,6 +128,8 @@ const { mockControlQueueInstance } = vi.hoisted(() => {
     markLastTerminal: vi.fn(),
     sendControlMessage: vi.fn(async () => {}),
     getLog: vi.fn(() => []),
+    endTurn: vi.fn(),
+    targetChatJid: 'control@heal.internal',
   };
   return { mockControlQueueInstance };
 });
@@ -496,7 +500,7 @@ describe('emit_heal_result MCP tool', () => {
   // Handler — cleanup and dequeue
   // ──────────────────────────────────────────────────────────────────────────
 
-  it('clears activeControlReportId after successful emit', async () => {
+  it('retains the active report until the provider terminal result arrives', async () => {
     const { runtime, handler } = await buildRuntime();
     await runtime.handleControlTurn('r-CLEAR', JSON.stringify({}));
 
@@ -510,14 +514,21 @@ describe('emit_heal_result MCP tool', () => {
     }, { tier: 'global' });
 
     expect(result).toEqual({ sent: true, reportId: 'r-CLEAR', result: 'fixed' });
+    expect(runtime.currentControlReportId).toBe('r-CLEAR');
+    expect(mockSession.shutdown).not.toHaveBeenCalled();
 
     await expect(handler({
       reportId: 'r-CLEAR',
       errorClass: 'crash__x',
       result: 'fixed',
       diagnosis: 'duplicate completion',
-    }, { tier: 'global' })).rejects.toThrow('No active repair session');
+    }, { tier: 'global' })).rejects.toThrow(/already emitted/i);
     expect(mockControlQueueInstance.sendControlMessage).toHaveBeenCalledTimes(1);
+
+    capturedOnEventRef.current?.({ type: 'result', text: null });
+    await vi.waitFor(() => expect(runtime.currentControlReportId).toBeNull());
+    expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
   });
 
   it('attempts to resolve pending_heal_reports row (best-effort, no throw on missing table)', async () => {
@@ -543,7 +554,7 @@ describe('emit_heal_result MCP tool', () => {
     }, { tier: 'global' })).resolves.toMatchObject({ sent: true });
   });
 
-  it('dequeues and dispatches the next queued report after completion', async () => {
+  it('dequeues and dispatches the next queued report only after terminal completion and teardown', async () => {
     const { runtime, handler } = await buildRuntime();
     await runtime.handleControlTurn('r-FIRST', JSON.stringify({}));
 
@@ -569,6 +580,21 @@ describe('emit_heal_result MCP tool', () => {
       diagnosis: 'done',
     }, { tier: 'global' });
 
+    expect(mockDequeueNextReport).not.toHaveBeenCalled();
+    expect(sendTurnSpy).not.toHaveBeenCalled();
+    expect(runtime.currentControlReportId).toBe('r-FIRST');
+
+    let proveTerminalTeardown!: () => void;
+    mockSession.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      proveTerminalTeardown = resolve;
+    }));
+    capturedOnEventRef.current?.({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockSession.shutdown).toHaveBeenCalledOnce());
+    expect(mockDequeueNextReport).not.toHaveBeenCalled();
+    expect(sendTurnSpy).not.toHaveBeenCalled();
+
+    proveTerminalTeardown();
+    await vi.waitFor(() => expect(sendTurnSpy).toHaveBeenCalled());
     expect(mockDequeueNextReport).toHaveBeenCalledOnce();
     expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('[REPAIR REQUEST — report_id: r-NEXT]'));
     expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('"errorClass":"crash__next"'));
@@ -588,6 +614,9 @@ describe('emit_heal_result MCP tool', () => {
       diagnosis: 'done',
     }, { tier: 'global' });
 
+    expect(mockDequeueNextReport).not.toHaveBeenCalled();
+    capturedOnEventRef.current?.({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockDequeueNextReport).toHaveBeenCalledOnce());
     expect(mockDequeueNextReport).toHaveBeenCalledOnce();
     // No second handleControlTurn dispatch
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(1); // only the initial repair turn

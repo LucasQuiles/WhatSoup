@@ -28,15 +28,16 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
   it('adds mcp.whatsoup into an empty (absent) config', () => {
     const launch = buildMcpLaunchCommand(proxyScript);
     const merged = mergeOpencodeConfig(null, generatedMcp());
-    expect(merged).toEqual({
-      mcp: {
-        whatsoup: {
-          type: 'local',
-          command: [launch.command, ...launch.args],
-          environment: { WHATSOUP_SOCKET: socketPath },
-          enabled: true,
-        },
+    expect(merged.mcp).toEqual({
+      whatsoup: {
+        type: 'local',
+        command: [launch.command, ...launch.args],
+        environment: { WHATSOUP_SOCKET: socketPath },
+        enabled: true,
       },
+    });
+    expect(merged.agent).toMatchObject({
+      'whatsoup-headless': { mode: 'primary' },
     });
   });
 
@@ -85,9 +86,9 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
 
   it('does NOT add a provider block when no baseUrl is set', () => {
     const merged = mergeOpencodeConfig(null, generatedMcp(), { model: 'x' });
-    // Without a baseUrl the merge stays MCP-only: exactly the `mcp` key, no
-    // `provider` block and no top-level `model` rewrite leaked in.
-    expect(Object.keys(merged).sort()).toEqual(['mcp']);
+    // Without a baseUrl the merge contains only the managed MCP/agent blocks:
+    // no `provider` block and no top-level `model` rewrite leaks in.
+    expect(Object.keys(merged).sort()).toEqual(['agent', 'mcp']);
   });
 });
 
@@ -151,7 +152,7 @@ describe('mergeOpencodeConfig — provider block apiKey env interpolation', () =
       model: 'MiniMax-M2',
       apiKeyService: 'minimax',
     });
-    expect(Object.keys(merged).sort()).toEqual(['mcp']);
+    expect(Object.keys(merged).sort()).toEqual(['agent', 'mcp']);
   });
 });
 

@@ -770,6 +770,20 @@ function makeFakeQueue() {
   };
 }
 
+function makeEventSession() {
+  return {
+    clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
+    getDbRowId: vi.fn(() => null),
+    getProviderId: vi.fn(() => 'claude-cli'),
+    getStatus: vi.fn(() => ({ active: true })),
+    shutdown: vi.fn(async () => {}),
+    tickWatchdog: vi.fn(),
+    trackToolStart: vi.fn(),
+    trackToolEnd: vi.fn(),
+  };
+}
+
 type EventDriveView = {
   fallbackWindow: { activeUntil: number | null };
   handleEventWithContext(
@@ -795,6 +809,8 @@ type FullEventDriveView = {
   lastFallbackTurnAt: number | null;
   turnHadVisibleOutput: boolean;
   queue: unknown;
+  session: unknown;
+  sessionEventToolScopes: WeakMap<object, string>;
   handleEventWithContext(
     event: unknown,
     queue: unknown,
@@ -805,8 +821,10 @@ type FullEventDriveView = {
     toolScopeKey?: string,
     isSystemResult?: boolean,
   ): void;
-  handleEvent(event: unknown): void;
+  handleEvent(sourceSession: object, event: unknown): void;
   activateProviderFallback(resetAt: Date | null): void;
+  managerIdFor(session: object): string;
+  publishLegacyProviderTurn(session: object, scopeKey: string, routeChatJid: string): unknown;
 };
 
 function fullView(runtime: AgentRuntime): FullEventDriveView {
@@ -986,8 +1004,15 @@ describe('usage-limit user notice', () => {
       agentFallbackModel: 'minimax/minimax-m2',
     });
     const queue = makeFakeQueue();
-    (runtime as unknown as { queue: unknown }).queue = queue;
-    (runtime as unknown as { handleEvent(e: unknown): void }).handleEvent(
+    const session = makeEventSession();
+    const state = fullView(runtime);
+    state.queue = queue;
+    state.session = session;
+    state.managerIdFor(session);
+    state.sessionEventToolScopes.set(session, '__global__');
+    state.publishLegacyProviderTurn(session, '__global__', queue.targetChatJid);
+    state.handleEvent(
+      session,
       { type: 'result', text: USAGE_LIMIT_TEXT },
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(

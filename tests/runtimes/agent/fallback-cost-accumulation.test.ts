@@ -147,10 +147,26 @@ function makeFakeQueue() {
   };
 }
 
+function makeEventSession() {
+  return {
+    clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
+    getDbRowId: vi.fn(() => null),
+    getProviderId: vi.fn(() => 'claude-cli'),
+    getStatus: vi.fn(() => ({ active: true })),
+    shutdown: vi.fn(async () => {}),
+    tickWatchdog: vi.fn(),
+    trackToolStart: vi.fn(),
+    trackToolEnd: vi.fn(),
+  };
+}
+
 /** Bracket-access view exposing private fallback telemetry and handlers. */
 type RuntimeView = {
   fallbackWindow: { activeUntil: number | null };
   queue: unknown;
+  session: unknown;
+  sessionEventToolScopes: WeakMap<object, string>;
   turnHadVisibleOutput: boolean;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;
@@ -164,8 +180,10 @@ type RuntimeView = {
     toolScopeKey?: string,
     isSystemResult?: boolean,
   ): void;
-  handleEvent(event: unknown): void;
+  handleEvent(sourceSession: object, event: unknown): void;
   getFallbackState(): { fallbackWindowCostUsd: number };
+  managerIdFor(session: object): string;
+  publishLegacyProviderTurn(session: object, scopeKey: string, routeChatJid: string): unknown;
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -208,11 +226,18 @@ describe('fallback window cost accumulation', () => {
   it('single/shared path: accumulates finite costUsd while the window is active', () => {
     const runtime = makeRuntime();
     v(runtime).activateProviderFallback(null);
-    v(runtime).queue = makeFakeQueue();
+    const queue = makeFakeQueue();
+    const session = makeEventSession();
+    v(runtime).queue = queue;
+    v(runtime).session = session;
+    v(runtime).managerIdFor(session);
+    v(runtime).sessionEventToolScopes.set(session, '__global__');
+    v(runtime).publishLegacyProviderTurn(session, '__global__', queue.targetChatJid);
     v(runtime).turnHadVisibleOutput = true;
 
-    v(runtime).handleEvent({ type: 'result', text: 'reply', costUsd: 0.0021 });
+    v(runtime).handleEvent(session, { type: 'result', text: 'reply', costUsd: 0.0021 });
 
+    expect(session.completeProviderTurn).toHaveBeenCalledOnce();
     expect(v(runtime).getFallbackState().fallbackWindowCostUsd).toBeCloseTo(0.0021, 10);
   });
 
