@@ -514,6 +514,63 @@ describe('fleet bot hardening parity guard', () => {
     expect(error.mock.calls.flat().join('\n')).toContain('manifest-unreadable');
   });
 
+  describe('separated verdict (#1867 criterion 4)', () => {
+    it('reports a broken source anchor as sourceAnchorParity failure without failing runtimeParity', () => {
+      const root = makeRoot();
+      // Otherwise-valid manifest (default fixture rows/dates all pass), but the
+      // standard file is missing the '### D. Fallback Chain' marker required by
+      // writeFixtureManifest's sourceAnchors entry.
+      writeFixtureFile(root, 'docs/runbooks/fleet-bot-hardening-standard.md', '### A. Turn-Capability Health\n');
+      writeFixtureManifest(root);
+
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceAnchorParity.ok).toBe(false);
+      expect(result.sourceAnchorParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'source-anchor-missing-anchor' }),
+      ]));
+      expect(result.runtimeParity.ok).toBe(true);
+      expect(result.runtimeParity.findings).toEqual([]);
+    });
+
+    it('reports a stale row verifiedAt as runtimeParity failure without failing sourceAnchorParity', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, {
+        rows: [
+          {
+            id: 'reference-incident-bot',
+            status: 'hardened',
+            capabilities: {
+              'turn-capability-health': 'proven',
+              'primary-model-usability-probe': 'proven',
+              'release-drift-check-job': 'proven',
+              'fallback-chain': 'proven',
+            },
+            evidence: ['fixture evidence'],
+            verifiedAt: '2026-01-01',
+          },
+        ],
+        scope: { description: 'fixture', inventoryPolicy: 'redacted', cohortSize: 1 },
+        summary: { total: 1, hardened: 1, pendingRollout: 0, blocked: 0, acceptedException: 0 },
+      });
+
+      // updated 2026-06-15 stays fresh (5 days); the row verifiedAt 2026-01-01 is ~170 days stale.
+      const now = new Date('2026-06-20T00:00:00Z');
+      const result = checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, now);
+
+      expect(result.ok).toBe(false);
+      expect(result.runtimeParity.ok).toBe(false);
+      expect(result.runtimeParity.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'stale-row-verified-at' }),
+      ]));
+      expect(result.sourceAnchorParity.ok).toBe(true);
+      expect(result.sourceAnchorParity.findings).toEqual([]);
+    });
+  });
+
   it('is wired into branch and release verification between source and runtime drift guards', () => {
     const packageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as {
       scripts: Record<string, string>;
