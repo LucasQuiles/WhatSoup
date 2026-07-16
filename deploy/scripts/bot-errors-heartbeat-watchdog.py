@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
@@ -463,6 +464,80 @@ def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
         f"{path} checkedAt={data.get('checkedAt')} healthy={data.get('healthy')} "
         f"fleetAction={data.get('fleetAction')} hostCount={data.get('hostCount')}"
     )
+
+
+def _readable_fleet_sentinel_heartbeat(path: Path) -> dict[str, Any] | None:
+    if critical_file_problem(path) is not None:
+        return None
+    data = load_json(path)
+    if not isinstance(data, dict) or data.get("kind") != "bot-errors-sentinel-heartbeat":
+        return None
+    return data
+
+
+def fleet_sentinel_roster_problem(path: Path) -> str | None:
+    """Independently verify the sentinel heartbeat is bound to the intended
+    roster (#1875).
+
+    The age/deadman check (``fleet_sentinel_age``) owns a missing, unreadable, or
+    wrong-kind heartbeat, so this returns ``None`` for those and only evaluates a
+    readable, current-kind snapshot. It re-derives the expected roster digest and
+    count directly from disk (not from the value the sentinel declared) and
+    rejects a roster-blind, zero/truncated, wrong-manifest, or incompletely
+    observed snapshot as not-green.
+    """
+    data = _readable_fleet_sentinel_heartbeat(path)
+    if data is None:
+        return None
+    try:
+        _roster_data, inventory = load_roster()
+    except RosterError as exc:
+        return f"fleet sentinel roster unreadable for independent check: {exc}"
+    independent_digest = str(inventory["digest"])
+    independent_expected = int(inventory["expectedHostCount"])
+    declared_digest = data.get("rosterDigest")
+    declared_expected = data.get("expectedHostCount")
+    declared_observed = data.get("observedHostCount")
+    declared_unknown = data.get("unknownHostCount")
+    # 1. Roster-blind: the heartbeat carries no roster binding at all.
+    if not isinstance(declared_digest, str) or not declared_digest:
+        return (
+            "fleet sentinel heartbeat is roster-blind: no rosterDigest bound; "
+            f"independent roster expects {independent_expected} hosts "
+            f"(digest {independent_digest[:12]})"
+        )
+    # 2. Zero / truncated roster.
+    if not isinstance(declared_expected, int) or isinstance(declared_expected, bool) or declared_expected <= 0:
+        return (
+            "fleet sentinel heartbeat declares zero/no expected hosts: "
+            f"expectedHostCount={declared_expected!r}; independent roster expects {independent_expected}"
+        )
+    # 3. Digest mismatch: wrong manifest / stale / truncated roster.
+    if declared_digest != independent_digest:
+        return (
+            "fleet sentinel roster digest mismatch: "
+            f"heartbeat_digest={declared_digest[:12]} independent_digest={independent_digest[:12]} "
+            f"heartbeat_expected_hosts={declared_expected} independent_expected_hosts={independent_expected}"
+        )
+    # 4. Count mismatch against the independently-loaded roster.
+    if declared_expected != independent_expected:
+        return (
+            "fleet sentinel expected-host count mismatch: "
+            f"heartbeat={declared_expected} independent={independent_expected}"
+        )
+    # 5. Incomplete / unknown observation of the roster.
+    if (
+        isinstance(declared_observed, int)
+        and not isinstance(declared_observed, bool)
+        and declared_observed != declared_expected
+    ):
+        return (
+            "fleet sentinel incomplete roster observation: "
+            f"observedHostCount={declared_observed} expectedHostCount={declared_expected}"
+        )
+    if isinstance(declared_unknown, int) and not isinstance(declared_unknown, bool) and declared_unknown > 0:
+        return f"fleet sentinel has unknown/unprobed hosts: unknownHostCount={declared_unknown}"
+    return None
 
 
 def env_int(name: str, default: int) -> int:
@@ -1176,6 +1251,48 @@ def optional_daily_health_hosts() -> list[str]:
     return unique_hosts([*env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"), *collector_best_effort_hosts()])
 
 
+def collector_roster_drift_problem() -> str | None:
+    """Independently compare the collector's configured remotes against the
+    tracked ``collectorRemote: true`` roster (#1880).
+
+    The collector's required-remote list and the daily-health cadence both derive
+    from the same host-local configuration, so an omission shrinks the producer
+    and the checker together and creates no drift attention. This check derives
+    the *required* set from the independent roster instead, so a required host
+    that is missing from collector configuration surfaces as explicit drift.
+
+    Privacy: a missing host is a public roster member and is named so the operator
+    can act; an *extra* configured remote may be a private ssh alias, so only its
+    count is reported, never the raw identifier. A missing state file is owned by
+    the collector freshness check; a present-but-unreadable one is reported as
+    config-unreadable drift.
+    """
+    collector_path = state_root() / "collector-state.json"
+    if not collector_path.exists():
+        return None
+    try:
+        _roster_data, inventory = load_roster()
+    except RosterError as exc:
+        return f"collector roster comparison unavailable: roster unreadable: {exc}"
+    data = load_json(collector_path, require_private=True)
+    if data is None:
+        return f"collector roster drift: collector-state config-unreadable path={collector_path}"
+    roster_required = set(inventory["collectorRemoteHosts"])
+    roster_all = set(inventory["expectedHosts"])
+    configured = set(collector_configured_hosts())
+    excluded = set(collector_best_effort_hosts()) | set(env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"))
+    missing = sorted((roster_required - configured) - excluded)
+    extra = sorted(configured - roster_all)
+    if not missing and not extra:
+        return None
+    parts = [f"collector roster drift: required={len(roster_required)} configured={len(configured)}"]
+    if missing:
+        parts.append(f"missing={','.join(missing)}")
+    if extra:
+        parts.append(f"extra_count={len(extra)}")
+    return " ".join(parts)
+
+
 def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | None:
     match = re.search(r"\.relay-([A-Za-z0-9_.:-]+)\.bot-errors-health\.daily-health\.", path.name)
     if match:
@@ -1329,6 +1446,8 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("local_health:")
     if "fleet_sentinel" in checks:
         prefixes.append("fleet_sentinel")
+    if "collector_roster" in checks:
+        prefixes.append("collector_roster")
     return prefixes
 
 
@@ -1395,12 +1514,20 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
         if age is None or age > args.max_collector_age:
             problems["collector"] = f"collector heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_collector_age} detail={detail}"
     if "fleet_sentinel" in checks:
-        age, detail = fleet_sentinel_age(fleet_sentinel_heartbeat_path())
+        sentinel_path = fleet_sentinel_heartbeat_path()
+        age, detail = fleet_sentinel_age(sentinel_path)
         if age is None or age > args.max_fleet_sentinel_age:
             problems["fleet_sentinel"] = (
                 f"fleet sentinel heartbeat stale: age_seconds={age if age is not None else 'missing'} "
                 f"max={args.max_fleet_sentinel_age} detail={detail}"
             )
+        roster_problem = fleet_sentinel_roster_problem(sentinel_path)
+        if roster_problem is not None:
+            problems["fleet_sentinel:roster"] = roster_problem
+    if "collector_roster" in checks:
+        drift = collector_roster_drift_problem()
+        if drift is not None:
+            problems["collector_roster"] = drift
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:
