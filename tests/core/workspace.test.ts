@@ -375,7 +375,7 @@ describe('provisionWorkspace', () => {
     expect(lstatSync(join(workspacePath, 'opencode.json')).isSymbolicLink()).toBe(true);
   });
 
-  it('overwrites corrupt pre-existing opencode.json and the result contains mcp.whatsoup', () => {
+  it('fails workspace provisioning closed without overwriting corrupt opencode.json', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();
     writeFileSync(join(workspacePath, 'opencode.json'), 'not json{');
@@ -386,10 +386,9 @@ describe('provisionWorkspace', () => {
         provider: 'opencode-cli',
         sendMediaServerPath: '/abs/path/to/send-media-server.ts',
       }),
-    ).not.toThrow();
+    ).toThrow('Existing OpenCode configuration must be a valid JSON object');
 
-    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
-    expect(opencode).toHaveProperty('mcp.whatsoup');
+    expect(readFileSync(join(workspacePath, 'opencode.json'), 'utf8')).toBe('not json{');
   });
 
   it('prunes stale whatsoup-cloud provider/model but preserves sibling mcp entries and unrelated top-level keys', () => {

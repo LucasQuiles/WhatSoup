@@ -528,25 +528,15 @@ describe('opencode MCP config write hardening', () => {
     return dir;
   }
 
-  it('warns on corrupt user opencode.json, overwrites from a fresh base, and proceeds', () => {
+  it('fails closed on corrupt user opencode.json without logging or overwriting it', () => {
     const dir = tmp();
     const target = join(dir, 'opencode.json');
     writeFileSync(target, '{ not json');
-    let fileAtWarn = '';
-    mockRuntimeLogger.warn.mockImplementationOnce(() => {
-      fileAtWarn = readFileSync(target, 'utf8');
-    });
 
-    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
-
-    expect(written).toBe(target);
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ target }),
-      expect.stringContaining('failed to parse existing opencode.json'),
-    );
-    expect(fileAtWarn).toBe('{ not json');
-    const parsed = readJson(target);
-    expect((parsed.mcp as Record<string, unknown>).whatsoup).toBeDefined();
+    expect(() => writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript))
+      .toThrow('Existing OpenCode configuration must be a valid JSON object');
+    expect(mockRuntimeLogger.warn).not.toHaveBeenCalled();
+    expect(readFileSync(target, 'utf8')).toBe('{ not json');
   });
 
   it('fails closed on symlinked opencode.json without touching the target', () => {

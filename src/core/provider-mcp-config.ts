@@ -1,11 +1,11 @@
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMcpLaunchCommand } from './mcp-launcher.ts';
+import { WHATSOUP_HEADLESS_EXECUTION_PROFILE } from '../lib/opencode-execution-profile-contract.ts';
 import { SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { writePrivateFileSync } from '../lib/private-fs.ts';
-import { createChildLogger } from '../logger.ts';
 
-const log = createChildLogger('provider-mcp-config');
+const MAX_OPENCODE_CONFIG_BYTES = 1024 * 1024;
 
 /**
  * Subset of `agentOptions.providerConfig` consumed when writing an opencode
@@ -36,6 +36,114 @@ function openCodeConfigSymlinkError(): NodeJS.ErrnoException {
   ) as NodeJS.ErrnoException;
   err.code = 'ELOOP';
   return err;
+}
+
+function openCodeConfigError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function openCodeConfigReadError(cause: unknown): NodeJS.ErrnoException {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? 'EIO';
+  return openCodeConfigError('Unable to safely read existing OpenCode configuration', code);
+}
+
+function openCodeConfigWriteError(cause: unknown): NodeJS.ErrnoException {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? 'EIO';
+  return openCodeConfigError('Unable to safely write OpenCode configuration', code);
+}
+
+function invalidOpenCodeConfigError(): NodeJS.ErrnoException {
+  return openCodeConfigError(
+    'Existing OpenCode configuration must be a valid JSON object',
+    'EINVAL',
+  );
+}
+
+function oversizedOpenCodeConfigError(): NodeJS.ErrnoException {
+  return openCodeConfigError(
+    'Existing OpenCode configuration exceeds the safe size limit',
+    'EFBIG',
+  );
+}
+
+function readExistingOpenCodeConfig(target: string): Record<string, unknown> | null {
+  let fd: number;
+  try {
+    fd = openSync(
+      target,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'ELOOP') throw openCodeConfigSymlinkError();
+    throw openCodeConfigReadError(err);
+  }
+
+  let operationFailed = false;
+  let raw: string;
+  try {
+    let stat: ReturnType<typeof fstatSync>;
+    try {
+      stat = fstatSync(fd);
+    } catch (err) {
+      throw openCodeConfigReadError(err);
+    }
+    if (!stat.isFile()) {
+      throw openCodeConfigError(
+        'OpenCode configuration must be a regular non-symlink file',
+        'EINVAL',
+      );
+    }
+    if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > MAX_OPENCODE_CONFIG_BYTES) {
+      throw oversizedOpenCodeConfigError();
+    }
+
+    const buffer = Buffer.allocUnsafe(MAX_OPENCODE_CONFIG_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_OPENCODE_CONFIG_BYTES) {
+      let count: number;
+      try {
+        count = readSync(
+          fd,
+          buffer,
+          total,
+          MAX_OPENCODE_CONFIG_BYTES + 1 - total,
+          total,
+        );
+      } catch (err) {
+        throw openCodeConfigReadError(err);
+      }
+      if (count === 0) break;
+      total += count;
+    }
+    if (total > MAX_OPENCODE_CONFIG_BYTES) {
+      throw oversizedOpenCodeConfigError();
+    }
+    raw = buffer.subarray(0, total).toString('utf8');
+  } catch (err) {
+    operationFailed = true;
+    throw err;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (err) {
+      if (!operationFailed) throw openCodeConfigReadError(err);
+    }
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw invalidOpenCodeConfigError();
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw invalidOpenCodeConfigError();
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
@@ -148,6 +256,16 @@ export function mergeOpencodeConfig(
     : {};
   base.mcp = { ...existingMcp, ...generatedMcp };
 
+  if (base.agent && typeof base.agent === 'object' && !Array.isArray(base.agent)) {
+    const existingAgents = { ...(base.agent as Record<string, unknown>) };
+    delete existingAgents[WHATSOUP_HEADLESS_EXECUTION_PROFILE];
+    if (Object.keys(existingAgents).length > 0) {
+      base.agent = existingAgents;
+    } else {
+      delete base.agent;
+    }
+  }
+
   if (providerConfig?.baseUrl) {
     const providerId = providerConfig.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
     const model = providerConfig.model;
@@ -224,33 +342,7 @@ export function writeProviderMcpConfig(
   if (target === null) return null;
 
   if (providerId === 'opencode-cli') {
-    try {
-      const stat = lstatSync(target);
-      if (stat.isSymbolicLink()) {
-        throw openCodeConfigSymlinkError();
-      }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ELOOP') {
-        throw openCodeConfigSymlinkError();
-      }
-      if (code !== 'ENOENT') throw err;
-    }
-
-    let existing: Record<string, unknown> | null = null;
-    if (existsSync(target)) {
-      try {
-        const parsed = JSON.parse(readFileSync(target, 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          existing = parsed as Record<string, unknown>;
-        }
-      } catch (err) {
-        // Corrupt/unreadable user config — fall back to a fresh merge base
-        // rather than refusing to wire MCP. The whatsoup block is what matters.
-        log.warn({ err, target }, 'failed to parse existing opencode.json before MCP config write; overwriting managed entries');
-        existing = null;
-      }
-    }
+    const existing = readExistingOpenCodeConfig(target);
     const merged = mergeOpencodeConfig(existing, generated, providerConfig);
     try {
       writePrivateFileSync(target, JSON.stringify(merged, null, 2));
@@ -258,7 +350,7 @@ export function writeProviderMcpConfig(
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
         throw openCodeConfigSymlinkError();
       }
-      throw err;
+      throw openCodeConfigWriteError(err);
     }
     return target;
   }

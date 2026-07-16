@@ -39,14 +39,14 @@ describe('mergeOpencodeConfig — merge without clobbering', () => {
     expect(merged).not.toHaveProperty('agent');
   });
 
-  it('preserves an existing agent map without adding or replacing policy', () => {
+  it('preserves sibling agents while removing the obsolete reserved inline profile', () => {
     const agents = {
       personal: { mode: 'subagent', permission: { '*': 'ask' } },
       'whatsoup-headless': { mode: 'primary', permission: { edit: 'deny' } },
     };
     const merged = mergeOpencodeConfig({ agent: agents }, generatedMcp());
 
-    expect(merged.agent).toEqual(agents);
+    expect(merged.agent).toEqual({ personal: agents.personal });
   });
 
   it('preserves existing top-level keys and sibling mcp servers', () => {
