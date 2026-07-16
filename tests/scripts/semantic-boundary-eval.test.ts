@@ -10,6 +10,10 @@ import {
   loadCorpus,
   type BoundaryDecision,
 } from '../../scripts/experiments/semantic-boundary-eval.ts';
+import {
+  contentFingerprintSha256,
+  type PathBlobRecord,
+} from '../../scripts/lib/semantic-quality/fingerprint.ts';
 
 const DECISIONS = new Set<BoundaryDecision>(['pass', 'warn', 'block', 'inconclusive']);
 const EVALUATOR_SOURCE = readFileSync(
@@ -47,24 +51,36 @@ describe('semantic boundary experiment baseline', () => {
 });
 
 describe('semantic boundary experiment candidate', () => {
-  it('delegates graph and receipt decisions to the production semantic-quality engine', () => {
-    expect(EVALUATOR_SOURCE).toMatch(/from '..\/lib\/semantic-quality\/module-graph\.ts'/);
+  it('delegates graph, receipt, fingerprint, history, and provenance decisions to production', () => {
+    expect(EVALUATOR_SOURCE).toMatch(/from ["']..\/lib\/semantic-quality\/module-graph\.ts["']/);
     expect(EVALUATOR_SOURCE).toContain('buildModuleGraph');
     expect(EVALUATOR_SOURCE).toContain('analyzeReachability');
-    expect(EVALUATOR_SOURCE).toMatch(/from '..\/lib\/semantic-quality\/receipt\.ts'/);
+    expect(EVALUATOR_SOURCE).toMatch(/from ["']..\/lib\/semantic-quality\/receipt\.ts["']/);
     expect(EVALUATOR_SOURCE).toContain('aggregateBoundaryDecision');
     expect(EVALUATOR_SOURCE).toContain('isBoundaryFindingComplete');
+    expect(EVALUATOR_SOURCE).toMatch(/from ["']..\/lib\/semantic-quality\/fingerprint\.ts["']/);
+    expect(EVALUATOR_SOURCE).toContain('contentFingerprintSha256');
+    expect(EVALUATOR_SOURCE).toMatch(/from ["']..\/lib\/semantic-quality\/history\.ts["']/);
+    expect(EVALUATOR_SOURCE).toContain('evaluateHistory');
+    expect(EVALUATOR_SOURCE).toMatch(/from ["']..\/lib\/semantic-quality\/provenance\.ts["']/);
+    expect(EVALUATOR_SOURCE).toContain('evaluateProvenance');
+    expect(EVALUATOR_SOURCE).not.toMatch(/from ["']node:crypto["']/);
     expect(EVALUATOR_SOURCE).not.toContain('function runtimeSpecifiers');
     expect(EVALUATOR_SOURCE).not.toContain('function resolveSpecifier');
     expect(EVALUATOR_SOURCE).not.toContain('function reachableModules');
     expect(EVALUATOR_SOURCE).not.toContain('function isFindingComplete');
+    expect(EVALUATOR_SOURCE).not.toMatch(/if \(history\?\.exactMatch\)/);
+    expect(EVALUATOR_SOURCE).not.toMatch(/if \(provenance &&/);
+    expect(EVALUATOR_SOURCE).not.toMatch(/reentry && !reentry\.ownerOverride/);
   });
 
   it('distinguishes production edges from tests, comments, strings, and unresolved imports', () => {
     const corpus = loadCorpus();
     const roots = corpus.productionRoots;
 
-    expect(findUnreachableModules(corpus.graphs.integrated, roots, ['src/lib/feature.ts'])).toEqual([]);
+    expect(findUnreachableModules(corpus.graphs.integrated, roots, ['src/lib/feature.ts'])).toEqual(
+      [],
+    );
     expect(findUnreachableModules(corpus.graphs.testOnly, roots, ['src/lib/feature.ts'])).toEqual([
       'src/lib/feature.ts',
     ]);
@@ -77,22 +93,23 @@ describe('semantic boundary experiment candidate', () => {
         'src/island/b.ts',
       ]),
     ).toEqual(['src/island/a.ts', 'src/island/b.ts']);
-    expect(findUnreachableModules(corpus.graphs.literalDynamic, roots, ['src/lib/feature.ts'])).toEqual(
-      [],
-    );
+    expect(
+      findUnreachableModules(corpus.graphs.literalDynamic, roots, ['src/lib/feature.ts']),
+    ).toEqual([]);
     expect(
       findUnreachableModules(corpus.graphs.unresolvedDynamic, roots, ['src/lib/feature.ts']),
     ).toEqual(['src/lib/feature.ts']);
   });
 
   it('canonicalizes path/blob sets independently of record order', () => {
-    const left = [
-      { status: 'added', path: 'src/b.ts', blobOid: 'bbb' },
-      { status: 'modified', path: 'src/a.ts', blobOid: 'aaa' },
+    const left: PathBlobRecord[] = [
+      { status: 'added', path: 'src/b.ts', blobOid: 'b'.repeat(40) },
+      { status: 'modified', path: 'src/a.ts', blobOid: 'a'.repeat(40) },
     ];
     const right = [...left].reverse();
 
     expect(contentFingerprint(left)).toBe(contentFingerprint(right));
+    expect(contentFingerprint(left)).toBe(contentFingerprintSha256(left));
   });
 
   it('meets the target on the locked synthetic cases without false blocks', () => {
@@ -108,6 +125,49 @@ describe('semantic boundary experiment candidate', () => {
     expect(summary.falseBlocks).toBe(0);
     expect(summary.targetMet).toBe(true);
     expect(summary.feedbackCompleteness).toBe(1);
+  });
+
+  it('routes synthetic history and provenance cases through the expected production rules', () => {
+    const corpus = loadCorpus();
+    const caseIds = new Set([
+      'synthetic-history-exact-closed',
+      'synthetic-history-exact-open',
+      'synthetic-history-subset',
+      'synthetic-history-renamed-patch',
+      'synthetic-history-path-overlap',
+      'synthetic-reentry-cosmetic',
+      'synthetic-issue-exact',
+      'synthetic-issue-similar',
+      'synthetic-provenance-stale-tracking',
+      'synthetic-provenance-stale-disjoint',
+      'synthetic-provenance-stale-overlap',
+      'synthetic-provenance-unavailable',
+    ]);
+    const summary = evaluateCandidate({
+      ...corpus,
+      cases: corpus.cases.filter((item) => caseIds.has(item.id)),
+    });
+    const rules = Object.fromEntries(
+      summary.receipts.map((receipt) => [
+        receipt.caseId,
+        receipt.findings.map((result) => `${result.ruleId}:${result.decision}`),
+      ]),
+    );
+
+    expect(rules).toEqual({
+      'synthetic-history-exact-closed': ['history.exact-closed-pr:block'],
+      'synthetic-history-exact-open': ['history.exact-open-pr:block'],
+      'synthetic-history-subset': ['history.blob-subset:warn'],
+      'synthetic-history-renamed-patch': ['history.renamed-patch-closed-pr:block'],
+      'synthetic-history-path-overlap': ['history.path-overlap:warn'],
+      'synthetic-reentry-cosmetic': ['history.incomplete-reentry:block'],
+      'synthetic-issue-exact': ['history.exact-issue:block'],
+      'synthetic-issue-similar': ['history.exact-issue:warn'],
+      'synthetic-provenance-stale-tracking': ['provenance.stale-tracking-ref:block'],
+      'synthetic-provenance-stale-disjoint': ['provenance.stale-disjoint:warn'],
+      'synthetic-provenance-stale-overlap': ['provenance.stale-overlap:block'],
+      'synthetic-provenance-unavailable': ['provenance.unavailable:inconclusive'],
+    });
   });
 
   it('renders evidence, correction, rerun, and source references for interventions', () => {

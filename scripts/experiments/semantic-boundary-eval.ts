@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +8,25 @@ import {
   type ModuleSource,
 } from '../lib/semantic-quality/module-graph.ts';
 import { readCandidateTree } from '../lib/semantic-quality/git-tree.ts';
+import {
+  buildProposalIdentity,
+  contentFingerprintSha256,
+  taskFingerprintSha256,
+  type PathBlobRecord as ProductionPathBlobRecord,
+  type PathBlobStatus,
+  type ProposalIdentity,
+} from '../lib/semantic-quality/fingerprint.ts';
+import { evaluateHistory, type ReentryPacket } from '../lib/semantic-quality/history.ts';
+import type { HistoryCollection } from '../lib/semantic-quality/history-provider.ts';
+import type {
+  DispositionCategory,
+  HistoryArtifactRecord,
+} from '../lib/semantic-quality/history-types.ts';
+import {
+  evaluateProvenance,
+  type ProvenanceObservation,
+} from '../lib/semantic-quality/provenance.ts';
+import type { BoundaryFinding } from '../lib/semantic-quality/boundary-types.ts';
 import {
   aggregateBoundaryDecision,
   isBoundaryFindingComplete,
@@ -106,24 +124,6 @@ export interface EvaluationSummary {
   }>;
 }
 
-export interface BoundaryFinding {
-  ruleId: string;
-  decision: Exclude<BoundaryDecision, 'pass'>;
-  action: 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'open-issue';
-  summary: string;
-  why: string;
-  observed: Array<{ label: string; value: string }>;
-  matchedArtifacts: Array<{
-    kind: 'pr' | 'issue';
-    number: number;
-    url: string;
-    state: string;
-  }>;
-  correction: string[];
-  rerun: string;
-  sourceRefs: string[];
-}
-
 export interface BoundaryReceipt {
   schemaVersion: 1;
   caseId: string;
@@ -149,6 +149,25 @@ const DEFAULT_CORPUS = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../tests/fixtures/semantic-boundary-eval/cases.json',
 );
+const REPOSITORY = 'LucasQuiles/WhatSoup';
+const FIXTURE_OIDS = Object.freeze({
+  remote: '1'.repeat(40),
+  head: '2'.repeat(40),
+  base: '3'.repeat(40),
+  staleTracking: '4'.repeat(40),
+  candidateBlob: 'a'.repeat(40),
+  priorBlob: 'b'.repeat(40),
+  extraBlob: 'c'.repeat(40),
+  patch: 'd'.repeat(40),
+});
+const PATH_BLOB_STATUSES = new Set<PathBlobStatus>([
+  'added',
+  'copied',
+  'modified',
+  'renamed',
+  'deleted',
+]);
+const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export function loadCorpus(path = DEFAULT_CORPUS): Corpus {
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as Corpus;
@@ -235,20 +254,394 @@ function findGitUnreachableModules(
   return analyzeReachability(graph, roots, changedModules).unreachableCandidates;
 }
 
-export function contentFingerprint(records: PathBlobRecord[]): string {
-  const canonical = records
-    .map((record) => ({
-      status: record.status,
-      oldPath: record.oldPath ?? null,
+function fixtureOid(value: string): string {
+  return GIT_OID_RE.test(value)
+    ? value.toLowerCase()
+    : taskFingerprintSha256({
+        title: 'semantic-boundary-fixture-oid',
+        body: value,
+      });
+}
+
+function fixturePathBlobRecords(records: PathBlobRecord[]): ProductionPathBlobRecord[] {
+  return records.map((record) => {
+    if (!PATH_BLOB_STATUSES.has(record.status as PathBlobStatus)) {
+      throw new Error(`invalid fixture path/blob status: ${record.status}`);
+    }
+    return {
+      status: record.status as PathBlobStatus,
+      ...(record.oldPath == null ? {} : { oldPath: record.oldPath }),
       path: record.path,
-      blobOid: record.blobOid,
-    }))
-    .sort((left, right) =>
-      `${left.status}\0${left.oldPath}\0${left.path}\0${left.blobOid}`.localeCompare(
-        `${right.status}\0${right.oldPath}\0${right.path}\0${right.blobOid}`,
-      ),
-    );
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+      blobOid: fixtureOid(record.blobOid),
+    };
+  });
+}
+
+export function contentFingerprint(records: PathBlobRecord[]): string {
+  return contentFingerprintSha256(fixturePathBlobRecords(records));
+}
+
+type CandidateIdentity = ProposalIdentity & {
+  pathBlobSet: ProductionPathBlobRecord[];
+};
+
+function fixtureCandidate(input: {
+  records: PathBlobRecord[];
+  patchIdStable?: string | null;
+  task?: { title: string; body: string } | null;
+}): CandidateIdentity {
+  const pathBlobSet = fixturePathBlobRecords(input.records);
+  return {
+    ...buildProposalIdentity({
+      records: pathBlobSet,
+      patchIdStable: input.patchIdStable,
+      task: input.task,
+    }),
+    pathBlobSet,
+  };
+}
+
+function completeHistory(corpus: Corpus, artifacts: HistoryArtifactRecord[]): HistoryCollection {
+  return {
+    repository: REPOSITORY,
+    observedAt: [corpus.lockedAt],
+    artifacts,
+    pageCount: 1,
+    complete: true,
+    limitations: [],
+  };
+}
+
+function artifactUrl(kind: 'pull-request' | 'issue', number: number): string {
+  const route = kind === 'pull-request' ? 'pull' : 'issues';
+  return `https://github.com/${REPOSITORY}/${route}/${number}`;
+}
+
+function withFixtureSources(item: EvaluationCase, findings: BoundaryFinding[]): BoundaryFinding[] {
+  return findings.map((result) => ({
+    ...result,
+    sourceRefs: [...new Set([...result.sourceRefs, ...item.sourceRefs])].sort(),
+  }));
+}
+
+function historyArtifact(input: {
+  kind?: 'pull-request' | 'issue';
+  number: number;
+  state?: HistoryArtifactRecord['state'];
+  pathBlobSet?: ProductionPathBlobRecord[];
+  patchIdStable?: string | null;
+  taskFingerprintSha256?: string | null;
+  disposition?: HistoryArtifactRecord['disposition'];
+}): HistoryArtifactRecord {
+  const kind = input.kind ?? 'pull-request';
+  return {
+    repository: REPOSITORY,
+    kind,
+    number: input.number,
+    state: input.state ?? 'closed-unmerged',
+    url: artifactUrl(kind, input.number),
+    ...(input.pathBlobSet == null ? {} : { pathBlobSet: input.pathBlobSet }),
+    ...(input.patchIdStable === undefined ? {} : { patchIdStable: input.patchIdStable }),
+    ...(input.taskFingerprintSha256 === undefined
+      ? {}
+      : { taskFingerprintSha256: input.taskFingerprintSha256 }),
+    ...(input.disposition === undefined ? {} : { disposition: input.disposition }),
+  };
+}
+
+function evaluateHistoryFixtures(
+  item: EvaluationCase,
+  corpus: Corpus,
+  priorProposals: HistoryArtifactRecord[],
+): BoundaryFinding[] {
+  const inputs: Array<{
+    action: 'open-pr' | 'open-issue' | 'reopen-pr';
+    candidate: CandidateIdentity;
+    artifacts: HistoryArtifactRecord[];
+    reentry?: ReentryPacket;
+  }> = [];
+
+  if (item.proposal) {
+    inputs.push({
+      action: 'open-pr',
+      candidate: fixtureCandidate({ records: item.proposal.pathBlobSet }),
+      artifacts: priorProposals,
+    });
+  }
+
+  const history = item.history;
+  if (history) {
+    const number = history.matchedPr ?? history.matchedIssue ?? 100;
+    if (history.exactMatch) {
+      const candidate = fixtureCandidate({
+        records: [
+          {
+            status: 'modified',
+            path: 'src/exact.ts',
+            blobOid: FIXTURE_OIDS.candidateBlob,
+          },
+        ],
+      });
+      inputs.push({
+        action: 'open-pr',
+        candidate,
+        artifacts: [
+          historyArtifact({
+            number,
+            state: history.exactMatch,
+            pathBlobSet: candidate.pathBlobSet,
+          }),
+        ],
+      });
+    } else if (history.subsetMatch) {
+      const shared = {
+        status: 'modified',
+        path: 'src/shared.ts',
+        blobOid: FIXTURE_OIDS.candidateBlob,
+      } satisfies PathBlobRecord;
+      const candidate = fixtureCandidate({
+        records: [
+          shared,
+          {
+            status: 'added',
+            path: 'src/new.ts',
+            blobOid: FIXTURE_OIDS.extraBlob,
+          },
+        ],
+      });
+      inputs.push({
+        action: 'open-pr',
+        candidate,
+        artifacts: [
+          historyArtifact({
+            number,
+            pathBlobSet: fixturePathBlobRecords([shared]),
+          }),
+        ],
+      });
+    } else if (history.renamedPatchClosed) {
+      const candidate = fixtureCandidate({
+        records: [
+          {
+            status: 'added',
+            path: 'src/new-name.ts',
+            blobOid: FIXTURE_OIDS.candidateBlob,
+          },
+        ],
+        patchIdStable: FIXTURE_OIDS.patch,
+      });
+      inputs.push({
+        action: 'open-pr',
+        candidate,
+        artifacts: [
+          historyArtifact({
+            number,
+            pathBlobSet: fixturePathBlobRecords([
+              {
+                status: 'added',
+                path: 'src/old-name.ts',
+                blobOid: FIXTURE_OIDS.priorBlob,
+              },
+            ]),
+            patchIdStable: FIXTURE_OIDS.patch,
+          }),
+        ],
+      });
+    } else if (history.pathOverlap) {
+      const candidate = fixtureCandidate({
+        records: [
+          {
+            status: 'modified',
+            path: 'src/overlap.ts',
+            blobOid: FIXTURE_OIDS.candidateBlob,
+          },
+        ],
+      });
+      inputs.push({
+        action: 'open-pr',
+        candidate,
+        artifacts: [
+          historyArtifact({
+            number,
+            pathBlobSet: fixturePathBlobRecords([
+              {
+                status: 'modified',
+                path: 'src/overlap.ts',
+                blobOid: FIXTURE_OIDS.priorBlob,
+              },
+            ]),
+          }),
+        ],
+      });
+    } else if (history.sameFilenameOnly) {
+      inputs.push({
+        action: 'open-pr',
+        candidate: fixtureCandidate({
+          records: [
+            {
+              status: 'modified',
+              path: 'src/current/feature.ts',
+              blobOid: FIXTURE_OIDS.candidateBlob,
+            },
+          ],
+        }),
+        artifacts: [
+          historyArtifact({
+            number,
+            pathBlobSet: fixturePathBlobRecords([
+              {
+                status: 'modified',
+                path: 'src/prior/feature.ts',
+                blobOid: FIXTURE_OIDS.priorBlob,
+              },
+            ]),
+          }),
+        ],
+      });
+    } else if (history.exactIssue || history.similarIssue) {
+      const task = {
+        title: 'Deterministic boundary fixture',
+        body: 'Prove exact task identity through the production history evaluator.',
+      };
+      const candidate = fixtureCandidate({ records: [], task });
+      inputs.push({
+        // The production core intentionally makes exact issue identity warning-only for a
+        // code proposal; the holdout uses that path to calibrate contextual issue feedback.
+        action: history.exactIssue ? 'open-issue' : 'open-pr',
+        candidate,
+        artifacts: [
+          historyArtifact({
+            kind: 'issue',
+            number,
+            state: 'open',
+            taskFingerprintSha256: candidate.taskFingerprintSha256,
+          }),
+        ],
+      });
+    }
+  }
+
+  if (item.reentry) {
+    const number = 700;
+    const priorUrl = artifactUrl('pull-request', number);
+    const condition = 'Integrate through a named production owner.';
+    const candidate = fixtureCandidate({
+      records: [
+        {
+          status: 'modified',
+          path: 'src/reentry-new.ts',
+          blobOid: FIXTURE_OIDS.candidateBlob,
+        },
+      ],
+    });
+    const packet: ReentryPacket = {
+      priorArtifactRefs: [priorUrl],
+      addressedConditions: item.reentry.packetComplete ? [condition] : [],
+      deltaKind: item.reentry.delta === 'material' ? 'material' : 'fixture-hygiene',
+      productionOwner: item.reentry.packetComplete ? 'src/main.ts' : null,
+      ...(item.reentry.ownerOverride
+        ? {
+            override: {
+              owner: 'repository-owner',
+              ruleId: 'history.incomplete-reentry',
+              fingerprintSha256: candidate.proposalFingerprintSha256,
+              reason: 'Scoped fixture override for the exact proposal identity.',
+              expiresAt: '2099-01-01T00:00:00Z',
+              sourceRef: priorUrl,
+            },
+          }
+        : {}),
+    };
+    inputs.push({
+      action: 'reopen-pr',
+      candidate,
+      artifacts: [
+        historyArtifact({
+          number,
+          pathBlobSet: fixturePathBlobRecords([
+            {
+              status: 'modified',
+              path: 'src/reentry-old.ts',
+              blobOid: FIXTURE_OIDS.priorBlob,
+            },
+          ]),
+          disposition: {
+            category: item.reentry.priorDisposition as DispositionCategory,
+            artifactRefs: [priorUrl],
+            reentryConditions: [condition],
+            recordedAt: corpus.lockedAt,
+          },
+        }),
+      ],
+      reentry: packet,
+    });
+  }
+
+  return inputs.flatMap((input) =>
+    withFixtureSources(
+      item,
+      evaluateHistory({
+        action: input.action,
+        candidate: input.candidate,
+        collection: completeHistory(corpus, input.artifacts),
+        reentry: input.reentry,
+        now: new Date(corpus.lockedAt),
+      }),
+    ),
+  );
+}
+
+function fixtureProvenance(item: EvaluationCase, corpus: Corpus): ProvenanceObservation | null {
+  const input = item.provenance;
+  if (!input) return null;
+  if (!input.remoteAvailable) {
+    return {
+      repository: REPOSITORY,
+      remoteTipOid: null,
+      localTrackingOid: null,
+      mergeBaseOid: null,
+      headOid: null,
+      aheadCount: null,
+      behindCount: null,
+      candidatePaths: null,
+      upstreamPaths: null,
+      highCouplingPaths: [],
+      observedAt: corpus.lockedAt,
+      evidenceSource: item.sourceRefs[0] ?? 'fixture:provenance',
+      complete: false,
+      limitations: ['fixture remote tip is unavailable'],
+    };
+  }
+
+  const olderBase = input.olderBase;
+  const candidatePaths = input.overlap ? ['src/shared.ts'] : ['src/local.ts'];
+  const upstreamPaths = input.overlap
+    ? ['src/shared.ts']
+    : input.highCoupling
+      ? ['package-lock.json']
+      : olderBase
+        ? ['src/upstream.ts']
+        : [];
+  return {
+    repository: REPOSITORY,
+    remoteTipOid: FIXTURE_OIDS.remote,
+    localTrackingOid: input.trackingMatches ? FIXTURE_OIDS.remote : FIXTURE_OIDS.staleTracking,
+    mergeBaseOid: input.mergeBaseAvailable
+      ? olderBase
+        ? FIXTURE_OIDS.base
+        : FIXTURE_OIDS.remote
+      : null,
+    headOid: olderBase ? FIXTURE_OIDS.head : FIXTURE_OIDS.remote,
+    aheadCount: input.mergeBaseAvailable ? (olderBase ? 1 : 0) : null,
+    behindCount: input.mergeBaseAvailable ? (olderBase ? 1 : 0) : null,
+    candidatePaths,
+    upstreamPaths,
+    highCouplingPaths: ['package-lock.json'],
+    observedAt: corpus.lockedAt,
+    evidenceSource: item.sourceRefs[0] ?? 'fixture:provenance',
+    complete: true,
+    limitations: [],
+  };
 }
 
 function finding(
@@ -267,7 +660,7 @@ function finding(
 function candidateReceipt(
   item: EvaluationCase,
   corpus: Corpus,
-  priorProposals: Map<string, { number: number; state: string }>,
+  priorProposals: HistoryArtifactRecord[],
   verifyGit: boolean,
   cwd: string,
   detectorCounts: { revisions: number; modulesChecked: number },
@@ -289,219 +682,29 @@ function candidateReceipt(
     );
   }
 
-  const provenance = item.provenance;
-  if (provenance && (!provenance.remoteAvailable || !provenance.mergeBaseAvailable)) {
+  const provenance = fixtureProvenance(item, corpus);
+  if (provenance) {
     findings.push(
-      finding(item, {
-        ruleId: 'provenance.unavailable',
-        decision: 'inconclusive',
-        action: 'push',
-        summary: 'Upstream provenance could not be proven.',
-        why: 'Duplicate and overlap verdicts are unsafe without the remote tip and merge base.',
-        observed: [
-          { label: 'remote_available', value: String(provenance.remoteAvailable) },
-          { label: 'merge_base_available', value: String(provenance.mergeBaseAvailable) },
-        ],
-        correction: ['Restore read access to origin, fetch the tip, and recompute the merge base.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  } else if (provenance && !provenance.trackingMatches) {
-    findings.push(
-      finding(item, {
-        ruleId: 'provenance.stale-tracking-ref',
-        decision: 'block',
-        action: 'push',
-        summary: 'The local tracking ref differs from the remotely observed tip.',
-        why: 'A stale local tip invalidates subsequent changed-path and duplicate comparisons.',
-        observed: [{ label: 'tracking_matches_remote', value: 'false' }],
-        correction: ['Fetch origin/main, verify the observed OIDs, and recompute the branch diff.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  } else if (provenance?.olderBase && (provenance.overlap || provenance.highCoupling)) {
-    findings.push(
-      finding(item, {
-        ruleId: 'provenance.stale-overlap',
-        decision: 'block',
-        action: 'push',
-        summary: 'The candidate has an older base that overlaps upstream changes.',
-        why: 'Overlapping or high-coupling upstream changes require deliberate reconciliation.',
-        observed: [
-          { label: 'path_overlap', value: String(provenance.overlap) },
-          { label: 'high_coupling', value: String(provenance.highCoupling) },
-        ],
-        correction: ['Rebase or merge deliberately, then rerun the affected tests and boundary check.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  } else if (provenance?.olderBase) {
-    findings.push(
-      finding(item, {
-        ruleId: 'provenance.stale-disjoint',
-        decision: 'warn',
-        action: 'push',
-        summary: 'The candidate base is older, but the proven upstream delta is disjoint.',
-        why: 'Disjoint changes lower immediate risk but should remain visible to the agent.',
-        observed: [{ label: 'path_overlap', value: 'false' }],
-        correction: ['Fetch origin/main and consider rebasing before the next material edit.'],
-        rerun: 'npm run verify:boundary',
-      }),
+      ...withFixtureSources(item, evaluateProvenance({ action: 'push', observation: provenance })),
     );
   }
-
-  if (item.proposal) {
-    const fingerprint = contentFingerprint(item.proposal.pathBlobSet);
-    const prior = priorProposals.get(fingerprint);
-    if (prior) {
-      findings.push(
-        finding(item, {
-          ruleId: prior.state === 'open' ? 'history.exact-open-pr' : 'history.exact-closed-pr',
-          decision: 'block',
-          action: 'open-pr',
-          summary: `The candidate content exactly matches PR #${prior.number}.`,
-          why: 'The canonical changed path/blob fingerprint is identical after removing proposal identity.',
-          observed: [{ label: 'content_fingerprint_sha256', value: fingerprint }],
-          matchedArtifacts: [
-            {
-              kind: 'pr',
-              number: prior.number,
-              url: `https://github.com/LucasQuiles/WhatSoup/pull/${prior.number}`,
-              state: prior.state,
-            },
-          ],
-          correction: ['Continue through the existing artifact or provide a material re-entry packet.'],
-          rerun: 'npm run verify:boundary',
-        }),
-      );
-    }
-  }
-
-  const history = item.history;
-  if (history?.exactMatch) {
-    const number = history.matchedPr!;
-    findings.push(
-      finding(item, {
-        ruleId: history.exactMatch === 'open' ? 'history.exact-open-pr' : 'history.exact-closed-pr',
-        decision: 'block',
-        action: 'open-pr',
-        summary: `The candidate exactly matches PR #${number}.`,
-        why: 'Exact content evidence is deterministic and survives branch recreation.',
-        observed: [{ label: 'match', value: history.exactMatch }],
-        matchedArtifacts: [
-          {
-            kind: 'pr',
-            number,
-            url: `https://github.com/LucasQuiles/WhatSoup/pull/${number}`,
-            state: history.exactMatch,
-          },
-        ],
-        correction: ['Continue through the existing PR or prove a material re-entry delta.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  }
-  if (history?.renamedPatchClosed) {
-    findings.push(
-      finding(item, {
-        ruleId: 'history.renamed-patch-closed-pr',
-        decision: 'block',
-        action: 'open-pr',
-        summary: `The stable patch matches closed PR #${history.matchedPr}.`,
-        why: 'A stable patch match detects identical work even when its path is renamed.',
-        observed: [{ label: 'stable_patch_match', value: 'true' }],
-        matchedArtifacts: [
-          {
-            kind: 'pr',
-            number: history.matchedPr!,
-            url: `https://github.com/LucasQuiles/WhatSoup/pull/${history.matchedPr}`,
-            state: 'closed-unmerged',
-          },
-        ],
-        correction: ['Address the recorded disposition before recreating the patch.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  }
-  if (history?.subsetMatch || history?.pathOverlap) {
-    const ruleId = history.subsetMatch ? 'history.blob-subset' : 'history.path-overlap';
-    findings.push(
-      finding(item, {
-        ruleId,
-        decision: 'warn',
-        action: 'open-pr',
-        summary: `The candidate overlaps prior PR #${history.matchedPr}.`,
-        why: 'Partial overlap may be legitimate, so it supplies context without blocking.',
-        observed: [{ label: 'overlap_kind', value: history.subsetMatch ? 'blob-subset' : 'path' }],
-        matchedArtifacts: [
-          {
-            kind: 'pr',
-            number: history.matchedPr!,
-            url: `https://github.com/LucasQuiles/WhatSoup/pull/${history.matchedPr}`,
-            state: 'historical',
-          },
-        ],
-        correction: ['Link the prior artifact and explain the material distinction.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  }
-  if (history?.exactIssue || history?.similarIssue) {
-    const number = history.matchedIssue!;
-    const exact = Boolean(history.exactIssue);
-    findings.push(
-      finding(item, {
-        ruleId: exact ? 'history.exact-issue' : 'history.related-issue',
-        decision: exact ? 'block' : 'warn',
-        action: 'open-issue',
-        summary: `${exact ? 'Exact' : 'Related'} issue #${number} already exists.`,
-        why: exact
-          ? 'The normalized title/body fingerprint is identical.'
-          : 'Similarity is contextual evidence and cannot safely block by itself.',
-        observed: [{ label: 'issue_match', value: exact ? 'exact' : 'similar' }],
-        matchedArtifacts: [
-          {
-            kind: 'issue',
-            number,
-            url: `https://github.com/LucasQuiles/WhatSoup/issues/${number}`,
-            state: 'existing',
-          },
-        ],
-        correction: ['Continue on the existing issue or state the non-overlapping acceptance criteria.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  }
-
-  const reentry = item.reentry;
-  if (reentry && !reentry.ownerOverride && (reentry.delta !== 'material' || !reentry.packetComplete)) {
-    findings.push(
-      finding(item, {
-        ruleId: 'history.incomplete-reentry',
-        decision: 'block',
-        action: 'reopen-pr',
-        summary: 'The resubmission does not satisfy the prior disposition.',
-        why: 'Cosmetic changes and incomplete packets cannot cure an architectural rejection.',
-        observed: [
-          { label: 'prior_disposition', value: reentry.priorDisposition },
-          { label: 'delta', value: reentry.delta },
-          { label: 'packet_complete', value: String(reentry.packetComplete) },
-        ],
-        correction: ['Name the production owner, prove the material delta, and complete the re-entry packet.'],
-        rerun: 'npm run verify:boundary',
-      }),
-    );
-  }
+  findings.push(...evaluateHistoryFixtures(item, corpus, priorProposals));
 
   if (item.semantic) {
     let unreachable: string[];
     if (item.semantic.kind === 'fixture') {
       const graph = corpus.graphs[item.semantic.graph];
       if (!graph) throw new Error(`missing graph fixture: ${item.semantic.graph}`);
-      unreachable = findUnreachableModules(graph, corpus.productionRoots, item.semantic.changedModules);
+      unreachable = findUnreachableModules(
+        graph,
+        corpus.productionRoots,
+        item.semantic.changedModules,
+      );
     } else {
       if (!verifyGit) {
-        throw new Error(`case ${item.id} requires --verify-git to inspect ${item.semantic.revision}`);
+        throw new Error(
+          `case ${item.id} requires --verify-git to inspect ${item.semantic.revision}`,
+        );
       }
       unreachable = findGitUnreachableModules(
         item.semantic.revision,
@@ -521,7 +724,9 @@ function candidateReceipt(
           summary: 'Added production modules are unreachable from every production root.',
           why: 'Tests, comments, strings, and disconnected islands do not prove runtime integration.',
           observed: [{ label: 'unreachable_modules', value: unreachable.join(', ') }],
-          correction: ['Integrate through the named production owner and add a behavior test through that owner.'],
+          correction: [
+            'Integrate through the named production owner and add a behavior test through that owner.',
+          ],
           rerun: 'npm run verify:semantic',
         }),
       );
@@ -569,7 +774,9 @@ function candidateReceipt(
         summary: 'The workflow uses a floating runner label.',
         why: 'Runner image drift should remain visible until the support policy is explicit.',
         observed: [{ label: 'runner', value: item.supply.runnerLabels.join(', ') }],
-        correction: ['Record the intended runner support window or pin an explicit image generation.'],
+        correction: [
+          'Record the intended runner support window or pin an explicit image generation.',
+        ],
         rerun: 'npm run guard:upstream-pins',
       }),
     );
@@ -584,9 +791,14 @@ function candidateReceipt(
         why: 'An unowned child can hang a hook or leave descendants after timeout.',
         observed: [
           { label: 'bounded', value: String(item.process.bounded) },
-          { label: 'owns_process_group', value: String(item.process.ownsProcessGroup) },
+          {
+            label: 'owns_process_group',
+            value: String(item.process.ownsProcessGroup),
+          },
         ],
-        correction: ['Wrap the command in an external deadline that owns and reaps its process group.'],
+        correction: [
+          'Wrap the command in an external deadline that owns and reaps its process group.',
+        ],
         rerun: 'npm run verify:boundary',
       }),
     );
@@ -600,7 +812,9 @@ function candidateReceipt(
         summary: 'Guard behavior changed without a neighboring negative-control fixture.',
         why: 'A wired test name does not prove the guard rejects its target failure mode.',
         observed: [{ label: 'negative_control_changed', value: 'false' }],
-        correction: ['Add a fixture that triggers the unsafe input and assert the guard rejects it.'],
+        correction: [
+          'Add a fixture that triggers the unsafe input and assert the guard rejects it.',
+        ],
         rerun: 'npm test -- tests/scripts/<guard>.test.ts',
       }),
     );
@@ -624,24 +838,20 @@ export function evaluateCandidate(
 ): CandidateSummary {
   const verifyGit = options.verifyGit ?? false;
   const cwd = options.cwd ?? process.cwd();
-  const priorProposals = new Map<string, { number: number; state: string }>();
+  const priorProposals: HistoryArtifactRecord[] = [];
   const detectorCounts = { revisions: 0, modulesChecked: 0 };
   const receipts: BoundaryReceipt[] = [];
   for (const item of corpus.cases) {
-    const receipt = candidateReceipt(
-      item,
-      corpus,
-      priorProposals,
-      verifyGit,
-      cwd,
-      detectorCounts,
-    );
+    const receipt = candidateReceipt(item, corpus, priorProposals, verifyGit, cwd, detectorCounts);
     receipts.push(receipt);
     if (item.proposal) {
-      priorProposals.set(contentFingerprint(item.proposal.pathBlobSet), {
-        number: item.proposal.number,
-        state: item.proposal.state,
-      });
+      priorProposals.push(
+        historyArtifact({
+          number: item.proposal.number,
+          state: item.proposal.state,
+          pathBlobSet: fixturePathBlobRecords(item.proposal.pathBlobSet),
+        }),
+      );
     }
   }
   const predicted = new Map(receipts.map((receipt) => [receipt.caseId, receipt.decision]));
