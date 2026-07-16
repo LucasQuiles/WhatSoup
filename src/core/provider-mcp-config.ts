@@ -39,10 +39,12 @@ function translateClaudeMcpPermissionToOpencodeTool(permission: string): string 
     ? permission.slice('mcp__'.length)
     : '';
   const separator = qualifiedName.indexOf('__');
-  if (separator <= 0 || separator === qualifiedName.length - 2) {
+  const serverName = separator > 0 ? qualifiedName.slice(0, separator) : '';
+  const toolName = separator > 0 ? qualifiedName.slice(separator + 2) : '';
+  if (!serverName || !toolName) {
     throw new Error(`Invalid Claude MCP permission identifier: ${permission}`);
   }
-  return [qualifiedName.slice(0, separator), qualifiedName.slice(separator + 2)]
+  return [serverName, toolName]
     .map((component) => component.replace(/[^a-zA-Z0-9_-]/g, '_'))
     .join('_');
 }
