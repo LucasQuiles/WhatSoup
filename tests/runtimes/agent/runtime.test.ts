@@ -51,9 +51,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
     sendTurn: vi.fn(async (_text: string) => {}),
-    sendTrustedActorTurn: vi.fn(async (text: string) => {
-      await mockSession.sendTurn(text);
-    }),
+    sendTrustedActorTurn: vi.fn(async (text: string) => { await mockSession.sendTurn(text); }),
     handleNew: vi.fn(async () => {}),
     getStatus: vi.fn(() => ({ active: false, pid: null as number | null, sessionId: null as string | null, startedAt: null as string | null, messageCount: 0, lastMessageAt: null as string | null })),
     shutdown: vi.fn(async () => {}),
@@ -1061,9 +1059,7 @@ describe('AgentRuntime', () => {
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
-    mockSession.sendTrustedActorTurn.mockReset().mockImplementation(async (text: string) => {
-      await mockSession.sendTurn(text);
-    });
+    mockSession.sendTrustedActorTurn.mockReset().mockImplementation(async (text: string) => { await mockSession.sendTurn(text); });
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
       turnId,
@@ -1161,27 +1157,16 @@ describe('AgentRuntime', () => {
 
   it('derives trusted actor access independently for each dispatched turn', async () => {
     const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'line-a');
-    const sendTrustedActorTurn = (runtime as unknown as {
-      sendTrustedActorTurn(
-        session: typeof mockSession,
-        text: string,
-        actorJid: string | undefined,
-      ): Promise<void>;
-    }).sendTrustedActorTurn.bind(runtime);
+    const sendTrustedActorTurn = (runtime as unknown as { sendTrustedActorTurn(
+      session: typeof mockSession, text: string, actorJid: string | undefined,
+    ): Promise<void> }).sendTrustedActorTurn.bind(runtime);
 
     await sendTrustedActorTurn(mockSession, 'admin request', '15550100001@s.whatsapp.net');
     await sendTrustedActorTurn(mockSession, 'unknown request', 'unknown-actor@s.whatsapp.net');
-
-    expect(mockSession.sendTrustedActorTurn).toHaveBeenNthCalledWith(
-      1,
-      'admin request',
-      'administrator',
-    );
-    expect(mockSession.sendTrustedActorTurn).toHaveBeenNthCalledWith(
-      2,
-      'unknown request',
-      'untrusted_or_unknown',
-    );
+    expect(mockSession.sendTrustedActorTurn.mock.calls).toEqual([
+      ['admin request', 'administrator'],
+      ['unknown request', 'untrusted_or_unknown'],
+    ]);
   });
 
   it('start() calls ensureAgentSchema', async () => {
@@ -8945,9 +8930,7 @@ describe('AgentRuntime', () => {
         active = true;
       }),
       sendTurn: vi.fn(async (_text: string) => {}),
-      sendTrustedActorTurn: vi.fn(async (text: string) => {
-        await localSession.sendTurn(text);
-      }),
+      sendTrustedActorTurn: vi.fn(async (text: string) => { await localSession.sendTurn(text); }),
       shutdown: vi.fn(async () => {}),
     };
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
@@ -9871,9 +9854,7 @@ describe('AgentRuntime', () => {
         const perChatSession = {
           spawnSession: vi.fn(async () => {}),
           sendTurn,
-          sendTrustedActorTurn: vi.fn(async (text: string) => {
-            await sendTurn(text);
-          }),
+          sendTrustedActorTurn: vi.fn(async (text: string) => { await sendTurn(text); }),
           handleNew: vi.fn(async () => {}),
           getStatus: vi.fn(() => ({
             active: true,
@@ -9975,9 +9956,7 @@ describe('AgentRuntime', () => {
         return {
           spawnSession: vi.fn(async () => { spawnSessionCalls.push(key); }),
           sendTurn,
-          sendTrustedActorTurn: vi.fn(async (text: string) => {
-            await sendTurn(text);
-          }),
+          sendTrustedActorTurn: vi.fn(async (text: string) => { await sendTurn(text); }),
           handleNew: vi.fn(async () => {}),
           getStatus: vi.fn(() => ({
             active: true, pid: null, sessionId: `session-${key}`,
