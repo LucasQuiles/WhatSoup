@@ -203,6 +203,19 @@ DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES = {
     "whatsapp_device_bond_lost",
     "instance_logged_out",
 }
+# For AUTOCLOSE_PROTECTED sources that require outbound proof, a sustained
+# stable connection (process uptime above this threshold + zero reconnect
+# attempts + verified WhatsApp health) is accepted as an ALTERNATIVE to a
+# post-relink outbound send.  A server-revoked bond (WA_AUTH_BOND_SERVER_REVOKED)
+# forces a socket disconnect within seconds; a process that has been connected
+# for this long with zero reconnect attempts cannot have a revoked bond.  This
+# lets low-traffic / allowlist-restricted bots clear ghost bond-lost incidents
+# without requiring an organic outbound message that may never come.  Default
+# 10 minutes — well past any server-revocation propagation window.
+SUSTAINED_STABILITY_MIN_UPTIME_SECONDS = positive_env_int(
+    "BOT_ERRORS_SUSTAINED_STABILITY_MIN_UPTIME_SECONDS",
+    600,
+)
 # Pattern C — inhibition table (root cause suppresses symptom).
 #
 # Direction: root source -> set of downstream SYMPTOM sources it suppresses
@@ -1106,6 +1119,53 @@ def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: 
     return evidence_epoch(probe, "outbound_success_at") is not None
 
 
+def has_post_incident_outbound_proof(probe: str, record: dict[str, Any], opened_epoch: int) -> bool:
+    """True iff the probe carries an outbound send timestamp strictly AFTER the
+    incident opened.  This is the original proof path for AUTOCLOSE_PROTECTED
+    sources: a successful outbound send after the relink proves the server-side
+    bond is alive.
+    """
+    if evidence_field(probe, "outbound_success_transport_present") != "true":
+        return False
+    outbound_epoch = evidence_epoch(probe, "outbound_success_at")
+    if outbound_epoch is None:
+        return False
+    opened_at = int_field(record, "openedAt", opened_epoch)
+    required_after = max(opened_epoch, opened_at)
+    if required_after > 0 and outbound_epoch <= required_after:
+        return False
+    return True
+
+
+def has_sustained_connection_stability(probe: str) -> bool:
+    """True iff the probe shows a WhatsApp connection that has been continuously
+    stable long enough to rule out a server-side bond revocation.
+
+    A ``WA_AUTH_BOND_SERVER_REVOKED`` revocation forces a socket disconnect
+    within seconds — the client cannot maintain a ``connected`` state against a
+    revoked bond.  Therefore a process whose WhatsApp socket has been up for
+    ``SUSTAINED_STABILITY_MIN_UPTIME_SECONDS`` with zero reconnect attempts is
+    genuinely bonded server-side, even without a post-relink outbound send.
+
+    This is the alternative proof path for low-traffic / allowlist-restricted
+    bots whose bond-lost incidents cannot clear via outbound proof alone.
+    """
+    try:
+        uptime = int(evidence_field(probe, "lifecycle_process_uptime_seconds") or "0")
+    except ValueError:
+        return False
+    if uptime < SUSTAINED_STABILITY_MIN_UPTIME_SECONDS:
+        return False
+    attempts_raw = evidence_field(probe, "reconnect_attempts")
+    if attempts_raw is not None:
+        try:
+            if int(attempts_raw) != 0:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
     """True iff this incident record's last-known health probe is a VERIFIED
     WhatsApp recovery per the exogenous oracle.
@@ -1175,15 +1235,21 @@ def daily_health_recovered_incident_keys(
                 if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
                     continue
                 require_outbound_proof = source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
-                if not is_verified_whatsapp_health_recovery(probe, require_outbound_proof=require_outbound_proof):
-                    continue
                 if require_outbound_proof:
-                    outbound_epoch = evidence_epoch(probe, "outbound_success_at")
-                    if outbound_epoch is None:
+                    # AUTOCLOSE_PROTECTED sources need extra proof beyond base
+                    # verified health.  Accept EITHER a post-incident outbound
+                    # send (original path) OR sustained connection stability
+                    # (alternative path for low-traffic bots).
+                    if not is_verified_whatsapp_health_recovery(probe):
                         continue
-                    opened_at = int_field(record, "openedAt", opened)
-                    required_after = max(opened, opened_at)
-                    if required_after > 0 and outbound_epoch <= required_after:
+                    if has_post_incident_outbound_proof(probe, record, opened):
+                        pass
+                    elif has_sustained_connection_stability(probe):
+                        pass
+                    else:
+                        continue
+                else:
+                    if not is_verified_whatsapp_health_recovery(probe):
                         continue
                 if key not in seen:
                     seen.add(key)
