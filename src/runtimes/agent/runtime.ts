@@ -5489,8 +5489,17 @@ export class AgentRuntime implements Runtime {
         // legitimate session-replacement scenarios where two sessions share a mapKey.
         if (this.isSilentCompact(mapKey)) break;
         const toolNames = this.activeToolNames.get(toolScopeKey);
+        const trackedToolName = toolNames?.get(event.toolId);
+        const resultToolName = event.toolName?.trim() || undefined;
+        if (trackedToolName === undefined && resultToolName !== undefined) {
+          this.turnHadToolActivity.add(toolScopeKey);
+          if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
+            const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
+            if (contexts?.[0]) contexts[0] = markRuntimeTurnReplayUnsafe(contexts[0]);
+          }
+        }
         if (event.isError) {
-          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
+          const toolName = trackedToolName ?? resultToolName ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
@@ -10156,8 +10165,16 @@ export class AgentRuntime implements Runtime {
 
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
+        const trackedToolName = toolNames?.get(event.toolId);
+        const resultToolName = event.toolName?.trim() || undefined;
+        if (trackedToolName === undefined && resultToolName !== undefined) {
+          this.singleTurnHadToolActivity = true;
+          if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
+            this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
+          }
+        }
         if (event.isError) {
-          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
+          const toolName = trackedToolName ?? resultToolName ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,

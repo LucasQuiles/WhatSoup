@@ -126,13 +126,14 @@ describe('OpenCode parser — tool_use branch', () => {
     const event = p.parse(
       JSON.stringify({
         type: 'tool_use',
-        part: { callID: 'c-1', state: { status: 'completed', output: 'ok' } },
+        part: { tool: 'bash', callID: 'c-1', state: { status: 'completed', output: 'ok' } },
       }),
     );
     expect(event).toEqual({
       type: 'tool_result',
       isError: false,
       toolId: 'c-1',
+      toolName: 'bash',
       content: 'ok',
     });
   });
@@ -142,28 +143,107 @@ describe('OpenCode parser — tool_use branch', () => {
     const event = p.parse(
       JSON.stringify({
         type: 'tool_use',
-        part: { callID: 'c-1', state: { status: 'failed', output: 'boom' } },
+        part: { tool: 'edit', callID: 'c-1', state: { status: 'failed', output: 'boom' } },
       }),
     );
     expect(event).toEqual({
       type: 'tool_result',
       isError: true,
       toolId: 'c-1',
+      toolName: 'edit',
       content: 'boom',
     });
   });
 
-  it('emits tool_result with default empty content + isError=false when state is not a record', () => {
+  it('treats a missing state as a malformed failed result with non-empty detail', () => {
     const p = createOpenCodeParser();
     const event = p.parse(
-      JSON.stringify({ type: 'tool_use', part: { callID: 'c-1' } }),
+      JSON.stringify({ type: 'tool_use', part: { tool: 'edit', callID: 'c-1' } }),
     );
-    expect(event).toEqual({
+    expect(event).toMatchObject({
       type: 'tool_result',
-      isError: false,
+      isError: true,
       toolId: 'c-1',
-      content: '',
+      toolName: 'edit',
     });
+    expect((event as Extract<NonNullable<typeof event>, { type: 'tool_result' }>).content.trim())
+      .not.toBe('');
+  });
+
+  it('prioritizes structured error, output, then metadata in synthetic rejected events', () => {
+    // Synthetic: the incident retained WhatSoup logs, but no terminal OpenCode JSON.
+    const base: {
+      type: string;
+      part: {
+        type: string;
+        tool: string;
+        callID: string;
+        state: {
+          status: string;
+          error?: unknown;
+          output?: unknown;
+          metadata?: unknown;
+        };
+      };
+    } = {
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'edit',
+        callID: 'call_rejected_1',
+        state: {
+          status: 'rejected',
+          error: { message: 'permission requested: edit; auto-rejecting' },
+          output: 'lower-priority output',
+          metadata: { message: 'lowest-priority metadata' },
+        },
+      },
+    };
+    const parser = createOpenCodeParser();
+
+    expect(parser.parse(JSON.stringify(base))).toEqual({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'call_rejected_1',
+      toolName: 'edit',
+      content: 'permission requested: edit; auto-rejecting',
+    });
+
+    const withoutError = structuredClone(base);
+    delete withoutError.part.state.error;
+    expect(parser.parse(JSON.stringify(withoutError))).toMatchObject({
+      content: 'lower-priority output',
+    });
+
+    const metadataOnly = structuredClone(withoutError);
+    delete metadataOnly.part.state.output;
+    expect(parser.parse(JSON.stringify(metadataOnly))).toMatchObject({
+      content: 'lowest-priority metadata',
+    });
+  });
+
+  it('uses a bounded non-empty status fallback when a synthetic rejection has no detail', () => {
+    // Synthetic: the incident retained WhatSoup logs, but no terminal OpenCode JSON.
+    const longStatus = `rejected-${'x'.repeat(500)}`;
+    const event = createOpenCodeParser().parse(JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call_rejected_2',
+        state: { status: longStatus },
+      },
+    }));
+
+    expect(event).toMatchObject({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'call_rejected_2',
+      toolName: 'bash',
+    });
+    const content = (event as Extract<NonNullable<typeof event>, { type: 'tool_result' }>).content;
+    expect(content.trim()).not.toBe('');
+    expect(content.length).toBeLessThanOrEqual(160);
   });
 
   it('returns unknown when part is not a record', () => {

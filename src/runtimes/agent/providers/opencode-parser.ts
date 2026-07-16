@@ -12,7 +12,25 @@
 // compatible with (line: string) => AgentEvent | null.
 
 import type { AgentEvent } from '../stream-parser.ts';
-import { isRecord, stringifyValue } from './parser-utils.ts';
+import { extractMessage, isRecord, stringifyValue } from './parser-utils.ts';
+
+const OPENCODE_STATUS_EXCERPT_CHARS = 96;
+
+function toolResultDetail(value: unknown): string | null {
+  const extracted = extractMessage(value)?.trim();
+  if (extracted) return extracted;
+  const serialized = stringifyValue(value).trim();
+  return serialized || null;
+}
+
+function statusFallback(status: string): string {
+  const normalized = status.trim().replace(/\s+/g, ' ');
+  if (!normalized) return 'OpenCode tool failed without status or error detail.';
+  const bounded = normalized.length > OPENCODE_STATUS_EXCERPT_CHARS
+    ? `${normalized.slice(0, OPENCODE_STATUS_EXCERPT_CHARS - 1)}…`
+    : normalized;
+  return `OpenCode tool failed with status "${bounded}".`;
+}
 
 export interface OpenCodeParser {
   parse: (line: string) => AgentEvent | null;
@@ -77,25 +95,33 @@ export function createOpenCodeParser(): OpenCodeParser {
         }
 
         const callID = String(part['callID'] ?? '');
+        const toolName = String(part['tool'] ?? '').trim();
         const state = part['state'];
 
         if (!isRecord(state)) {
           return {
             type: 'tool_result',
-            isError: false,
+            isError: true,
             toolId: callID,
-            content: '',
+            ...(toolName ? { toolName } : {}),
+            content: 'OpenCode tool result had missing or malformed state.',
           };
         }
 
         const status = String(state['status'] ?? '');
         const isError = status !== 'completed';
-        const content = stringifyValue(state['output']);
+        const content = isError
+          ? toolResultDetail(state['error'])
+            ?? toolResultDetail(state['output'])
+            ?? toolResultDetail(state['metadata'])
+            ?? statusFallback(status)
+          : stringifyValue(state['output']);
 
         return {
           type: 'tool_result',
           isError,
           toolId: callID,
+          ...(toolName ? { toolName } : {}),
           content,
         };
       }
@@ -144,4 +170,3 @@ export function createOpenCodeParser(): OpenCodeParser {
     },
   };
 }
-

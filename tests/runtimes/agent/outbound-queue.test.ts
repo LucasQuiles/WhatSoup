@@ -98,6 +98,7 @@ describe('OutboundQueue', () => {
     const leakedTimers = vi.getTimerCount();
     vi.clearAllTimers(); // always clean up regardless, for test isolation
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     expect(leakedTimers, 'Test leaked pending timers — call queue.flush() or queue.abortTurn() before the test ends').toBe(0);
   });
@@ -136,6 +137,31 @@ describe('OutboundQueue', () => {
     expect(messenger.sendMessage).not.toHaveBeenCalledWith(
       CHAT_JID,
       expect.stringContaining('Running migration probe'),
+    );
+  });
+
+  it('redacts internal artifacts for the redirect audience before direct send', async () => {
+    vi.stubEnv('WHATSOUP_INTERNAL_JIDS', '');
+    vi.stubEnv('BOT_ERRORS_JID', 'ops-only@g.us');
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const redirectJid = 'client-status@s.whatsapp.net';
+
+    queue.setToolUpdateRedirectJid(redirectJid);
+    queue.enqueueToolUpdate({
+      category: 'running',
+      detail: 'Run /Users/testuser/LAB/example/06_tools/merge_apply.py',
+    });
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+    await queue.flush();
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      redirectJid,
+      expect.stringContaining('internal-path'),
+    );
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      redirectJid,
+      expect.stringContaining('/Users/testuser/LAB/example'),
     );
   });
 
@@ -639,6 +665,21 @@ describe('OutboundQueue', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toBe('🔎 Searching:\n  • Pinecone query');
+  });
+
+  it('substitutes a non-empty friendly error detail before deduplication', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueToolUpdate({ category: 'error', detail: '' });
+    queue.enqueueToolUpdate({ category: 'error', detail: '   \n' });
+    await queue.flush();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('⚠️ Ran into an issue:');
+    expect(calls[0]).not.toMatch(/•\s*$/);
+    expect(calls[0]?.split('\n').filter((line) => line.includes('•'))).toHaveLength(1);
   });
 
   it('separates multiple category groups with a blank line', async () => {

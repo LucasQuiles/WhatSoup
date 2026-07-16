@@ -10,6 +10,7 @@ import { jitteredDelay } from '../../core/retry.ts';
 import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
 import { isOutboundGovernorShed } from '../../transport/outbound-governor.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
@@ -1144,9 +1145,14 @@ export class OutboundQueue implements IOutboundQueue {
     const buffered = this.toolBuffer;
     this.toolBuffer = [];
     if (this.toolUpdateRedirectJid !== null) {
+      const redirectJid = this.toolUpdateRedirectJid;
       const statusText = this.renderToolUpdates(buffered.map(({ update }) => update));
-      this.messenger.sendMessage(this.toolUpdateRedirectJid, statusText).catch((err) => {
-        log.warn({ err, target: this.toolUpdateRedirectJid, textLength: statusText.length }, 'tool-status redirect send failed');
+      const safeStatusText = redactInternalArtifacts(
+        statusText,
+        resolveOutboundAudience(redirectJid),
+      ).text;
+      this.messenger.sendMessage(redirectJid, safeStatusText).catch((err) => {
+        log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
       });
       return;
     }
@@ -1176,13 +1182,14 @@ export class OutboundQueue implements IOutboundQueue {
     const categoryOrder: ToolCategory[] = [];
     const groups = new Map<ToolCategory, string[]>();
     for (const { category, detail } of updates) {
+      const safeDetail = detail.trim() === '' ? formatProviderErrorForUser(undefined) : detail;
       if (!groups.has(category)) {
         categoryOrder.push(category);
         groups.set(category, []);
       }
       const existing = groups.get(category)!;
-      if (!existing.includes(detail)) {
-        existing.push(detail);
+      if (!existing.includes(safeDetail)) {
+        existing.push(safeDetail);
       }
     }
 

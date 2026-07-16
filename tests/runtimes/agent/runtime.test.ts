@@ -6009,6 +6009,112 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
+  it('scoped result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('scoped@s.whatsapp.net');
+    const tracker = {
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+    };
+    const mapKey = 'scoped@s.whatsapp.net';
+    const toolScopeKey = `${mapKey}#1`;
+    const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 41, 'turn-scoped');
+    const state = runtime as unknown as {
+      operationTrackers: Map<string, typeof tracker>;
+      perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
+      turnHadToolActivity: Set<string>;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEventWithContext(
+        event: AgentEvent,
+        queue: IOutboundQueue,
+        session: null,
+        conversationKey: string,
+        inboundSeq: number,
+        mapKey: string,
+        toolScopeKey: string,
+      ): void;
+    };
+    state.operationTrackers.set(mapKey, tracker);
+    state.perChatRuntimeTurnContexts.set(mapKey, [context]);
+
+    state.handleEventWithContext(
+      {
+        type: 'tool_result',
+        toolId: 'call_edit_rejected',
+        toolName: 'edit',
+        isError: true,
+        content: 'permission requested: edit; auto-rejecting',
+      },
+      queue,
+      null,
+      'scoped',
+      41,
+      mapKey,
+      toolScopeKey,
+    );
+
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'error',
+      detail: expect.stringContaining('edit'),
+    }));
+    expect(state.turnHadToolActivity.has(toolScopeKey)).toBe(true);
+    expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_edit_rejected');
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
+  });
+
+  it('global result-only tool events preserve identity and make replay unsafe without a tracker start', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('global@s.whatsapp.net');
+    const tracker = {
+      onAnyActivity: vi.fn(),
+      onToolStart: vi.fn(),
+      onToolEnd: vi.fn(),
+      onTurnComplete: vi.fn(),
+    };
+    const context = makeRuntimeTurnContext('shared', 'global', queue.targetChatJid, 42, 'turn-global');
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      outboundQueues: Map<string, IOutboundQueue>;
+      operationTracker: typeof tracker;
+      currentRuntimeTurnContext: typeof context;
+      singleTurnHadToolActivity: boolean;
+      activeToolNames: Map<string, Map<string, string>>;
+      handleEvent(event: AgentEvent): void;
+    };
+    state.session = mockSession;
+    state.activeChatJid = queue.targetChatJid;
+    state.currentTurnChatJid = queue.targetChatJid;
+    state.outboundQueues.set(queue.targetChatJid, queue);
+    state.operationTracker = tracker;
+    state.currentRuntimeTurnContext = context;
+
+    state.handleEvent({
+      type: 'tool_result',
+      toolId: 'call_bash_rejected',
+      toolName: 'bash',
+      isError: true,
+      content: 'permission requested: bash; auto-rejecting',
+    });
+
+    expect(queue.enqueueToolUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'error',
+      detail: expect.stringContaining('bash'),
+    }));
+    expect(state.singleTurnHadToolActivity).toBe(true);
+    expect(state.currentRuntimeTurnContext.replay.replaySafe).toBe(false);
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_bash_rejected');
+    expect(tracker.onToolStart).not.toHaveBeenCalled();
+    expect(state.activeToolNames.has('__global__')).toBe(false);
+  });
+
   it('tool_result with isError emits a provider-wide BOT ERRORS alert', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

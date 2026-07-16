@@ -48,6 +48,14 @@ describe('classifyToolError', () => {
     expect(result.detail).toBe('Something broke');
   });
 
+  it('uses the provider-error fallback when a known tool has empty error content', () => {
+    const result = classifyToolError('edit', '');
+    expect(result.category).toBe('error');
+    expect(result.detail.trim()).not.toBe('');
+    expect(result.detail).toContain('edit');
+    expect(result.detail.length).toBeLessThanOrEqual(110);
+  });
+
   // ── Content cleaning ──
 
   it('strips <tool_use_error> XML tags', () => {

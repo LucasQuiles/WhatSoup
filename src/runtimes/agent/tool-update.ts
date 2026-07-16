@@ -11,6 +11,7 @@
 
 /** Max chars of tool-failure error text included in an operator alert excerpt. */
 const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
+import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import type { ToolUpdate } from './outbound-queue.ts';
 /**
  * Build a structured ToolUpdate from a tool_use event.
@@ -227,7 +228,8 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   }
 
   // Fallback: technical detail
-  const firstLine = cleaned.split('\n')[0] ?? cleaned;
+  const formatted = formatProviderErrorForUser(cleaned);
+  const firstLine = formatted.split('\n')[0] ?? formatted;
   const simplified = firstLine
     .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
     .replace(/^Exit code (\d+)$/, 'exit code $1');
