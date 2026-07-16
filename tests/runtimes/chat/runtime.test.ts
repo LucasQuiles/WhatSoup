@@ -1680,17 +1680,18 @@ describe('Token budget trimming', () => {
 
     await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
 
-    // Exactly one call — the real conversation call. No side summarization call.
-    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(1);
-    const request = vi.mocked(primary.generate).mock.calls[0][0];
-    expect(request.messages).toHaveLength(2); // earlier message + current message
-    expect(request.messages[0].content).toBe('short earlier message');
-
     // No trim log at all — nothing was trimmed.
     const trimLog = mockLogInfo().mock.calls.find(
       (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('token budget'),
     );
     expect(trimLog).toBeUndefined();
+
+    // Exactly one call — the real conversation call. No side summarization call —
+    // and the intact under-budget window reaches the provider verbatim.
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(1);
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    expect(request.messages).toHaveLength(2); // earlier message + current message
+    expect(request.messages[0].content).toBe('short earlier message');
   });
 });
 
