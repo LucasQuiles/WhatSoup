@@ -7,11 +7,13 @@ import type { Database } from './database.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { DurabilityEngine } from './durability.ts';
+import { sendTracked } from './durability.ts';
+import type { CapabilityGrantManager } from '../lib/capability-grant.ts';
 import { classifyErrorForInbound } from './inbound-failure-class.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
-import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from './admin.ts';
+import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -237,6 +239,7 @@ export function createIngestHandler(
   getBotLid: () => string | null,
   durability?: DurabilityEngine,
   instanceType?: string,
+  grantManager?: CapabilityGrantManager,
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
@@ -380,6 +383,12 @@ export function createIngestHandler(
           try {
             if (cmd.action === 'fallback') {
               await handleFallbackCommand(runtime, messenger, cmd, msg.chatJid, durability);
+            } else if (cmd.action === 'grant') {
+              if (grantManager) {
+                await handleGrantCommand(grantManager, messenger, cmd, msg.chatJid, durability);
+              } else {
+                await sendTracked(messenger, msg.chatJid, 'Capability grants are not enabled on this instance.', durability, { replayPolicy: 'safe', isTerminal: true });
+              }
             } else {
               await handleAdminCommand(
                 db,

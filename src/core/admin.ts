@@ -12,6 +12,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { AdminCommand } from './command-router.ts';
+import type { CapabilityGrantManager, GrantAuthorization } from '../lib/capability-grant.ts';
 import { sleep } from './retry.ts';
 
 const log = createChildLogger('admin');
@@ -362,4 +363,60 @@ export async function handleFallbackCommand(
   if (!runtime.disableFallback) { await reply('Fallback control not supported on this instance.'); return; }
   runtime.disableFallback();
   await reply('Fallback disabled — primary provider active.');
+}
+
+// ---------------------------------------------------------------------------
+// handleGrantCommand
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle a `/grant` admin command by driving the capability-grant manager.
+ * Reached ONLY past the isAdminMessage gate in ingest, so the caller is the
+ * WhatsApp-authenticated admin — authorize as owner.
+ */
+export async function handleGrantCommand(
+  manager: CapabilityGrantManager,
+  messenger: Messenger,
+  cmd: Extract<AdminCommand, { action: 'grant' }>,
+  adminChatJid: string,
+  durability?: DurabilityEngine,
+): Promise<void> {
+  const reply = (text: string) =>
+    sendTracked(messenger, adminChatJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
+  const auth: GrantAuthorization = { isOwner: true };
+
+  if (cmd.sub === 'help') {
+    await reply(
+      'Grant commands: GRANT <group> [<n>m|<n>h] — temporarily unlock a capability group (auto-reverts on expiry, default manual); GRANT DISARM — revert the active grant now; GRANT STATUS — show the active grant.',
+    );
+    return;
+  }
+
+  if (cmd.sub === 'status') {
+    const s = await manager.status();
+    if (!s.armed) { await reply('No capability grant active.'); return; }
+    const window =
+      s.remainingMs == null
+        ? 'manual (no expiry)'
+        : `until ${new Date(Date.now() + s.remainingMs).toISOString()} (${formatRelativeWindow(Date.now() + s.remainingMs)})`;
+    await reply(`Grant active: ${s.group} — ${(s.capabilities ?? []).join(', ')}; expires: ${window}.`);
+    return;
+  }
+
+  if (cmd.sub === 'disarm') {
+    const r = await manager.disarm(auth);
+    if (r.reason === 'unauthorized') { await reply('Not authorized to disarm capability grants.'); return; }
+    await reply(r.changed ? `Grant reverted (removed: ${r.removed.join(', ') || 'none'}).` : 'No capability grant was active.');
+    return;
+  }
+
+  if (cmd.sub === 'arm') {
+    const result = await manager.arm(cmd.group, cmd.durationMs ?? null, auth);
+    if (!result.ok) { await reply(`Cannot grant '${cmd.group}': ${result.error}`); return; }
+    const exp = result.record.expiresAtMs;
+    await reply(
+      `Granted '${cmd.group}' — ${result.record.capabilities.join(', ')}` +
+        (exp ? `; auto-reverts ${new Date(exp).toISOString()}.` : '; manual (no expiry) — GRANT DISARM to revert.'),
+    );
+  }
 }

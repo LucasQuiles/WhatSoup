@@ -75,6 +75,119 @@ if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
   exit 1
 fi
 
+DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
+if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: unsafe database compatibility entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -e "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: database compatibility entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "FATAL: unsafe database compatibility entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+
+# The compatibility verdict runs before the full restart preflight, so its
+# smaller import graph needs an independent trust root. Verify the static
+# checker and every local module it executes before asking that checker to walk
+# the bootstrap graph. The graph walk reads source only; it never imports or
+# evaluates bootstrap modules.
+DATABASE_BOOTSTRAP_TRUST_CHECKER="scripts/source-runtime-drift-check.ts"
+DATABASE_BOOTSTRAP_TRUST_PATHS=(
+  "$DATABASE_BOOTSTRAP_TRUST_CHECKER"
+  "scripts/lib/guard-core.ts"
+  "src/lib/git-env.ts"
+  "src/lib/type-guards.ts"
+)
+_database_bootstrap_trust_git() (
+  while IFS='=' read -r git_env_name _; do
+    case "$git_env_name" in
+      GIT_*) unset "$git_env_name" ;;
+    esac
+  done < <(env)
+  exec git -C "$REPO_ROOT" "$@"
+)
+if ! _database_bootstrap_trust_git rev-parse --is-inside-work-tree 2>/dev/null \
+  | grep -qx 'true'; then
+  echo "FATAL: database bootstrap trust check requires a committed git work tree: $REPO_ROOT" >&2
+  exit 1
+fi
+for trust_path in "${DATABASE_BOOTSTRAP_TRUST_PATHS[@]}"; do
+  trust_absolute="$REPO_ROOT/$trust_path"
+  if [ -L "$trust_absolute" ] || [ ! -f "$trust_absolute" ] \
+    || ! _database_bootstrap_trust_git ls-files --error-unmatch -- "$trust_path" >/dev/null 2>&1 \
+    || ! _database_bootstrap_trust_git cat-file -e "HEAD:$trust_path" >/dev/null 2>&1 \
+    || ! _database_bootstrap_trust_git diff --quiet HEAD -- "$trust_path"; then
+    echo "FATAL: unsafe database bootstrap trust checker path: $trust_absolute" >&2
+    echo "       checker closure must be regular non-symlink, tracked, committed, and clean" >&2
+    exit 1
+  fi
+done
+
+if ! (
+  cd "$REPO_ROOT"
+  "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$REPO_ROOT/$DATABASE_BOOTSTRAP_TRUST_CHECKER" \
+    --manifest /dev/stdin >/dev/null <<'JSON'
+{
+  "schemaVersion": 1,
+  "scope": "database-compatibility-bootstrap",
+  "entrypoints": [
+    {
+      "path": "src/database-compatibility-bootstrap.ts",
+      "importGraph": true
+    }
+  ]
+}
+JSON
+); then
+  echo "FATAL: database compatibility bootstrap trust check failed" >&2
+  exit 1
+fi
+unset DATABASE_BOOTSTRAP_TRUST_CHECKER DATABASE_BOOTSTRAP_TRUST_PATHS \
+  trust_path trust_absolute
+unset -f _database_bootstrap_trust_git
+
+# Database compatibility precedes restart preflight, checkout version reporting,
+# tmp creation, full config parsing, and every provider credential/keyring lookup.
+# A future schema or hot rollback journal enters the dependency-free health
+# drain directly, so unrelated startup damage cannot mask the storage verdict.
+DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS=78
+if DATABASE_COMPATIBILITY_STATUS="$(
+  "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$DATABASE_BOOTSTRAP_TS" "$INSTANCE" --check
+)"; then
+  :
+else
+  DATABASE_COMPATIBILITY_RC=$?
+  echo "FATAL: database compatibility preflight failed for instance '$INSTANCE'" >&2
+  if [ "$DATABASE_COMPATIBILITY_RC" -eq "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS" ]; then
+    exit "$DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS"
+  fi
+  exit 1
+fi
+case "$DATABASE_COMPATIBILITY_STATUS" in
+  ready) ;;
+  future_schema|engine_recovery_required)
+    exec "$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$DATABASE_BOOTSTRAP_TS" "$INSTANCE" --hold
+    ;;
+  *)
+    echo "FATAL: unrecognized database compatibility status for instance '$INSTANCE'" >&2
+    exit 1
+    ;;
+esac
+unset DATABASE_COMPATIBILITY_STATUS DATABASE_COMPATIBILITY_RC \
+  DATABASE_COMPATIBILITY_PERMANENT_EXIT_STATUS
+
 # Restart-safety pre-flight gate: probe the live import graph (bootstrap.ts ->
 # main.ts -> runtimes/agent/runtime.ts) BEFORE exec'ing node, so a dirty/partial
 # tree with a phantom import cannot crash-loop on restart while the old cached
@@ -190,6 +303,11 @@ fi
 if [ -n "$WHATSOUP_HEALTH_TOKEN" ]; then
   export WHATSOUP_HEALTH_TOKEN
 fi
+
+# Import-only mode is reserved for deploy/preflight-probe.ts. Never inherit it
+# into the real service process: an ambient/systemd value must not turn a valid
+# startup into a clean no-op exit under Restart=on-failure.
+unset WHATSOUP_PREFLIGHT_IMPORT_ONLY WHATSOUP_PREFLIGHT_IMPORT_SENTINEL
 
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \

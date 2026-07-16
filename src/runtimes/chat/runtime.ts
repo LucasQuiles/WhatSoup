@@ -22,6 +22,7 @@ import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
 import { loadConversationWindow } from './window.ts';
+import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContext } from './context.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -31,6 +32,7 @@ import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
+import { DatabaseCompatibilityError } from '../../core/database-compatibility.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { resolveModelRole } from '../../lib/model-advisor.ts';
 
@@ -91,6 +93,7 @@ export class ChatRuntime implements Runtime {
   private botName: string;
   private cachedIdentityBlock: string | null = null;
   private cachedIdentityJid: string = '';
+  private databaseCompatibilityRejection: DatabaseCompatibilityError | null = null;
 
   constructor(
     db: Database,
@@ -120,6 +123,7 @@ export class ChatRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    this.db.assertWritableCompatibility();
     ensureChatSchema(this.db);
     if (this.enrichmentPoller) {
       this.enrichmentPoller.start();
@@ -134,7 +138,9 @@ export class ChatRuntime implements Runtime {
     const enrichmentLastRunAt = this.enrichmentPoller?.lastRunAt ?? null;
 
     let status: RuntimeHealth['status'] = 'healthy';
-    if ((queue?.queuedChats ?? 0) > 0) {
+    if (this.databaseCompatibilityRejection) {
+      status = 'unhealthy';
+    } else if ((queue?.queuedChats ?? 0) > 0) {
       // Waiters are backed up — signal degraded
       status = 'degraded';
     } else if (enrichmentLastRunAt !== null) {
@@ -151,6 +157,13 @@ export class ChatRuntime implements Runtime {
         enrichmentLastRunAt,
         queueDepth: queue?.queuedChats ?? 0,
         enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
+        databaseCompatibility: this.databaseCompatibilityRejection
+          ? {
+              reason: this.databaseCompatibilityRejection.reason,
+              observedMigration: this.databaseCompatibilityRejection.observedMigration,
+              requiredMigration: this.databaseCompatibilityRejection.requiredMigration,
+            }
+          : null,
       },
     };
   }
@@ -161,14 +174,40 @@ export class ChatRuntime implements Runtime {
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
+    if (this.databaseCompatibilityRejection) {
+      throw this.databaseCompatibilityRejection;
+    }
     const traceId = randomBytes(4).toString('hex');
     const startTime = Date.now();
 
     // Enqueue via chatQueue for per-chat sequential processing
-    this.chatQueue.enqueue(msg.chatJid, () => this.processMessage(msg, traceId, startTime));
+    void this.chatQueue.enqueue(msg.chatJid, async () => {
+      try {
+        await this.processMessage(msg, traceId, startTime);
+      } catch (err) {
+        if (!(err instanceof DatabaseCompatibilityError)) throw err;
+        this.handleDatabaseCompatibilityRejection(err);
+      }
+    });
+  }
+
+  handleDatabaseCompatibilityRejection(rejection: DatabaseCompatibilityError): void {
+    if (this.databaseCompatibilityRejection) return;
+    this.databaseCompatibilityRejection = rejection;
+    this.enrichmentPoller?.stop();
+    log.error(
+      {
+        reason: rejection.reason,
+        observedMigration: rejection.observedMigration,
+        requiredMigration: rejection.requiredMigration,
+      },
+      'database compatibility rejection latched; Chat runtime admission is blocked',
+    );
   }
 
   private async processMessage(msg: IncomingMessage, traceId: string, startTime: number): Promise<void> {
+    this.db.assertWritableCompatibility();
+
     // 1. Rate limit check — resolve sender to phone number so the same person
     //    via LID or JID shares a single rate limit bucket.
     //    Uses senderJid (not chatJid) so group chats track per-sender, not per-group.
@@ -249,22 +288,32 @@ export class ChatRuntime implements Runtime {
       .filter(Boolean)
       .join('\n\n');
 
-    const window: ChatMessage[] = [...conversationWindow];
-
-    const estimateTokens = (): number => {
-      const windowContentLength = window.reduce((sum, m) => sum + m.content.length, 0);
-      return (systemPrompt.length + windowContentLength) / 4 + mediaImages.length * 1000;
-    };
-
-    let trimmedMessages = 0;
-    while (estimateTokens() > config.tokenBudget && window.length > 1) {
-      window.shift();
-      trimmedMessages = trimmedMessages + 1;
-    }
+    // Summarize-before-trim (#1445 QR-010): rather than silently window.shift()-ing
+    // the oldest turns once over budget, collect the contiguous overflow and
+    // summarize it in one cheap LLM call, prepending the bounded summary as a
+    // synthetic turn. Config-gated (config.workingMemorySummarization, default
+    // true) with a deterministic-marker fallback on failure or when disabled —
+    // there is never silent, untraceable loss either way.
+    const trimResult = await summarizeWindowBeforeTrim([...conversationWindow], {
+      tokenBudget: config.tokenBudget,
+      systemPromptLength: systemPrompt.length,
+      mediaTokenEstimate: mediaImages.length * 1000,
+      summarizationEnabled: config.workingMemorySummarization,
+      provider: this.primaryProvider,
+      resolveSummarizationModel: () => resolveModelRole(config.models.validation),
+      traceId,
+    });
+    const window: ChatMessage[] = trimResult.window;
+    const trimmedMessages = trimResult.trimmedMessages;
 
     if (trimmedMessages > 0) {
       log.info(
-        { traceId, trimmedMessages, estimatedTokens: estimateTokens() },
+        {
+          traceId,
+          trimmedMessages,
+          estimatedTokens: trimResult.estimatedTokens,
+          summarized: trimResult.summarized,
+        },
         'token budget: trimmed messages from window',
       );
     }
@@ -329,6 +378,7 @@ export class ChatRuntime implements Runtime {
       );
       clearAlertSourceChecked(this.botName, 'llm_total_failure');
     } catch (primaryErr) {
+      if (primaryErr instanceof DatabaseCompatibilityError) throw primaryErr;
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: conversationModel, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
 
       // Auth and rate-limit errors won't be fixed by retrying any provider — fast-fail.
@@ -364,6 +414,7 @@ export class ChatRuntime implements Runtime {
           llmDurationMs = Date.now() - llmStart;
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
+          if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
@@ -393,6 +444,7 @@ export class ChatRuntime implements Runtime {
         );
         clearAlertSourceChecked(this.botName, 'llm_total_failure');
       } catch (retryErr) {
+        if (retryErr instanceof DatabaseCompatibilityError) throw retryErr;
         log.warn({ step: 'retry', provider: this.primaryProvider.name, model: conversationModel, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
         log.error({ traceId, err: retryErr }, 'primary provider retry failed — trying fallback');
 
@@ -413,6 +465,7 @@ export class ChatRuntime implements Runtime {
           );
           clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
+          if (fallbackErr instanceof DatabaseCompatibilityError) throw fallbackErr;
           log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: fallbackModel, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;

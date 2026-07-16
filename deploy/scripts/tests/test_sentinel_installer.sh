@@ -90,7 +90,8 @@ grep -q 'BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS' "$plist" || { echo "
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_Q_HOST' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd q host env"; cat "$plist"; exit 1; }
 grep -q '<string>--max-fleet-sentinel-age</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog max-age arg"; cat "$watchdog_plist"; exit 1; }
 grep -q '<key>StartInterval</key><integer>300</integer>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog interval"; cat "$watchdog_plist"; exit 1; }
-grep -q '<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog checks env"; cat "$watchdog_plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel,collector_roster</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog checks env"; cat "$watchdog_plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_HOSTS</key>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog roster hosts env"; cat "$watchdog_plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT</key>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog heartbeat env"; cat "$watchdog_plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
@@ -122,7 +123,8 @@ grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL sy
 grep -q '^RandomizedDelaySec=120s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd randomized delay"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-heartbeat-watchdog.py --once --max-fleet-sentinel-age ' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog exec"; cat "$watchdog_service"; exit 1; }
-grep -q '^Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel"$' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog checks env"; cat "$watchdog_service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel,collector_roster"$' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog checks env"; cat "$watchdog_service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog roster hosts env"; cat "$watchdog_service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT=' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog heartbeat env"; cat "$watchdog_service"; exit 1; }
 grep -q '^OnUnitActiveSec=300s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog interval"; cat "$watchdog_timer"; exit 1; }
 grep -q '^RandomizedDelaySec=60s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog randomized delay"; cat "$watchdog_timer"; exit 1; }

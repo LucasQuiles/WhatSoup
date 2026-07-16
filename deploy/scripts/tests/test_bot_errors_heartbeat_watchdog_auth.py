@@ -23,6 +23,47 @@ def _load_module():
     return mod
 
 
+def _load_roster_lib():
+    spec = importlib.util.spec_from_file_location(
+        "bot_errors_roster", _SCRIPT_ROOT / "lib" / "bot_errors_roster.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_roster_lib = _load_roster_lib()
+
+
+def _bind_valid_roster(monkeypatch, tmp_path: Path) -> dict:
+    """Write a roster the watchdog will load independently and return the
+    matching heartbeat roster-binding fields, so an age-focused test is not also
+    tripped by the #1875 roster check."""
+    roster = {
+        "schemaVersion": 1,
+        "hosts": [
+            {"host": "host-a", "collectorRemote": True, "instances": []},
+            {"host": "host-b", "collectorRemote": True, "instances": []},
+        ],
+    }
+    path = tmp_path / "roster.json"
+    path.write_text(json.dumps(roster), encoding="utf-8")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(path))
+    inv = _roster_lib.roster_inventory(roster)
+    return {
+        "rosterDigest": inv["digest"],
+        "rosterEpoch": int(path.stat().st_mtime),
+        "expectedHostCount": inv["expectedHostCount"],
+        "observedHostCount": inv["expectedHostCount"],
+        "unknownHostCount": 0,
+        "expectedInstanceCount": inv["expectedInstanceCount"],
+        "observedInstanceCount": inv["expectedInstanceCount"],
+        "problemInstanceCount": 0,
+        "unknownInstanceCount": 0,
+    }
+
+
 def _watchdog_args(max_fleet_sentinel_age: int = 60):
     return SimpleNamespace(
         max_q_loop_age=600,
@@ -61,6 +102,7 @@ def test_bad_dry_now_falls_back_to_wall_clock(monkeypatch):
 def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
+    roster_fields = _bind_valid_roster(monkeypatch, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
     mod.atomic_write_json(
         heartbeat,
@@ -70,7 +112,9 @@ def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monk
             "checkedAt": "1970-01-01T00:16:20Z",
             "healthy": True,
             "fleetAction": "none",
-            "hostCount": 9,
+            "hostCount": roster_fields["expectedHostCount"],
+            "problemHostCount": 0,
+            **roster_fields,
         },
     )
 
@@ -82,7 +126,10 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
     state = _private_state(monkeypatch, mod, tmp_path)
     outbox = tmp_path / "outbox"
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    roster_fields = _bind_valid_roster(monkeypatch, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
+    # Roster-valid but STALE: only the age/deadman problem should fire (the
+    # #1875 roster check must stay quiet on a well-bound roster).
     mod.atomic_write_json(
         heartbeat,
         {
@@ -91,7 +138,9 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
             "checkedAt": "1970-01-01T00:00:00Z",
             "healthy": True,
             "fleetAction": "none",
-            "hostCount": 9,
+            "hostCount": roster_fields["expectedHostCount"],
+            "problemHostCount": 0,
+            **roster_fields,
         },
     )
 
@@ -872,6 +921,119 @@ def test_local_instance_health_flags_terminal_auth_class_as_physical_interventio
     detail = problems["local_health:line-alpha"]
     assert "auth_failure_class=Pairing_Required" in detail
     assert "physical_intervention_required=terminal_auth_failure_class" in detail
+
+
+def _single_instance_profile(tmp_path: Path) -> Path:
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {
+                        "name": "line-alpha",
+                        "service": "whatsoup-line-alpha.service",
+                        "expected": "always_on",
+                        "healthPort": 3201,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return profile
+
+
+def test_local_instance_health_surfaces_terminal_auth_on_503(tmp_path: Path, monkeypatch):
+    """A server-side logout returns HTTP 503 with the full telemetry body.
+
+    The old non-200 short-circuit dropped the body, so the terminal-auth class
+    never surfaced and the dispatcher's Pattern-C inhibition never engaged. The
+    503 path MUST now parse the body and emit the terminal-auth token.
+    """
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps(
+            {
+                "line-alpha": {
+                    "status": 503,
+                    "json": {
+                        "status": "unhealthy",
+                        "instance": {"name": "line-alpha"},
+                        "whatsapp": {
+                            "connected": False,
+                            "connection": {
+                                "state": "disconnected",
+                                "last_status_code": 401,
+                                "last_disconnect_reason": "loggedOut",
+                                "auth_failure_class": "serverside_logout_irreversible",
+                            },
+                            "auth_bond": {"status": "present", "issues": []},
+                        },
+                    },
+                }
+            }
+        ),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "http_status=503" in detail
+    assert "auth_failure_class=serverside_logout_irreversible" in detail
+    assert "physical_intervention_required=terminal_auth_failure_class" in detail
+    # It is a structured failure, not the opaque probe-failed fallback.
+    assert "local instance health failure" in detail
+    assert "local health probe failed" not in detail
+
+
+def test_local_instance_health_503_without_auth_class_stays_recoverable(
+    tmp_path: Path, monkeypatch
+):
+    """A transient 503 crash (no auth_failure_class) must NOT be tagged terminal.
+
+    A real live crash should keep alerting until it recovers — the fix must not
+    suppress it by falsely inferring physical intervention.
+    """
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps(
+            {
+                "line-alpha": {
+                    "status": 503,
+                    "json": {
+                        "status": "unhealthy",
+                        "instance": {"name": "line-alpha"},
+                        "whatsapp": {"connected": False, "connection": {"state": "connecting"}},
+                    },
+                }
+            }
+        ),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "http_status=503" in detail
+    assert "health_status=unhealthy" in detail
+    assert "physical_intervention_required" not in detail
+    assert "auth_failure_class=" not in detail
+
+
+def test_local_instance_health_503_unparseable_body_fails_open(tmp_path: Path, monkeypatch):
+    """A hard-down instance (503 with non-JSON body) must still raise a problem."""
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps({"line-alpha": {"status": 503, "body": "<html>502 Bad Gateway</html>"}}),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "local health probe failed" in detail
+    assert "http_status=503" in detail
 
 
 def test_terminal_auth_failure_class_inventory_matches_dispatcher_and_health_check():

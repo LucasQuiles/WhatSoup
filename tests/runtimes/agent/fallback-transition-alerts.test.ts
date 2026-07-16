@@ -124,6 +124,7 @@ import { emitAlert, clearAlertSource } from '../../../src/lib/emit-alert.ts';
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),

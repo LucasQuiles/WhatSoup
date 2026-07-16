@@ -245,3 +245,63 @@ def test_stale_verify_filler_with_failure_code_is_suppressed(tmp_path):
     assert len(sends) == 1
     assert "Auto-closed" in sends[0]
     assert key not in _open_incidents(mod)
+
+
+# ---------------------------------------------------------------------------
+# T7: runtime-tool-error:* stale incident is non-actionable -> suppressed +
+#     auto-closed. An agent's own tool call failing is a point-in-time,
+#     self-corrected event; with NO failure_code it would otherwise derive the
+#     actionable INVESTIGATE action and renotify forever. The runtime-tool-error
+#     prefix in STALE_RENOTIFY_SUPPRESS_PREFIXES makes it non-actionable once
+#     stale. (A genuinely stuck agent re-emits FRESH events -> flap-storm.)
+# ---------------------------------------------------------------------------
+
+def test_runtime_tool_error_stale_is_suppressed_and_autoclosed(tmp_path):
+    mod = _load(tmp_path)
+    now = int(time.time())
+    key = "host-a|instance-x|runtime-tool-error:claude-cli:Bash"
+    _write_state(mod, {
+        key: {
+            "status": "stale",
+            "severity": "warning",
+            "openedAt": now - 5 * 86400,
+            "lastSeenAt": now - 5 * 86400,
+            "lastSummary": "Agent tool failure: Bash",
+        },
+    })
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    assert len(sends) == 1
+    assert "Auto-closed" in sends[0]
+    assert key not in _open_incidents(mod)
+
+
+# ---------------------------------------------------------------------------
+# T8: a non-stale-eligible source with the SAME tool name but NOT the
+#     runtime-tool-error prefix is unaffected by the prefix rule (guards against
+#     an over-broad match). A real actionable incident still renotifies.
+# ---------------------------------------------------------------------------
+
+def test_non_tool_error_source_with_failure_code_still_actionable(tmp_path):
+    mod = _load(tmp_path)
+    now = int(time.time())
+    key = "host-a|instance-x|whatsapp_device_bond_lost"
+    _write_state(mod, {
+        key: {
+            "status": "awaiting_physical",
+            "openedAt": now - 5 * 86400,
+            "lastSeenAt": now - 5 * 86400,
+            "lastSummary": "device bond lost",
+            "failureCode": "DEVICE_BOND_LOST",
+            "recoverability": "manual_relink_required",
+            "assetKind": "whatsapp_linked_device",
+        },
+    })
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 1 and failed == 0
+    assert "Auto-closed" not in sends[0]
+    assert key in _open_incidents(mod)

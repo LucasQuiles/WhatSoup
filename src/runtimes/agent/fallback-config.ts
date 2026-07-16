@@ -11,6 +11,23 @@
  */
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 
+/** Whether fallback notice and stand-in reply collapse into one user-facing message. */
+export function oneMessageHandoffEnabled(): boolean {
+  return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
+}
+
+/**
+ * Reasons whose failover borrows the auth-required control semantics: the
+ * revert is gated on a fresh primary probe and same-provider fallbacks are
+ * skipped. Empty-output and probe-unusable remain honest first-class reasons
+ * while retaining those control effects.
+ */
+export function fallbackRequiresIndependentProbe(
+  reason: string | null | undefined,
+): boolean {
+  return reason === 'auth-required' || reason === 'empty-output' || reason === 'probe-unusable';
+}
+
 /**
  * Resolve the providerConfig an inbound fallback entry should inherit. A
  * fallback into the agent's own provider (or a managed API sibling) inherits the

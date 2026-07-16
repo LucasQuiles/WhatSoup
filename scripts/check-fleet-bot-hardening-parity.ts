@@ -4,9 +4,29 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { rosterEpoch, rosterInventory } from './lib/fleet-roster-inventory.ts';
 
 export const DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH =
   'docs/reliability-runner/fleet-bot-hardening-parity.json';
+
+// Conventional path of the committed fleet roster SSOT, same file
+// `deploy/scripts/lib/bot_errors_roster.py`'s `default_roster_path()` resolves
+// to by default. The inventory-epoch binding check (#1867 criterion 3)
+// recomputes the roster digest/inventory from this file independently,
+// mirroring how `bot-errors-heartbeat-watchdog.py` never trusts the
+// sentinel's declared digest without recomputing it from disk first.
+export const FLEET_ROSTER_PATH = 'deploy/bot-errors-expected-fleet.json';
+
+// Documented freshness backstop for the source-side parity manifest. The fleet
+// hardening standard expires rows on runtime events (restart, re-cut, config or
+// credential change); this age budget is a coarse fail-closed floor so a manifest
+// that is never refreshed cannot stay green forever. It is deliberately generous
+// (the tracked manifest ages out ~90 days after its `updated` date) so it never
+// second-guesses a manifest that is being actively maintained. Event-based
+// expiry is tracked separately from this age check.
+export const FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS = 90;
+const FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS =
+  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 
 export const REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES = [
   'turn-capability-health',
@@ -55,6 +75,8 @@ export type FleetBotHardeningParityFindingCode =
   | 'manifest-not-object'
   | 'unsupported-schema'
   | 'invalid-updated'
+  | 'future-updated'
+  | 'stale-updated'
   | 'missing-standard'
   | 'invalid-scope'
   | 'summary-not-object'
@@ -67,6 +89,10 @@ export type FleetBotHardeningParityFindingCode =
   | 'invalid-row-id'
   | 'duplicate-row-id'
   | 'invalid-row-status'
+  | 'missing-row-verified-at'
+  | 'invalid-row-verified-at'
+  | 'future-row-verified-at'
+  | 'stale-row-verified-at'
   | 'row-capabilities-not-object'
   | 'missing-row-capability'
   | 'unknown-row-capability'
@@ -84,7 +110,12 @@ export type FleetBotHardeningParityFindingCode =
   | 'source-anchor-missing-file'
   | 'source-anchor-unsafe-path'
   | 'source-anchor-anchors-not-list'
-  | 'source-anchor-missing-anchor';
+  | 'source-anchor-missing-anchor'
+  | 'invalid-inventory-binding'
+  | 'roster-unreadable'
+  | 'roster-digest-mismatch'
+  | 'roster-instance-count-mismatch'
+  | 'future-roster-epoch';
 
 export interface FleetBotHardeningParityFinding {
   code: FleetBotHardeningParityFindingCode;
@@ -97,6 +128,12 @@ export interface FleetBotHardeningParityResult {
   rows: number;
   sourceAnchors: number;
   findings: FleetBotHardeningParityFinding[];
+  // Source-anchor validation (docs/tests exist and contain required markers)
+  // reported separately from runtime parity (#1867 criterion 4), so a docs-only
+  // fix cannot masquerade as fleet-runtime proof and vice versa. `ok` above
+  // remains the AND of both, for CI-gating back-compat.
+  sourceAnchorParity: { ok: boolean; findings: FleetBotHardeningParityFinding[] };
+  runtimeParity: { ok: boolean; findings: FleetBotHardeningParityFinding[] };
 }
 
 function finding(
@@ -118,6 +155,15 @@ function arrayOfStrings(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
     : null;
+}
+
+// Parse a `YYYY-MM-DD` manifest date as UTC midnight. Returns null when the
+// value is not that exact shape or is not a real calendar date, so callers can
+// distinguish a malformed date from a freshness violation.
+function parseManifestDateMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 function recordPrivateLabelFindings(
@@ -199,6 +245,7 @@ function validateCapabilities(payload: Record<string, unknown>, findings: FleetB
 function validateRows(
   payload: Record<string, unknown>,
   findings: FleetBotHardeningParityFinding[],
+  now: Date,
 ): Array<Record<string, unknown>> {
   const rawRows = payload['rows'];
   if (!Array.isArray(rawRows)) {
@@ -263,6 +310,35 @@ function validateRows(
     const evidence = arrayOfStrings(rawRow['evidence']);
     if (evidence === null) {
       findings.push(finding('evidence-not-list', `${context}.evidence must be an array of strings`));
+    }
+
+    // Per-row runtime verification date. A hardened row asserts current runtime
+    // parity, so it must carry a `verifiedAt` (fail closed with
+    // missing-row-verified-at otherwise). Non-hardened rows may omit it, but
+    // whenever it is present it must be a real YYYY-MM-DD, not in the future,
+    // and within the freshness budget, so no row can carry a stale runtime
+    // timestamp. (An immutable runtime-receipt digest that would upgrade this
+    // operator-written assertion into captured proof is producer-gated and not
+    // validated here.)
+    const verifiedAt = rawRow['verifiedAt'];
+    if (verifiedAt === undefined) {
+      if (status === 'hardened') {
+        findings.push(finding('missing-row-verified-at', `${context} is hardened but has no verifiedAt runtime-verification date`));
+      }
+    } else if (typeof verifiedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(verifiedAt)) {
+      findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be YYYY-MM-DD`));
+    } else {
+      const verifiedMs = parseManifestDateMs(verifiedAt);
+      if (verifiedMs === null) {
+        findings.push(finding('invalid-row-verified-at', `${context}.verifiedAt must be a valid calendar date`));
+      } else if (verifiedMs > now.getTime()) {
+        findings.push(finding('future-row-verified-at', `${context}.verifiedAt ${verifiedAt} is in the future`));
+      } else if (now.getTime() - verifiedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+        findings.push(finding(
+          'stale-row-verified-at',
+          `${context}.verifiedAt ${verifiedAt} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget`,
+        ));
+      }
     }
 
     if (status === 'hardened') {
@@ -346,65 +422,182 @@ function validateSourceAnchors(
   return checked;
 }
 
+// Inventory-epoch / membership validation (#1867 criterion 3, design §7.4).
+//
+// `inventoryBinding` is manifest-level (a property of the whole redacted
+// cohort, not one row) and validate-when-present: absent -> no finding at
+// all, so the guard stays green on the tracked manifest
+// (`docs/reliability-runner/fleet-bot-hardening-parity.json`), which does not
+// yet declare this field (populating it is a deferred, separate change).
+// Whenever a manifest *does* declare it, the guard never trusts the declared
+// values -- it independently recomputes the roster digest/inventory from the
+// committed roster file and rejects on mismatch, mirroring the existing
+// sentinel/watchdog split (`bot-errors-heartbeat-watchdog.py`'s
+// `declared_digest != independent_digest`) so membership drift cannot pass
+// through self-consistent row counts.
+function validateInventoryBinding(
+  cwd: string,
+  payload: Record<string, unknown>,
+  findings: FleetBotHardeningParityFinding[],
+): void {
+  const inventoryBinding = payload['inventoryBinding'];
+  if (inventoryBinding === undefined) return;
+
+  if (!isRecord(inventoryBinding)) {
+    findings.push(finding('invalid-inventory-binding', 'inventoryBinding must be an object'));
+    return;
+  }
+
+  const declaredDigest = inventoryBinding['rosterDigest'];
+  const declaredEpoch = inventoryBinding['rosterEpoch'];
+  const declaredCount = inventoryBinding['expectedInstanceCount'];
+
+  const digestOk = typeof declaredDigest === 'string' && /^[0-9a-f]{64}$/.test(declaredDigest);
+  const epochOk = typeof declaredEpoch === 'number' && Number.isInteger(declaredEpoch) && declaredEpoch >= 0;
+  const countOk = typeof declaredCount === 'number' && Number.isInteger(declaredCount) && declaredCount >= 0;
+
+  if (!digestOk || !epochOk || !countOk) {
+    findings.push(finding(
+      'invalid-inventory-binding',
+      'inventoryBinding.rosterDigest must be 64-hex, rosterEpoch and expectedInstanceCount must be non-negative integers',
+    ));
+    return;
+  }
+
+  const rosterPath = path.resolve(cwd, FLEET_ROSTER_PATH);
+  let rosterData: unknown;
+  try {
+    rosterData = JSON.parse(readFileSync(rosterPath, 'utf8'));
+  } catch (err) {
+    findings.push(finding(
+      'roster-unreadable',
+      `cannot read fleet roster ${FLEET_ROSTER_PATH} to independently recompute inventoryBinding: ${(err as Error).message}`,
+    ));
+    return;
+  }
+
+  let inventory: ReturnType<typeof rosterInventory>;
+  try {
+    inventory = rosterInventory(rosterData);
+  } catch (err) {
+    findings.push(finding(
+      'roster-unreadable',
+      `cannot recompute roster inventory from ${FLEET_ROSTER_PATH}: ${(err as Error).message}`,
+    ));
+    return;
+  }
+  const independentEpoch = rosterEpoch(rosterPath);
+
+  if (declaredDigest !== inventory.digest) {
+    findings.push(finding(
+      'roster-digest-mismatch',
+      `inventoryBinding.rosterDigest=${declaredDigest} does not match independently recomputed roster digest=${inventory.digest}`,
+    ));
+  }
+  if (declaredCount !== inventory.expectedInstanceCount) {
+    findings.push(finding(
+      'roster-instance-count-mismatch',
+      `inventoryBinding.expectedInstanceCount=${declaredCount} does not match roster_inventory().expectedInstanceCount=${inventory.expectedInstanceCount}`,
+    ));
+  }
+  if (independentEpoch !== null && declaredEpoch > independentEpoch) {
+    findings.push(finding(
+      'future-roster-epoch',
+      `inventoryBinding.rosterEpoch=${declaredEpoch} is later than the roster file's current mtime epoch=${independentEpoch}`,
+    ));
+  }
+}
+
 export function checkFleetBotHardeningParity(
   cwd = process.cwd(),
   manifestPath = DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
+  now: Date = new Date(),
 ): FleetBotHardeningParityResult {
   let payload: unknown;
   try {
     payload = JSON.parse(readFileSync(path.resolve(cwd, manifestPath), 'utf8'));
   } catch (err) {
+    const runtimeFindings = [finding('manifest-unreadable', `cannot read parity manifest ${manifestPath}: ${(err as Error).message}`)];
     return {
       ok: false,
       rows: 0,
       sourceAnchors: 0,
-      findings: [finding('manifest-unreadable', `cannot read parity manifest ${manifestPath}: ${(err as Error).message}`)],
+      findings: runtimeFindings,
+      sourceAnchorParity: { ok: true, findings: [] },
+      runtimeParity: { ok: false, findings: runtimeFindings },
     };
   }
 
-  const findings: FleetBotHardeningParityFinding[] = [];
+  // Everything below is bucketed into exactly one of two sub-verdicts
+  // (#1867 criterion 4): `sourceAnchorFindings` holds only what
+  // `validateSourceAnchors` produces (docs/tests exist and carry required
+  // markers); `runtimeFindings` holds every other finding (manifest shape,
+  // capability enums, summary arithmetic, private-label redaction, and the
+  // `updated`/`verifiedAt` date checks). This keeps a docs-only fix from
+  // masquerading as fleet-runtime proof, and vice versa.
+  const runtimeFindings: FleetBotHardeningParityFinding[] = [];
+  const sourceAnchorFindings: FleetBotHardeningParityFinding[] = [];
   if (!isRecord(payload)) {
+    runtimeFindings.push(finding('manifest-not-object', 'fleet bot hardening parity manifest must be a JSON object'));
     return {
       ok: false,
       rows: 0,
       sourceAnchors: 0,
-      findings: [finding('manifest-not-object', 'fleet bot hardening parity manifest must be a JSON object')],
+      findings: runtimeFindings,
+      sourceAnchorParity: { ok: true, findings: [] },
+      runtimeParity: { ok: false, findings: runtimeFindings },
     };
   }
 
   if (payload['schemaVersion'] !== 1) {
-    findings.push(finding('unsupported-schema', `unsupported schemaVersion=${String(payload['schemaVersion'])}`));
+    runtimeFindings.push(finding('unsupported-schema', `unsupported schemaVersion=${String(payload['schemaVersion'])}`));
   }
-  if (typeof payload['updated'] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(payload['updated'])) {
-    findings.push(finding('invalid-updated', 'parity manifest updated must be YYYY-MM-DD'));
+  const updated = payload['updated'];
+  if (typeof updated !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(updated)) {
+    runtimeFindings.push(finding('invalid-updated', 'parity manifest updated must be YYYY-MM-DD'));
+  } else {
+    const updatedMs = parseManifestDateMs(updated);
+    if (updatedMs === null) {
+      runtimeFindings.push(finding('invalid-updated', 'parity manifest updated must be a valid calendar date'));
+    } else if (updatedMs > now.getTime()) {
+      runtimeFindings.push(finding('future-updated', `parity manifest updated ${updated} is in the future`));
+    } else if (now.getTime() - updatedMs > FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS) {
+      runtimeFindings.push(finding(
+        'stale-updated',
+        `parity manifest updated ${updated} is older than the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget; refresh the runtime parity evidence`,
+      ));
+    }
   }
   if (typeof payload['standard'] !== 'string' || !isSafeRepoRelativePath(payload['standard'])) {
-    findings.push(finding('missing-standard', 'parity manifest standard must be a safe repo-relative path'));
+    runtimeFindings.push(finding('missing-standard', 'parity manifest standard must be a safe repo-relative path'));
   } else if (!existsSync(path.resolve(cwd, payload['standard']))) {
-    findings.push(finding('missing-standard', `parity standard file is missing: ${payload['standard']}`, payload['standard']));
+    runtimeFindings.push(finding('missing-standard', `parity standard file is missing: ${payload['standard']}`, payload['standard']));
   }
   const scope = payload['scope'];
   if (!isRecord(scope) || typeof scope['cohortSize'] !== 'number' || scope['cohortSize'] <= 0) {
-    findings.push(finding('invalid-scope', 'parity manifest scope must include positive cohortSize'));
+    runtimeFindings.push(finding('invalid-scope', 'parity manifest scope must include positive cohortSize'));
   }
 
-  recordPrivateLabelFindings(findings, payload, '$');
-  validateCapabilities(payload, findings);
-  const rows = validateRows(payload, findings);
-  validateSummary(payload, rows, findings);
+  recordPrivateLabelFindings(runtimeFindings, payload, '$');
+  validateCapabilities(payload, runtimeFindings);
+  const rows = validateRows(payload, runtimeFindings, now);
+  validateSummary(payload, rows, runtimeFindings);
   if (isRecord(scope) && typeof scope['cohortSize'] === 'number' && scope['cohortSize'] !== rows.length) {
-    findings.push(finding(
+    runtimeFindings.push(finding(
       'summary-count-mismatch',
       `scope cohortSize=${scope['cohortSize']} does not match row count ${rows.length}`,
     ));
   }
-  const sourceAnchors = validateSourceAnchors(cwd, payload, findings);
+  validateInventoryBinding(cwd, payload, runtimeFindings);
+  const sourceAnchors = validateSourceAnchors(cwd, payload, sourceAnchorFindings);
 
   return {
-    ok: findings.length === 0,
+    ok: runtimeFindings.length === 0 && sourceAnchorFindings.length === 0,
     rows: rows.length,
     sourceAnchors,
-    findings,
+    findings: [...runtimeFindings, ...sourceAnchorFindings],
+    sourceAnchorParity: { ok: sourceAnchorFindings.length === 0, findings: sourceAnchorFindings },
+    runtimeParity: { ok: runtimeFindings.length === 0, findings: runtimeFindings },
   };
 }
 
@@ -431,14 +624,30 @@ export function run(argv = process.argv.slice(2), cwd = process.cwd()): FleetBot
   const args = parseArgs(argv);
   if (args.help) {
     console.log(`Usage: check-fleet-bot-hardening-parity.ts [--manifest ${DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH}]`);
-    return { ok: true, rows: 0, sourceAnchors: 0, findings: [] };
+    return {
+      ok: true,
+      rows: 0,
+      sourceAnchors: 0,
+      findings: [],
+      sourceAnchorParity: { ok: true, findings: [] },
+      runtimeParity: { ok: true, findings: [] },
+    };
   }
 
   const result = checkFleetBotHardeningParity(cwd, args.manifestPath);
   if (!result.ok) {
     console.error('fleet bot hardening parity guard failed');
-    for (const item of result.findings) {
-      console.error(`${item.code}: ${item.message}`);
+    // Print the two sub-verdicts under separate headers (#1867 criterion 4)
+    // so a failing run shows which class of proof is missing: source
+    // documentation being stale reads very differently from runtime receipts
+    // being stale, and a single flat list can't say which.
+    console.error(`source anchor parity: ${result.sourceAnchorParity.ok ? 'ok' : 'FAIL'}`);
+    for (const item of result.sourceAnchorParity.findings) {
+      console.error(`  ${item.code}: ${item.message}`);
+    }
+    console.error(`runtime parity: ${result.runtimeParity.ok ? 'ok' : 'FAIL'}`);
+    for (const item of result.runtimeParity.findings) {
+      console.error(`  ${item.code}: ${item.message}`);
     }
     process.exitCode = 1;
   } else {

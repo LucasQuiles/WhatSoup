@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
 
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
@@ -463,6 +464,85 @@ def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
         f"{path} checkedAt={data.get('checkedAt')} healthy={data.get('healthy')} "
         f"fleetAction={data.get('fleetAction')} hostCount={data.get('hostCount')}"
     )
+
+
+def _readable_fleet_sentinel_heartbeat(path: Path) -> dict[str, Any] | None:
+    if critical_file_problem(path) is not None:
+        return None
+    data = load_json(path)
+    if not isinstance(data, dict) or data.get("kind") != "bot-errors-sentinel-heartbeat":
+        return None
+    return data
+
+
+def fleet_sentinel_roster_problem(path: Path) -> str | None:
+    """Independently verify the sentinel heartbeat is bound to the intended
+    roster (#1875).
+
+    The age/deadman check (``fleet_sentinel_age``) owns a missing, unreadable, or
+    wrong-kind heartbeat, so this returns ``None`` for those and only evaluates a
+    readable, current-kind snapshot. It re-derives the expected roster digest and
+    count directly from disk (not from the value the sentinel declared) and
+    rejects a roster-blind, zero/truncated, wrong-manifest, or incompletely
+    observed snapshot as not-green.
+    """
+    data = _readable_fleet_sentinel_heartbeat(path)
+    if data is None:
+        return None
+    try:
+        _roster_data, inventory = load_roster()
+    except RosterError as exc:
+        return f"fleet sentinel roster unreadable for independent check: {exc}"
+    independent_digest = str(inventory["digest"])
+    independent_expected = int(inventory["expectedHostCount"])
+    declared_digest = data.get("rosterDigest")
+    declared_expected = data.get("expectedHostCount")
+    declared_observed = data.get("observedHostCount")
+    declared_unknown = data.get("unknownHostCount")
+    # 1. Roster-blind: the heartbeat carries no roster binding at all.
+    if not isinstance(declared_digest, str) or not declared_digest:
+        return (
+            "fleet sentinel heartbeat is roster-blind: no rosterDigest bound; "
+            f"independent roster expects {independent_expected} hosts "
+            f"(digest {independent_digest[:12]})"
+        )
+    # 2. Zero / truncated roster.
+    if not isinstance(declared_expected, int) or isinstance(declared_expected, bool) or declared_expected <= 0:
+        return (
+            "fleet sentinel heartbeat declares zero/no expected hosts: "
+            f"expectedHostCount={declared_expected!r}; independent roster expects {independent_expected}"
+        )
+    # 3. Digest mismatch: wrong manifest / stale / truncated roster.
+    if declared_digest != independent_digest:
+        return (
+            "fleet sentinel roster digest mismatch: "
+            f"heartbeat_digest={declared_digest[:12]} independent_digest={independent_digest[:12]} "
+            f"heartbeat_expected_hosts={declared_expected} independent_expected_hosts={independent_expected}"
+        )
+    # 4. Count mismatch against the independently-loaded roster.
+    if declared_expected != independent_expected:
+        return (
+            "fleet sentinel expected-host count mismatch: "
+            f"heartbeat={declared_expected} independent={independent_expected}"
+        )
+    # 5. Accounting gap: observed + unknown must account for every expected host.
+    # A shortfall means the snapshot dropped roster members entirely. This is
+    # robust to a heartbeat-only fleet (where every host may legitimately be
+    # unknown/unprobed) because it fires only when the counts fail to add up, not
+    # merely because some hosts are unknown.
+    if (
+        isinstance(declared_observed, int)
+        and not isinstance(declared_observed, bool)
+        and isinstance(declared_unknown, int)
+        and not isinstance(declared_unknown, bool)
+        and declared_observed + declared_unknown != declared_expected
+    ):
+        return (
+            "fleet sentinel roster accounting gap: "
+            f"observedHostCount={declared_observed} unknownHostCount={declared_unknown} "
+            f"expectedHostCount={declared_expected} (roster members dropped from snapshot)"
+        )
+    return None
 
 
 def env_int(name: str, default: int) -> int:
@@ -1033,6 +1113,57 @@ def is_terminal_auth_failure_class(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
 
 
+def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], dict]:
+    """Extract failure reasons + formatting context from a parsed /health body.
+
+    Runs on ANY status code: a server-side logout returns HTTP 503 with the full
+    telemetry (including auth_failure_class), so the terminal-auth class must be
+    surfaced as a token regardless of the HTTP status. Returns ([], {}) when the
+    telemetry is clean (healthy instance).
+    """
+    instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
+    actual_name = instance.get("name") if isinstance(instance, dict) else None
+    whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
+    connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
+    auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
+    connected = whatsapp.get("connected") if isinstance(whatsapp, dict) else None
+    health_status = payload.get("status")
+    auth_failure = connection.get("auth_failure_class") if isinstance(connection, dict) else None
+    bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
+    bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
+    reasons: list[str] = []
+    if isinstance(actual_name, str) and actual_name != name:
+        reasons.append(f"health_identity_mismatch actual={actual_name}")
+    if health_status == "unhealthy":
+        reasons.append("health_status=unhealthy")
+    if connected is not True:
+        reasons.append(f"connected={str(connected).lower()}")
+    if auth_failure not in (None, "", "none"):
+        reasons.append(f"auth_failure_class={auth_failure}")
+        if is_terminal_auth_failure_class(auth_failure):
+            reasons.append("physical_intervention_required=terminal_auth_failure_class")
+    if bond_status not in (None, "", "present"):
+        reasons.append(f"auth_bond_status={bond_status}")
+    if isinstance(bond_issues, list) and bond_issues:
+        reasons.append(f"auth_bond_issues={','.join(str(issue) for issue in bond_issues[:5])}")
+    return reasons, {"connection": connection, "bond_status": bond_status}
+
+
+def format_health_failure(
+    name: str, port: int, url: str, status: int, reasons: list[str], ctx: dict, profile: Any
+) -> str:
+    connection = ctx.get("connection") if isinstance(ctx, dict) else {}
+    bond_status = ctx.get("bond_status") if isinstance(ctx, dict) else None
+    return (
+        f"local instance health failure: instance={name} port={port} url={url} "
+        f"http_status={status} {' '.join(reasons)} "
+        f"connection_state={compact_health_field(connection.get('state') if isinstance(connection, dict) else None)} "
+        f"last_status_code={compact_health_field(connection.get('last_status_code') if isinstance(connection, dict) else None)} "
+        f"last_disconnect_reason={compact_health_field(connection.get('last_disconnect_reason') if isinstance(connection, dict) else None)} "
+        f"auth_bond_status={compact_health_field(bond_status)} profile={profile}"
+    )
+
+
 def local_instance_health_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
@@ -1043,61 +1174,43 @@ def local_instance_health_problems() -> dict[str, str]:
         name = str(item["name"])
         status, body, url = local_health_http_response(name, port)
         key = f"local_health:{name}"
-        if status != 200:
-            problems[key] = (
-                f"local health probe failed: instance={name} port={port} url={url} "
-                f"http_status={status} body={compact_health_field(body)} profile={profile}"
-            )
+        # Parse the telemetry REGARDLESS of status code. A server-side logout
+        # returns HTTP 503 with the full health body carrying
+        # auth_failure_class=serverside_logout_irreversible — the old code
+        # short-circuited on non-200 and dumped the opaque body, so the
+        # terminal-auth token never surfaced and the dispatcher's Pattern-C
+        # inhibition never engaged (the instance re-paged indefinitely).
+        payload: dict | None = None
+        if isinstance(body, str) and body.strip():
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                payload = parsed
+        if payload is None:
+            # No structured telemetry to classify. Fail-open: still alert on the
+            # raw probe failure so a hard-down instance (503 HTML / empty body /
+            # transport error) is never silently swallowed.
+            if status != 200:
+                problems[key] = (
+                    f"local health probe failed: instance={name} port={port} url={url} "
+                    f"http_status={status} body={compact_health_field(body)} profile={profile}"
+                )
+            else:
+                problems[key] = (
+                    f"local health probe invalid JSON: instance={name} port={port} url={url} "
+                    f"http_status={status} body={compact_health_field(body)} profile={profile}"
+                )
             continue
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            problems[key] = (
-                f"local health probe invalid JSON: instance={name} port={port} url={url} "
-                f"http_status={status} body={compact_health_field(body)} profile={profile}"
-            )
-            continue
-        if not isinstance(payload, dict):
-            problems[key] = (
-                f"local health probe invalid payload: instance={name} port={port} url={url} "
-                f"http_status={status} payload_type={type(payload).__name__} profile={profile}"
-            )
-            continue
-        instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
-        actual_name = instance.get("name") if isinstance(instance, dict) else None
-        whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
-        connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
-        auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
-        connected = whatsapp.get("connected") if isinstance(whatsapp, dict) else None
-        health_status = payload.get("status")
-        auth_failure = connection.get("auth_failure_class") if isinstance(connection, dict) else None
-        bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
-        bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
-        reasons: list[str] = []
-        if isinstance(actual_name, str) and actual_name != name:
-            reasons.append(f"health_identity_mismatch actual={actual_name}")
-        if health_status == "unhealthy":
-            reasons.append("health_status=unhealthy")
-        if connected is not True:
-            reasons.append(f"connected={str(connected).lower()}")
-        if auth_failure not in (None, "", "none"):
-            reasons.append(f"auth_failure_class={auth_failure}")
-            if is_terminal_auth_failure_class(auth_failure):
-                reasons.append("physical_intervention_required=terminal_auth_failure_class")
-        if bond_status not in (None, "", "present"):
-            reasons.append(f"auth_bond_status={bond_status}")
-        if isinstance(bond_issues, list) and bond_issues:
-            reasons.append(f"auth_bond_issues={','.join(str(issue) for issue in bond_issues[:5])}")
+        reasons, ctx = health_reasons_from_payload(payload, name)
+        if status != 200 and not reasons:
+            # Non-200 with parseable-but-clean telemetry is still a probe
+            # failure — never drop it (fail-open).
+            reasons = [f"http_status_non_ok={status}"]
         if not reasons:
             continue
-        problems[key] = (
-            f"local instance health failure: instance={name} port={port} url={url} "
-            f"http_status={status} {' '.join(reasons)} "
-            f"connection_state={compact_health_field(connection.get('state') if isinstance(connection, dict) else None)} "
-            f"last_status_code={compact_health_field(connection.get('last_status_code') if isinstance(connection, dict) else None)} "
-            f"last_disconnect_reason={compact_health_field(connection.get('last_disconnect_reason') if isinstance(connection, dict) else None)} "
-            f"auth_bond_status={compact_health_field(bond_status)} profile={profile}"
-        )
+        problems[key] = format_health_failure(name, port, url, status, reasons, ctx, profile)
     return problems
 
 
@@ -1141,6 +1254,48 @@ def collector_best_effort_hosts() -> list[str]:
 
 def optional_daily_health_hosts() -> list[str]:
     return unique_hosts([*env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"), *collector_best_effort_hosts()])
+
+
+def collector_roster_drift_problem() -> str | None:
+    """Independently compare the collector's configured remotes against the
+    tracked ``collectorRemote: true`` roster (#1880).
+
+    The collector's required-remote list and the daily-health cadence both derive
+    from the same host-local configuration, so an omission shrinks the producer
+    and the checker together and creates no drift attention. This check derives
+    the *required* set from the independent roster instead, so a required host
+    that is missing from collector configuration surfaces as explicit drift.
+
+    Privacy: a missing host is a public roster member and is named so the operator
+    can act; an *extra* configured remote may be a private ssh alias, so only its
+    count is reported, never the raw identifier. A missing state file is owned by
+    the collector freshness check; a present-but-unreadable one is reported as
+    config-unreadable drift.
+    """
+    collector_path = state_root() / "collector-state.json"
+    if not collector_path.exists():
+        return None
+    try:
+        _roster_data, inventory = load_roster()
+    except RosterError as exc:
+        return f"collector roster comparison unavailable: roster unreadable: {exc}"
+    data = load_json(collector_path, require_private=True)
+    if data is None:
+        return f"collector roster drift: collector-state config-unreadable path={collector_path}"
+    roster_required = set(inventory["collectorRemoteHosts"])
+    roster_all = set(inventory["expectedHosts"])
+    configured = set(collector_configured_hosts())
+    excluded = set(collector_best_effort_hosts()) | set(env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"))
+    missing = sorted((roster_required - configured) - excluded)
+    extra = sorted(configured - roster_all)
+    if not missing and not extra:
+        return None
+    parts = [f"collector roster drift: required={len(roster_required)} configured={len(configured)}"]
+    if missing:
+        parts.append(f"missing={','.join(missing)}")
+    if extra:
+        parts.append(f"extra_count={len(extra)}")
+    return " ".join(parts)
 
 
 def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | None:
@@ -1296,6 +1451,8 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("local_health:")
     if "fleet_sentinel" in checks:
         prefixes.append("fleet_sentinel")
+    if "collector_roster" in checks:
+        prefixes.append("collector_roster")
     return prefixes
 
 
@@ -1362,12 +1519,20 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
         if age is None or age > args.max_collector_age:
             problems["collector"] = f"collector heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_collector_age} detail={detail}"
     if "fleet_sentinel" in checks:
-        age, detail = fleet_sentinel_age(fleet_sentinel_heartbeat_path())
+        sentinel_path = fleet_sentinel_heartbeat_path()
+        age, detail = fleet_sentinel_age(sentinel_path)
         if age is None or age > args.max_fleet_sentinel_age:
             problems["fleet_sentinel"] = (
                 f"fleet sentinel heartbeat stale: age_seconds={age if age is not None else 'missing'} "
                 f"max={args.max_fleet_sentinel_age} detail={detail}"
             )
+        roster_problem = fleet_sentinel_roster_problem(sentinel_path)
+        if roster_problem is not None:
+            problems["fleet_sentinel:roster"] = roster_problem
+    if "collector_roster" in checks:
+        drift = collector_roster_drift_problem()
+        if drift is not None:
+            problems["collector_roster"] = drift
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:

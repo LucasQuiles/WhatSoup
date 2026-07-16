@@ -1038,6 +1038,14 @@ export const config = {
   // Token budget
   tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,
 
+  // Working-memory summarize-before-trim (#1445 QR-010). When the conversation
+  // window would exceed tokenBudget, the oldest overflow turns are summarized
+  // in one cheap LLM call and prepended as a synthetic turn instead of being
+  // silently dropped. Default true. When false (or when the summarization call
+  // fails), a deterministic "[N earlier turns omitted]" marker is used instead
+  // — there is never silent, untraceable loss either way.
+  workingMemorySummarization: (instance?.workingMemorySummarization as boolean | undefined) ?? true,
+
   // Retention
   retentionDays: resolvedMemory.retention.days,
 
@@ -1090,6 +1098,24 @@ export const config = {
 
   // Typing simulation (SP5)
   autoTyping: ((instance?.autoTyping as string | undefined) ?? 'off') as 'composing' | 'recording' | 'off',
+
+  // Temporary capability grants (#1835): named groups of tool patterns that an
+  // admin `/grant <group>` can temporarily unlock (auto-reverting on expiry).
+  // Empty by default — configure per instance; each group is validated at
+  // startup to not intersect the REQUIRED_DENY floor.
+  capabilityGrantGroups: ((): Record<string, { capabilities: string[] }> => {
+    const raw = (instance as { capabilityGrantGroups?: unknown } | undefined)?.capabilityGrantGroups;
+    const out: Record<string, { capabilities: string[] }> = {};
+    if (raw && typeof raw === 'object') {
+      for (const [name, def] of Object.entries(raw as Record<string, unknown>)) {
+        const caps = (def as { capabilities?: unknown } | null)?.capabilities;
+        if (Array.isArray(caps) && caps.every((c) => typeof c === 'string')) {
+          out[name] = { capabilities: caps as string[] };
+        }
+      }
+    }
+    return out;
+  })(),
 
   // Media retention (SP7) — per-instance config with safe defaults
   mediaRetention: {

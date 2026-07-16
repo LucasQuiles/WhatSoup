@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "8d83e03b11ecedcb511caf27742a15d53b7a5ca70a9af4db6e3d2f25f2e8ea33",
+      "sha256": "f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -21,12 +21,13 @@
         "_is_ssh_transport_failure",
         "best-effort-remote",
         "redact_collector_text",
-        "tcp_probe_reachable"
+        "remote_liveness_probe_ok",
+        "tailscale_ping_command"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "cbe56f4251fddb218e88e3b580fd46cc3fd8153f634c772595738fd5fba6cad4",
+      "sha256": "d078aab86ef9619c5d65759f470b4ba037e83788e7c4a2d5f59a2235ce893e35",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -47,7 +48,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "5e78a09b4ff271ab3ccb993602302386b7d1c5bbae34b57720682b5c6b40877c",
+      "sha256": "8720776527c3dca43da31bb13b3f53a38719a8074d4899c4139c2f8b409340ca",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -122,7 +123,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "3fe939866829ae41460833e4c6e1bd1f8738fdd128b808d6602d53c59975c209",
+      "sha256": "71d48284f433489b7ec3b5f1ba882e6a3e76fada8e0c9cc4b0da4a277460dac9",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -182,7 +183,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "56499d5aea5cf69e3e5845f1c7478647d0621faed07bf1d91f67193d84af2a12",
+      "sha256": "5deb4c7077bb488500bbd58f3aa2f771dff62468ded0911e95a1861010d212a6",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -234,6 +235,15 @@
         "daily_health_host_from_payload",
         "normalize_hub_host",
         "remoteHost"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
+      "mustContain": [
+        "roster_digest",
+        "roster_inventory",
+        "load_roster"
       ]
     },
     {

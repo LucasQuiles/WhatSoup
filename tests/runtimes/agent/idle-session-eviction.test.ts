@@ -168,7 +168,10 @@ void _mockQueueTypeCheck;
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 
 function makeDb(): Database {
-  return { raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() } } as unknown as Database;
+  return {
+    assertWritableCompatibility: vi.fn(),
+    raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() },
+  } as unknown as Database;
 }
 function makeMessenger(): Messenger {
   return { sendMessage: vi.fn(async () => ({ waMessageId: null })), sendMedia: vi.fn(async () => ({ waMessageId: null })) };

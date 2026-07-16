@@ -125,6 +125,7 @@ import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anth
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),
@@ -242,6 +243,48 @@ describe('SessionManager', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it('rejects spawnSession before provider creation when the database is drained', async () => {
+    const db = makeDb();
+    const rejection = new Error('database compatibility drain');
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+
+    await expect(sm.spawnSession()).rejects.toBe(rejection);
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects sendTurn before budget or provider I/O when the database is drained', async () => {
+    const db = makeDb();
+    const rejection = new Error('database compatibility drain');
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+    vi.mocked(db.assertWritableCompatibility).mockClear();
+
+    await expect(sm.sendTurn('must not dispatch')).rejects.toBe(rejection);
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+    expect(incrementMessageCount).not.toHaveBeenCalled();
   });
 
   // @check CHK-018

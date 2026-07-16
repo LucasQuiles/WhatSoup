@@ -1242,7 +1242,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         0,
         'failed to read sqlite schema migration version',
       );
-      const schemaReady = schemaMigrationLatest >= CURRENT_SCHEMA_MIGRATION;
+      const schemaReady = schemaMigrationLatest === CURRENT_SCHEMA_MIGRATION;
+      const schemaIsFuture = schemaMigrationLatest > CURRENT_SCHEMA_MIGRATION;
 
       let pendingPollsTotal = 0;
       let pendingPollsReadable = true;
@@ -1256,7 +1257,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         logProbeFailure('failed to count pending polls', err);
       }
 
-      if (status === 'healthy' && (!schemaReady || !pendingPollsReadable)) {
+      if (schemaIsFuture) {
+        status = 'unhealthy';
+      } else if (status === 'healthy' && (!schemaReady || !pendingPollsReadable)) {
         status = 'degraded';
       }
 
@@ -1287,10 +1290,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         } else if (deps.instanceType === 'chat') {
           const details = snap.details as Record<string, unknown>;
           const queue = details.queue as { activeChats?: number; queuedChats?: number } | undefined;
+          const compatibility = details.databaseCompatibility as Record<string, unknown> | undefined;
           runtimeBlock = {
             chat: {
               queueDepth: (queue?.activeChats ?? 0) + (queue?.queuedChats ?? 0),
               enrichmentUnprocessed: enrichmentStats.unprocessed,
+              ...(compatibility
+                ? {
+                    database_compatibility: {
+                      reason: typeof compatibility.reason === 'string'
+                        ? compatibility.reason
+                        : null,
+                      observed_migration: typeof compatibility.observedMigration === 'number'
+                        ? compatibility.observedMigration
+                        : null,
+                      required_migration: typeof compatibility.requiredMigration === 'number'
+                        ? compatibility.requiredMigration
+                        : null,
+                    },
+                  }
+                : {}),
             },
           };
         } else if (deps.instanceType === 'agent') {

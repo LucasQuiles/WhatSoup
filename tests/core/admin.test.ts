@@ -41,8 +41,10 @@ import { insertPending, lookupAccess } from '../../src/core/access-list.ts';
 import {
   handleAdminCommand,
   handleFallbackCommand,
+  handleGrantCommand,
   sendApprovalRequest,
 } from '../../src/core/admin.ts';
+import type { CapabilityGrantManager } from '../../src/lib/capability-grant.ts';
 import * as adminModule from '../../src/core/admin.ts';
 import type { Runtime } from '../../src/runtimes/types.ts';
 // ---------------------------------------------------------------------------
@@ -1168,5 +1170,87 @@ describe('admin.ts uncovered-branch coverage', () => {
     const sentText = messenger.sendMessage.mock.calls[0][1] as string;
     expect(sentText).toContain('Fallback disabled');
     expect(sentText).toContain('primary provider active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGrantCommand
+// ---------------------------------------------------------------------------
+
+describe('handleGrantCommand', () => {
+  function mgr(overrides: Partial<CapabilityGrantManager> = {}): CapabilityGrantManager {
+    return {
+      arm: vi.fn(),
+      disarm: vi.fn(),
+      status: vi.fn(),
+      reconcile: vi.fn(),
+      stop: vi.fn(),
+      ...overrides,
+    } as unknown as CapabilityGrantManager;
+  }
+
+  it('help replies with the grant command summary', async () => {
+    const messenger = makeMockMessenger();
+    await handleGrantCommand(mgr(), messenger, { action: 'grant', sub: 'help' }, ADMIN_CHAT_JID);
+    const t = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(t).toContain('GRANT');
+    expect(t).toContain('DISARM');
+  });
+
+  it('arm success replies with the granted capabilities and expiry', async () => {
+    const messenger = makeMockMessenger();
+    const arm = vi.fn().mockResolvedValue({ ok: true, record: { capabilities: ['camera.snap'], expiresAtMs: 1_900_000_000_000 } });
+    await handleGrantCommand(mgr({ arm }), messenger, { action: 'grant', sub: 'arm', group: 'camera', durationMs: 60_000 }, ADMIN_CHAT_JID);
+    expect(arm).toHaveBeenCalledWith('camera', 60_000, { isOwner: true });
+    const t = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(t).toContain("Granted 'camera'");
+    expect(t).toContain('auto-reverts');
+  });
+
+  it('arm on an unknown group relays the manager error, not a success', async () => {
+    const messenger = makeMockMessenger();
+    const arm = vi.fn().mockResolvedValue({ ok: false, error: 'unknown group: nope' });
+    await handleGrantCommand(mgr({ arm }), messenger, { action: 'grant', sub: 'arm', group: 'nope' }, ADMIN_CHAT_JID);
+    const t = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(t).toContain("Cannot grant 'nope'");
+    expect(t).toContain('unknown group');
+  });
+
+  it('arm with no duration passes null (manual grant)', async () => {
+    const messenger = makeMockMessenger();
+    const arm = vi.fn().mockResolvedValue({ ok: true, record: { capabilities: ['x'], expiresAtMs: null } });
+    await handleGrantCommand(mgr({ arm }), messenger, { action: 'grant', sub: 'arm', group: 'g' }, ADMIN_CHAT_JID);
+    expect(arm).toHaveBeenCalledWith('g', null, { isOwner: true });
+    expect(messenger.sendMessage.mock.calls[0][1] as string).toContain('manual (no expiry)');
+  });
+
+  it('disarm relays a distinguishable "not authorized" (never claims success)', async () => {
+    const messenger = makeMockMessenger();
+    const disarm = vi.fn().mockResolvedValue({ changed: false, removed: [], restored: [], reason: 'unauthorized' });
+    await handleGrantCommand(mgr({ disarm }), messenger, { action: 'grant', sub: 'disarm' }, ADMIN_CHAT_JID);
+    expect(messenger.sendMessage.mock.calls[0][1] as string).toContain('Not authorized');
+  });
+
+  it('disarm success reports what was reverted', async () => {
+    const messenger = makeMockMessenger();
+    const disarm = vi.fn().mockResolvedValue({ changed: true, removed: ['camera.snap'], restored: [], reason: 'manual' });
+    await handleGrantCommand(mgr({ disarm }), messenger, { action: 'grant', sub: 'disarm' }, ADMIN_CHAT_JID);
+    expect(messenger.sendMessage.mock.calls[0][1] as string).toContain('reverted');
+  });
+
+  it('status when not armed', async () => {
+    const messenger = makeMockMessenger();
+    const status = vi.fn().mockResolvedValue({ armed: false });
+    await handleGrantCommand(mgr({ status }), messenger, { action: 'grant', sub: 'status' }, ADMIN_CHAT_JID);
+    expect(messenger.sendMessage.mock.calls[0][1] as string).toContain('No capability grant active');
+  });
+
+  it('status when armed reports the group and capabilities', async () => {
+    const messenger = makeMockMessenger();
+    const status = vi.fn().mockResolvedValue({ armed: true, group: 'camera', capabilities: ['camera.snap'], remainingMs: 120_000 });
+    await handleGrantCommand(mgr({ status }), messenger, { action: 'grant', sub: 'status' }, ADMIN_CHAT_JID);
+    const t = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(t).toContain('camera');
+    expect(t).toContain('camera.snap');
   });
 });

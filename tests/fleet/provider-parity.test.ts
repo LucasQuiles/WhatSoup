@@ -523,6 +523,63 @@ describe('evaluateProviderParity', () => {
     expect(exitCodeForProviderParityReport(report)).toBe(0);
   });
 
+  it('fails the gate for a restored agent that is active while still declared expected=blocked', () => {
+    // Regression for #1866: a restored macOS agent can be running, transport-reachable,
+    // and reporting online while its checked-in declaration still says expected=blocked.
+    // The old short-circuit marked it not_applicable and excluded it from monitoring.
+    const report = evaluateProviderParity({
+      generatedAtUtc: '2026-06-23T10:24:24Z',
+      targetMain: 'f9a0a62b3a298dba4e076ed5840f9694dbfb6097',
+      expected: [expected({ host: 'mini9', instance: 'agent', expected: 'blocked' })],
+      statuses: {
+        'mini9/agent': status({ signal: { status: 'online', confidence: 'confirmed', reason: null, evidence: [] }, lineReachable: true }),
+      },
+      probes: [],
+    });
+
+    expect(report.verdict).toBe('blocked');
+    expect(report.rows[0]).toMatchObject({
+      host: 'mini9',
+      instance: 'agent',
+      verdict: 'blocked',
+      reasons: ['restored_service_expected_blocked'],
+    });
+    expect(exitCodeForProviderParityReport(report)).toBe(1);
+  });
+
+  it('keeps a genuinely blocked agent excluded and inactive when no live status is present', () => {
+    const report = evaluateProviderParity({
+      generatedAtUtc: '2026-06-23T10:24:24Z',
+      targetMain: 'f9a0a62b3a298dba4e076ed5840f9694dbfb6097',
+      expected: [expected({ host: 'mini6', instance: 'agent', expected: 'blocked' })],
+      statuses: {},
+      probes: [],
+    });
+
+    expect(report.rows[0]?.verdict).toBe('not_applicable');
+    expect(exitCodeForProviderParityReport(report)).toBe(0);
+  });
+
+  it('keeps a blocked agent not_applicable when its status snapshot shows it inactive (offline and unreachable)', () => {
+    // Discriminates the fix from a naive "status-present => surface" rule: a blocked
+    // service that is genuinely down must stay excluded even if a stale snapshot exists.
+    const report = evaluateProviderParity({
+      generatedAtUtc: '2026-06-23T10:24:24Z',
+      targetMain: 'f9a0a62b3a298dba4e076ed5840f9694dbfb6097',
+      expected: [expected({ host: 'mini6', instance: 'agent', expected: 'blocked' })],
+      statuses: {
+        'mini6/agent': status({
+          signal: { status: 'offline', confidence: 'confirmed', reason: null, evidence: [] },
+          lineReachable: false,
+        }),
+      },
+      probes: [],
+    });
+
+    expect(report.rows[0]?.verdict).toBe('not_applicable');
+    expect(exitCodeForProviderParityReport(report)).toBe(0);
+  });
+
   it('sorts rows by severity, host, instance, and reason for deterministic reports', () => {
     const report = evaluateProviderParity({
       generatedAtUtc: '2026-06-23T10:24:24Z',

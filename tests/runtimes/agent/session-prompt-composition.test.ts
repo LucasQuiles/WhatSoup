@@ -21,6 +21,7 @@ function makeTempRoot(): string {
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: () => undefined,
     raw: {
       prepare: () => ({ run: () => undefined, get: () => undefined }),
       exec: () => undefined,
