@@ -7668,7 +7668,19 @@ export class AgentRuntime implements Runtime {
     const { socketPath, cfgPath } = existing
       ? { socketPath: existing.socketPath, cfgPath: existing.cfgPath }
       : this.createPerChatActorSocket(mapKey, chatJid);
-    return { mcpSocketPath: socketPath, providerConfigOverride: { mcpConfig: [cfgPath], strictMcpConfig: true } };
+    const configuredMcp = this.sessionProviderConfig()?.['mcpConfig'];
+    const configuredMcpPaths = configuredMcp === undefined
+      ? []
+      : Array.isArray(configuredMcp)
+        ? configuredMcp.map(String)
+        : [String(configuredMcp)];
+    return {
+      mcpSocketPath: socketPath,
+      providerConfigOverride: {
+        mcpConfig: [...configuredMcpPaths, cfgPath],
+        strictMcpConfig: true,
+      },
+    };
   }
 
   /** F-STICKY-ACTOR (QR-247 hardening): stop + unlink a per-chat actor socket and clear its exec-queue. Idempotent — safe when no entry exists. */
