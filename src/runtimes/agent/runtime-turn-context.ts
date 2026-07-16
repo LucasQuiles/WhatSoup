@@ -1,4 +1,5 @@
 import type { ContentType } from '../../core/types.ts';
+import type { StoredMessage } from '../../core/messages.ts';
 import type {
   RecoveryOwnerIdentity,
   TurnIdentity,
@@ -69,4 +70,11 @@ export function rebindRuntimeTurnOwner(
     replay: context.replay,
     toolScopeKey: owner.toolScopeKey ?? context.toolScopeKey,
   });
+}
+
+export function excludeCurrentInboundMessage(
+  messages: StoredMessage[],
+  sourceMessageId: string | null | undefined,
+): StoredMessage[] {
+  return sourceMessageId ? messages.filter((message) => message.messageId !== sourceMessageId) : messages;
 }

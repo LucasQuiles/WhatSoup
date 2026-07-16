@@ -100,17 +100,14 @@ import { resolveRoute, type RouteDecision } from './route-resolution.ts';
 import { deriveChatScope, emitRouteEvent, type ModelRouteEvent } from './route-events.ts';
 import { buildRoutingPromptContract, extractRouteIntents } from './route-intent.ts';
 import { isProviderId } from './providers/index.ts';
-import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter, type StoredMessage } from '../../core/messages.ts';
+import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
-import {
-  markRuntimeTurnReplayUnsafe,
-  type RuntimeTurnContext,
-} from './runtime-turn-context.ts';
+import { excludeCurrentInboundMessage, markRuntimeTurnReplayUnsafe, type RuntimeTurnContext } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
 import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
@@ -4152,11 +4149,7 @@ export class AgentRuntime implements Runtime {
     return `${prefix}\n${turn.text}`;
   }
 
-  private sendTrustedActorTurn(
-    session: SessionManager,
-    text: string,
-    actorJid: string | undefined,
-  ): Promise<void> {
+  private sendTrustedActorTurn(session: SessionManager, text: string, actorJid: string | undefined): Promise<void> {
     const actorAccess = classifyTrustedActorAccess(actorJid, this.db, config.adminPhones);
     return session.sendTrustedActorTurn(text, actorAccess);
   }
@@ -4377,7 +4370,7 @@ export class AgentRuntime implements Runtime {
         let contextLease: SystemTurnLeaseToken | null = null;
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
-          const recent = this.excludeCurrentInboundFromContext(getRecentMessages(this.db, convKey, 20), effectiveMapKey);
+          const recent = excludeCurrentInboundMessage(getRecentMessages(this.db, convKey, 20), effectiveMapKey === undefined ? this.currentTurnSourceMessageId : this.perChatTurnSourceMessageId.get(effectiveMapKey));
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
             // QR-095: mark under the SAME scope the single/shared result handler
@@ -10901,10 +10894,6 @@ export class AgentRuntime implements Runtime {
     return d.toTimeString().slice(0, 5); // HH:MM
   }
 
-  private excludeCurrentInboundFromContext(messages: StoredMessage[], mapKey?: string): StoredMessage[] {
-    const sourceMessageId = mapKey === undefined ? this.currentTurnSourceMessageId : this.perChatTurnSourceMessageId.get(mapKey);
-    return sourceMessageId ? messages.filter((message) => message.messageId !== sourceMessageId) : messages;
-  }
   /**
    * Format chat messages into the `[HH:MM] sender: content` lines injected as
    * recent-context into a fresh/stand-in session. Single source of truth for
@@ -11032,7 +11021,7 @@ export class AgentRuntime implements Runtime {
 
           let contextLease: SystemTurnLeaseToken | null = null;
           try {
-            const recent = this.excludeCurrentInboundFromContext(getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), mapKey);
+            const recent = excludeCurrentInboundMessage(getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), this.perChatTurnSourceMessageId.get(mapKey));
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
               // QR-095: same fix as the sendTurnToSession injection — in single/
