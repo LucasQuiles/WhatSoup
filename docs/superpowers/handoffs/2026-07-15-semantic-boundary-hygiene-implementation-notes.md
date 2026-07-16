@@ -1,6 +1,6 @@
 # Semantic Boundary Hygiene Implementation Notes
 
-**Status:** Active — specification and PR A plan written; production implementation not started
+**Status:** Active — PR A Tasks 1-4 committed; Task 5 structural/executable decision-poll work in progress
 **Date:** 2026-07-15
 **Owner:** Lucas Quiles
 **Branch:** `experiment/jul15-semantic-boundary-eval`
@@ -135,6 +135,14 @@ and documentation. PR A separates them:
 A spawn error, signal, absent exit status, unreadable hook, or malformed TypeScript file is a
 finding. The executable probe must have a bounded test fixture and may not run against live chats or
 external services.
+
+Implementation clarification: the runbook, configuration reference, and public-surface inventory
+all define `poll-interaction-lint.mjs` as a fail-open PostToolUse diagnostic. The original Task 5
+wording incorrectly expected prohibited input to exit nonzero. The corrected contract requires exit
+0 for accepted and prohibited probes, an empty diagnostic surface for accepted input, and an exact
+`asks-user-to-type-i-voted` session-local finding for prohibited input. The enclosing repository
+guard fails closed when that behavior is absent, bounded execution is inconclusive, or the hook is a
+textual no-op.
 
 ## Rollout and Rollback
 

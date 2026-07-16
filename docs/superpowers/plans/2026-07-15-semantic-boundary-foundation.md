@@ -560,7 +560,9 @@ Build a complete minimal fixture and prove these mutations fail:
 - removing `withZodDescription` from the registry call;
 - replacing the workspace `PostToolUse` registration with an unrelated object containing the same strings;
 - replacing the lint hook with `process.exit(0)`;
-- accepted transcript exits 0 and prohibited “type I voted” transcript exits non-zero.
+- accepted and prohibited transcripts both preserve the documented fail-open exit 0 contract;
+  accepted input produces no diagnostic, while prohibited “type I voted” input produces the exact
+  session-local diagnostic. The guard fails when either behavior is absent.
 
 - [ ] **Step 2: Confirm RED**
 
@@ -572,7 +574,7 @@ Expected: current anchor implementation incorrectly passes at least the comment/
 
 - [ ] **Step 3: Implement structural and executable checks**
 
-Parse TypeScript with `createSourceFile`. Match the exported guidance declaration, the MCP schema description call, the registry wrapper call, and the workspace hook registration object by AST kind and property/callee relationships. Execute the lint hook twice through `spawnSync` with bounded fixture input, `timeout: 2_000`, `killSignal: 'SIGKILL'`, and a 1 MiB output cap: one accepted transcript and one prohibited transcript. Treat spawn errors, timeouts, signals, missing status, and output overflow as findings rather than pass.
+Parse TypeScript with `createSourceFile`. Match the guidance declaration and runtime reference, the MCP schema description call, the registry wrapper call, and the workspace hook registration object by AST kind and property/callee relationships. Execute the lint hook twice through `spawnSync` with an isolated home and bounded fixture input, `timeout: 2_000`, `killSignal: 'SIGKILL'`, and a 1 MiB output cap: one accepted transcript and one prohibited transcript. Require exit 0 for both because the tracked hook is a fail-open PostToolUse diagnostic; prove behavior through absence/presence of the exact session-local finding. Treat spawn errors, timeouts, signals, missing status, output overflow, or a missing/incorrect diagnostic as findings rather than pass.
 
 Documentation references remain textual because they are documentation promises, but code and hook behavior cannot be satisfied by textual anchors.
 
