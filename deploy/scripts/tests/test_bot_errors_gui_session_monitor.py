@@ -1087,6 +1087,23 @@ def test_best_effort_is_a_known_excluding_policy(mod):
     assert "best_effort" in mod._EXCLUDING_POLICIES
 
 
+def test_gui_vocabulary_matches_policy_ssot(mod):
+    # The canonical policy vocabulary lives in tests/support/bot_errors_policy.py
+    # (#1874 contract — kept out of deploy/scripts[/lib] so it needs no integrity-
+    # manifest entry). The GUI monitor keeps a local copy (it is NOT runtime-imported).
+    # This drift-guard makes the two provably identical so they cannot silently diverge.
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from support import bot_errors_policy as ssot
+
+    assert mod.KNOWN_GUI_SESSION_POLICIES == ssot.KNOWN_GUI_SESSION_POLICIES
+    assert set(mod._EXCLUDING_POLICIES) == set(ssot._EXCLUDING_POLICIES)
+    assert mod.POLICY_ALWAYS_AQUA == ssot.POLICY_ALWAYS_AQUA
+    # Every value the GUI monitor treats as excluding must be a known SSOT policy.
+    assert set(mod._EXCLUDING_POLICIES) <= ssot.KNOWN_GUI_SESSION_POLICIES
+
+
 def test_best_effort_overrides_launchagent_label(mod):
     # An intentionally intermittent host carrying an always_on com.whatsoup.*
     # LaunchAgent used to be re-enrolled by the fail-closed default (#1874).

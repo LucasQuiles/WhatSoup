@@ -288,6 +288,17 @@ GUI_LABEL_PREFIX = "com.whatsoup."
 # ``guiSessionExpected`` key. This is a NON-PII enum — host aliases + a policy
 # value only; no OS usernames are stored in committed SSOT (those stay
 # live-resolved, see resolve_expected_user).
+#
+# The CANONICAL definition of this vocabulary + each policy's cross-monitor
+# disposition lives in lib/bot_errors_policy.py (the #1874 SSOT). These constants
+# are kept local here — NOT imported at runtime — because the deployed monitor is
+# packaged by an explicit per-file allowlist (deploy/bot-errors-runtime-manifest
+# .json, whatsoup-bot-errors-deploy.sh), so importing a new lib module would add a
+# deploy dependency on those manifests. A drift-guard test
+# (test_gui_vocabulary_matches_policy_ssot) asserts these values stay byte-identical
+# to the SSOT, so the two cannot silently diverge. best_effort is an intentionally-
+# intermittent (expected-sleeping) host -> an auditable exclusion, NOT a
+# missing/unknown policy that must fail closed.
 POLICY_ALWAYS_AQUA = "always_aqua"      # GUI LaunchAgent must have an Aqua session -> monitor
 POLICY_HEADLESS_OK = "headless_ok"      # headless/on_demand, no Aqua session -> exclude
 POLICY_NOT_APPLICABLE = "not_applicable"  # systemd / no-bot / blocked -> exclude
@@ -296,10 +307,6 @@ KNOWN_GUI_SESSION_POLICIES = frozenset(
     {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT}
 )
 # Declared policies that explicitly EXCLUDE a target from GUI-session monitoring.
-# best_effort is intentionally intermittent (declared expected-sleeping, e.g. a
-# laptop that sleeps): a valid, auditable exclusion — NOT a missing/unknown policy
-# that must fail closed. Excluding it keeps GUI-session membership in agreement
-# with the collector, which already treats such a host as expected-offline (#1874).
 _EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT)
 
 # Public manifests may use sanitized placeholder labels for private hosts. Those
