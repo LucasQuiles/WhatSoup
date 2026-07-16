@@ -1,7 +1,21 @@
 #!/usr/bin/env sh
-set -e
+set -eu
 
-node --experimental-strip-types scripts/pre-push-guard.ts
+# Git exports repository-local variables to hooks. If they leak into the test
+# suite, nested fixture repositories silently target the source repository and
+# fail with misleading "must be run in a work tree" errors. Resolve the exact
+# local-variable vocabulary before clearing it; an unknown Git context is a
+# failed gate, not permission to run contaminated verification.
+git_local_env_vars="$(git rev-parse --local-env-vars)" || {
+  echo "pre-push hook: unable to resolve repository-local Git environment" >&2
+  exit 2
+}
+for git_local_env_var in $git_local_env_vars; do
+  unset "$git_local_env_var"
+done
+unset git_local_env_var git_local_env_vars
+
+bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts
 
 # design:metrics — report-only metrics emitter.
 # Blocking only for expired waivers (deterministic, zero FP surface) and malformed
@@ -14,7 +28,7 @@ node --experimental-strip-types scripts/pre-push-guard.ts
 # Gating the entire invocation on eslint presence is fail-open for the deterministic
 # blocking path — the guard must run regardless. Missing eslint only silences the drift
 # column, never the expired-waiver or malformed-input checks.
-npm --prefix console run design:metrics || {
+bash scripts/run-with-pinned-npm.sh --prefix console run design:metrics || {
   echo "design:metrics exited nonzero (expired waivers or parse error -- see output above)" >&2
   exit 1
 }
@@ -25,7 +39,7 @@ npm --prefix console run design:metrics || {
 # queue drift (violations moved without count change), or any malformed/missing input
 # (scanners-fail-closed policy). Pure-node file scan: no eslint dependency, so there is
 # no degraded path — this gate never fails open.
-npm --prefix console run design:burndown || {
+bash scripts/run-with-pinned-npm.sh --prefix console run design:burndown || {
   echo "design:burndown failed (new violation, ratchet fall, queue drift, or parse error -- see output above)" >&2
   exit 1
 }

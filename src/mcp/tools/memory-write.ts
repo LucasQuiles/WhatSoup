@@ -140,6 +140,14 @@ export function registerMemoryWriteTools(
         return errorResult(`memory_write failed: ${err instanceof Error ? err.message : String(err)}`);
       }
 
+      // QR-006: success was previously silent (only failures logged) — emit a
+      // trace-grade success log carrying the written record id. NOTE: no
+      // traceId here — no traceId currently flows to MCP handlers, and
+      // threading a real one through the MCP session/handler is more than
+      // this observability-only change should take on (see report: MCP
+      // traceId plumbing is a follow-up).
+      log.info({ id: record.id, memoryType }, 'memory_write upsert complete');
+
       return { id: record.id, status: 'written', memory_type: memoryType };
     },
   });

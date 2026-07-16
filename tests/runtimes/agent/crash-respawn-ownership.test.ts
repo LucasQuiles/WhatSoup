@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import { ensureHandoffArtifactSchema } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -143,6 +144,7 @@ describe('per-chat crash respawn ownership', () => {
       sessionScope: 'per_chat',
       cwd: '/tmp',
     });
+    runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
     const ownership = new ObservedOwnershipRegistry();
     const timers = new ObservedRespawnTimers();
@@ -274,6 +276,7 @@ describe('per-chat crash respawn ownership', () => {
       sessionScope: 'per_chat',
       cwd: '/tmp',
     });
+    runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
     const ownership = new ObservedOwnershipRegistry();
     const timers = new ObservedRespawnTimers();
@@ -403,6 +406,7 @@ describe('per-chat crash respawn ownership', () => {
       sessionScope: 'per_chat',
       cwd: '/tmp',
     });
+    runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
     const ownership = new ObservedOwnershipRegistry();
     const timers = new ObservedRespawnTimers();

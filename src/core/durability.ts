@@ -47,6 +47,7 @@ import {
   type CloseSessionLifecycleFailureParams,
   type CloseSessionLifecycleParams,
   type ReactivateSessionLifecycleParams,
+  type RetireSessionLifecycleParams,
 } from './session-lifecycle-store.ts';
 import type {
   ClaimTurnRecoveryJobOptions,
@@ -1367,14 +1368,8 @@ export class DurabilityEngine {
   }
 
   /** Atomically retire an exact agent row and all checkpoints for its provider session. */
-  retireSessionLifecycle(
-    agentSessionRowId: number | undefined,
-    providerSessionId: string,
-  ): number {
-    return this.sessionLifecycle.retireSessionLifecycle(
-      agentSessionRowId,
-      providerSessionId,
-    );
+  retireSessionLifecycle(params: RetireSessionLifecycleParams): number {
+    return this.sessionLifecycle.retireSessionLifecycle(params);
   }
 
   closeSessionLifecycleFailure(params: CloseSessionLifecycleFailureParams): void {

@@ -46,11 +46,15 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import {
+  buildManagedOpencodeAgentConfig,
   generateMcpConfigFile,
   mergeOpencodeConfig,
+  OPENCODE_REQUIRED_DENY,
+  WHATSOUP_OPENCODE_AGENT_ID,
   writeProviderMcpConfig,
   writeProviderMcpConfigTarget,
 } from '../../src/core/provider-mcp-config.ts';
+import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 const SOCKET = '/tmp/whatsoup-test.sock';
 const PROXY = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
@@ -159,10 +163,73 @@ describe('generateMcpConfigFile', () => {
 // path on the unset branch.
 // ---------------------------------------------------------------------------
 describe('mergeOpencodeConfig', () => {
-  it('seeds an mcp.whatsoup block when existing is null', () => {
+  it('seeds mcp.whatsoup and the reserved WhatSoup headless agent when existing is null', () => {
     const merged = mergeOpencodeConfig(null, generated());
-    expect(Object.keys(merged)).toEqual(['mcp']);
+    expect(Object.keys(merged)).toEqual(['mcp', 'agent']);
     expect(merged.mcp).toHaveProperty('whatsoup');
+
+    const agents = merged.agent as Record<string, Record<string, unknown>>;
+    expect(WHATSOUP_OPENCODE_AGENT_ID).toBe('whatsoup-headless');
+    expect(Object.keys(agents)).toEqual([WHATSOUP_OPENCODE_AGENT_ID]);
+    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toEqual(buildManagedOpencodeAgentConfig());
+    expect(agents[WHATSOUP_OPENCODE_AGENT_ID]).toMatchObject({ mode: 'primary' });
+    expect(agents[WHATSOUP_OPENCODE_AGENT_ID].permission).toMatchObject({
+      '*': 'allow',
+      question: 'deny',
+      plan_enter: 'deny',
+      plan_exit: 'deny',
+      external_directory: 'deny',
+      doom_loop: 'allow',
+      read: {
+        '*': 'allow',
+        '*.env': 'deny',
+        '*.env.*': 'deny',
+        '*.env.example': 'allow',
+      },
+    });
+  });
+
+  it('translates the Claude mutation deny floor into collision-free OpenCode tool names', () => {
+    const merged = mergeOpencodeConfig(null, generated());
+    const agents = merged.agent as Record<string, Record<string, unknown>>;
+    const permission = agents['whatsoup-headless'].permission as Record<string, unknown>;
+
+    expect(OPENCODE_REQUIRED_DENY).toHaveLength(REQUIRED_DENY.length);
+    expect(new Set(OPENCODE_REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
+    expect(OPENCODE_REQUIRED_DENY[0]).toBe('claude_ai_Gmail_create_draft');
+    expect(OPENCODE_REQUIRED_DENY).toContain(
+      'plugin_microsoft_365_microsoft_365_send-mail',
+    );
+    expect(OPENCODE_REQUIRED_DENY.every((entry) => !entry.startsWith('mcp_'))).toBe(true);
+    for (const toolName of OPENCODE_REQUIRED_DENY) expect(permission[toolName]).toBe('deny');
+  });
+
+  it('preserves user agents and global permissions while replacing only the reserved agent', () => {
+    const userAgent = {
+      description: 'user-owned',
+      mode: 'subagent',
+      permission: { '*': 'ask' },
+    };
+    const globalPermission = { '*': 'deny', read: 'allow' };
+    const merged = mergeOpencodeConfig({
+      permission: globalPermission,
+      agent: {
+        personal: userAgent,
+        'whatsoup-headless': { description: 'stale managed config', permission: { '*': 'deny' } },
+      },
+    }, generated());
+
+    expect(merged.permission).toEqual(globalPermission);
+    const agents = merged.agent as Record<string, Record<string, unknown>>;
+    expect(agents.personal).toEqual(userAgent);
+    expect(agents['whatsoup-headless']).not.toHaveProperty('description', 'stale managed config');
+    expect(agents['whatsoup-headless']).toMatchObject({ mode: 'primary' });
+  });
+
+  it.each(['broken', [], null])('treats corrupt agent value %j as empty', (agent) => {
+    const merged = mergeOpencodeConfig({ agent: agent as never }, generated());
+    const agents = merged.agent as Record<string, Record<string, unknown>>;
+    expect(Object.keys(agents)).toEqual(['whatsoup-headless']);
   });
 
   it('tolerates a generated object without an mcp key (?? {} fallback)', () => {
@@ -384,8 +451,9 @@ describe('writeProviderMcpConfig', () => {
     const target = writeProviderMcpConfig('opencode-cli', '/agent', SOCKET, PROXY);
     expect(target).toBe(join('/agent', 'opencode.json'));
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'agent']);
     expect(parsed.mcp.whatsoup.environment).toEqual({ WHATSOUP_SOCKET: SOCKET });
+    expect(parsed.agent['whatsoup-headless']).toMatchObject({ mode: 'primary' });
     expect(mockLogWarn).not.toHaveBeenCalled();
   });
 
@@ -501,7 +569,7 @@ describe('writeProviderMcpConfig', () => {
       model: 'm',
     });
     const parsed = JSON.parse(mockWritePrivate.mock.calls[0][1]);
-    expect(Object.keys(parsed)).toEqual(['mcp', 'provider', 'model']);
+    expect(Object.keys(parsed)).toEqual(['mcp', 'agent', 'provider', 'model']);
     expect(parsed.model).toBe('whatsoup-cloud/m');
     const provider = parsed.provider as Record<string, Record<string, Record<string, unknown>>>;
     expect(provider['whatsoup-cloud'].options.baseURL).toBe('https://api.example.com/v1');

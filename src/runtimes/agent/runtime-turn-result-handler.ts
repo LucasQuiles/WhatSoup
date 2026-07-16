@@ -14,7 +14,10 @@ import { createChildLogger } from '../../logger.ts';
 import type { TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { workflowForProviderText, type ResponseWorkflow } from './response-registry.ts';
 import type { PendingPollStore } from './pending-poll-store.ts';
-import type { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
+import type {
+  PendingSystemResultTracker,
+  SystemTurnPurpose,
+} from './pending-system-result-tracker.ts';
 import type { WorkspaceSweeper } from './workspace-sweeper.ts';
 import type { RuntimeTurnCoordinator } from './runtime-turn-coordinator.ts';
 
@@ -210,6 +213,7 @@ export interface ScopedRuntimeResultArgs {
   mapKey?: string;
   toolScopeKey: string;
   isSystemResult: boolean;
+  systemTurnPurpose?: SystemTurnPurpose | null;
   tracker?: OperationTracker;
   extractUsageLimitResetTime(text: string): Date | null;
 }
@@ -263,7 +267,7 @@ if (config.nlRouting) {
 }
 const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
 const hadCompactBoundary = host.consumeCompactBoundary(compactScopeKey);
-session?.clearTurnWatchdog();
+session?.completeProviderTurn();
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
@@ -756,6 +760,7 @@ if (!replayScheduled) {
 export interface GlobalRuntimeResultArgs {
   event: Extract<AgentEvent, { type: 'result' }>;
   queue: IOutboundQueue;
+  systemTurnPurpose?: SystemTurnPurpose | null;
   tracker?: OperationTracker;
   extractUsageLimitResetTime(text: string): Date | null;
 }
@@ -794,7 +799,7 @@ if (config.nlRouting && host.currentTurnRouteMarkerHold !== null) {
   }
 }
 const hadCompactBoundary = host.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
-host.session?.clearTurnWatchdog();
+host.session?.completeProviderTurn();
 tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
@@ -813,7 +818,9 @@ host.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 // incremented by maybeStartAutoCompact / handleAgentCommand. Shared mode
 // never increments GLOBAL (auto-compact early-returns), so this is a
 // no-op there.
-isSystemResult = host.pendingSystemResults.consumeIfPending(GLOBAL_TOOL_SCOPE_KEY);
+isSystemResult = args.systemTurnPurpose !== undefined
+  ? args.systemTurnPurpose !== null
+  : host.pendingSystemResults.consumeIfPending(GLOBAL_TOOL_SCOPE_KEY);
 
 // AskUserQuestion poll bridge is per_chat only — no pending-poll
 // suppression in shared mode. Normal result lifecycle applies.

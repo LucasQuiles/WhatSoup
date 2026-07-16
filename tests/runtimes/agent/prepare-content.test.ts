@@ -72,6 +72,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
     getStatus: vi.fn(() => ({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })),
     shutdown: vi.fn(),
     clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
     tickWatchdog: vi.fn(),
   })),
   formatAge: vi.fn(() => '1m ago'),

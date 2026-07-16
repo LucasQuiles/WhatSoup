@@ -315,6 +315,8 @@ describe('per-chat /new ownership transition', () => {
     const spawnRelease = new Promise<void>((resolve) => { releaseSpawn = resolve; });
     let reportSpawned!: () => void;
     const spawned = new Promise<void>((resolve) => { reportSpawned = resolve; });
+    let releaseContextResult!: () => void;
+    const contextResultRelease = new Promise<void>((resolve) => { releaseContextResult = resolve; });
 
     try {
       storeMessageIfNew(db, {
@@ -344,6 +346,11 @@ describe('per-chat /new ownership transition', () => {
             : null;
         routedTurns.push({ mapKey: activeMapKey, text });
         await realSendTurn(text);
+        if (text.includes('[Recent chat context')) {
+          void contextResultRelease.then(() => {
+            (currentManager as any).onEvent({ type: 'result', text: null });
+          });
+        }
       };
       const claimedOwner = ownership.get(lidKey);
       if (!claimedOwner) throw new Error('initial owner was not claimed');
@@ -370,6 +377,13 @@ describe('per-chat /new ownership transition', () => {
       });
 
       releaseSpawn();
+      expect(await waitUntil(() => routedTurns.length === 1, 2_000)).toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(routedTurns).toHaveLength(1);
+      expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(1);
+      expect(state.perChatExecActorQueue.has(canonicalKey)).toBe(false);
+
+      releaseContextResult();
       await turn;
       expect(await waitUntil(() => ownership.get(canonicalKey)?.state === 'active', 2_000)).toBe(true);
 
@@ -384,7 +398,7 @@ describe('per-chat /new ownership transition', () => {
       expect(state.chatQueues.get(canonicalKey)).toBe(initialQueue);
       expect(state.chatQueues.has(lidKey)).toBe(false);
       expect(indicateTyping).toHaveBeenCalledTimes(1);
-      expect(state.pendingSystemResults.counts.get(canonicalKey)).toBe(1);
+      expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
       expect(state.pendingSystemResults.counts.has(lidKey)).toBe(false);
       expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
@@ -399,6 +413,7 @@ describe('per-chat /new ownership transition', () => {
       });
     } finally {
       releaseSpawn();
+      releaseContextResult();
       await turn?.catch(() => {});
       await runtime.shutdown();
       await manager?.shutdown(false);

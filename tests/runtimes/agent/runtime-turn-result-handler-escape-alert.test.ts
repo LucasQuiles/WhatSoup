@@ -47,6 +47,7 @@ function makeHost(overrides: { mapKey?: string } = {}) {
   const context = runtimeContext();
   const session = {
     clearTurnWatchdog: vi.fn(),
+    completeProviderTurn: vi.fn(),
     shutdown: vi.fn(),
     getDbRowId: vi.fn(() => 5),
   };
@@ -159,10 +160,11 @@ describe('runtime turn finalization escape — visible failure (#1775)', () => {
     const [instanceName, source] = emitAlertChecked.mock.calls[0] as unknown as [string, string, string, string, string?];
     expect(instanceName).toBe('escape-alert-test');
     expect(source).toBe('agent_turn_finalization_escaped');
+    expect(session.completeProviderTurn).toHaveBeenCalledOnce();
   });
 
   it('global: alerts ops when finalizeRuntimeTurnContext rejects, not just log.error', async () => {
-    const { host, queue } = makeHost();
+    const { host, queue, session } = makeHost();
 
     handleGlobalRuntimeResult(host, {
       event: { type: 'result', text: null, inputTokens: 10, outputTokens: 2 },
@@ -176,5 +178,6 @@ describe('runtime turn finalization escape — visible failure (#1775)', () => {
     const [instanceName, source] = emitAlertChecked.mock.calls[0] as unknown as [string, string, string, string, string?];
     expect(instanceName).toBe('escape-alert-test');
     expect(source).toBe('agent_turn_finalization_escaped');
+    expect(session.completeProviderTurn).toHaveBeenCalledOnce();
   });
 });

@@ -1,6 +1,16 @@
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 import { describe, expect, it } from 'vitest';
 
@@ -12,6 +22,7 @@ import {
 } from '../../scripts/pre-push-guard.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const prePushHook = resolve(repoRoot, '.husky/pre-push');
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
@@ -79,6 +90,129 @@ describe('pre-push guard classifier', () => {
 
   it('rejects malformed pre-push ref lines', () => {
     expect(() => classifyPrePushLine('refs/heads/main only-two-fields')).toThrow(/Invalid pre-push/);
+  });
+});
+
+describe('pre-push hook runtime isolation', () => {
+  it('clears repository-local Git state and runs every command through the pinned wrappers', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-hook-'));
+    const bin = resolve(root, 'bin');
+    const calls = resolve(root, 'calls.log');
+    const environments = resolve(root, 'environments.log');
+    const stdin = resolve(root, 'stdin.log');
+    const refUpdate = 'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5';
+
+    try {
+      mkdirSync(bin, { recursive: true });
+
+      const writeExecutable = (name: string, body: string) => {
+        const target = resolve(bin, name);
+        writeFileSync(target, body);
+        chmodSync(target, 0o755);
+      };
+
+      writeExecutable('git', [
+        '#!/bin/sh',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--local-env-vars" ]; then',
+        '  printf "%s\\n" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX"',
+        '  exit 0',
+        'fi',
+        'exit 97',
+        '',
+      ].join('\n'));
+      writeExecutable('bash', [
+        '#!/bin/sh',
+        'printf "bash %s\\n" "$*" >> "$HOOK_CALLS"',
+        'printf "%s|%s|%s|%s\\n" "${GIT_DIR-unset}" "${GIT_WORK_TREE-unset}" "${GIT_INDEX_FILE-unset}" "${GIT_PREFIX-unset}" >> "$HOOK_ENVIRONMENTS"',
+        'if [ "$1" = "scripts/run-with-pinned-node.sh" ]; then',
+        '  IFS= read -r line || true',
+        '  printf "%s\\n" "$line" >> "$HOOK_STDIN"',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'));
+      for (const ambient of ['node', 'npm']) {
+        writeExecutable(ambient, [
+          '#!/bin/sh',
+          `printf "AMBIENT-${ambient} %s\\n" "$*" >> "$HOOK_CALLS"`,
+          'exit 0',
+          '',
+        ].join('\n'));
+      }
+
+      const result = spawnSync('sh', [prePushHook], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        input: `${refUpdate}\n`,
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          HOME: process.env['HOME'] ?? tmpdir(),
+          HOOK_CALLS: calls,
+          HOOK_ENVIRONMENTS: environments,
+          HOOK_STDIN: stdin,
+          GIT_DIR: '/poison/source.git',
+          GIT_WORK_TREE: '/poison/source-tree',
+          GIT_INDEX_FILE: '/poison/source.index',
+          GIT_PREFIX: 'poison-prefix/',
+        },
+      });
+
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
+        'bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts',
+        'bash scripts/run-with-pinned-npm.sh --prefix console run design:metrics',
+        'bash scripts/run-with-pinned-npm.sh --prefix console run design:burndown',
+      ]);
+      expect(readFileSync(environments, 'utf8').trim().split('\n')).toEqual([
+        'unset|unset|unset|unset',
+        'unset|unset|unset|unset',
+        'unset|unset|unset|unset',
+      ]);
+      expect(readFileSync(stdin, 'utf8').trim()).toBe(refUpdate);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed before verification when Git-local environment discovery is inconclusive', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-hook-failure-'));
+    const bin = resolve(root, 'bin');
+    const calls = resolve(root, 'calls.log');
+
+    try {
+      mkdirSync(bin, { recursive: true });
+      const git = resolve(bin, 'git');
+      writeFileSync(git, '#!/bin/sh\nexit 75\n');
+      chmodSync(git, 0o755);
+      for (const command of ['bash', 'node', 'npm']) {
+        const target = resolve(bin, command);
+        writeFileSync(target, [
+          '#!/bin/sh',
+          'printf "%s\\n" "$0 $*" >> "$HOOK_CALLS"',
+          'exit 0',
+          '',
+        ].join('\n'));
+        chmodSync(target, 0o755);
+      }
+
+      const result = spawnSync('sh', [prePushHook], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        input: 'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5\n',
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          HOME: process.env['HOME'] ?? tmpdir(),
+          HOOK_CALLS: calls,
+          GIT_DIR: '/poison/source.git',
+        },
+      });
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('unable to resolve repository-local Git environment');
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

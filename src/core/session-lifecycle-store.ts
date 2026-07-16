@@ -15,12 +15,20 @@ export interface BeginFreshSessionLifecycleParams {
 export interface ReactivateSessionLifecycleParams {
   agentSessionRowId?: number;
   providerSessionId: string;
+  provider: string;
   pid: number;
+}
+
+export interface RetireSessionLifecycleParams {
+  agentSessionRowId?: number;
+  providerSessionId: string;
+  provider: string;
 }
 
 export interface CloseSessionLifecycleFailureParams {
   agentSessionRowId: number;
   providerSessionId: string | null;
+  provider: string;
   conversationKey: string;
   agentStatus: 'crashed' | 'resume_failed';
 }
@@ -28,6 +36,7 @@ export interface CloseSessionLifecycleFailureParams {
 export interface CloseSessionLifecycleParams {
   agentSessionRowId: number;
   providerSessionId: string | null;
+  provider: string;
   conversationKey: string;
   status: 'suspended' | 'ended';
 }
@@ -61,6 +70,10 @@ function validateRowId(rowId: number): void {
 
 function validateProviderSessionId(sessionId: string): void {
   if (sessionId.length === 0) throw new Error('Provider session ID must not be empty');
+}
+
+function validateProvider(provider: string): void {
+  if (provider.length === 0) throw new Error('Provider must not be empty');
 }
 
 function requireChanges(result: { changes: number | bigint }, message: string): void {
@@ -127,6 +140,7 @@ export class SessionLifecycleStore {
         SET status = 'active', claude_pid = ?, ended_at = NULL
         WHERE id = ?
           AND session_id = ?
+          AND provider = ?
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
       `),
       reactivateSessionCheckpoints: prepare(`
@@ -143,6 +157,7 @@ export class SessionLifecycleStore {
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
         WHERE id = ?
           AND session_id = ?
+          AND provider = ?
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
       `),
       retireSessionCheckpoints: prepare(`
@@ -157,6 +172,7 @@ export class SessionLifecycleStore {
         SET status = ?, ended_at = COALESCE(ended_at, datetime('now'))
         WHERE id = ?
           AND session_id = ?
+          AND provider = ?
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
       `),
       closePreInitAgentFailure: prepare(`
@@ -164,6 +180,7 @@ export class SessionLifecycleStore {
         SET status = ?, ended_at = COALESCE(ended_at, datetime('now'))
         WHERE id = ?
           AND session_id IS NULL
+          AND provider = ?
           AND status IN ('active', 'suspended', 'orphaned', 'crashed')
       `),
       orphanExactSessionCheckpoints: prepare(`
@@ -183,22 +200,22 @@ export class SessionLifecycleStore {
       suspendExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
       `),
       endExactAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id = ? AND status = 'active'
+        WHERE id = ? AND session_id = ? AND provider = ? AND status = 'active'
       `),
       suspendPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'suspended', ended_at = NULL
-        WHERE id = ? AND session_id IS NULL AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
       `),
       endPreInitAgentSession: prepare(`
         UPDATE agent_sessions
         SET status = 'ended', ended_at = COALESCE(ended_at, datetime('now'))
-        WHERE id = ? AND session_id IS NULL AND status = 'active'
+        WHERE id = ? AND session_id IS NULL AND provider = ? AND status = 'active'
       `),
       closeExactSessionCheckpoints: prepare(`
         UPDATE session_checkpoints
@@ -229,6 +246,7 @@ export class SessionLifecycleStore {
   }
 
   beginFreshSessionLifecycle(params: BeginFreshSessionLifecycleParams): number {
+    validateProvider(params.provider);
     return this.transact(() => {
       const result = this.statements.insertAgentSession.run(
         params.pid,
@@ -246,9 +264,11 @@ export class SessionLifecycleStore {
 
   private resolveExactResumableRowId(
     providerSessionId: string,
+    provider: string,
     suppliedRowId?: number,
   ): number {
     validateProviderSessionId(providerSessionId);
+    validateProvider(provider);
     if (suppliedRowId !== undefined) {
       validateRowId(suppliedRowId);
       return suppliedRowId;
@@ -267,6 +287,7 @@ export class SessionLifecycleStore {
     return this.transact(() => {
       const rowId = this.resolveExactResumableRowId(
         params.providerSessionId,
+        params.provider,
         params.agentSessionRowId,
       );
       requireChanges(
@@ -274,6 +295,7 @@ export class SessionLifecycleStore {
           params.pid,
           rowId,
           params.providerSessionId,
+          params.provider,
         ),
         'Exact agent session row is not resumable or does not match the provider session ID',
       );
@@ -288,18 +310,23 @@ export class SessionLifecycleStore {
     });
   }
 
-  retireSessionLifecycle(
-    agentSessionRowId: number | undefined,
-    providerSessionId: string,
-  ): number {
+  retireSessionLifecycle(params: RetireSessionLifecycleParams): number {
     return this.transact(() => {
-      const rowId = this.resolveExactResumableRowId(providerSessionId, agentSessionRowId);
+      const rowId = this.resolveExactResumableRowId(
+        params.providerSessionId,
+        params.provider,
+        params.agentSessionRowId,
+      );
       requireChanges(
-        this.statements.retireExactAgentSession.run(rowId, providerSessionId),
+        this.statements.retireExactAgentSession.run(
+          rowId,
+          params.providerSessionId,
+          params.provider,
+        ),
         'Exact agent session row is not resumable or does not match the provider session ID',
       );
       requireChanges(
-        this.statements.retireSessionCheckpoints.run(providerSessionId),
+        this.statements.retireSessionCheckpoints.run(params.providerSessionId),
         'No checkpoint rows match the provider session ID',
       );
       return rowId;
@@ -308,12 +335,14 @@ export class SessionLifecycleStore {
 
   closeSessionLifecycleFailure(params: CloseSessionLifecycleFailureParams): void {
     validateRowId(params.agentSessionRowId);
+    validateProvider(params.provider);
     this.transact(() => {
       if (params.providerSessionId === null) {
         requireChanges(
           this.statements.closePreInitAgentFailure.run(
             params.agentStatus,
             params.agentSessionRowId,
+            params.provider,
           ),
           'Exact pre-init agent session row is not open',
         );
@@ -329,6 +358,7 @@ export class SessionLifecycleStore {
           params.agentStatus,
           params.agentSessionRowId,
           params.providerSessionId,
+          params.provider,
         ),
         'Exact agent session row does not match the failed provider session',
       );
@@ -341,6 +371,7 @@ export class SessionLifecycleStore {
 
   closeSessionLifecycle(params: CloseSessionLifecycleParams): void {
     validateRowId(params.agentSessionRowId);
+    validateProvider(params.provider);
     this.transact(() => {
       const rowStatement = params.providerSessionId === null
         ? params.status === 'suspended'
@@ -350,8 +381,12 @@ export class SessionLifecycleStore {
           ? this.statements.suspendExactAgentSession
           : this.statements.endExactAgentSession;
       const rowResult = params.providerSessionId === null
-        ? rowStatement.run(params.agentSessionRowId)
-        : rowStatement.run(params.agentSessionRowId, params.providerSessionId);
+        ? rowStatement.run(params.agentSessionRowId, params.provider)
+        : rowStatement.run(
+            params.agentSessionRowId,
+            params.providerSessionId,
+            params.provider,
+          );
       requireChanges(rowResult, 'Exact active agent session row could not be closed');
 
       const checkpointResult = params.providerSessionId === null
