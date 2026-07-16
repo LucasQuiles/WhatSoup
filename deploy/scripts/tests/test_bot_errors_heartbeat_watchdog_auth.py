@@ -23,6 +23,47 @@ def _load_module():
     return mod
 
 
+def _load_roster_lib():
+    spec = importlib.util.spec_from_file_location(
+        "bot_errors_roster", _SCRIPT_ROOT / "lib" / "bot_errors_roster.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_roster_lib = _load_roster_lib()
+
+
+def _bind_valid_roster(monkeypatch, tmp_path: Path) -> dict:
+    """Write a roster the watchdog will load independently and return the
+    matching heartbeat roster-binding fields, so an age-focused test is not also
+    tripped by the #1875 roster check."""
+    roster = {
+        "schemaVersion": 1,
+        "hosts": [
+            {"host": "host-a", "collectorRemote": True, "instances": []},
+            {"host": "host-b", "collectorRemote": True, "instances": []},
+        ],
+    }
+    path = tmp_path / "roster.json"
+    path.write_text(json.dumps(roster), encoding="utf-8")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(path))
+    inv = _roster_lib.roster_inventory(roster)
+    return {
+        "rosterDigest": inv["digest"],
+        "rosterEpoch": int(path.stat().st_mtime),
+        "expectedHostCount": inv["expectedHostCount"],
+        "observedHostCount": inv["expectedHostCount"],
+        "unknownHostCount": 0,
+        "expectedInstanceCount": inv["expectedInstanceCount"],
+        "observedInstanceCount": inv["expectedInstanceCount"],
+        "problemInstanceCount": 0,
+        "unknownInstanceCount": 0,
+    }
+
+
 def _watchdog_args(max_fleet_sentinel_age: int = 60):
     return SimpleNamespace(
         max_q_loop_age=600,
@@ -61,6 +102,7 @@ def test_bad_dry_now_falls_back_to_wall_clock(monkeypatch):
 def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
+    roster_fields = _bind_valid_roster(monkeypatch, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
     mod.atomic_write_json(
         heartbeat,
@@ -70,7 +112,9 @@ def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monk
             "checkedAt": "1970-01-01T00:16:20Z",
             "healthy": True,
             "fleetAction": "none",
-            "hostCount": 9,
+            "hostCount": roster_fields["expectedHostCount"],
+            "problemHostCount": 0,
+            **roster_fields,
         },
     )
 
@@ -82,7 +126,10 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
     state = _private_state(monkeypatch, mod, tmp_path)
     outbox = tmp_path / "outbox"
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    roster_fields = _bind_valid_roster(monkeypatch, tmp_path)
     heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
+    # Roster-valid but STALE: only the age/deadman problem should fire (the
+    # #1875 roster check must stay quiet on a well-bound roster).
     mod.atomic_write_json(
         heartbeat,
         {
@@ -91,7 +138,9 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
             "checkedAt": "1970-01-01T00:00:00Z",
             "healthy": True,
             "fleetAction": "none",
-            "hostCount": 9,
+            "hostCount": roster_fields["expectedHostCount"],
+            "problemHostCount": 0,
+            **roster_fields,
         },
     )
 

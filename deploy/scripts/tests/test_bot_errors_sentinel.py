@@ -28,6 +28,19 @@ def _load_module():
 _mod = _load_module()
 
 
+def _load_roster_lib():
+    spec = importlib.util.spec_from_file_location(
+        "bot_errors_roster", Path(__file__).resolve().parents[1] / "lib" / "bot_errors_roster.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_roster_lib = _load_roster_lib()
+
+
 def _write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -276,6 +289,15 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
         "fleetAction": "none",
         "hostCount": 1,
         "problemHostCount": 0,
+        "rosterDigest": _roster_lib.roster_digest({"schemaVersion": 1, "hosts": [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}]}),
+        "rosterEpoch": int(hosts.stat().st_mtime),
+        "expectedHostCount": 1,
+        "observedHostCount": 1,
+        "unknownHostCount": 0,
+        "expectedInstanceCount": 0,
+        "observedInstanceCount": 0,
+        "problemInstanceCount": 0,
+        "unknownInstanceCount": 0,
     }
     assert host["ackPath"] == str(ack)
     assert result["heartbeatPath"] == str(_mod.heartbeat_path(config))
@@ -2146,3 +2168,125 @@ def test_parse_args_redeem_flags_default_none():
     parsed = _mod.parse_args(["--redeem-token", "t", "--redeem-request-id", "r"])
     assert parsed.redeem_token == "t"
     assert parsed.redeem_request_id == "r"
+
+
+def _fleet_roster_file(tmp_path: Path, hosts: list[dict]) -> Path:
+    return _write_json(tmp_path / "expected-fleet.json", {"schemaVersion": 1, "hosts": hosts})
+
+
+def test_central_heartbeat_binds_roster_digest_epoch_and_counts(tmp_path: Path):
+    """#1875: the heartbeat binds a roster digest+epoch and reports expected /
+    observed / problem / unknown counts for hosts AND runtime-relevant instances."""
+    hb_a = _heartbeat(tmp_path / "a-hb.json", healthy=True, mtime=1000.0)
+    hb_b = _heartbeat(tmp_path / "b-hb.json", healthy=True, mtime=1000.0)
+    roster = _fleet_roster_file(
+        tmp_path,
+        [
+            {
+                "host": "host-a",
+                "role": "bot-host",
+                "collectorRemote": True,
+                "heartbeatPath": str(hb_a),
+                "instances": [
+                    {"name": "bot1", "expected": "always_on", "service": "s1"},
+                    {"name": "bot2", "expected": "always_on", "service": "s2"},
+                ],
+            },
+            {
+                "host": "host-b",
+                "role": "relay-only",
+                "collectorRemote": True,
+                "heartbeatPath": str(hb_b),
+                "instances": [{"name": "agent", "expected": "none"}],
+            },
+        ],
+    )
+    config = _config(tmp_path, roster)
+    probes = {
+        "host-a": {"reachable": True, "healthy": True, "class": "healthy"},
+        "host-b": {"reachable": True, "healthy": True, "class": "healthy"},
+    }
+    _mod.run_once(config, _deps(1010.0, probes))
+
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    roster_data = json.loads(roster.read_text(encoding="utf-8"))
+    assert heartbeat["rosterDigest"] == _roster_lib.roster_digest(roster_data)
+    assert len(heartbeat["rosterDigest"]) == 64
+    assert heartbeat["rosterEpoch"] == int(roster.stat().st_mtime)
+    assert heartbeat["expectedHostCount"] == 2
+    assert heartbeat["observedHostCount"] == 2
+    assert heartbeat["unknownHostCount"] == 0
+    # Runtime-relevant instances exclude the expected==none relay row on host-b.
+    assert heartbeat["expectedInstanceCount"] == 2
+    assert heartbeat["observedInstanceCount"] == 2
+    assert heartbeat["problemInstanceCount"] == 0
+    assert heartbeat["unknownInstanceCount"] == 0
+    assert heartbeat["healthy"] is True
+
+
+def test_unknown_host_is_explicit_and_blocks_green(tmp_path: Path):
+    """#1875: a host with no configured heartbeat and no probe is UNKNOWN
+    (insufficient_data), not folded into healthy/absent, and it blocks green."""
+    # Simple (non-fleet) host with no heartbeatPath -> heartbeat not_configured;
+    # empty probe -> unknown; classify -> insufficient_data.
+    hosts = _hosts_file(tmp_path, [{"host": "host-a"}])
+    config = _config(tmp_path, hosts)
+    result = _mod.run_once(config, _deps(1010.0, {}))
+
+    assert result["hosts"][0]["class"] == "insufficient_data"
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["expectedHostCount"] == 1
+    assert heartbeat["unknownHostCount"] == 1
+    assert heartbeat["observedHostCount"] == 0
+    assert heartbeat["expectedInstanceCount"] == 0
+    assert heartbeat["healthy"] is False
+
+
+def test_problem_host_instances_counted_as_problem(tmp_path: Path):
+    """#1875: runtime-relevant instances on a problem host are counted as
+    problem/observed (not healthy, not unknown)."""
+    bad_hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="runtime_verify_failed", mtime=1000.0)
+    roster = _fleet_roster_file(
+        tmp_path,
+        [
+            {
+                "host": "host-a",
+                "role": "bot-host",
+                "collectorRemote": True,
+                "heartbeatPath": str(bad_hb),
+                "instances": [
+                    {"name": "bot1", "expected": "always_on", "service": "s1"},
+                    {"name": "bot2", "expected": "always_on", "service": "s2"},
+                ],
+            },
+        ],
+    )
+    config = _config(tmp_path, roster)
+    probes = {"host-a": {"reachable": True, "healthy": False, "class": "runtime_verify_failed"}}
+    _mod.run_once(config, _deps(1010.0, probes))
+
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["expectedInstanceCount"] == 2
+    assert heartbeat["problemInstanceCount"] == 2
+    assert heartbeat["observedInstanceCount"] == 2
+    assert heartbeat["unknownInstanceCount"] == 0
+    assert heartbeat["healthy"] is False
+
+
+def test_unreadable_roster_is_not_bound_and_blocks_green(tmp_path: Path, monkeypatch):
+    """#1875: if the roster cannot be independently loaded the heartbeat is not
+    roster-bound and must not be green (fail-closed)."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+
+    def boom(_path):
+        raise _mod.RosterError("cannot read roster")
+
+    monkeypatch.setattr(_mod, "load_roster", boom)
+    _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["rosterDigest"] is None
+    assert heartbeat["rosterEpoch"] is None
+    assert heartbeat["healthy"] is False

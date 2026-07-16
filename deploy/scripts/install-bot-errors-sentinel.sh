@@ -186,7 +186,8 @@ PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>BOT_ERRORS_STATE_DIR</key><string>$state_xml</string>
-    <key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel</string>
+    <key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel,collector_roster</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_HOSTS</key><string>$hosts_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT</key><string>$sentinel_heartbeat_xml</string>
     <key>BOT_ERRORS_MAX_FLEET_SENTINEL_AGE</key><string>$watchdog_max_age_xml</string>
   </dict>
@@ -306,7 +307,8 @@ Type=oneshot
 WorkingDirectory=$REPO_ROOT
 EnvironmentFile=-%h/.config/whatsoup/bot-errors.env
 Environment="BOT_ERRORS_STATE_DIR=$state_q"
-Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel"
+Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel,collector_roster"
+Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=$hosts_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT=$sentinel_heartbeat_q"
 Environment="BOT_ERRORS_MAX_FLEET_SENTINEL_AGE=$watchdog_max_age_q"
 ExecStart=$py_q $watchdog_script_q --once --max-fleet-sentinel-age $watchdog_max_age_q

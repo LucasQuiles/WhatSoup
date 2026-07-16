@@ -28,6 +28,13 @@ from typing import Callable, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from lib.bot_errors_roster import RosterError, load_roster, roster_epoch  # noqa: E402
+
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
 DEFAULT_CONNECTIVITY_HYSTERESIS_CYCLES = 3
@@ -451,6 +458,20 @@ def save_state(config: SentinelConfig, state: dict) -> None:
     atomic_write_json(state_path(config), state)
 
 
+def _host_observation_bucket(observed_class: str) -> str:
+    """Map an evaluated host class to observed / unknown / problem.
+
+    ``insufficient_data`` (no healthy or failed independent signal) and an
+    unevaluated roster host are UNKNOWN — explicitly, never folded into healthy
+    or absent (#1875). A definite non-healthy signal is a PROBLEM.
+    """
+    if observed_class == "healthy":
+        return "healthy"
+    if observed_class in ("", "insufficient_data"):
+        return "unknown"
+    return "problem"
+
+
 def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     hosts = result.get("hosts") if isinstance(result.get("hosts"), list) else []
     problem_hosts = [
@@ -460,15 +481,81 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     ]
     events = result.get("actionEvents") if isinstance(result.get("actionEvents"), list) else []
     attention_events = [event for event in events if isinstance(event, dict) and event.get("action") in ATTENTION_ACTIONS]
+
+    # Roster binding: the heartbeat is bound to a privacy-safe roster digest and
+    # inventory epoch so the watchdog can independently verify that the sentinel
+    # supervised the intended roster (not a truncated/wrong-path one). #1875.
+    inventory = result.get("rosterInventory") if isinstance(result.get("rosterInventory"), dict) else None
+    roster_epoch_val = result.get("rosterEpoch")
+
+    class_by_host: dict[str, str] = {}
+    for host in hosts:
+        if isinstance(host, dict) and host.get("host") is not None:
+            class_by_host[str(host["host"])] = str(host.get("class") or "")
+
+    if inventory is not None:
+        expected_hosts = [str(name) for name in (inventory.get("expectedHosts") or [])]
+        expected_host_count = int(inventory.get("expectedHostCount") or 0)
+        runtime_by_host = inventory.get("runtimeInstancesByHost") or {}
+        expected_instance_count = int(inventory.get("expectedInstanceCount") or 0)
+        roster_digest_val = inventory.get("digest")
+    else:
+        expected_hosts = [str(host["host"]) for host in hosts if isinstance(host, dict) and host.get("host") is not None]
+        expected_host_count = len(expected_hosts)
+        runtime_by_host = {}
+        expected_instance_count = 0
+        roster_digest_val = None
+
+    observed_host_count = 0
+    unknown_host_count = 0
+    for name in expected_hosts:
+        if _host_observation_bucket(class_by_host.get(name, "")) == "unknown":
+            unknown_host_count += 1
+        else:
+            observed_host_count += 1
+
+    observed_instance_count = 0
+    problem_instance_count = 0
+    unknown_instance_count = 0
+    for name, count in runtime_by_host.items():
+        count = int_or_zero(count)
+        bucket = _host_observation_bucket(class_by_host.get(str(name), ""))
+        if bucket == "unknown":
+            unknown_instance_count += count
+        elif bucket == "problem":
+            observed_instance_count += count
+            problem_instance_count += count
+        else:
+            observed_instance_count += count
+
+    # Green requires a bound, non-zero roster in addition to the base health
+    # signals. We deliberately do NOT require unknown_host_count == 0 here: an
+    # unprobed (heartbeat-only) host is already reflected in base_healthy via the
+    # per-host problem accounting, and gating green on zero-unknown would make a
+    # heartbeat-only fleet perpetually not-green. Unknown membership is instead
+    # reported explicitly below for the watchdog and operators.
+    roster_bound = bool(roster_digest_val) and expected_host_count > 0
+    base_healthy = result.get("fleetAction") == "none" and not problem_hosts and not attention_events
+    healthy = bool(base_healthy and roster_bound)
+
     payload = {
         "schemaVersion": 1,
         "kind": "bot-errors-sentinel-heartbeat",
         "checkedAt": result.get("checkedAt"),
         "controllerHost": result.get("controllerHost"),
-        "healthy": result.get("fleetAction") == "none" and not problem_hosts and not attention_events,
+        "healthy": healthy,
         "fleetAction": result.get("fleetAction"),
         "hostCount": len(hosts),
         "problemHostCount": len(problem_hosts),
+        "rosterDigest": roster_digest_val if roster_digest_val else None,
+        "rosterEpoch": roster_epoch_val if isinstance(roster_epoch_val, int) and not isinstance(roster_epoch_val, bool) else None,
+        "expectedHostCount": expected_host_count,
+        "observedHostCount": observed_host_count,
+        "unknownHostCount": unknown_host_count,
+        "expectedInstanceCount": expected_instance_count,
+        "observedInstanceCount": observed_instance_count,
+        "problemInstanceCount": problem_instance_count,
+        "unknownInstanceCount": unknown_instance_count,
     }
     atomic_write_json(heartbeat_path(config), payload)
     return str(heartbeat_path(config))
@@ -1460,6 +1547,15 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     now = deps.now_epoch()
     controller_host = deps.hostname()
     hosts = load_hosts(config.hosts_path, config.state_dir)
+    # Independently derive the roster inventory (digest + expected counts) from
+    # the same manifest the sentinel supervised, and bind it to the heartbeat so
+    # the watchdog can reject a truncated / wrong-path / roster-blind snapshot.
+    try:
+        _roster_data, roster_inventory_data = load_roster(config.hosts_path)
+        roster_epoch_value = roster_epoch(config.hosts_path)
+    except RosterError:
+        roster_inventory_data = None
+        roster_epoch_value = None
     state = load_state(config)
     state["schemaVersion"] = 1
     state["updatedAt"] = now_iso(now)
@@ -1549,6 +1645,8 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             "actionOutboxDepth": action_outbox_depth,
             "statePath": str(state_path(config)),
             "cycleSeq": state["cycleSeq"],
+            "rosterInventory": roster_inventory_data,
+            "rosterEpoch": roster_epoch_value,
         }
         result["heartbeatPath"] = save_central_heartbeat(config, result)
         return result

@@ -123,7 +123,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "05a07bd1212fea1acb37356a87039c2d53b17ffe38c6ff8547658b0035d5bdce",
+      "sha256": "71d48284f433489b7ec3b5f1ba882e6a3e76fada8e0c9cc4b0da4a277460dac9",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
@@ -183,7 +183,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "56499d5aea5cf69e3e5845f1c7478647d0621faed07bf1d91f67193d84af2a12",
+      "sha256": "5deb4c7077bb488500bbd58f3aa2f771dff62468ded0911e95a1861010d212a6",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES"
@@ -235,6 +235,15 @@
         "daily_health_host_from_payload",
         "normalize_hub_host",
         "remoteHost"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_roster.py",
+      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
+      "mustContain": [
+        "roster_digest",
+        "roster_inventory",
+        "load_roster"
       ]
     },
     {

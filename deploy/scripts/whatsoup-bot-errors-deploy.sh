@@ -21,7 +21,7 @@ ROOT="${2:?missing <root>}"
 FILES=(
   "deploy/scripts/bot-errors-dispatcher.py:d078aab86ef9619c5d65759f470b4ba037e83788e7c4a2d5f59a2235ce893e35"
   "deploy/scripts/bot-errors-health-check.py:061270815f5af97f836d59f48f792f00e16cbb16bcf1797a9878c15ba5155820"
-  "deploy/scripts/bot-errors-heartbeat-watchdog.py:05a07bd1212fea1acb37356a87039c2d53b17ffe38c6ff8547658b0035d5bdce"
+  "deploy/scripts/bot-errors-heartbeat-watchdog.py:71d48284f433489b7ec3b5f1ba882e6a3e76fada8e0c9cc4b0da4a277460dac9"
   "deploy/scripts/bot-errors-q-loop.py:eb7fc866b074d67406cf3ec9325dab5c202492ac223a1f57f85b09c1aebce21d"
   "src/lib/bot-errors-outbox.ts:f8ade0f2b2b6531488d7acb4f23cead45f3c471dd5e82faedad5549eeb0f07fc"
   "deploy/scripts/bot-errors-collector.py:f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5"
@@ -30,6 +30,7 @@ FILES=(
   "deploy/scripts/lib/__init__.py:438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0"
   "deploy/scripts/lib/bot_errors_redaction.py:274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301"
   "deploy/scripts/lib/bot_errors_daily_health.py:45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea"
+  "deploy/scripts/lib/bot_errors_roster.py:d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c"
 )
 
 sha() {
