@@ -508,6 +508,7 @@ describe('main bootstrap', () => {
       expect.any(Function),
       h.durability,
       'chat',
+      undefined, // grantManager — only agent instances construct one
     );
     expect(h.startHealthServer).toHaveBeenCalledWith(expect.objectContaining({
       db: h.db,
