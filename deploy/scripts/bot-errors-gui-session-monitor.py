@@ -288,14 +288,26 @@ GUI_LABEL_PREFIX = "com.whatsoup."
 # ``guiSessionExpected`` key. This is a NON-PII enum — host aliases + a policy
 # value only; no OS usernames are stored in committed SSOT (those stay
 # live-resolved, see resolve_expected_user).
+#
+# The CANONICAL definition of this vocabulary + each policy's cross-monitor
+# disposition lives in lib/bot_errors_policy.py (the #1874 SSOT). These constants
+# are kept local here — NOT imported at runtime — because the deployed monitor is
+# packaged by an explicit per-file allowlist (deploy/bot-errors-runtime-manifest
+# .json, whatsoup-bot-errors-deploy.sh), so importing a new lib module would add a
+# deploy dependency on those manifests. A drift-guard test
+# (test_gui_vocabulary_matches_policy_ssot) asserts these values stay byte-identical
+# to the SSOT, so the two cannot silently diverge. best_effort is an intentionally-
+# intermittent (expected-sleeping) host -> an auditable exclusion, NOT a
+# missing/unknown policy that must fail closed.
 POLICY_ALWAYS_AQUA = "always_aqua"      # GUI LaunchAgent must have an Aqua session -> monitor
 POLICY_HEADLESS_OK = "headless_ok"      # headless/on_demand, no Aqua session -> exclude
 POLICY_NOT_APPLICABLE = "not_applicable"  # systemd / no-bot / blocked -> exclude
+POLICY_BEST_EFFORT = "best_effort"      # intentionally intermittent (expected-sleeping) host -> exclude
 KNOWN_GUI_SESSION_POLICIES = frozenset(
-    {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE}
+    {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT}
 )
 # Declared policies that explicitly EXCLUDE a target from GUI-session monitoring.
-_EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE)
+_EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EFFORT)
 
 # Public manifests may use sanitized placeholder labels for private hosts. Those
 # hosts must declare this marker and provide their live labels via a hub-private
@@ -320,6 +332,48 @@ def policy_for_target(host_entry: dict, instance: dict):
     return None
 
 
+def unknown_policy_values(fleet: dict) -> list[dict]:
+    """Collect declared ``guiSessionExpected`` values that are not recognized.
+
+    A PRESENT-but-unrecognized policy (a typo or a retired enum) is a config
+    error: ``policy_for_target`` resolves it to ``None`` and it then silently
+    falls through to the fail-closed default in ``gui_targets_from_fleet``,
+    changing monitor membership without an auditable SSOT decision (the #1874
+    class of defect). A MISSING policy is NOT flagged — absence is the
+    intentional fail-closed default, not a typo.
+
+    Returns one record per offending declaration:
+    ``{"host": str, "instance": str | None, "value": str}`` (host-level
+    declarations carry ``instance=None``). Order is deterministic:
+    host-level first, then each instance in declaration order.
+    """
+    offenders: list[dict] = []
+    hosts = fleet.get("hosts")
+    if not isinstance(hosts, list):
+        return offenders
+    for host_entry in hosts:
+        if not isinstance(host_entry, dict):
+            continue
+        host = _norm(host_entry.get("host")) or "<unnamed-host>"
+        host_value = _norm(host_entry.get("guiSessionExpected"))
+        if host_value and host_value not in KNOWN_GUI_SESSION_POLICIES:
+            offenders.append({"host": host, "instance": None, "value": host_value})
+        instances = host_entry.get("instances")
+        if not isinstance(instances, list):
+            continue
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            inst_value = _norm(instance.get("guiSessionExpected"))
+            if inst_value and inst_value not in KNOWN_GUI_SESSION_POLICIES:
+                offenders.append({
+                    "host": host,
+                    "instance": _norm(instance.get("name")) or None,
+                    "value": inst_value,
+                })
+    return offenders
+
+
 def gui_targets_from_fleet(fleet: dict) -> list[dict]:
     """Enumerate GUI-session monitor targets from the expected-fleet SSOT.
 
@@ -331,6 +385,8 @@ def gui_targets_from_fleet(fleet: dict) -> list[dict]:
       - policy ``always_aqua``   -> monitored
       - policy ``headless_ok``   -> excluded
       - policy ``not_applicable``-> excluded
+      - policy ``best_effort``   -> excluded (intentionally intermittent /
+        expected-sleeping host; an auditable exclusion, not a forgotten policy)
       - policy missing/unknown   -> FAIL-CLOSED default: a plausible GUI
         LaunchAgent (``always_on`` + ``com.whatsoup.*`` label) is STILL
         monitored so a profile that forgot the policy is never silently dropped;
@@ -636,6 +692,19 @@ def config_check() -> int:
         return 2
     if not isinstance(data, dict):
         print(f"expected fleet file must contain a JSON object: {path}", file=sys.stderr)
+        return 2
+
+    unknown = unknown_policy_values(data)
+    if unknown:
+        detail = ", ".join(
+            f"{o['host']}" + (f"/{o['instance']}" if o["instance"] else "") + f"={o['value']!r}"
+            for o in unknown
+        )
+        print(
+            "expected fleet file declares unknown guiSessionExpected policy value(s): "
+            f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
+            file=sys.stderr,
+        )
         return 2
 
     private_override_error = private_override_contract_error(data)

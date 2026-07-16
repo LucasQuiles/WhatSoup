@@ -34,6 +34,7 @@
         "operator-private parity row captured outside the public repo",
         "source anchors below cover the standard and guard surfaces"
       ],
+      "verifiedAt": "2026-06-16",
       "approval": "none-read-only-evidence"
     },
     {
@@ -50,6 +51,7 @@
         "2026-06-15 fleet objective snapshot records the second hardened live bot; private instance label omitted from this public manifest",
         "source anchors below cover the standard and guard surfaces"
       ],
+      "verifiedAt": "2026-06-16",
       "approval": "none-read-only-evidence"
     },
     {
