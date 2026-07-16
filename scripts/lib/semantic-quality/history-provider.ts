@@ -80,7 +80,7 @@ function limitation(code: string, detail: unknown): string {
   return `${code}: ${safeText(detail)}`.slice(0, LIMITATION_LENGTH);
 }
 
-function isIsoTimestamp(value: unknown): value is string {
+export function isValidHistoryTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const match = ISO_TIMESTAMP_RE.exec(value);
   if (!match) return false;
@@ -139,7 +139,9 @@ function canonicalDisposition(value: unknown): DispositionRecord {
   if (!DISPOSITION_CATEGORIES.has(record.category as DispositionCategory)) {
     throw new Error('disposition category is invalid');
   }
-  if (!isIsoTimestamp(record.recordedAt)) throw new Error('disposition recordedAt is invalid');
+  if (!isValidHistoryTimestamp(record.recordedAt)) {
+    throw new Error('disposition recordedAt is invalid');
+  }
   return {
     category: record.category as DispositionCategory,
     artifactRefs: canonicalStringSet(record.artifactRefs, 'disposition artifactRefs'),
@@ -305,7 +307,7 @@ export async function collectHistory(input: CollectHistoryInput): Promise<Histor
       );
       break;
     }
-    if (!isIsoTimestamp(page.observedAt)) {
+    if (!isValidHistoryTimestamp(page.observedAt)) {
       result.limitations.push(
         limitation('history.invalid-observed-at', `page ${result.pageCount + 1} has no valid time`),
       );
