@@ -2538,6 +2538,21 @@ typecheck from a new observation run; never edit or reuse the failed run. For li
 corrective interval `BCF_VALIDATOR_BASE..BCF_VALIDATOR_COMMIT` must still contain exactly the three
 validator paths and no documentation path.
 
+Second recovery note for preserved run `bcf00-reconciliation-8a4e34828`: merge transition
+`39023446bcbf6795a51d2142678b7fcdb836fe3e` correctly joined first parent
+`8a4e348282a7c7be17576f352208a52802bce1eb` and pinned second parent
+`5d16cd401e1250f417f7bde481a4cc8b0ad1df55`, regenerated only the two authorized work-index
+conflicts, and recorded a passing conflict-resolution report. Its required
+`postmerge-validator-suite` then failed because the pinned-conflict regression cloned the current
+postmerge head, where the pinned parent was already an ancestor, instead of reconstructing the
+historical first-parent fixture. Preserve that reconciliation run and the original branch at the
+merge; neither is retryable evidence. Recover on a distinct branch from `8a4e348282a7c7be17576f352208a52802bce1eb`
+with one plan/notes commit followed by the exact three-validator-file correction
+`fix(quality): make pinned merge regression head-independent`. The fixture must select the first
+parent of a reachable merge whose second parent is the profile-owned pinned OID, when present, and
+otherwise retain the current premerge head. Re-run the full observation and reconciliation under
+new run IDs; only their fresh immutable receipts may advance BCF-00.
+
 ```bash
 git rev-parse --show-toplevel
 git rev-parse HEAD

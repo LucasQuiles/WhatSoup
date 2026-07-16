@@ -386,12 +386,35 @@ reuse or overwrite that run. The approved recovery is one plan/notes commit foll
 three-validator-file correction `fix(quality): accept conflict merge previews`, then a fresh full
 observation run.
 
+## 2026-07-16 postmerge validator recovery
+
+Fresh observation run `bcf00-observation-8a4e34828` passed and pinned origin/main at
+`5d16cd401e1250f417f7bde481a4cc8b0ad1df55`. Reconciliation run
+`bcf00-reconciliation-8a4e34828` then created merge
+`39023446bcbf6795a51d2142678b7fcdb836fe3e`, with validator commit
+`8a4e348282a7c7be17576f352208a52802bce1eb` as first parent and the pinned upstream as second
+parent. Its helper-owned generated-index resolution passed for exactly `docs/work-index.json` and
+`docs/work-index.md`. The subsequent required `postmerge-validator-suite` did not pass: the
+pinned-conflict regression cloned the current postmerge head, so the pinned parent was already an
+ancestor and the fixture could not recreate the expected conflict. The failed attempt, run, merge,
+and original branch remain preserved and non-retryable.
+
+Recovery continues on `experiment/jul16-boundary-core-history-recovery` from validator commit
+`8a4e348282a7c7be17576f352208a52802bce1eb`. After this plan/notes amendment, make exactly one
+three-validator-file correction with subject
+`fix(quality): make pinned merge regression head-independent`. Centralize the profile-owned pinned
+OID and make the regression select the historical merge's first parent before building its local
+fixture. Then create new observation and reconciliation run IDs; no result from the failed run may
+be promoted or overwritten.
+
 ## Authorization Boundary
 
-The current approval authorizes writing and committing the local specification, plan, and
-implementation-notes packet, then implementing and locally verifying the planned code tranche. It
-does not authorize creating or mutating GitHub issues, pull requests, comments, reviews, labels,
+The planning packet's initial approval authorized writing and committing the local specification,
+plan, and implementation notes, then implementing and locally verifying the planned code tranche.
+It did not authorize creating or mutating GitHub issues, pull requests, comments, reviews, labels,
 merges, workflow runs, rulesets, required contexts, repository settings, or external producers.
 
-Stop after local commit and verification unless a current owner instruction explicitly names the
-external action and target.
+The current owner instruction explicitly authorizes committing, pushing, opening the integration
+pull request, and merging this boundary-contract lane into the `LucasQuiles/WhatSoup` repository
+after its required evidence is complete. That authorization does not include issues, unrelated
+comments, settings, rulesets, required-check changes, workflow reruns, or other external producers.
