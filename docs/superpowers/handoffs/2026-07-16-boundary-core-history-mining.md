@@ -20,6 +20,17 @@ similarity, or term frequency. Those signals occur in legitimate work and remain
 No GitHub issue, comment, review, label, merge, close, reopen, workflow rerun, ruleset change, or
 pull request was created by this mining pass.
 
+## Execution-Plan Correction
+
+The first pre-implementation replay exposed an incorrect command shape in the reviewed plan: the
+evaluator rejects positional `baseline`/`candidate` arguments and accepts `--engine`, `--corpus`, and
+`--format`. Candidate replay also contains Git-backed cases and rejects execution unless
+`--verify-git` is present. The invalid positional and missing-verification invocations exited nonzero
+and are recorded as inconclusive command errors, not evaluator failures. The plan now uses the actual
+parser contract. Before Task 1 code, the existing evaluator test suite passed 7/7, the baseline
+reproduced 13/40 with 19 missed critical cases and zero false blocks, and the repository
+test-integrity baseline reported six known findings, zero new findings, and zero drifted findings.
+
 ## Observation Envelope
 
 - Observation window: 2026-07-16 00:35–00:45 America/New_York.

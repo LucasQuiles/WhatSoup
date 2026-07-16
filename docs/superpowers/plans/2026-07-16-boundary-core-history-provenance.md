@@ -1883,9 +1883,9 @@ production findings back into the experiment result. Do not move supply-chain ru
 
 ```bash
 bash scripts/run-with-pinned-npm.sh test -- tests/scripts/semantic-boundary-eval.test.ts --pool=forks --fileParallelism=false
-bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts baseline tests/fixtures/semantic-boundary-eval/cases.json
-bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts candidate tests/fixtures/semantic-boundary-eval/cases.json
-bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts candidate tests/fixtures/semantic-boundary-eval/holdout.json
+bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts --engine baseline --corpus tests/fixtures/semantic-boundary-eval/cases.json --format json
+bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts --engine candidate --corpus tests/fixtures/semantic-boundary-eval/cases.json --verify-git --format json
+bash scripts/run-with-pinned-node.sh scripts/experiments/semantic-boundary-eval.ts --engine candidate --corpus tests/fixtures/semantic-boundary-eval/holdout.json --verify-git --format json
 ```
 
 Expected: baseline 13/40 with 19 missed block cases and zero false blocks; candidate 40/40 with zero
