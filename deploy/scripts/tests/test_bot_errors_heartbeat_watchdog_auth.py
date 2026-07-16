@@ -874,6 +874,119 @@ def test_local_instance_health_flags_terminal_auth_class_as_physical_interventio
     assert "physical_intervention_required=terminal_auth_failure_class" in detail
 
 
+def _single_instance_profile(tmp_path: Path) -> Path:
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {
+                        "name": "line-alpha",
+                        "service": "whatsoup-line-alpha.service",
+                        "expected": "always_on",
+                        "healthPort": 3201,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return profile
+
+
+def test_local_instance_health_surfaces_terminal_auth_on_503(tmp_path: Path, monkeypatch):
+    """A server-side logout returns HTTP 503 with the full telemetry body.
+
+    The old non-200 short-circuit dropped the body, so the terminal-auth class
+    never surfaced and the dispatcher's Pattern-C inhibition never engaged. The
+    503 path MUST now parse the body and emit the terminal-auth token.
+    """
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps(
+            {
+                "line-alpha": {
+                    "status": 503,
+                    "json": {
+                        "status": "unhealthy",
+                        "instance": {"name": "line-alpha"},
+                        "whatsapp": {
+                            "connected": False,
+                            "connection": {
+                                "state": "disconnected",
+                                "last_status_code": 401,
+                                "last_disconnect_reason": "loggedOut",
+                                "auth_failure_class": "serverside_logout_irreversible",
+                            },
+                            "auth_bond": {"status": "present", "issues": []},
+                        },
+                    },
+                }
+            }
+        ),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "http_status=503" in detail
+    assert "auth_failure_class=serverside_logout_irreversible" in detail
+    assert "physical_intervention_required=terminal_auth_failure_class" in detail
+    # It is a structured failure, not the opaque probe-failed fallback.
+    assert "local instance health failure" in detail
+    assert "local health probe failed" not in detail
+
+
+def test_local_instance_health_503_without_auth_class_stays_recoverable(
+    tmp_path: Path, monkeypatch
+):
+    """A transient 503 crash (no auth_failure_class) must NOT be tagged terminal.
+
+    A real live crash should keep alerting until it recovers — the fix must not
+    suppress it by falsely inferring physical intervention.
+    """
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps(
+            {
+                "line-alpha": {
+                    "status": 503,
+                    "json": {
+                        "status": "unhealthy",
+                        "instance": {"name": "line-alpha"},
+                        "whatsapp": {"connected": False, "connection": {"state": "connecting"}},
+                    },
+                }
+            }
+        ),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "http_status=503" in detail
+    assert "health_status=unhealthy" in detail
+    assert "physical_intervention_required" not in detail
+    assert "auth_failure_class=" not in detail
+
+
+def test_local_instance_health_503_unparseable_body_fails_open(tmp_path: Path, monkeypatch):
+    """A hard-down instance (503 with non-JSON body) must still raise a problem."""
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(_single_instance_profile(tmp_path)))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps({"line-alpha": {"status": 503, "body": "<html>502 Bad Gateway</html>"}}),
+    )
+
+    detail = mod.local_instance_health_problems()["local_health:line-alpha"]
+
+    assert "local health probe failed" in detail
+    assert "http_status=503" in detail
+
+
 def test_terminal_auth_failure_class_inventory_matches_dispatcher_and_health_check():
     mod = _load_module()
 

@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "8d83e03b11ecedcb511caf27742a15d53b7a5ca70a9af4db6e3d2f25f2e8ea33",
+      "sha256": "f169290fdfe1543028a29b7c4d752e94a51564960ee9b052f3d217e74cc8ffd5",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -21,7 +21,8 @@
         "_is_ssh_transport_failure",
         "best-effort-remote",
         "redact_collector_text",
-        "tcp_probe_reachable"
+        "remote_liveness_probe_ok",
+        "tailscale_ping_command"
       ]
     },
     {
@@ -122,7 +123,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "3fe939866829ae41460833e4c6e1bd1f8738fdd128b808d6602d53c59975c209",
+      "sha256": "05a07bd1212fea1acb37356a87039c2d53b17ffe38c6ff8547658b0035d5bdce",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",

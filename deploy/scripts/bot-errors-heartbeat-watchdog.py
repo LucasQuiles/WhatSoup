@@ -1033,6 +1033,57 @@ def is_terminal_auth_failure_class(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
 
 
+def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], dict]:
+    """Extract failure reasons + formatting context from a parsed /health body.
+
+    Runs on ANY status code: a server-side logout returns HTTP 503 with the full
+    telemetry (including auth_failure_class), so the terminal-auth class must be
+    surfaced as a token regardless of the HTTP status. Returns ([], {}) when the
+    telemetry is clean (healthy instance).
+    """
+    instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
+    actual_name = instance.get("name") if isinstance(instance, dict) else None
+    whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
+    connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
+    auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
+    connected = whatsapp.get("connected") if isinstance(whatsapp, dict) else None
+    health_status = payload.get("status")
+    auth_failure = connection.get("auth_failure_class") if isinstance(connection, dict) else None
+    bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
+    bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
+    reasons: list[str] = []
+    if isinstance(actual_name, str) and actual_name != name:
+        reasons.append(f"health_identity_mismatch actual={actual_name}")
+    if health_status == "unhealthy":
+        reasons.append("health_status=unhealthy")
+    if connected is not True:
+        reasons.append(f"connected={str(connected).lower()}")
+    if auth_failure not in (None, "", "none"):
+        reasons.append(f"auth_failure_class={auth_failure}")
+        if is_terminal_auth_failure_class(auth_failure):
+            reasons.append("physical_intervention_required=terminal_auth_failure_class")
+    if bond_status not in (None, "", "present"):
+        reasons.append(f"auth_bond_status={bond_status}")
+    if isinstance(bond_issues, list) and bond_issues:
+        reasons.append(f"auth_bond_issues={','.join(str(issue) for issue in bond_issues[:5])}")
+    return reasons, {"connection": connection, "bond_status": bond_status}
+
+
+def format_health_failure(
+    name: str, port: int, url: str, status: int, reasons: list[str], ctx: dict, profile: Any
+) -> str:
+    connection = ctx.get("connection") if isinstance(ctx, dict) else {}
+    bond_status = ctx.get("bond_status") if isinstance(ctx, dict) else None
+    return (
+        f"local instance health failure: instance={name} port={port} url={url} "
+        f"http_status={status} {' '.join(reasons)} "
+        f"connection_state={compact_health_field(connection.get('state') if isinstance(connection, dict) else None)} "
+        f"last_status_code={compact_health_field(connection.get('last_status_code') if isinstance(connection, dict) else None)} "
+        f"last_disconnect_reason={compact_health_field(connection.get('last_disconnect_reason') if isinstance(connection, dict) else None)} "
+        f"auth_bond_status={compact_health_field(bond_status)} profile={profile}"
+    )
+
+
 def local_instance_health_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
@@ -1043,61 +1094,43 @@ def local_instance_health_problems() -> dict[str, str]:
         name = str(item["name"])
         status, body, url = local_health_http_response(name, port)
         key = f"local_health:{name}"
-        if status != 200:
-            problems[key] = (
-                f"local health probe failed: instance={name} port={port} url={url} "
-                f"http_status={status} body={compact_health_field(body)} profile={profile}"
-            )
+        # Parse the telemetry REGARDLESS of status code. A server-side logout
+        # returns HTTP 503 with the full health body carrying
+        # auth_failure_class=serverside_logout_irreversible — the old code
+        # short-circuited on non-200 and dumped the opaque body, so the
+        # terminal-auth token never surfaced and the dispatcher's Pattern-C
+        # inhibition never engaged (the instance re-paged indefinitely).
+        payload: dict | None = None
+        if isinstance(body, str) and body.strip():
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                payload = parsed
+        if payload is None:
+            # No structured telemetry to classify. Fail-open: still alert on the
+            # raw probe failure so a hard-down instance (503 HTML / empty body /
+            # transport error) is never silently swallowed.
+            if status != 200:
+                problems[key] = (
+                    f"local health probe failed: instance={name} port={port} url={url} "
+                    f"http_status={status} body={compact_health_field(body)} profile={profile}"
+                )
+            else:
+                problems[key] = (
+                    f"local health probe invalid JSON: instance={name} port={port} url={url} "
+                    f"http_status={status} body={compact_health_field(body)} profile={profile}"
+                )
             continue
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            problems[key] = (
-                f"local health probe invalid JSON: instance={name} port={port} url={url} "
-                f"http_status={status} body={compact_health_field(body)} profile={profile}"
-            )
-            continue
-        if not isinstance(payload, dict):
-            problems[key] = (
-                f"local health probe invalid payload: instance={name} port={port} url={url} "
-                f"http_status={status} payload_type={type(payload).__name__} profile={profile}"
-            )
-            continue
-        instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
-        actual_name = instance.get("name") if isinstance(instance, dict) else None
-        whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
-        connection = whatsapp.get("connection") if isinstance(whatsapp.get("connection"), dict) else {}
-        auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
-        connected = whatsapp.get("connected") if isinstance(whatsapp, dict) else None
-        health_status = payload.get("status")
-        auth_failure = connection.get("auth_failure_class") if isinstance(connection, dict) else None
-        bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
-        bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
-        reasons: list[str] = []
-        if isinstance(actual_name, str) and actual_name != name:
-            reasons.append(f"health_identity_mismatch actual={actual_name}")
-        if health_status == "unhealthy":
-            reasons.append("health_status=unhealthy")
-        if connected is not True:
-            reasons.append(f"connected={str(connected).lower()}")
-        if auth_failure not in (None, "", "none"):
-            reasons.append(f"auth_failure_class={auth_failure}")
-            if is_terminal_auth_failure_class(auth_failure):
-                reasons.append("physical_intervention_required=terminal_auth_failure_class")
-        if bond_status not in (None, "", "present"):
-            reasons.append(f"auth_bond_status={bond_status}")
-        if isinstance(bond_issues, list) and bond_issues:
-            reasons.append(f"auth_bond_issues={','.join(str(issue) for issue in bond_issues[:5])}")
+        reasons, ctx = health_reasons_from_payload(payload, name)
+        if status != 200 and not reasons:
+            # Non-200 with parseable-but-clean telemetry is still a probe
+            # failure — never drop it (fail-open).
+            reasons = [f"http_status_non_ok={status}"]
         if not reasons:
             continue
-        problems[key] = (
-            f"local instance health failure: instance={name} port={port} url={url} "
-            f"http_status={status} {' '.join(reasons)} "
-            f"connection_state={compact_health_field(connection.get('state') if isinstance(connection, dict) else None)} "
-            f"last_status_code={compact_health_field(connection.get('last_status_code') if isinstance(connection, dict) else None)} "
-            f"last_disconnect_reason={compact_health_field(connection.get('last_disconnect_reason') if isinstance(connection, dict) else None)} "
-            f"auth_bond_status={compact_health_field(bond_status)} profile={profile}"
-        )
+        problems[key] = format_health_failure(name, port, url, status, reasons, ctx, profile)
     return problems
 
 
