@@ -42,7 +42,7 @@ function canonicalOptionalGitOid(value: string | null | undefined, field: string
   return value == null ? null : canonicalGitOid(value, field);
 }
 
-function canonicalRepoPath(value: unknown, field: string): string {
+export function canonicalRepositoryPath(value: unknown, field = 'path'): string {
   if (typeof value !== 'string' || value.length === 0) throw invalid(field, value);
   if (value.startsWith('/') || value.includes('\\')) throw invalid(field, value);
   const segments = value.split('/');
@@ -88,9 +88,9 @@ export function canonicalPathBlobRecords(
     return {
       status: record.status,
       oldPath: needsOldPath
-        ? canonicalRepoPath(record.oldPath, `record[${index}].oldPath`)
+        ? canonicalRepositoryPath(record.oldPath, `record[${index}].oldPath`)
         : null,
-      path: canonicalRepoPath(record.path, `record[${index}].path`),
+      path: canonicalRepositoryPath(record.path, `record[${index}].path`),
       blobOid: canonicalGitOid(record.blobOid, `record[${index}].blobOid`),
     } satisfies PathBlobRecord;
   });
