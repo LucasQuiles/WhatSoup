@@ -55,6 +55,14 @@ receipt and planning-base commit predate this correction and cannot authorize th
 the operator must bind fresh exact-input review to a successor planning commit before resuming the
 bootstrap lane.
 
+The revived attempt-table implementation then exposed a second dynamic-argv omission before any
+child process ran: the three required liveness probes consume decimal identities emitted by the
+watchdog canary, but the closed placeholder allowlist did not name those prerequisite-derived
+values. The plan now permits only `watchdog-parent-pid`, `watchdog-child-pid`, and
+`watchdog-group-pgid`, parsed by the helper from the admitted canary PID artifact and never accepted
+from callers. This correction likewise requires a fresh exact-input review and successor planning
+commit before the bootstrap validator commit.
+
 ## Planning Review Evidence
 
 The 27-pass deterministic plan review completed under the external artifact root recorded in the

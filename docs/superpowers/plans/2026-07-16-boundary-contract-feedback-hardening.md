@@ -1430,8 +1430,11 @@ parent relation, and staged/merge-path allowlist source. The argv templates are 
 process equals one attempt. The four Task 2 inventory commands, five documentation/index commands,
 three evaluator invocations, two typechecks, and every other displayed multi-command block therefore
 retain separate IDs as shown above. Allowed placeholders are only `run-dir`, `entry-head`,
-`reconciled-base`, `observed-upstream-oid`, and `observed-merge-base`; each is resolved from immutable
-run fields or the validated stdout of the named prerequisite attempt. Every executable in a template
+`reconciled-base`, `observed-upstream-oid`, `observed-merge-base`, `watchdog-parent-pid`,
+`watchdog-child-pid`, and `watchdog-group-pgid`; each is resolved from immutable run fields or the
+validated stdout/artifact of the named prerequisite attempt. The three watchdog identities are
+positive decimal integers parsed exclusively from the admitted `watchdog-canary` PID artifact;
+callers cannot supply or override them. Every executable in a template
 comes from the closed tool-name set
 `bash|git|rg|tr|sort|wc|test|kill|ps|sleep|test-integrity|gnu-timeout|loadgate`
 and is resolved to a real path, version, and file hash by the helper-owned capability preflight
