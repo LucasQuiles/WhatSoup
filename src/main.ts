@@ -5,7 +5,7 @@ import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
-import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
+import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
 import { createConnection } from './transport/factory.ts';
@@ -724,13 +724,11 @@ const healthServer = startHealthServer({
 // 8. ffmpeg check
 try { execFileSync('which', ['ffmpeg']); } catch { log.warn('ffmpeg not found — video processing will fail'); }
 
-// 9. Initial cleanup (delayed 60s to not block startup)
-const startupCleanupTimeout = setTimeout(() => {
-  try {
-    const deleted = deleteOldMessages(db, config.retentionDays);
-    if (deleted > 0) log.info({ count: deleted }, 'retention: deleted old messages');
-  } catch (err) { log.error({ err }, 'startup cleanup failed'); }
-}, 60_000);
+// 9. (#1445 QR-012) Messages/receipts retention no longer runs its own
+// standalone startup timeout — it is folded into the unified
+// `databaseRetentionTimer` sweep below (item 12a), which already performs an
+// immediate run on `.start()`, so the startup prune still happens, just
+// through the single retention SSOT instead of a second bespoke path.
 
 // 10. Metrics backfill + hourly aggregation (piggybacks on enrichment cadence)
 const metricsBackfillTimeout = setTimeout(() => {
@@ -745,11 +743,10 @@ const metricsInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'metrics collection failed'); }
 }, config.enrichmentIntervalMs);
 
-// 11. Daily retention + hourly rate limit cleanup
+// 11. Daily rate limit + LLM attempt cleanup (messages/receipts retention
+// moved to the unified databaseRetentionTimer sweep, #1445 QR-012)
 const retentionInterval = setInterval(() => {
   try {
-    const deleted = deleteOldMessages(db, config.retentionDays);
-    if (deleted > 0) log.info({ count: deleted }, 'retention: deleted old messages');
     const rateLimitDeleted = cleanupOldRateLimits(db);
     if (rateLimitDeleted > 0) log.info({ count: rateLimitDeleted }, 'cleaned up old rate limits');
     const attemptsDeleted = cleanupOldAttempts(db);
@@ -773,7 +770,14 @@ const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
 );
 processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 
-const databaseRetentionTimer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+// 12a. (#1445 QR-012) Unified database retention sweep — also covers
+// messages/receipts now (config.retentionDays, same knob the retired
+// standalone path read), replacing the separate startup timeout + daily
+// interval that used to call deleteOldMessages() directly.
+const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
+  ...DEFAULT_DATABASE_RETENTION,
+  messageRetentionDays: config.retentionDays,
+});
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
@@ -994,7 +998,6 @@ async function shutdown(signal: string): Promise<void> {
   }, 10_000);
 
   try {
-    clearTimeout(startupCleanupTimeout);
     clearTimeout(metricsBackfillTimeout);
     clearInterval(metricsInterval);
     clearInterval(retentionInterval);
