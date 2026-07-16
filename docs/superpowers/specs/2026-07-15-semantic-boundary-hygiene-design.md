@@ -1,10 +1,12 @@
-# Semantic Boundary Hygiene Design
+# Semantic Boundary Hygiene Specification
 
-**Status:** Active
-**Review:** Approved direction; design record awaiting owner review
+**Status:** Active — approved for semantic-foundation implementation planning
+**Review:** Owner-approved direction on 2026-07-15; production enforcement has not started
 **Date:** 2026-07-15
 **Owner:** Lucas Quiles
 **Scope:** WhatSoup repository quality boundaries and the read-only contract used by external PR/issue producers
+**Implementation plan:** `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md`
+**Implementation notes:** `docs/superpowers/handoffs/2026-07-15-semantic-boundary-hygiene-implementation-notes.md`
 
 ## Outcome
 
@@ -18,6 +20,71 @@ The checks must tell an agent exactly what action was evaluated, what evidence w
 why the action was allowed, warned, blocked, or considered inconclusive, and what concrete
 change or command can resolve the finding. Passing output stays concise; warnings and blocks
 are intentionally explicit.
+
+## Authority and Tranche Boundary
+
+This specification defines the full semantic-boundary program. The approved first implementation
+tranche is narrower: semantic production reachability, executable negative-control proof for guard
+tests, structural decision-poll verification, contextual receipts, and shadow-mode local/CI wiring.
+It does not authorize GitHub writes, ruleset changes, blocking required-check promotion, automatic
+comments or labels, supply-chain pin replacement, or external producer changes.
+
+The first tranche must remain independently reviewable and reversible. Provenance/history,
+local enforcement, GitHub enforcement, and external producer integration each receive a separate
+implementation plan after the preceding tranche supplies measured false-positive, latency, and
+feedback-correction evidence. The existing experiment evaluator is evidence and a reusable test
+oracle; it is not itself the production guard architecture.
+
+## Measured Calibration
+
+The direction was evaluated before implementation on an isolated experiment branch.
+
+| Evaluation | Correct | Accuracy | False blocks | Missed block cases |
+|---|---:|---:|---:|---:|
+| Current gates, locked visible/synthetic corpus | 13/40 | 32.5% | 0 | 19 |
+| Candidate, same locked corpus | 40/40 | 100% | 0 | 0 |
+| Frozen candidate, later holdout | 18/18 | 100% | 0 | 0 |
+
+The locked corpus contains 10 recent visible PR snapshots and 30 synthetic cases. The holdout adds
+17 adversarial synthetic cases plus the newly wired current head of PR #1835. Seven main-corpus
+Git revisions and one holdout revision were traversed from exact Git objects. Required feedback
+fields were present in every candidate intervention finding.
+
+These measurements justify prioritizing the semantic foundation. They do **not** justify enabling
+blocking enforcement immediately: the examples are curated, synthetic labels encode this policy,
+GitHub provider behavior was not exercised end-to-end, and structural feedback completeness does
+not prove that an agent understands or acts on the feedback. Shadow observation and agent
+correction-rate measurement remain mandatory promotion gates.
+
+## Normative Requirements
+
+- **SBH-001 — Exact candidate identity:** Every decision records the exact candidate head and the
+  evidence source used to inspect it. Working-tree content may not silently stand in for a pushed
+  commit.
+- **SBH-002 — Runtime reachability:** An added production TypeScript/TSX module is integrated only
+  when a runtime edge connects it to a declared production root. Type-only imports, tests,
+  comments, strings, and unresolved computed imports do not establish the edge.
+- **SBH-003 — Honest unknowns:** Missing Git objects, parse failures, unavailable upstream state,
+  incomplete pagination, and timeouts produce `inconclusive`, never `pass`.
+- **SBH-004 — Exact before heuristic:** Exact fingerprints and stable patch evidence may block;
+  similarity and path overlap warn until a separately proven deterministic rule applies.
+- **SBH-005 — Re-entry evidence:** A prior architectural or runtime-wiring disposition remains in
+  force until a material delta, complete re-entry packet, or scoped owner override is present.
+- **SBH-006 — Feedback completeness:** Every warning, block, or inconclusive decision contains the
+  action, observed evidence, reason, correction, exact rerun command, and source references.
+- **SBH-007 — One engine, many adapters:** Hooks, local commands, workflows, and external producer
+  preflights consume the same policy functions and receipt schema.
+- **SBH-008 — Shadow before block:** A new blocker is first observed in shadow mode and requires a
+  negative control, positive control, false-positive control, rollback path, and measured owner or
+  agent review before promotion.
+- **SBH-009 — No ambient bypass:** Overrides are owner-authored, rule- and fingerprint-scoped,
+  time-bounded records. Environment variables and magic comments are not durable overrides.
+- **SBH-010 — Read-only GitHub access:** Repository-side history checks use read-only contents,
+  pull-request, and issue permissions and never execute untrusted head code with a privileged token.
+- **SBH-011 — Immutable upstream identity:** Enforced third-party action and image references use
+  full immutable identifiers plus a reviewable provenance record.
+- **SBH-012 — Bounded execution:** Boundary processes have an external deadline and owned
+  process-group cleanup. A deadline expiry is `inconclusive` and boundary-blocking once enforced.
 
 ## Evidence Behind the Design
 
@@ -66,10 +133,23 @@ re-exports, dynamic imports with literal specifiers, and known composition regis
 edges. Tests, fixtures, comments, strings, and source modules unreachable from a production
 root do not satisfy integration.
 
+The initial production roots are exactly:
+
+- `src/main.ts`;
+- `src/bootstrap.ts`;
+- `src/bootstrap-auth.ts`;
+- `src/fleet/standalone.ts`;
+- `src/transport/auth.ts`.
+
+Changing this list is a policy change with a positive and negative fixture. Added/renamed modules
+are the first block-capable delta. Modified pre-existing islands and full-tree export inventory
+start as warnings so the tranche does not convert historical debt into an unrelated hard stop.
+
 The first implementation reuses WS-D03 from
 `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md`:
 
-- add `scripts/orphan-export-guard.ts`;
+- add `scripts/semantic-quality-check.ts` backed by focused modules under
+  `scripts/lib/semantic-quality/`;
 - replace text-counting tests with fixture-driven reachability tests;
 - require guard companion tests to import, invoke, and prove a failure path;
 - make decision-poll checks structural and executable;
@@ -189,7 +269,7 @@ type BoundaryDecision = 'pass' | 'warn' | 'block' | 'inconclusive';
 interface BoundaryFinding {
   ruleId: string;
   decision: BoundaryDecision;
-  action: 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'update-pr' | 'merge' | 'tag';
+  action: 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'update-pr' | 'open-issue' | 'merge' | 'tag';
   summary: string;
   why: string;
   observed: Array<{ label: string; value: string }>;
@@ -233,8 +313,8 @@ external producer's preflight without scraping prose.
 
 ```text
 BLOCK [semantic.production-reachability] while pushing qpi/capability-grant
-Observed: src/lib/capability-grant.ts exports 3 runtime values; no path from src/main.ts,
-src/fleet/index.ts, or src/mcp/index.ts reaches the module. Only tests import it.
+Observed: src/lib/capability-grant.ts exports runtime values; no path from any declared production
+root reaches the module. Only tests import it.
 Why: tests prove the isolated primitive, not a WhatSoup runtime behavior.
 Correction: integrate at the named composition owner and add a behavior test through that owner,
 or remove the module. Do not allowlist a proposed feature.
@@ -332,10 +412,11 @@ The pre-push driver receives an external watchdog that owns and reaps its proces
 is `inconclusive` and blocking, with the active phase and rerun command in the receipt. Time
 budgets should be set from observed local/CI percentiles with slack, not guessed once and frozen.
 
-Add a fast required `semantic-quality` job on pinned Node 24 that runs before the expensive
-quality matrix. Add `workflow-hygiene` for parsed workflow/Docker pin checks plus `actionlint` and
-`shellcheck`. After an observation period and fixture review, add these contexts to ruleset
-`16319133`; ruleset mutation is a separate explicitly authorized operation.
+PR A adds one pinned-Node-24 shadow step to the existing Quality workflow. After shadow
+observation, a later GitHub-enforcement tranche may split that step into a fast `semantic-quality`
+job before the expensive matrix and add `workflow-hygiene` for parsed workflow/Docker pin checks,
+`actionlint`, and `shellcheck`. Only after the promotion gates pass may those contexts be proposed
+for ruleset `16319133`; ruleset mutation is a separate explicitly authorized operation.
 
 ## Validation Strategy
 
@@ -365,7 +446,9 @@ input passes. Every warning rule needs a false-positive fixture.
 
 ## Rollout
 
-1. **PR A — semantic foundation:** execute WS-D03 and introduce `verify:semantic`.
+1. **PR A — semantic foundation:** execute the dedicated implementation plan, introduce
+   `verify:semantic`, upgrade guard proof checks, and wire local/CI shadow reporting. No required
+   context or hard blocker is promoted in this PR.
 2. **PR B — boundary core:** provenance and canonical fingerprint library, receipt schema,
    renderer, and synthetic history/provider interfaces.
 3. **PR C — local enforcement:** changed-file pre-commit adapter, pre-push remote/history adapter,
@@ -376,8 +459,28 @@ input passes. Every warning rule needs a false-positive fixture.
    preflight before issue/PR create or reopen, and emit suppression receipts. This is outside the
    WhatSoup repository until its owner surface is identified.
 
-PR #1835 remains a separate needs-fix review. P0 issue #1783 remains separate product/security
-work; neither should be bundled into quality-infrastructure PRs.
+PR #1835 remains a separate code-review stream. P0 issue #1783 remains separate product/security
+work; neither is adjudicated or bundled by the quality-infrastructure PRs.
+
+## Promotion Gates
+
+A rule can move from shadow to warning only when its real-repository inventory is explainable and
+its feedback receipt names a correction that a reviewer can execute without rediscovery. A warning
+can move to blocking only when all of the following are recorded:
+
+1. a deterministic unsafe fixture and a neighboring legitimate fixture;
+2. a false-positive fixture derived from a real or adversarial example;
+3. at least 20 shadow observations or every applicable PR in a 14-day window, whichever is larger;
+4. zero unexplained false blocks in that observation set;
+5. measured local and CI duration distributions with a separately approved timeout;
+6. a rule-scoped rollback and owner-authored override path;
+7. an agent-feedback trial that records whether the next attempt corrected the cited condition;
+8. explicit owner authorization for ruleset or required-check mutation.
+
+Exact duplicate evidence may reach blocking before heuristic similarity, but it is not exempt from
+the observation, feedback, rollback, and authorization requirements. Supply-chain enforcement also
+requires a baseline migration so current mutable references are not converted into surprise global
+failures.
 
 ## Rollback and Overrides
 
@@ -404,3 +507,10 @@ work; neither should be bundled into quality-infrastructure PRs.
   command without requiring the driving agent to rediscover the failure.
 - Passing checks remain concise; warnings, blocks, and inconclusive states are visible and
   auditable.
+
+## Implementation Readiness
+
+The semantic-foundation plan is ready for execution only after this specification, its plan, and
+the implementation notes are committed together. Completion of those documents does not mean the
+production guard exists. The first implementation task must begin with a failing fixture and may
+reuse experiment logic only after moving it behind the production interfaces named in the plan.
