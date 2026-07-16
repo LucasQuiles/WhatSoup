@@ -20,15 +20,18 @@ import type { CandidateTree } from '../../scripts/lib/semantic-quality/git-tree.
 import type { SemanticPolicyFinding } from '../../scripts/lib/semantic-quality/policy.ts';
 import {
   aggregateBoundaryDecision,
+  buildBoundaryReceipt,
   buildSemanticReceipt,
   isBoundaryFindingComplete,
   renderSemanticReceipt,
   semanticExitCode,
   writeLocalReceipt,
   type BoundaryDecision,
+  type BoundaryFinding,
   type BoundaryReceipt,
   type EnforcementMode,
 } from '../../scripts/lib/semantic-quality/receipt.ts';
+import type { BoundaryAction } from '../../scripts/lib/semantic-quality/boundary-types.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = path.join(REPO_ROOT, 'scripts/semantic-quality-check.ts');
@@ -126,6 +129,32 @@ function runCli(repo: string, args: string[], env: NodeJS.ProcessEnv = cleanGitE
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
+function expectOperationalFinding(
+  parsed: BoundaryReceipt,
+  ruleId: string,
+  observedLabel: string,
+  source: string | RegExp,
+): BoundaryFinding {
+  const finding = parsed.findings.find((item) => item.ruleId === ruleId);
+  expect(finding).toMatchObject({
+    ruleId,
+    decision: 'inconclusive',
+    summary: expect.any(String),
+    why: expect.any(String),
+    observed: expect.arrayContaining([
+      expect.objectContaining({ label: observedLabel, value: expect.any(String) }),
+    ]),
+    correction: expect.arrayContaining([expect.any(String)]),
+    rerun: 'npm run verify:semantic -- --base origin/main',
+    sourceRefs: expect.any(Array),
+  });
+  if (typeof source === 'string') expect(finding?.sourceRefs).toContain(source);
+  else expect(finding?.sourceRefs.join(' ')).toMatch(source);
+  expect(finding?.summary.length).toBeGreaterThan(20);
+  expect(finding?.why.length).toBeGreaterThan(20);
+  return finding!;
+}
+
 function policyFinding(decision: Exclude<BoundaryDecision, 'pass'>): SemanticPolicyFinding {
   return {
     ruleId: 'semantic.production-reachability',
@@ -148,6 +177,38 @@ function receipt(
     enforcementMode,
     evidenceSource: 'fixture:semantic-quality-check',
   });
+}
+
+function genericFinding(
+  action: BoundaryAction,
+  overrides: Partial<BoundaryFinding> = {},
+): BoundaryFinding {
+  return {
+    ruleId: 'history.exact-closed-pr',
+    decision: 'block',
+    action,
+    summary: 'Candidate content exactly matches a prior closed pull request.',
+    why: 'The canonical path/blob identity is exact.',
+    observed: [{ label: 'content_fingerprint_sha256', value: 'a'.repeat(64) }],
+    matchedArtifacts: [
+      {
+        kind: 'pull-request',
+        repository: 'LucasQuiles/WhatSoup',
+        id: '1838',
+        url: 'https://github.com/LucasQuiles/WhatSoup/pull/1838',
+        state: 'closed-unmerged',
+        fingerprintSha256: 'a'.repeat(64),
+      },
+    ],
+    correction: ['Continue from the prior artifact or prove a material delta.'],
+    rerun: 'npm run verify:boundary',
+    sourceRefs: [
+      'https://github.com/LucasQuiles/WhatSoup/pull/1838',
+      'fixture:history',
+      'fixture:history',
+    ],
+    ...overrides,
+  };
 }
 
 afterEach(() => {
@@ -268,6 +329,126 @@ describe('semantic quality receipt', () => {
     expect(() => writeLocalReceipt(repo, receipt('warn', 'shadow'))).toThrow(/receipt.*symlink/i);
     expect(lstatSync(receiptPath).isSymbolicLink()).toBe(true);
     expect(readFileSync(decoy, 'utf8')).toBe('unchanged\n');
+  });
+});
+
+describe('generic boundary receipt', () => {
+  const actions: BoundaryAction[] = ['commit', 'push', 'open-pr', 'reopen-pr', 'open-issue'];
+
+  it.each(actions)('builds and renders complete matched-artifact feedback for %s', (action) => {
+    const built = buildBoundaryReceipt({
+      invocation: 'boundary-history',
+      action,
+      enforcementMode: 'enforce',
+      base: {
+        headOid: TREE.headOid,
+        baseOid: TREE.baseOid,
+        mergeBaseOid: TREE.mergeBaseOid,
+        evidenceSource: 'fixture:generic-boundary',
+      },
+      fingerprints: { zeta: null, alpha: 'b'.repeat(64) },
+      findings: [genericFinding(action)],
+      limitations: ['second limitation', 'first limitation', 'first limitation'],
+    });
+    const output = renderSemanticReceipt(built);
+
+    expect(built).toMatchObject({
+      schemaVersion: 1,
+      action,
+      decision: 'block',
+      correlationIdSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      fingerprints: { alpha: 'b'.repeat(64), zeta: null },
+      limitations: ['first limitation', 'second limitation'],
+    });
+    expect(built.findings[0]?.sourceRefs).toEqual([
+      'fixture:history',
+      'https://github.com/LucasQuiles/WhatSoup/pull/1838',
+    ]);
+    expect(output).toContain(`while ${action}`);
+    expect(output).toMatch(/Correlation: [0-9a-f]{12}/);
+    expect(output.indexOf('Matched artifacts:')).toBeGreaterThan(output.indexOf('Observed:'));
+    expect(output.indexOf('Why:')).toBeGreaterThan(output.indexOf('Matched artifacts:'));
+    expect(output).toContain('pull-request LucasQuiles/WhatSoup#1838');
+  });
+
+  it('derives correlation only from the stable safe tuple', () => {
+    const build = (input: {
+      action?: BoundaryAction;
+      headOid?: string;
+      ruleId?: string;
+      summary?: string;
+      limitation?: string;
+      evidenceSource?: string;
+    }) =>
+      buildBoundaryReceipt({
+        invocation: 'boundary-history',
+        action: input.action ?? 'open-pr',
+        enforcementMode: 'enforce',
+        base: {
+          headOid: input.headOid ?? TREE.headOid,
+          baseOid: TREE.baseOid,
+          mergeBaseOid: TREE.mergeBaseOid,
+          evidenceSource: input.evidenceSource ?? 'fixture:first-source',
+        },
+        findings: [
+          genericFinding(input.action ?? 'open-pr', {
+            ruleId: input.ruleId ?? 'history.exact-closed-pr',
+            summary: input.summary ?? 'first summary',
+          }),
+        ],
+        limitations: [input.limitation ?? 'first diagnostic'],
+      }).correlationIdSha256;
+
+    const stable = build({});
+    expect(build({
+      summary: 'different diagnostic prose',
+      limitation: 'different error text',
+      evidenceSource: '/different/local/path',
+    })).toBe(stable);
+    expect(build({ action: 'reopen-pr' })).not.toBe(stable);
+    expect(build({ headOid: '9999999999999999999999999999999999999999' })).not.toBe(stable);
+    expect(build({ ruleId: 'provenance.stale-overlap' })).not.toBe(stable);
+  });
+
+  it('rejects a finding whose action differs from the receipt boundary', () => {
+    expect(() =>
+      buildBoundaryReceipt({
+        invocation: 'boundary-history',
+        action: 'open-pr',
+        enforcementMode: 'enforce',
+        base: {
+          headOid: TREE.headOid,
+          baseOid: TREE.baseOid,
+          mergeBaseOid: TREE.mergeBaseOid,
+          evidenceSource: 'fixture:action-mismatch',
+        },
+        findings: [genericFinding('push')],
+      }),
+    ).toThrow(/action/i);
+  });
+
+  it('keeps the additive action and correlation fields optional for legacy receipt literals', () => {
+    const legacy: BoundaryReceipt = {
+      schemaVersion: 1,
+      repository: 'LucasQuiles/WhatSoup',
+      invocation: 'semantic-quality',
+      enforcementMode: 'shadow',
+      decision: 'pass',
+      base: {
+        headOid: TREE.headOid,
+        baseOid: TREE.baseOid,
+        mergeBaseOid: TREE.mergeBaseOid,
+        evidenceSource: 'fixture:legacy',
+      },
+      fingerprints: {},
+      findings: [],
+      limitations: [],
+    };
+
+    expect({
+      action: legacy.action ?? null,
+      correlationIdSha256: legacy.correlationIdSha256 ?? null,
+    }).toEqual({ action: null, correlationIdSha256: null });
   });
 });
 
@@ -427,7 +608,15 @@ export function emitDelegationReceipt(): void {}
     ]);
 
     expect(result.status).toBe(status);
-    expect(JSON.parse(result.stdout)).toMatchObject({ decision: 'inconclusive' });
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    expect(parsed).toMatchObject({ decision: 'inconclusive' });
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.candidate-unavailable',
+      'candidate_problem',
+      'git:refs/heads/absent',
+    );
+    expect(finding.summary).toMatch(/candidate revision/i);
   });
 
   it('treats an unreadable policy as inconclusive', () => {
@@ -444,7 +633,72 @@ export function emitDelegationReceipt(): void {}
     ]);
 
     expect(result.status).toBe(2);
-    expect(JSON.parse(result.stdout)).toMatchObject({ decision: 'inconclusive' });
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    expect(parsed).toMatchObject({ decision: 'inconclusive' });
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.policy-unavailable',
+      'policy_read_problem',
+      'config/semantic-quality.json',
+    );
+    expect(finding.summary).toMatch(/policy.*read|policy.*parsed/i);
+    expect(JSON.stringify(finding)).not.toMatch(/production module is not reachable/i);
+  });
+
+  it('identifies a missing configured root as source-tree evidence failure', () => {
+    const repo = initRepo();
+    write(repo, 'config/semantic-quality.json', `${JSON.stringify({
+      schemaVersion: 1,
+      roots: ['src/missing-root.ts'],
+      sourcePrefixes: ['src/'],
+      excludedSuffixes: ['.d.ts'],
+      allowlist: [],
+    })}\n`);
+    write(repo, 'src/main.ts', `console.log('main');\n`);
+    const head = commit(repo, 'source tree without configured root');
+
+    const result = runCli(repo, [
+      '--scope', 'tree',
+      '--head', head,
+      '--mode', 'enforce',
+      '--format', 'json',
+      '--no-receipt',
+    ]);
+
+    expect(result.status).toBe(2);
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.source-tree-unavailable',
+      'source_tree_problem',
+      'config/semantic-quality.json',
+    );
+    expect(finding.observed.map((item) => item.value).join(' ')).toMatch(/missing-root/i);
+  });
+
+  it('identifies a source parse failure as analysis evidence failure', () => {
+    const repo = initRepo();
+    writePolicy(repo);
+    write(repo, 'src/main.ts', `import { broken from './broken.ts';\n`);
+    const head = commit(repo, 'malformed source tree');
+
+    const result = runCli(repo, [
+      '--scope', 'tree',
+      '--head', head,
+      '--mode', 'enforce',
+      '--format', 'json',
+      '--no-receipt',
+    ]);
+
+    expect(result.status).toBe(2);
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.analysis-unavailable',
+      'analysis_problem',
+      'config/semantic-quality.json',
+    );
+    expect(finding.observed.map((item) => item.value).join(' ')).toMatch(/parse|syntax/i);
   });
 
   it('keeps an expired policy override blocking instead of converting it to unreadable', () => {
@@ -485,9 +739,42 @@ export function emitDelegationReceipt(): void {}
     ]);
 
     expect(result.status).toBe(2);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    expect(parsed).toMatchObject({
       decision: 'inconclusive',
       limitations: [expect.stringMatching(/unknown argument.*--unknown-option/i)],
     });
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.invocation-invalid',
+      'invocation_problem',
+      'semantic-quality-cli',
+    );
+    expect(finding.summary).toMatch(/invocation.*invalid/i);
+  });
+
+  it('adds a distinct finding when the receipt cannot be written durably', () => {
+    const { repo, baseOid, integratedOid } = makeHistory();
+    const directoryTarget = path.join(repo, 'receipt-target');
+    mkdirSync(directoryTarget);
+
+    const result = runCli(repo, [
+      '--head', integratedOid,
+      '--base', baseOid,
+      '--mode', 'enforce',
+      '--format', 'json',
+      '--receipt', directoryTarget,
+    ]);
+
+    expect(result.status).toBe(2);
+    const parsed = JSON.parse(result.stdout) as BoundaryReceipt;
+    const finding = expectOperationalFinding(
+      parsed,
+      'semantic.receipt-write-failed',
+      'receipt_write_problem',
+      'local-receipt-writer',
+    );
+    expect(finding.summary).toMatch(/receipt.*written durably/i);
+    expect(parsed.limitations.join(' ')).toMatch(/receipt write failed/i);
   });
 });

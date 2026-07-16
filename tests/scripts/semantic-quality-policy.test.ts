@@ -207,7 +207,7 @@ describe('exact candidate Git tree', () => {
 
     expect(findings).toContainEqual(
       expect.objectContaining({
-        ruleId: 'semantic.production-reachability',
+        ruleId: 'semantic.analysis-unavailable',
         decision: 'inconclusive',
       }),
     );

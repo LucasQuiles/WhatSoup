@@ -12,6 +12,7 @@ import {
   type SemanticPolicyFinding,
 } from './lib/semantic-quality/policy.ts';
 import {
+  buildBoundaryReceipt,
   buildSemanticReceipt,
   renderSemanticReceipt,
   semanticExitCode,
@@ -131,12 +132,26 @@ function emptyTree(limitation: string): CandidateTree {
   };
 }
 
-function inconclusiveFinding(message: string): SemanticPolicyFinding {
+function inconclusiveFinding(
+  ruleId:
+    | 'semantic.candidate-unavailable'
+    | 'semantic.policy-unavailable'
+    | 'semantic.analysis-unavailable'
+    | 'semantic.invocation-invalid'
+    | 'semantic.receipt-write-failed',
+  label:
+    | 'candidate_problem'
+    | 'policy_read_problem'
+    | 'analysis_problem'
+    | 'invocation_problem'
+    | 'receipt_write_problem',
+  message: string,
+): SemanticPolicyFinding {
   return {
-    ruleId: 'semantic.production-reachability',
+    ruleId,
     decision: 'inconclusive',
     paths: [],
-    evidence: [{ label: 'limitation', value: message }],
+    evidence: [{ label, value: message }],
   };
 }
 
@@ -153,16 +168,43 @@ function evaluateInvocation(
   options: SemanticQualityCliOptions,
   cwd: string,
 ): { receipt: BoundaryReceipt; tree: CandidateTree } {
-  const tree = readCandidateTree({
-    cwd,
-    head: options.head,
-    baseRef: options.scope === 'branch' ? options.base : undefined,
-    scope: options.scope,
-  });
+  let tree: CandidateTree;
+  try {
+    tree = readCandidateTree({
+      cwd,
+      head: options.head,
+      baseRef: options.scope === 'branch' ? options.base : undefined,
+      scope: options.scope,
+    });
+  } catch (error) {
+    const message = boundedMessage(error);
+    tree = emptyTree(message);
+    return {
+      tree,
+      receipt: buildSemanticReceipt({
+        tree,
+        policyFindings: [
+          inconclusiveFinding(
+            'semantic.candidate-unavailable',
+            'candidate_problem',
+            message,
+          ),
+        ],
+        enforcementMode: options.mode,
+        evidenceSource: `git:${options.head}`,
+      }),
+    };
+  }
   let policyFindings: SemanticPolicyFinding[];
 
   if (!tree.headOid) {
-    policyFindings = [inconclusiveFinding(tree.limitations.join('; '))];
+    policyFindings = [
+      inconclusiveFinding(
+        'semantic.candidate-unavailable',
+        'candidate_problem',
+        tree.limitations.join('; ') || `candidate ${options.head} could not be resolved`,
+      ),
+    ];
   } else {
     try {
       const policy = loadSemanticPolicy(cwd, tree.headOid);
@@ -172,7 +214,11 @@ function evaluateInvocation(
       policyFindings = [
         message.includes('invalid semantic quality policy')
           ? invalidPolicyFinding(message)
-          : inconclusiveFinding(message),
+          : inconclusiveFinding(
+              'semantic.policy-unavailable',
+              'policy_read_problem',
+              message,
+            ),
       ];
     }
   }
@@ -195,17 +241,26 @@ function addReceiptWriteFailure(
 ): BoundaryReceipt {
   const failedWrite = buildSemanticReceipt({
     tree,
-    policyFindings: [inconclusiveFinding(message)],
+    policyFindings: [
+      inconclusiveFinding(
+        'semantic.receipt-write-failed',
+        'receipt_write_problem',
+        message,
+      ),
+    ],
     enforcementMode: receipt.enforcementMode,
     evidenceSource: receipt.base.evidenceSource,
     limitations: [message],
   });
-  return {
-    ...receipt,
-    decision: receipt.decision === 'block' ? 'block' : 'inconclusive',
+  return buildBoundaryReceipt({
+    invocation: receipt.invocation,
+    action: receipt.action ?? 'push',
+    enforcementMode: receipt.enforcementMode,
+    base: receipt.base,
+    fingerprints: receipt.fingerprints,
     findings: [...receipt.findings, ...failedWrite.findings],
     limitations: [...new Set([...receipt.limitations, message])],
-  };
+  });
 }
 
 function writeReceiptForInvocation(
@@ -245,23 +300,49 @@ export function runSemanticQuality(
   cwd = process.cwd(),
 ): SemanticQualityRunResult {
   let options: SemanticQualityCliOptions;
-  let tree: CandidateTree;
-  let receipt: BoundaryReceipt;
+  let tree!: CandidateTree;
+  let receipt: BoundaryReceipt | null = null;
 
   try {
     options = parseSemanticQualityArgs(argv);
-    const evaluated = evaluateInvocation(options, cwd);
-    ({ tree, receipt } = evaluated);
   } catch (error) {
     options = fallbackOptions(argv);
     const message = boundedMessage(error);
     tree = emptyTree(message);
     receipt = buildSemanticReceipt({
       tree,
-      policyFindings: [inconclusiveFinding(message)],
+      policyFindings: [
+        inconclusiveFinding(
+          'semantic.invocation-invalid',
+          'invocation_problem',
+          message,
+        ),
+      ],
       enforcementMode: options.mode,
-      evidenceSource: `git:${options.head}`,
+      evidenceSource: 'semantic-quality-cli',
     });
+  }
+
+  if (receipt === null) {
+    try {
+    const evaluated = evaluateInvocation(options, cwd);
+    ({ tree, receipt } = evaluated);
+    } catch (error) {
+      const message = boundedMessage(error);
+      tree = emptyTree(message);
+      receipt = buildSemanticReceipt({
+        tree,
+        policyFindings: [
+          inconclusiveFinding(
+            'semantic.analysis-unavailable',
+            'analysis_problem',
+            message,
+          ),
+        ],
+        enforcementMode: options.mode,
+        evidenceSource: `git:${options.head}`,
+      });
+    }
   }
 
   let receiptPath: string | null = null;

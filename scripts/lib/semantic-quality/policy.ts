@@ -27,7 +27,13 @@ export interface SemanticPolicyFinding {
     | 'semantic.production-reachability'
     | 'semantic.export-ownership'
     | 'semantic.unresolved-runtime-edge'
-    | 'semantic.invalid-allowlist';
+    | 'semantic.invalid-allowlist'
+    | 'semantic.candidate-unavailable'
+    | 'semantic.policy-unavailable'
+    | 'semantic.source-tree-unavailable'
+    | 'semantic.analysis-unavailable'
+    | 'semantic.invocation-invalid'
+    | 'semantic.receipt-write-failed';
   decision: 'warn' | 'block' | 'inconclusive';
   paths: string[];
   evidence: Array<{ label: string; value: string }>;
@@ -206,12 +212,16 @@ function sourcePath(policy: SemanticQualityPolicy, candidate: string): boolean {
   );
 }
 
-function inconclusive(problems: string[]): SemanticPolicyFinding[] {
+function inconclusive(
+  ruleId: 'semantic.source-tree-unavailable' | 'semantic.analysis-unavailable',
+  label: 'source_tree_problem' | 'analysis_problem',
+  problems: string[],
+): SemanticPolicyFinding[] {
   return [{
-    ruleId: 'semantic.production-reachability',
+    ruleId,
     decision: 'inconclusive',
     paths: [],
-    evidence: problems.map((value) => ({ label: 'limitation', value })),
+    evidence: problems.map((value) => ({ label, value })),
   }];
 }
 
@@ -231,19 +241,33 @@ export function evaluateSemanticPolicy(input: {
 }): SemanticPolicyFinding[] {
   const policyValidation = validatePolicy(input.policy, input.now);
   if (policyValidation.problems.length > 0) return invalidPolicyFindings(policyValidation);
-  if (input.tree.limitations.length > 0) return inconclusive(input.tree.limitations);
+  if (input.tree.limitations.length > 0) {
+    return inconclusive(
+      'semantic.source-tree-unavailable',
+      'source_tree_problem',
+      input.tree.limitations,
+    );
+  }
 
   let graph: ReturnType<typeof buildModuleGraph>;
   try {
     graph = buildModuleGraph(input.tree.sources);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return inconclusive([message.slice(0, 500)]);
+    return inconclusive(
+      'semantic.analysis-unavailable',
+      'analysis_problem',
+      [message.slice(0, 500)],
+    );
   }
 
   const missingRoots = input.policy.roots.filter((root) => !graph.files.has(root));
   if (missingRoots.length > 0) {
-    return inconclusive(missingRoots.map((root) => `configured production root is missing: ${root}`));
+    return inconclusive(
+      'semantic.source-tree-unavailable',
+      'source_tree_problem',
+      missingRoots.map((root) => `configured production root is missing: ${root}`),
+    );
   }
 
   const candidates = input.tree.changedPaths
@@ -291,10 +315,10 @@ export function evaluateSemanticPolicy(input: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     findings.push({
-      ruleId: 'semantic.export-ownership',
+      ruleId: 'semantic.analysis-unavailable',
       decision: 'inconclusive',
       paths: [],
-      evidence: [{ label: 'limitation', value: message.slice(0, 500) }],
+      evidence: [{ label: 'analysis_problem', value: message.slice(0, 500) }],
     });
     return findings;
   }

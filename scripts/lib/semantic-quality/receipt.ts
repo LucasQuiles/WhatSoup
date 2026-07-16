@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -16,29 +16,30 @@ import path from 'node:path';
 
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { fsyncDirectory, privateWriteError } from '../../../src/lib/private-fs.ts';
+import type {
+  BoundaryAction,
+  BoundaryArtifact,
+  BoundaryDecision,
+  BoundaryFinding,
+} from './boundary-types.ts';
 import type { CandidateTree } from './git-tree.ts';
 import type { SemanticPolicyFinding } from './policy.ts';
 
-export type BoundaryDecision = 'pass' | 'warn' | 'block' | 'inconclusive';
+export type {
+  BoundaryAction,
+  BoundaryArtifact,
+  BoundaryDecision,
+  BoundaryEvidenceRecord,
+  BoundaryFinding,
+} from './boundary-types.ts';
 export type EnforcementMode = 'shadow' | 'enforce';
-
-export interface BoundaryFinding {
-  ruleId: string;
-  decision: Exclude<BoundaryDecision, 'pass'>;
-  action: 'push';
-  summary: string;
-  why: string;
-  observed: Array<{ label: string; value: string }>;
-  matchedArtifacts: [];
-  correction: string[];
-  rerun: string;
-  sourceRefs: string[];
-}
 
 export interface BoundaryReceipt {
   schemaVersion: 1;
   repository: 'LucasQuiles/WhatSoup';
-  invocation: 'semantic-quality';
+  invocation: string;
+  action?: BoundaryAction;
+  correlationIdSha256?: string;
   enforcementMode: EnforcementMode;
   decision: BoundaryDecision;
   base: {
@@ -50,6 +51,16 @@ export interface BoundaryReceipt {
   fingerprints: Record<string, string | null>;
   findings: BoundaryFinding[];
   limitations: string[];
+}
+
+export interface BuildBoundaryReceiptInput {
+  invocation: string;
+  action: BoundaryAction;
+  enforcementMode: EnforcementMode;
+  base: BoundaryReceipt['base'];
+  fingerprints?: Record<string, string | null>;
+  findings: BoundaryFinding[];
+  limitations?: string[];
 }
 
 export interface BuildSemanticReceiptInput {
@@ -99,18 +110,82 @@ const FINDING_LANGUAGE: Record<SemanticPolicyFinding['ruleId'], FindingLanguage>
       'Do not use environment variables or source comments as semantic-quality bypasses.',
     ],
   },
+  'semantic.candidate-unavailable': {
+    summary: 'The requested candidate revision could not be resolved.',
+    why: 'Without an exact candidate tree and head identity, semantic reachability and ownership analysis cannot produce a clean result.',
+    correction: [
+      'Fetch the requested revision and verify the --head value resolves to a committed candidate.',
+      'Rerun only after the candidate tree and changed-path evidence are readable.',
+    ],
+  },
+  'semantic.policy-unavailable': {
+    summary: 'The semantic quality policy could not be read or parsed.',
+    why: 'Unreadable policy evidence leaves production roots, source scope, and owner exceptions unknown.',
+    correction: [
+      'Restore config/semantic-quality.json at the candidate revision and validate its JSON encoding.',
+      'Keep a readable but semantically invalid policy on the existing invalid-allowlist blocker path.',
+    ],
+  },
+  'semantic.source-tree-unavailable': {
+    summary: 'The candidate source tree or a configured production root is incomplete.',
+    why: 'A missing source inventory or runtime root prevents the graph from proving which production composition paths exist.',
+    correction: [
+      'Restore the missing TypeScript source tree or correct the configured production root.',
+      'Rerun after every declared root is present in the exact candidate tree.',
+    ],
+  },
+  'semantic.analysis-unavailable': {
+    summary: 'Semantic graph analysis could not complete.',
+    why: 'A parse, graph, reachability, or ownership failure makes partial semantic conclusions unsafe.',
+    correction: [
+      'Correct the named source or analysis failure and rerun the semantic boundary.',
+      'Do not treat partial graph results as proof of reachability or ownership.',
+    ],
+  },
+  'semantic.invocation-invalid': {
+    summary: 'The semantic quality invocation is invalid.',
+    why: 'Unknown, conflicting, or missing CLI arguments mean the requested boundary scope was not established.',
+    correction: [
+      'Correct the named CLI argument and rerun with an explicit scope, head, base, mode, and receipt choice.',
+    ],
+  },
+  'semantic.receipt-write-failed': {
+    summary: 'The boundary receipt could not be written durably.',
+    why: 'Analysis without an atomic durable receipt cannot prove what evidence and decision reached the enforcement boundary.',
+    correction: [
+      'Choose a writable non-symlink receipt path and verify its parent directory is private and durable.',
+      'Rerun the complete boundary action; do not reuse an in-memory decision as durable proof.',
+    ],
+  },
 };
+
+const POLICY_SOURCE_RULES = new Set<SemanticPolicyFinding['ruleId']>([
+  'semantic.production-reachability',
+  'semantic.export-ownership',
+  'semantic.unresolved-runtime-edge',
+  'semantic.invalid-allowlist',
+  'semantic.policy-unavailable',
+  'semantic.source-tree-unavailable',
+  'semantic.analysis-unavailable',
+]);
+
+function semanticSourceRefs(
+  finding: SemanticPolicyFinding,
+  evidenceSource: string,
+): string[] {
+  const sources = [evidenceSource, ...finding.paths];
+  if (POLICY_SOURCE_RULES.has(finding.ruleId)) sources.push('config/semantic-quality.json');
+  if (finding.ruleId === 'semantic.invocation-invalid') sources.push('semantic-quality-cli');
+  if (finding.ruleId === 'semantic.receipt-write-failed') sources.push('local-receipt-writer');
+  return sources;
+}
 
 function findingFromPolicy(
   finding: SemanticPolicyFinding,
   evidenceSource: string,
 ): BoundaryFinding {
   const language = FINDING_LANGUAGE[finding.ruleId];
-  const sourceRefs = [
-    evidenceSource,
-    'config/semantic-quality.json',
-    ...finding.paths,
-  ];
+  const sourceRefs = semanticSourceRefs(finding, evidenceSource);
   return {
     ruleId: finding.ruleId,
     decision: finding.decision,
@@ -124,7 +199,102 @@ function findingFromPolicy(
     matchedArtifacts: [],
     correction: [...language.correction],
     rerun: 'npm run verify:semantic -- --base origin/main',
-    sourceRefs: [...new Set(sourceRefs)],
+    sourceRefs,
+  };
+}
+
+function sortedUnique(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values)].sort();
+}
+
+function sortedFingerprints(
+  fingerprints: Record<string, string | null> | undefined,
+): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.entries(fingerprints ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function compareArtifacts(left: BoundaryArtifact, right: BoundaryArtifact): number {
+  return (
+    left.kind.localeCompare(right.kind) ||
+    left.repository.localeCompare(right.repository) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function canonicalFinding(item: BoundaryFinding): BoundaryFinding {
+  return {
+    ...item,
+    observed: item.observed.map((evidence) => ({ ...evidence })),
+    matchedArtifacts: item.matchedArtifacts.map((artifact) => ({ ...artifact })).sort(compareArtifacts),
+    correction: [...item.correction],
+    sourceRefs: sortedUnique(item.sourceRefs),
+  };
+}
+
+function correlationIdSha256(input: {
+  invocation: string;
+  action: BoundaryAction;
+  enforcementMode: EnforcementMode;
+  base: BoundaryReceipt['base'];
+  fingerprints: Record<string, string | null>;
+  findings: BoundaryFinding[];
+}): string {
+  const tuple = {
+    schemaVersion: 1,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: input.invocation,
+    action: input.action,
+    enforcementMode: input.enforcementMode,
+    base: {
+      headOid: input.base.headOid,
+      baseOid: input.base.baseOid,
+      mergeBaseOid: input.base.mergeBaseOid,
+    },
+    fingerprints: input.fingerprints,
+    ruleIds: sortedUnique(input.findings.map((finding) => finding.ruleId)),
+  };
+  return createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
+}
+
+export function buildBoundaryReceipt(input: BuildBoundaryReceiptInput): BoundaryReceipt {
+  if (typeof input.invocation !== 'string' || input.invocation.trim().length === 0) {
+    throw new Error('boundary receipt invocation is required');
+  }
+  for (const item of input.findings) {
+    if (item.action !== input.action) {
+      throw new Error(
+        `boundary finding action ${item.action} does not match receipt action ${input.action}`,
+      );
+    }
+    if (!isBoundaryFindingComplete(item)) {
+      throw new Error(`boundary finding ${item.ruleId || '<missing>'} is incomplete`);
+    }
+  }
+  const fingerprints = sortedFingerprints(input.fingerprints);
+  const findings = input.findings
+    .map(canonicalFinding)
+    .sort((left, right) => left.ruleId.localeCompare(right.ruleId));
+  return {
+    schemaVersion: 1,
+    repository: 'LucasQuiles/WhatSoup',
+    invocation: input.invocation,
+    action: input.action,
+    correlationIdSha256: correlationIdSha256({
+      invocation: input.invocation,
+      action: input.action,
+      enforcementMode: input.enforcementMode,
+      base: input.base,
+      fingerprints,
+      findings,
+    }),
+    enforcementMode: input.enforcementMode,
+    decision: aggregateBoundaryDecision(findings),
+    base: { ...input.base },
+    fingerprints,
+    findings,
+    limitations: sortedUnique(input.limitations ?? []),
   };
 }
 
@@ -160,12 +330,10 @@ export function isBoundaryFindingComplete(item: {
 }
 
 export function buildSemanticReceipt(input: BuildSemanticReceiptInput): BoundaryReceipt {
-  return {
-    schemaVersion: 1,
-    repository: 'LucasQuiles/WhatSoup',
+  return buildBoundaryReceipt({
     invocation: 'semantic-quality',
+    action: 'push',
     enforcementMode: input.enforcementMode,
-    decision: aggregateBoundaryDecision(input.policyFindings),
     base: {
       headOid: input.tree.headOid || null,
       baseOid: input.tree.baseOid,
@@ -177,7 +345,7 @@ export function buildSemanticReceipt(input: BuildSemanticReceiptInput): Boundary
       findingFromPolicy(finding, input.evidenceSource),
     ),
     limitations: [...new Set([...input.tree.limitations, ...(input.limitations ?? [])])],
-  };
+  });
 }
 
 export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
@@ -189,9 +357,24 @@ export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
   for (const finding of receipt.findings) {
     if (lines.length > 0) lines.push('');
     lines.push(`${finding.decision.toUpperCase()} [${finding.ruleId}] while ${finding.action}`);
+    if (receipt.correlationIdSha256) {
+      lines.push(`Correlation: ${receipt.correlationIdSha256.slice(0, 12)}`);
+    }
     lines.push(`Summary: ${finding.summary}`);
     lines.push('Observed:');
     for (const item of finding.observed) lines.push(`  - ${item.label}: ${item.value}`);
+    if (finding.matchedArtifacts.length > 0) {
+      lines.push('Matched artifacts:');
+      for (const item of finding.matchedArtifacts) {
+        const details = [
+          `${item.kind} ${item.repository}#${item.id}`,
+          item.state ? `state=${item.state}` : '',
+          item.url ?? '',
+          item.fingerprintSha256 ? `fingerprint=${item.fingerprintSha256}` : '',
+        ].filter(Boolean);
+        lines.push(`  - ${details.join(' ')}`);
+      }
+    }
     lines.push(`Why: ${finding.why}`);
     lines.push('Correction:');
     for (const item of finding.correction) lines.push(`  - ${item}`);
@@ -200,7 +383,10 @@ export function renderSemanticReceipt(receipt: BoundaryReceipt): string {
     for (const item of finding.sourceRefs) lines.push(`  - ${item}`);
   }
   if (receipt.findings.length === 0 && receipt.limitations.length > 0) {
-    lines.push('INCONCLUSIVE [semantic.production-reachability] while push');
+    lines.push(`INCONCLUSIVE [boundary.evidence-incomplete] while ${receipt.action ?? 'push'}`);
+    if (receipt.correlationIdSha256) {
+      lines.push(`Correlation: ${receipt.correlationIdSha256.slice(0, 12)}`);
+    }
     lines.push('Observed:');
     for (const limitation of receipt.limitations) lines.push(`  - limitation: ${limitation}`);
   }
