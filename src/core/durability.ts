@@ -370,7 +370,9 @@ export class DurabilityEngine {
          FROM outbound_ops o WHERE o.id = ?`,
       ),
       markMaybeSent: prepare(
-        `UPDATE outbound_ops SET status = 'maybe_sent', error = ? WHERE id = ?`,
+        `UPDATE outbound_ops
+         SET status = 'maybe_sent', error = ?, wa_message_id = COALESCE(?, wa_message_id)
+         WHERE id = ?`,
       ),
       markFailedPermanent: prepare(
         `UPDATE outbound_ops SET status = 'failed_permanent', error = ? WHERE id = ?`,
@@ -1240,8 +1242,8 @@ export class DurabilityEngine {
     });
   }
 
-  markMaybeSent(id: number, error?: string): void {
-    this.statements.markMaybeSent.run(error ?? null, id);
+  markMaybeSent(id: number, error?: string, waMessageId?: string): void {
+    this.statements.markMaybeSent.run(error ?? null, waMessageId ?? null, id);
   }
 
   markFailedPermanent(id: number, error: string): void {

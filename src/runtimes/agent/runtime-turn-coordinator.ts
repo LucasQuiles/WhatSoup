@@ -34,6 +34,7 @@ import { createChildLogger } from '../../logger.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('agent-runtime');
+export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
 
 export interface RuntimeTurnSourceSnapshot {
   readonly sourceMessageId: string;
@@ -599,7 +600,19 @@ async awaitRejectedRuntimeTurnFinalizations(): Promise<void> {
   throw new AggregateError(failures, 'rejected runtime turn finalization failed');
 }
 
-async finalizeActiveRuntimeTurnsForShutdown(): Promise<void> {
+async finalizeActiveRuntimeTurnsForShutdown(
+  deadlineAt = Date.now() + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
+): Promise<void> {
+  if (!Number.isFinite(deadlineAt)) {
+    throw new Error('Runtime turn shutdown deadline must be finite');
+  }
+  const activeQueue = this.host.getActiveQueue();
+  const shutdownQueues = new Set<IOutboundQueue>([
+    ...(activeQueue === null ? [] : [activeQueue]),
+    ...this.host.chatQueues.values(),
+  ]);
+  for (const queue of shutdownQueues) queue.preemptForShutdown?.(deadlineAt);
+
   const pending: Promise<FinalizeRuntimeTurnResult>[] = [];
   const queueUndispatched = (turn: QueuedTurn): void => {
     if (!turn.runtimeContext) {
@@ -629,7 +642,6 @@ async finalizeActiveRuntimeTurnsForShutdown(): Promise<void> {
   ) {
     pending.push(this.finalizeUndispatchedRuntimeTurn(activeGlobalTurn.runtimeContext));
   }
-  const activeQueue = this.host.getActiveQueue();
   if (current && activeQueue) {
     activeQueue.abortTurn({ preserveEvidence: true });
     pending.push(this.finalizeRuntimeTurnContext({
@@ -667,8 +679,27 @@ async finalizeActiveRuntimeTurnsForShutdown(): Promise<void> {
       clearReplayOnSuccess: false,
     }));
   }
-  const settled = await Promise.allSettled(pending);
-  await this.awaitActiveFinalizations();
+  const finalizationWork = (async (): Promise<PromiseSettledResult<FinalizeRuntimeTurnResult>[]> => {
+    const results = await Promise.allSettled(pending);
+    await this.awaitActiveFinalizations();
+    return results;
+  })();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let settled: PromiseSettledResult<FinalizeRuntimeTurnResult>[];
+  try {
+    settled = await Promise.race([
+      finalizationWork,
+      new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(
+          () => reject(new Error('Runtime turn shutdown finalization deadline expired')),
+          Math.max(0, deadlineAt - Date.now()),
+        );
+        deadlineTimer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
   const rejected = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
   const unproven = settled.filter((item): item is PromiseFulfilledResult<FinalizeRuntimeTurnResult> => (
     item.status === 'fulfilled'
