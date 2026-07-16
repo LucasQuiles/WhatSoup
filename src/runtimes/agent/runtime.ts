@@ -5491,7 +5491,7 @@ export class AgentRuntime implements Runtime {
         const toolNames = this.activeToolNames.get(toolScopeKey);
         const trackedToolName = toolNames?.get(event.toolId);
         const resultToolName = event.toolName?.trim() || undefined;
-        if (trackedToolName === undefined && resultToolName !== undefined) {
+        if (trackedToolName === undefined) {
           this.turnHadToolActivity.add(toolScopeKey);
           if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
             const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
@@ -10167,7 +10167,7 @@ export class AgentRuntime implements Runtime {
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
         const trackedToolName = toolNames?.get(event.toolId);
         const resultToolName = event.toolName?.trim() || undefined;
-        if (trackedToolName === undefined && resultToolName !== undefined) {
+        if (trackedToolName === undefined) {
           this.singleTurnHadToolActivity = true;
           if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
             this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);

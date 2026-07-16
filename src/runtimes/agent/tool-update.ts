@@ -265,10 +265,9 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   const simplified = normalizeDisplayLine(firstLine)
     .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
     .replace(/^Exit code (\d+)$/, 'exit code $1');
-  const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
 
   const humanName = displayToolName === 'unknown' ? '' : displayToolName;
-  const detail = humanName ? `${humanName} — ${reason}` : reason;
+  const detail = humanName ? `${humanName} — ${simplified}` : simplified;
 
   return { category, detail: boundToolUpdateDetail(detail) };
 }

@@ -132,6 +132,12 @@ describe('classifyToolError', () => {
     expect(result.detail.length).toBeLessThanOrEqual(100);
   });
 
+  it('does not split an astral character at the unknown-tool truncation boundary', () => {
+    const result = classifyToolError('unknown', `${'a'.repeat(98)}😀tail`);
+
+    expect(result.detail).toBe(`${'a'.repeat(98)}…`);
+  });
+
   it('uses first line only for multiline errors', () => {
     const result = classifyToolError('Bash', 'first line\nsecond line\nthird line');
     expect(result.detail).toBe('Bash — first line');
