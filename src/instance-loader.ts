@@ -83,6 +83,8 @@ interface InstanceConfig {
   pineconeAllowedIndexes?: string[];
   maxTokens?: number;
   tokenBudget?: number;
+  /** Summarize-before-trim gate (#1445 QR-010). Default true. See docs/configuration.md. */
+  workingMemorySummarization?: boolean;
   rateLimitPerHour?: number;
   healthPort?: number;
   gui?: boolean;

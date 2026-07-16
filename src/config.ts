@@ -1038,6 +1038,14 @@ export const config = {
   // Token budget
   tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,
 
+  // Working-memory summarize-before-trim (#1445 QR-010). When the conversation
+  // window would exceed tokenBudget, the oldest overflow turns are summarized
+  // in one cheap LLM call and prepended as a synthetic turn instead of being
+  // silently dropped. Default true. When false (or when the summarization call
+  // fails), a deterministic "[N earlier turns omitted]" marker is used instead
+  // — there is never silent, untraceable loss either way.
+  workingMemorySummarization: (instance?.workingMemorySummarization as boolean | undefined) ?? true,
+
   // Retention
   retentionDays: resolvedMemory.retention.days,
 
