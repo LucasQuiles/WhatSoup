@@ -19,6 +19,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
   BOUNDARY_RUN_SCHEMA,
   RUN_ATTEMPT_CONTRACTS,
   RUN_CHILD_CONTRACTS,
@@ -2920,7 +2921,7 @@ async function recordGitTransition(
     conflictPaths = gitPathSet(cwd, ['diff', '--name-only', '--diff-filter=U', '--']);
     const generatedIndexPaths = ['docs/work-index.json', 'docs/work-index.md'];
     const resolutionEligible = manifest.run.profileId === 'bcf00-reconciliation'
-      && expectedSecondParent === '5d16cd401e1250f417f7bde481a4cc8b0ad1df55'
+      && expectedSecondParent === BOUNDARY_PINNED_GENERATED_INDEX_PARENT
       && canonicalizeBoundaryRun(conflictPaths) === canonicalizeBoundaryRun(generatedIndexPaths)
       && canonicalizeBoundaryRun(previewConflictPaths) === canonicalizeBoundaryRun(generatedIndexPaths);
     if (resolutionEligible) {

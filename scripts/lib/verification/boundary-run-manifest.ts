@@ -1742,7 +1742,7 @@ function hasDirectStatus(rawExit: unknown, rawSignal: unknown, expectedExit: num
   return expectedExit === null || (rawExit === expectedExit && rawSignal === null);
 }
 
-const PINNED_GENERATED_INDEX_PARENT = '5d16cd401e1250f417f7bde481a4cc8b0ad1df55';
+export const BOUNDARY_PINNED_GENERATED_INDEX_PARENT = '5d16cd401e1250f417f7bde481a4cc8b0ad1df55';
 const GENERATED_INDEX_PATHS = ['docs/work-index.json', 'docs/work-index.md'] as const;
 const GENERATED_INDEX_ARGV = ['bash', 'scripts/run-with-pinned-npm.sh', 'run', 'work-index:regen'] as const;
 
@@ -1887,7 +1887,7 @@ export function validateBoundaryStructuredRecord(
     const expectedPaths = [...GENERATED_INDEX_PATHS];
     check(
       value['policy'] === 'regenerate-generated-work-index'
-        && isOid(value['beforeHead']) && value['expectedSecondParent'] === PINNED_GENERATED_INDEX_PARENT
+        && isOid(value['beforeHead']) && value['expectedSecondParent'] === BOUNDARY_PINNED_GENERATED_INDEX_PARENT
         && canonicalizeBoundaryRun(value['conflictPaths']) === canonicalizeBoundaryRun(expectedPaths)
         && canonicalizeBoundaryRun(value['resolvedPaths']) === canonicalizeBoundaryRun(expectedPaths)
         && canonicalizeBoundaryRun(value['generatorArgv']) === canonicalizeBoundaryRun(GENERATED_INDEX_ARGV),

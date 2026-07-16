@@ -6,7 +6,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import * as boundaryRun from '../../scripts/lib/verification/boundary-run-manifest.ts';
-import { validateBoundaryRun } from '../../scripts/lib/verification/boundary-run-manifest.ts';
+import {
+  BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
+  validateBoundaryRun,
+} from '../../scripts/lib/verification/boundary-run-manifest.ts';
 import * as boundaryCli from '../../scripts/verify-boundary-run.ts';
 import { evaluateBaseline, evaluateCandidate, loadCorpus } from '../../scripts/experiments/semantic-boundary-eval.ts';
 
@@ -1466,7 +1469,7 @@ describe('boundary run validator', () => {
       schemaVersion: 1,
       policy: 'regenerate-generated-work-index',
       beforeHead: OID,
-      expectedSecondParent: '5d16cd401e1250f417f7bde481a4cc8b0ad1df55',
+      expectedSecondParent: BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
       conflictPaths: ['docs/work-index.json', 'docs/work-index.md'],
       indexStages: [
         { path: 'docs/work-index.json', stage: 1, mode: '100644', oid: OID },
@@ -2515,6 +2518,17 @@ describe('boundary run validator', () => {
     execFileSync('git', ['clone', '--shared', process.cwd(), clone], { stdio: 'ignore' });
     git(clone, ['config', 'user.name', 'WhatSoup Test']);
     git(clone, ['config', 'user.email', FIXTURE_EMAIL]);
+    const pinnedMerge = git(clone, ['rev-list', '--first-parent', '--merges', 'HEAD'])
+      .split('\n')
+      .filter(Boolean)
+      .find((commit) => {
+        const parents = git(clone, ['show', '-s', '--format=%P', commit]).split(' ');
+        return parents.length === 2 && parents[1] === BOUNDARY_PINNED_GENERATED_INDEX_PARENT;
+      });
+    if (pinnedMerge !== undefined) {
+      const [historicalFirstParent] = git(clone, ['show', '-s', '--format=%P', pinnedMerge]).split(' ');
+      git(clone, ['switch', '-c', 'pinned-conflict-base', historicalFirstParent!]);
+    }
     const validatorPaths = [
       'scripts/lib/verification/boundary-run-manifest.ts',
       'scripts/verify-boundary-run.ts',
@@ -2545,7 +2559,7 @@ describe('boundary run validator', () => {
       const destination = path.join(pinnedBin, executable);
       if (!existsSync(destination)) symlinkSync(path.join(path.dirname(process.execPath), executable), destination);
     }
-    const pinnedParent = '5d16cd401e1250f417f7bde481a4cc8b0ad1df55';
+    const pinnedParent = BOUNDARY_PINNED_GENERATED_INDEX_PARENT;
     git(clone, ['cat-file', '-e', `${pinnedParent}^{commit}`]);
     const beforeHead = git(clone, ['rev-parse', 'HEAD']);
     const mergeBase = git(clone, ['merge-base', beforeHead, pinnedParent]);
