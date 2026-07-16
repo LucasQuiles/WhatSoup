@@ -460,9 +460,10 @@ export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
 
 /**
  * Pure derivation of the `modelUsable` health verdict from the last usability
- * probe, gated on freshness. A `usable` probe older than `freshnessMs` is reported
- * as `null` (unknown) with `modelUsableStale=true` rather than a stale green. Pure
- * + exported for direct unit testing (the probe state itself is private).
+ * probe, gated on freshness. Either verdict — a `usable` green OR a
+ * requires-alert red — older than `freshnessMs` is reported as `null` (unknown)
+ * with `modelUsableStale=true` rather than a stale green or a stale red (#1884).
+ * Pure + exported for direct unit testing (the probe state itself is private).
  */
 export function deriveModelUsable(
   usability: RuntimePrimaryModelUsability | null,
@@ -481,7 +482,15 @@ export function deriveModelUsable(
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
   }
   if (primaryModelUsabilityRequiresAlert(usability)) {
-    return { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt };
+    // Symmetric with the `usable` branch (#1884): a "not usable" verdict older
+    // than freshnessMs (e.g. a credential-unavailable cached at startup) is
+    // stale evidence, not an authoritative red — report null (unknown) +
+    // modelUsableStale=true so it re-probes rather than caching a stale false.
+    const fresh = typeof modelUsableCheckedAt === 'number'
+      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
+    return fresh
+      ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
+      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
   }
   return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
 }

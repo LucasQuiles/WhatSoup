@@ -39,9 +39,28 @@ describe('deriveModelUsable — modelUsable freshness gate (RCA 2026-06-24)', ()
     expect(deriveModelUsable(u, NOW).modelUsable).toBe(true);
   });
 
-  it('unusable (credential-unavailable) → false, regardless of probe age', () => {
+  it('FRESH unusable (credential-unavailable) → false', () => {
     const u = { ...base, status: 'credential-unavailable' as const, probeInFlight: false, checkedAt: NOW };
-    expect(deriveModelUsable(u, NOW)).toMatchObject({ modelUsable: false, modelUsableStale: false });
+    expect(deriveModelUsable(u, NOW)).toEqual({ modelUsable: false, modelUsableStale: false, modelUsableCheckedAt: NOW });
+  });
+
+  it('STALE unusable → unknown + stale (the #1884 stale-red gap, symmetric with stale-green)', () => {
+    const checkedAt = NOW - Math.round(9.4 * 60 * 60_000); // 9.4h-old startup credential-unavailable verdict
+    const u = { ...base, status: 'credential-unavailable' as const, probeInFlight: false, checkedAt };
+    expect(deriveModelUsable(u, NOW)).toEqual({ modelUsable: null, modelUsableStale: true, modelUsableCheckedAt: checkedAt });
+  });
+
+  it('unusable with null checkedAt → treated as stale (no fresh evidence)', () => {
+    const u = { ...base, status: 'credential-unavailable' as const, probeInFlight: false, checkedAt: null };
+    expect(deriveModelUsable(u, NOW)).toEqual({ modelUsable: null, modelUsableStale: true, modelUsableCheckedAt: null });
+  });
+
+  it('red honors a custom freshnessMs window', () => {
+    const checkedAt = NOW - 10 * 60_000;
+    const u = { ...base, status: 'credential-unavailable' as const, probeInFlight: false, checkedAt };
+    const r = deriveModelUsable(u, NOW, 5 * 60_000);
+    expect(r.modelUsable).toBeNull();
+    expect(r.modelUsableStale).toBe(true);
   });
 
   it('honors a custom freshnessMs window', () => {
