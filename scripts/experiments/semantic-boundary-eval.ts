@@ -89,7 +89,7 @@ export interface EvaluationCase {
 
 export interface PathBlobRecord {
   status: string;
-  oldPath?: string;
+  oldPath?: string | null;
   path: string;
   blobOid: string;
 }
