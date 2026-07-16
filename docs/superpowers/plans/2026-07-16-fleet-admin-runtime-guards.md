@@ -53,7 +53,7 @@
 - Modify: `tests/deploy/preflight-check.test.ts`
 - Modify only if needed for first-start proof: `src/fleet/routes/ops.ts`, `src/main.ts`
 
-**Contract:** The checker resolves the instance database from the standard XDG data root, opens it read-only, runs `quick_check`, verifies the required tables/columns, and emits one JSON verdict. It blocks on any replay-safe row outside `echoed`, `failed_permanent`, or `quarantined`; database/query/shape errors; unknown statuses; or a missing database on a previously-started instance. Unsafe nonterminal rows are reported as degraded debt but never replayed. A genuinely new instance may use a private, single-use first-start marker created by the CREATE path and removed after the database opens successfully.
+**Contract:** The checker resolves the instance database from the standard XDG data root, opens it read-only, runs `quick_check`, verifies the required tables/columns, and emits one JSON verdict. It blocks on any replay-safe row outside `echoed`, `failed_permanent`, `quarantined`, or the retained legacy terminal status `cancelled`; database/query/shape errors; unknown statuses; or a missing database on a previously-started instance. Unsafe nonterminal rows are reported as degraded debt but never replayed. A genuinely new instance may use a private, single-use first-start marker created by the CREATE path and removed after the database opens successfully.
 
 - [ ] Write failing tests for old and recent safe nonterminal rows, terminal safe rows, unsafe `maybe_sent`, unknown status, corrupt/missing schema, SQLite failure, first-start proof, and JSON output redaction.
 - [ ] Run the focused test and capture the expected failures.

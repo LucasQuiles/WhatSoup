@@ -117,7 +117,7 @@ Legacy compatibility code may read historical `response_sent` rows, but new writ
 Introduce one reusable, fail-closed restart check used by deployment scripts and operator restart commands. It opens the live database read-only and blocks when any outbound operation has:
 
 - `replay_policy = 'safe'`; and
-- a status outside the terminal set (`echoed`, `failed_permanent`, `quarantined`).
+- a status outside the terminal set (`echoed`, `failed_permanent`, `quarantined`, or the retained legacy terminal status `cancelled`).
 
 There is no age filter. The check also reports, without payloads or destinations:
 

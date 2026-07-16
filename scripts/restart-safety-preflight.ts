@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const TERMINAL_OUTBOUND_STATUSES = ['echoed', 'failed_permanent', 'quarantined'] as const;
+const TERMINAL_OUTBOUND_STATUSES = [
+  'echoed',
+  'failed_permanent',
+  'quarantined',
+  'cancelled',
+] as const;
 const KNOWN_OUTBOUND_STATUSES = [
   'pending',
   'sending',
@@ -12,6 +17,7 @@ const KNOWN_OUTBOUND_STATUSES = [
   'maybe_sent',
   'failed_permanent',
   'quarantined',
+  'cancelled',
 ] as const;
 const KNOWN_REPLAY_POLICIES = ['safe', 'unsafe', 'read_only'] as const;
 const REPLAY_SAFE_POLICIES = ['safe', 'read_only'] as const;

@@ -101,7 +101,7 @@ describe('restart-safety preflight', () => {
     });
   });
 
-  it.each(['echoed', 'failed_permanent', 'quarantined'])(
+  it.each(['echoed', 'failed_permanent', 'quarantined', 'cancelled'])(
     'allows terminal replay-safe status %s',
     (status) => {
       const { dbPath, db } = createFixtureDb();
@@ -130,7 +130,7 @@ describe('restart-safety preflight', () => {
   });
 
   it.each([
-    ['unknown status', 'cancelled', 'unsafe'],
+    ['unknown status', 'future_status', 'unsafe'],
     ['unknown replay policy', 'echoed', 'future_policy'],
   ])('blocks %s', (_label, status, replayPolicy) => {
     const { dbPath, db } = createFixtureDb();
