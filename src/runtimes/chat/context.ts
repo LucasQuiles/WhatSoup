@@ -54,6 +54,7 @@ export async function loadContext(
   chatJid: string,
   senderJid: string,
   messageText: string,
+  traceId?: string,
 ): Promise<string> {
   if (!messageText.trim()) return '';
 
@@ -64,26 +65,39 @@ export async function loadContext(
     // standalone mw-mind profile where namespace ordering actually changes
     // the fan-out.
     const routed = routeQuery(messageText, { namespaces: config.memory.pinecone.namespaces });
-    const results = await pinecone.searchEntities(messageText);
+    // QR-006: only append traceId when the caller actually threaded one
+    // through — preserves the exact no-traceId call signature for callers
+    // that don't (yet) have a traceId in scope.
+    const results = traceId
+      ? await pinecone.searchEntities(messageText, traceId)
+      : await pinecone.searchEntities(messageText);
     const topScores = results.slice(0, 3).map((r) => r.score);
+    // QR-006: candidate IDs alongside scores — bounded to 10 so a large
+    // candidate set can't blow up log volume.
+    const entityIds = results.slice(0, 10).map((r) => r.id);
     log.info(
       {
         chatJid,
         senderJid,
         entityHits: results.length,
         topScores,
+        entityIds,
         queryIntent: routed.intent,
         routedNamespaces: routed.namespaces,
+        ...(traceId ? { traceId } : {}),
       },
       'entity context retrieval complete',
     );
     return loadEntityContext(results);
   }
 
+  // QR-006: only append traceId when supplied — see entity-mode comment above.
   const [chatResults, senderResults, selfResults] = await Promise.all([
-    pinecone.searchForChat(chatJid, messageText),
-    pinecone.searchForSender(senderJid, messageText),
-    pinecone.searchSelfFacts(messageText),
+    traceId ? pinecone.searchForChat(chatJid, messageText, traceId) : pinecone.searchForChat(chatJid, messageText),
+    traceId
+      ? pinecone.searchForSender(senderJid, messageText, traceId)
+      : pinecone.searchForSender(senderJid, messageText),
+    traceId ? pinecone.searchSelfFacts(messageText, traceId) : pinecone.searchSelfFacts(messageText),
   ]);
 
   // Merge, deduplicate by id, preserve insertion order (chat results first)
@@ -108,8 +122,25 @@ export async function loadContext(
 
   if (merged.length === 0 && selfFacts.length === 0) return '';
 
-  const topScores = [...merged, ...selfFacts].slice(0, 3).map((r) => r.score);
-  log.info({ chatJid, senderJid, chatHits: chatResults.length, senderHits: senderResults.length, selfHits: selfResults.length, mergedHits: merged.length + selfFacts.length, topScores }, 'context retrieval complete');
+  const topResults = [...merged, ...selfFacts];
+  const topScores = topResults.slice(0, 3).map((r) => r.score);
+  // QR-006: candidate IDs alongside scores — bounded to 10 so a large
+  // candidate set can't blow up log volume.
+  const candidateIds = topResults.slice(0, 10).map((r) => r.id);
+  log.info(
+    {
+      chatJid,
+      senderJid,
+      chatHits: chatResults.length,
+      senderHits: senderResults.length,
+      selfHits: selfResults.length,
+      mergedHits: merged.length + selfFacts.length,
+      topScores,
+      candidateIds,
+      ...(traceId ? { traceId } : {}),
+    },
+    'context retrieval complete',
+  );
 
   const parts: string[] = [];
 
