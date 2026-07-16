@@ -77,7 +77,13 @@ import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePe
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
-import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
+import {
+  SessionManager,
+  buildChildEnv,
+  formatAge,
+  getProviderBinary,
+  type SessionCrashInfo,
+} from './session.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -7923,10 +7929,48 @@ export class AgentRuntime implements Runtime {
     if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
+    const fallbackProviderConfig = fallbackProviderConfigFor(
+      fallbackEntry.provider,
+      this.agentProvider,
+      this.agentProviderConfig,
+    );
+    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
+    let fallbackProbeEnv: NodeJS.ProcessEnv | null = null;
+    if (fallbackBinary) {
+      try {
+        fallbackProbeEnv = buildChildEnv(
+          fallbackEntry.provider,
+          {
+            allowM365Mutations: this.allowM365Mutations,
+            whatsoupInstance: this.instanceName,
+            whatsoupMcpSocket: this.globalMcpSocketPath ?? undefined,
+          },
+          fallbackEntry.model,
+          fallbackProviderConfig,
+        );
+      } catch (err) {
+        const detail = errorMessage(err);
+        log.error({
+          err: detail,
+          fallbackProvider: fallbackEntry.provider,
+          fallbackModel: fallbackEntry.model,
+        }, 'fallback preflight child environment configuration failed');
+        emitAlertChecked(
+          this.instanceName,
+          'fallback_preflight_config_error',
+          'Fallback provider preflight configuration error',
+          `provider=${alertEvidenceValue(fallbackEntry.provider)}`
+            + ` model=${alertEvidenceValue(fallbackEntry.model)}`
+            + ` detail=${alertEvidenceValue(detail)}`,
+        );
+        return true;
+      }
+    }
+
     const service = resolveProviderKeyService(
       fallbackEntry.provider,
       fallbackEntry.model,
-      fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig),
+      fallbackProviderConfig,
     );
     if (service) {
       const key = lookupCredential(service);
@@ -7960,9 +8004,8 @@ export class AgentRuntime implements Runtime {
     // Pre-flight: check binary presence for CLI-backed fallback providers.
     // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
     // Never blocks or reverts the window — fail-open on anything except ENOENT.
-    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
-    if (fallbackBinary) {
-      void probeFallbackBinary(fallbackBinary).then((r) => {
+    if (fallbackBinary && fallbackProbeEnv) {
+      void probeFallbackBinary(fallbackBinary, fallbackProbeEnv).then((r) => {
         if (r.status === 'missing') {
           log.error(
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
@@ -7989,7 +8032,7 @@ export class AgentRuntime implements Runtime {
           // Fire-and-forget, fail-open: never blocks or reverts the window.
           if (fallbackEntry.model && fallbackEntry.provider === 'opencode-cli') {
             const fallbackModel = fallbackEntry.model;
-            void probeModelCatalog(fallbackBinary, fallbackModel).then((catalog) => {
+            void probeModelCatalog(fallbackBinary, fallbackModel, fallbackProbeEnv).then((catalog) => {
               if (catalog.status !== 'not_found') return;
               log.error(
                 {

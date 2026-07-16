@@ -563,7 +563,7 @@ describe('loadInstance — OpenCode model admission', () => {
     });
 
     expect(() => loadInstance('model-less-opencode-agent')).toThrow(/opencode-cli.*model/i);
-    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+    expect(process.env).not.toHaveProperty('INSTANCE_CONFIG');
   });
 
   it('admits a mapped OpenCode route resolved through models.conversation', () => {

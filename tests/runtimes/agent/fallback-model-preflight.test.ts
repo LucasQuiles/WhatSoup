@@ -86,16 +86,17 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 
 // Mutable probe mocks — tests control what each probe returns.
 const probeFallbackBinaryMock = vi.fn<
-  (binary: string) => Promise<{ status: 'present' | 'missing' | 'unknown'; version: string | null }>
+  (binary: string, env: NodeJS.ProcessEnv) => Promise<{ status: 'present' | 'missing' | 'unknown'; version: string | null }>
 >(() => Promise.resolve({ status: 'present', version: '0.3.14' }));
 
 const probeModelCatalogMock = vi.fn<
-  (binary: string, model: string) => Promise<{ status: 'found' | 'not_found' | 'unknown'; suggestion: string | null }>
+  (binary: string, model: string, env: NodeJS.ProcessEnv) => Promise<{ status: 'found' | 'not_found' | 'unknown'; suggestion: string | null }>
 >(() => Promise.resolve({ status: 'unknown', suggestion: null }));
 
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
-  probeFallbackBinary: (binary: string) => probeFallbackBinaryMock(binary),
-  probeModelCatalog: (binary: string, model: string) => probeModelCatalogMock(binary, model),
+  probeFallbackBinary: (binary: string, env: NodeJS.ProcessEnv) => probeFallbackBinaryMock(binary, env),
+  probeModelCatalog: (binary: string, model: string, env: NodeJS.ProcessEnv) =>
+    probeModelCatalogMock(binary, model, env),
 }));
 
 // Stub out credential validity probe (never invalid here — credential tests
@@ -176,7 +177,77 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     vi.useRealTimers();
+  });
+
+  it('passes an isolated modeled-route environment to both OpenCode probes', async () => {
+    const systemEnv = {
+      PATH: '/safe/bin',
+      HOME: '/safe/home',
+      USER: 'testuser',
+      SHELL: '/bin/zsh',
+      LANG: 'C.UTF-8',
+      TERM: 'xterm-256color',
+      NODE_PATH: '/safe/node',
+      XDG_RUNTIME_DIR: '/safe/run',
+      XDG_CONFIG_HOME: '/safe/config',
+      XDG_DATA_HOME: '/safe/data',
+      TMPDIR: '/safe/tmp',
+    };
+    for (const [key, value] of Object.entries({
+      ...systemEnv,
+      SUDO_ASKPASS: '/unsafe/askpass',
+      ALLOW_M365_MUTATIONS: '1',
+      CLAUDE_CONFIG_DIR: '/unsafe/claude',
+      OPENAI_API_KEY: 'unrelated-openai',
+      ANTHROPIC_API_KEY: 'unrelated-anthropic',
+      GEMINI_API_KEY: 'unrelated-gemini',
+      PINECONE_API_KEY: 'unrelated-connector',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+      UNKNOWN_SECRET_TOKEN: 'unknown-secret',
+    })) {
+      vi.stubEnv(key, value);
+    }
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2',
+    });
+
+    fbView(runtime).activateProviderFallback(null);
+
+    await vi.waitFor(() => {
+      expect(probeModelCatalogMock).toHaveBeenCalled();
+    }, { interval: 0 });
+    const expectedEnv = {
+      ...systemEnv,
+      WHATSOUP_INSTANCE: 'test',
+      MINIMAX_API_KEY: 'dummy-key-for-model-preflight-tests',
+    };
+    expect(probeFallbackBinaryMock).toHaveBeenCalledWith('opencode', expectedEnv);
+    expect(probeModelCatalogMock).toHaveBeenCalledWith(
+      'opencode',
+      'minimax/MiniMax-M2',
+      expectedEnv,
+    );
+  });
+
+  it('surfaces an unmapped OpenCode model as a preflight config error without probing', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'unmapped/model',
+    });
+
+    expect(() => fbView(runtime).activateProviderFallback(null)).not.toThrow();
+
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_preflight_config_error',
+      expect.any(String),
+      expect.stringContaining('model=unmapped/model'),
+    );
+    expect(probeFallbackBinaryMock).not.toHaveBeenCalled();
+    expect(probeModelCatalogMock).not.toHaveBeenCalled();
   });
 
   // ── model not in catalog ─────────────────────────────────────────────────────
@@ -331,7 +402,7 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     expect(probeModelCatalogMock).not.toHaveBeenCalled();
   });
 
-  it('does NOT probe the catalog when no fallback model is configured', async () => {
+  it('reports a config error and starts no probe when no OpenCode model is configured', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: undefined,
@@ -339,11 +410,13 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
 
     fbView(runtime).activateProviderFallback(null);
 
-    await vi.waitFor(() => {
-      expect(probeFallbackBinaryMock).toHaveBeenCalled();
-    }, { interval: 0 });
-    await Promise.resolve();
-
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_preflight_config_error',
+      expect.any(String),
+      expect.stringContaining('model=unknown'),
+    );
+    expect(probeFallbackBinaryMock).not.toHaveBeenCalled();
     expect(probeModelCatalogMock).not.toHaveBeenCalled();
   });
 
@@ -411,7 +484,7 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     // The window must remain active after the binary probe resolves and the
     // hung catalog probe is dispatched.
     await vi.waitFor(() => {
-      expect(probeModelCatalogMock).toHaveBeenCalledWith('opencode', 'minimax/minimax-m2');
+      expect(probeModelCatalogMock).toHaveBeenCalled();
     }, { interval: 0 });
     expect(fbView(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');

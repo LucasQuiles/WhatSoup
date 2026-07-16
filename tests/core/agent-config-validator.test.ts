@@ -969,7 +969,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
       },
     }), ctx('load'));
 
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   // ---- chatOptions.openaiProviderConfig (QR-218 PR-2 — chat OpenAI provider config) ----
