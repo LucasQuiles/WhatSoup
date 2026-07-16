@@ -1470,28 +1470,16 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       expect(h.logger.warn).toHaveBeenCalledWith('ffmpeg not found — video processing will fail');
     });
 
-    it('runs startup cleanup and logs deleted messages', async () => {
+    // #1445 QR-012: messages/receipts retention used to run from a standalone
+    // 60s-delayed startup setTimeout calling deleteOldMessages() directly.
+    // That path is retired — the prune now flows through the unified
+    // databaseRetentionTimer sweep (which itself runs an immediate cleanup
+    // on `.start()`), so no timer with this signature should exist anymore.
+    it('does not register a standalone startup messages-cleanup timeout (#1445 QR-012)', async () => {
       const h = await importMainWithMocks();
-      h.deleteOldMessages.mockReturnValueOnce(7);
 
-      h.capturedTimeouts.find((timer) => timer.ms === 60_000)!.callback();
-
-      expect(h.logger.info).toHaveBeenCalledWith(
-        { count: 7 },
-        'retention: deleted old messages',
-      );
-    });
-
-    it('logs startup cleanup failures', async () => {
-      const h = await importMainWithMocks();
-      h.deleteOldMessages.mockImplementationOnce(() => { throw new Error('cleanup failed'); });
-
-      h.capturedTimeouts.find((timer) => timer.ms === 60_000)!.callback();
-
-      expect(h.logger.error).toHaveBeenCalledWith(
-        expect.objectContaining({ err: expect.any(Error) }),
-        'startup cleanup failed',
-      );
+      expect(h.capturedTimeouts.find((timer) => timer.ms === 60_000)).toBeUndefined();
+      expect(h.deleteOldMessages).not.toHaveBeenCalled();
     });
 
     it('logs metrics backfill and collection failures', async () => {
@@ -1512,15 +1500,15 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
-    it('runs daily retention cleanup and logs each positive deletion count', async () => {
+    it('runs daily rate limit + LLM attempt cleanup and logs each positive deletion count', async () => {
       const h = await importMainWithMocks();
-      h.deleteOldMessages.mockReturnValueOnce(2);
       h.cleanupOldRateLimits.mockReturnValueOnce(3);
       h.cleanupOldAttempts.mockReturnValueOnce(4);
 
       h.capturedIntervals.find((timer) => timer.ms === 24 * 60 * 60 * 1000)!.callback();
 
-      expect(h.logger.info).toHaveBeenCalledWith({ count: 2 }, 'retention: deleted old messages');
+      // #1445 QR-012: messages retention no longer runs in this interval.
+      expect(h.deleteOldMessages).not.toHaveBeenCalled();
       expect(h.logger.info).toHaveBeenCalledWith({ count: 3 }, 'cleaned up old rate limits');
       expect(h.logger.info).toHaveBeenCalledWith({ count: 4 }, 'cleaned up old llm attempts');
     });
