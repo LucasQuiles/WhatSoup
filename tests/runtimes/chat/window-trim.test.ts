@@ -197,6 +197,63 @@ describe('summarizeWindowBeforeTrim', () => {
     expect(provider.generate).not.toHaveBeenCalled();
   });
 
+  // ---- Providers (notably Anthropic) require strict user/assistant alternation
+  // with no consecutive same-role turns. The synthetic turn's role must
+  // therefore track whatever role `remaining[0]` ended up with after the
+  // drop, not a hardcoded 'assistant' — otherwise two assistant turns land
+  // back-to-back and the very over-budget turns this feature exists to
+  // rescue would 400 at the provider instead. ----
+  function windowEndingInAssistant() {
+    return [
+      msg('user', 'a'.repeat(200)),
+      msg('assistant', 'b'.repeat(200)),
+      msg('user', 'c'.repeat(200)),
+      msg('assistant', 'recent answer'),
+    ];
+  }
+
+  it('alternation: when the surviving recent turn is assistant, the marker turn is role=user (never two assistants in a row)', async () => {
+    const window = windowEndingInAssistant();
+    const provider = makeProvider(() => Promise.reject(new Error('provider unavailable')));
+
+    const result = await summarizeWindowBeforeTrim(window, {
+      ...baseOptions,
+      tokenBudget: 50,
+      summarizationEnabled: true,
+      provider,
+      resolveSummarizationModel: () => Promise.resolve('claude-haiku-4-5'),
+    });
+
+    expect(result.trimmedMessages).toBe(3);
+    expect(result.window[0]).toEqual({ role: 'user', content: '[3 earlier turns omitted]' });
+    expect(result.window[1].role).toBe('assistant'); // the surviving recent turn, untouched
+    // No two consecutive same-role turns anywhere in the returned window.
+    for (let i = 1; i < result.window.length; i++) {
+      expect(result.window[i].role).not.toBe(result.window[i - 1].role);
+    }
+  });
+
+  it('alternation: when the surviving recent turn is assistant, the summary turn is role=user', async () => {
+    const window = windowEndingInAssistant();
+    const provider = makeProvider(() => Promise.resolve(canned('CANNED SUMMARY TEXT')));
+
+    const result = await summarizeWindowBeforeTrim(window, {
+      ...baseOptions,
+      tokenBudget: 50,
+      summarizationEnabled: true,
+      provider,
+      resolveSummarizationModel: () => Promise.resolve('claude-haiku-4-5'),
+    });
+
+    expect(result.summarized).toBe(true);
+    expect(result.window[0].role).toBe('user');
+    expect(result.window[0].content).toContain('[earlier conversation summary]');
+    expect(result.window[1].role).toBe('assistant');
+    for (let i = 1; i < result.window.length; i++) {
+      expect(result.window[i].role).not.toBe(result.window[i - 1].role);
+    }
+  });
+
   it('empty summary content from the provider is treated as a failure and falls back to marker', async () => {
     const window = [
       msg('user', 'x'.repeat(200)),

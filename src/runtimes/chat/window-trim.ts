@@ -59,9 +59,22 @@ function estimateTokens(
   return (systemPromptLength + windowContentLength) / 4 + mediaTokenEstimate;
 }
 
+/**
+ * Providers (notably Anthropic's Messages API) require the message list to
+ * strictly alternate user/assistant with no consecutive same-role turns.
+ * `loadConversationWindow` already guarantees `remaining` alternates
+ * internally, and the caller always appends a `user` turn after this
+ * function returns (the current incoming message) — so the synthetic turn's
+ * role must be the OPPOSITE of `remaining[0]` (or, if `remaining` is empty,
+ * 'assistant', to alternate correctly with that trailing user turn).
+ */
+function syntheticTurnRole(remaining: ChatMessage[]): ChatMessage['role'] {
+  return remaining[0]?.role === 'assistant' ? 'user' : 'assistant';
+}
+
 /** Deterministic, human-readable marker recording how many turns were dropped — never silent. */
-function markerTurn(droppedCount: number): ChatMessage {
-  return { role: 'assistant', content: `[${droppedCount} earlier turns omitted]` };
+function markerTurn(droppedCount: number, remaining: ChatMessage[]): ChatMessage {
+  return { role: syntheticTurnRole(remaining), content: `[${droppedCount} earlier turns omitted]` };
 }
 
 /**
@@ -102,7 +115,7 @@ export async function summarizeWindowBeforeTrim(
   }
 
   const fallbackToMarker = (reason: string, extra?: Record<string, unknown>): WorkingMemoryTrimResult => {
-    const withMarker = [markerTurn(overflow.length), ...remaining];
+    const withMarker = [markerTurn(overflow.length, remaining), ...remaining];
     log.warn({ traceId, droppedTurns: overflow.length, ...extra }, reason);
     return {
       window: withMarker,
@@ -144,7 +157,7 @@ export async function summarizeWindowBeforeTrim(
     }
 
     const summaryTurn: ChatMessage = {
-      role: 'assistant',
+      role: syntheticTurnRole(remaining),
       content: `[earlier conversation summary] ${summaryText}`,
     };
     const withSummary = [summaryTurn, ...remaining];
