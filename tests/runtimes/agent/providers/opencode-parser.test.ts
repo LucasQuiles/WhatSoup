@@ -222,6 +222,59 @@ describe('OpenCode parser — tool_use branch', () => {
     });
   });
 
+  it.each([
+    ['empty object', {}],
+    ['empty array', []],
+    ['whitespace-only nested message', { message: '  \t\n ' }],
+  ])('falls through a structurally empty %s error to useful output', (_label, error) => {
+    const event = createOpenCodeParser().parse(JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'edit',
+        callID: 'call_useful_output',
+        state: {
+          status: 'rejected',
+          error,
+          output: 'permission requested: edit; auto-rejecting',
+          metadata: { message: 'lower-priority metadata' },
+        },
+      },
+    }));
+
+    expect(event).toMatchObject({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'call_useful_output',
+      toolName: 'edit',
+      content: 'permission requested: edit; auto-rejecting',
+    });
+  });
+
+  it('normalizes a multiline control-bearing 100k tool name while preserving call identity', () => {
+    const rawToolName = `edit\nspoofed\u0000${'x'.repeat(100_000)}`;
+    const event = createOpenCodeParser().parse(JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: rawToolName,
+        callID: 'call_stable_identity',
+        state: { status: 'rejected', output: 'auto-rejecting' },
+      },
+    }));
+
+    expect(event).toMatchObject({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'call_stable_identity',
+      content: 'auto-rejecting',
+    });
+    const toolName = (event as Extract<NonNullable<typeof event>, { type: 'tool_result' }>).toolName;
+    expect(toolName).toMatch(/^edit spoofed/);
+    expect(toolName?.length).toBeLessThanOrEqual(48);
+    expect(toolName).not.toMatch(/[\r\n\u0000-\u001F\u007F-\u009F\u200B]/u);
+  });
+
   it('uses a bounded non-empty status fallback when a synthetic rejection has no detail', () => {
     // Synthetic: the incident retained WhatSoup logs, but no terminal OpenCode JSON.
     const longStatus = `rejected-${'x'.repeat(500)}`;

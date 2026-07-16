@@ -12,15 +12,26 @@
 // compatible with (line: string) => AgentEvent | null.
 
 import type { AgentEvent } from '../stream-parser.ts';
+import { hasVisibleToolText, normalizeToolNameForDisplay } from '../tool-update.ts';
 import { extractMessage, isRecord, stringifyValue } from './parser-utils.ts';
 
 const OPENCODE_STATUS_EXCERPT_CHARS = 96;
 
+function hasMeaningfulValue(value: unknown, depth = 0): boolean {
+  if (typeof value === 'string') return hasVisibleToolText(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return true;
+  if (value === null || value === undefined || depth >= 64) return false;
+  if (Array.isArray(value)) return value.some((item) => hasMeaningfulValue(item, depth + 1));
+  if (!isRecord(value)) return false;
+  return Object.values(value).some((item) => hasMeaningfulValue(item, depth + 1));
+}
+
 function toolResultDetail(value: unknown): string | null {
-  const extracted = extractMessage(value)?.trim();
-  if (extracted) return extracted;
+  const extracted = extractMessage(value);
+  if (extracted && hasVisibleToolText(extracted)) return extracted.trim();
+  if (!hasMeaningfulValue(value)) return null;
   const serialized = stringifyValue(value).trim();
-  return serialized || null;
+  return serialized && hasVisibleToolText(serialized) ? serialized : null;
 }
 
 function statusFallback(status: string): string {
@@ -95,7 +106,10 @@ export function createOpenCodeParser(): OpenCodeParser {
         }
 
         const callID = String(part['callID'] ?? '');
-        const toolName = String(part['tool'] ?? '').trim();
+        const rawToolName = String(part['tool'] ?? '');
+        const toolName = hasVisibleToolText(rawToolName)
+          ? normalizeToolNameForDisplay(rawToolName)
+          : '';
         const state = part['state'];
 
         if (!isRecord(state)) {

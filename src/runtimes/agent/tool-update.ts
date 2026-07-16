@@ -9,10 +9,40 @@
  * not referenced by runtime.ts.
  */
 
-/** Max chars of tool-failure error text included in an operator alert excerpt. */
-const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import type { ToolUpdate } from './outbound-queue.ts';
+
+/** Max chars of tool-failure error text included in an operator alert excerpt. */
+const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
+const TOOL_UPDATE_DETAIL_CHARS = 100;
+const TOOL_NAME_DISPLAY_CHARS = 48;
+const NON_VISIBLE_OR_CONTROL = /[\p{Cc}\p{Cf}\p{Z}\s]/gu;
+const NON_VISIBLE_OR_CONTROL_RUN = /[\p{Cc}\p{Cf}\p{Z}\s]+/gu;
+
+function truncateDisplayText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  let prefix = text.slice(0, maxChars - 1);
+  const trailing = prefix.charCodeAt(prefix.length - 1);
+  if (trailing >= 0xd800 && trailing <= 0xdbff) prefix = prefix.slice(0, -1);
+  return `${prefix}…`;
+}
+
+export function hasVisibleToolText(text: string): boolean {
+  return text.replace(NON_VISIBLE_OR_CONTROL, '').length > 0;
+}
+
+function normalizeDisplayLine(text: string): string {
+  return text.replace(NON_VISIBLE_OR_CONTROL_RUN, ' ').trim();
+}
+
+export function normalizeToolNameForDisplay(toolName: string): string {
+  const normalized = normalizeDisplayLine(toolName) || 'unknown';
+  return truncateDisplayText(normalized, TOOL_NAME_DISPLAY_CHARS);
+}
+
+function boundToolUpdateDetail(detail: string): string {
+  return truncateDisplayText(detail, TOOL_UPDATE_DETAIL_CHARS);
+}
 /**
  * Build a structured ToolUpdate from a tool_use event.
  * detail is capped at 80 visible chars.
@@ -201,6 +231,8 @@ export function stripToolErrorTags(content: string): string {
 export function classifyToolError(toolName: string, content: string): ToolUpdate {
   // Strip internal XML-like tags from Claude error content
   const cleaned = stripToolErrorTags(content);
+  const visibleContent = hasVisibleToolText(cleaned) ? cleaned : '';
+  const displayToolName = normalizeToolNameForDisplay(toolName);
 
   const lower = cleaned.toLowerCase();
 
@@ -222,23 +254,23 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
 
   // Try human-friendly rewrite first (only for errors, not blocked/cancelled)
-  if (category === 'error' && toolName !== 'unknown') {
-    const humanized = humanizeError(toolName, cleaned);
-    if (humanized) return { category, detail: humanized };
+  if (category === 'error' && displayToolName !== 'unknown') {
+    const humanized = humanizeError(displayToolName, visibleContent);
+    if (humanized) return { category, detail: boundToolUpdateDetail(humanized) };
   }
 
   // Fallback: technical detail
-  const formatted = formatProviderErrorForUser(cleaned);
+  const formatted = formatProviderErrorForUser(visibleContent);
   const firstLine = formatted.split('\n')[0] ?? formatted;
-  const simplified = firstLine
+  const simplified = normalizeDisplayLine(firstLine)
     .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
     .replace(/^Exit code (\d+)$/, 'exit code $1');
   const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
 
-  const humanName = toolName === 'unknown' ? '' : toolName;
+  const humanName = displayToolName === 'unknown' ? '' : displayToolName;
   const detail = humanName ? `${humanName} — ${reason}` : reason;
 
-  return { category, detail };
+  return { category, detail: boundToolUpdateDetail(detail) };
 }
 
 /**

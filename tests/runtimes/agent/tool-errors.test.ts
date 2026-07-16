@@ -53,7 +53,30 @@ describe('classifyToolError', () => {
     expect(result.category).toBe('error');
     expect(result.detail.trim()).not.toBe('');
     expect(result.detail).toContain('edit');
-    expect(result.detail.length).toBeLessThanOrEqual(110);
+    expect(result.detail.length).toBeLessThanOrEqual(100);
+  });
+
+  it.each([
+    ['zero-width space', '\u200B'],
+    ['ASCII controls', '\u0000\t\r\n'],
+    ['format controls', '\u200B\u2060\uFEFF'],
+  ])('uses a visible bounded fallback for %s-only error content', (_label, content) => {
+    const result = classifyToolError('edit', content);
+    expect(result.category).toBe('error');
+    expect(result.detail).toContain('Request failed with an unknown error.');
+    expect(result.detail.length).toBeLessThanOrEqual(100);
+    expect(result.detail).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u200B\u2060\uFEFF]/u);
+  });
+
+  it('normalizes and bounds a hostile tool name before composing the update', () => {
+    const toolName = `edit\nspoofed\u0000${'x'.repeat(100_000)}`;
+    const result = classifyToolError(toolName, 'permission requested; auto-rejecting');
+
+    expect(result.category).toBe('error');
+    expect(result.detail).toMatch(/^edit spoofed/);
+    expect(result.detail).toContain('permission requested');
+    expect(result.detail.length).toBeLessThanOrEqual(100);
+    expect(result.detail).not.toMatch(/[\r\n\u0000-\u001F\u007F-\u009F\u200B]/u);
   });
 
   // ── Content cleaning ──
@@ -89,7 +112,7 @@ describe('classifyToolError', () => {
   it('truncates long error content to 100 chars', () => {
     const longError = 'A'.repeat(200);
     const result = classifyToolError('Bash', longError);
-    expect(result.detail.length).toBeLessThanOrEqual(110); // tool name + " — " + 99 + "…"
+    expect(result.detail.length).toBeLessThanOrEqual(100);
   });
 
   it('uses first line only for multiline errors', () => {

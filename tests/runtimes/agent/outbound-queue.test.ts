@@ -674,6 +674,7 @@ describe('OutboundQueue', () => {
 
     queue.enqueueToolUpdate({ category: 'error', detail: '' });
     queue.enqueueToolUpdate({ category: 'error', detail: '   \n' });
+    queue.enqueueToolUpdate({ category: 'error', detail: '\u200B\u2060\u0000' });
     await queue.flush();
 
     expect(calls).toHaveLength(1);
