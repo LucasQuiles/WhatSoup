@@ -170,15 +170,30 @@ def test_wrong_manifest_digest_mismatch_is_rejected(tmp_path: Path, monkeypatch)
     assert "digest mismatch" in problems["fleet_sentinel:roster"]
 
 
-def test_incomplete_observation_is_rejected(tmp_path: Path, monkeypatch):
+def test_dropped_host_accounting_gap_is_rejected(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _state(monkeypatch, tmp_path)
     roster = _sample_roster()
     _write_roster(monkeypatch, tmp_path, roster)
-    # Digest matches, but the sentinel only observed a subset of the roster.
-    _write_heartbeat(mod, state, roster, observedHostCount=2, unknownHostCount=1)
+    # Digest matches, but observed + unknown != expected: a roster member was
+    # dropped from the snapshot entirely (expected 3, only 2 accounted for).
+    _write_heartbeat(mod, state, roster, observedHostCount=1, unknownHostCount=1)
     problems = mod.collect_problems(_args(), {"fleet_sentinel"})
     assert "fleet_sentinel:roster" in problems
+    assert "accounting gap" in problems["fleet_sentinel:roster"]
+
+
+def test_heartbeat_only_all_unknown_is_not_a_false_positive(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _state(monkeypatch, tmp_path)
+    roster = _sample_roster()
+    _write_roster(monkeypatch, tmp_path, roster)
+    # Unprobed heartbeat-only fleet: every host is unknown but fully accounted
+    # for (observed 0 + unknown 3 == expected 3). The roster binding is valid, so
+    # the roster check must stay quiet rather than storm every cycle.
+    _write_heartbeat(mod, state, roster, observedHostCount=0, unknownHostCount=3)
+    problems = mod.collect_problems(_args(), {"fleet_sentinel"})
+    assert "fleet_sentinel:roster" not in problems
 
 
 def test_stale_roster_binding_is_rejected(tmp_path: Path, monkeypatch):

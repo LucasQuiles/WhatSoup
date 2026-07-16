@@ -528,10 +528,15 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
         else:
             observed_instance_count += count
 
+    # Green requires a bound, non-zero roster in addition to the base health
+    # signals. We deliberately do NOT require unknown_host_count == 0 here: an
+    # unprobed (heartbeat-only) host is already reflected in base_healthy via the
+    # per-host problem accounting, and gating green on zero-unknown would make a
+    # heartbeat-only fleet perpetually not-green. Unknown membership is instead
+    # reported explicitly below for the watchdog and operators.
     roster_bound = bool(roster_digest_val) and expected_host_count > 0
-    roster_complete = observed_host_count == expected_host_count and unknown_host_count == 0
     base_healthy = result.get("fleetAction") == "none" and not problem_hosts and not attention_events
-    healthy = bool(base_healthy and roster_bound and roster_complete)
+    healthy = bool(base_healthy and roster_bound)
 
     payload = {
         "schemaVersion": 1,

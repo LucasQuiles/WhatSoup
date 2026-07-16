@@ -525,18 +525,23 @@ def fleet_sentinel_roster_problem(path: Path) -> str | None:
             "fleet sentinel expected-host count mismatch: "
             f"heartbeat={declared_expected} independent={independent_expected}"
         )
-    # 5. Incomplete / unknown observation of the roster.
+    # 5. Accounting gap: observed + unknown must account for every expected host.
+    # A shortfall means the snapshot dropped roster members entirely. This is
+    # robust to a heartbeat-only fleet (where every host may legitimately be
+    # unknown/unprobed) because it fires only when the counts fail to add up, not
+    # merely because some hosts are unknown.
     if (
         isinstance(declared_observed, int)
         and not isinstance(declared_observed, bool)
-        and declared_observed != declared_expected
+        and isinstance(declared_unknown, int)
+        and not isinstance(declared_unknown, bool)
+        and declared_observed + declared_unknown != declared_expected
     ):
         return (
-            "fleet sentinel incomplete roster observation: "
-            f"observedHostCount={declared_observed} expectedHostCount={declared_expected}"
+            "fleet sentinel roster accounting gap: "
+            f"observedHostCount={declared_observed} unknownHostCount={declared_unknown} "
+            f"expectedHostCount={declared_expected} (roster members dropped from snapshot)"
         )
-    if isinstance(declared_unknown, int) and not isinstance(declared_unknown, bool) and declared_unknown > 0:
-        return f"fleet sentinel has unknown/unprobed hosts: unknownHostCount={declared_unknown}"
     return None
 
 
