@@ -59,7 +59,7 @@ import { parseAdminCommand, type AdminCommand } from '../../src/core/command-rou
 
 /** Narrow an AdminCommand to the allow/block variant (fails the test otherwise). */
 function asAccessCommand(cmd: AdminCommand | null): Extract<AdminCommand, { action: 'allow' | 'block' }> {
-  if (cmd === null || cmd.action === 'fallback') {
+  if (cmd === null || (cmd.action !== 'allow' && cmd.action !== 'block')) {
     throw new Error(`expected allow/block command, got ${JSON.stringify(cmd)}`);
   }
   return cmd;
