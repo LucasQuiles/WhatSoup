@@ -411,6 +411,7 @@ into place during deployment.
 | `pineconeAllowedIndexes` | string[] | no | `[]` | Legacy alias for `memory.pinecone.allowedIndexes`. |
 | `maxTokens` | integer | no | `750` | Max LLM response tokens. Overrides `MAX_TOKENS`. |
 | `tokenBudget` | integer | no | `100000` | Total token budget (used by agent runtime). |
+| `workingMemorySummarization` | boolean | no | `true` | Chat runtime only (#1445 QR-010). When the working-memory window would exceed `tokenBudget`, the oldest overflow turns are summarized in one cheap LLM call (via the chat model's own provider, `models.validation` role) and prepended as a synthetic `[earlier conversation summary]` turn instead of being silently dropped. Set to `false` to restore drop-only behavior — even then, loss is never silent: a deterministic `[N earlier turns omitted]` marker turn is prepended instead. The same marker fallback is used if the summarization call itself fails or times out, so a summarization outage never fails the user's turn. |
 | `rateLimitPerHour` | integer | no | `45` | Per-user rate limit. Overrides `RATE_LIMIT_PER_HOUR`. |
 | `healthPort` | integer | no | `9090` | Health server port. Overrides `HEALTH_PORT`. |
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |

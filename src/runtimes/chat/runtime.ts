@@ -22,6 +22,7 @@ import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { checkRateLimit } from './rate-limiter.ts';
 import { loadConversationWindow } from './window.ts';
+import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContext } from './context.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
@@ -249,22 +250,32 @@ export class ChatRuntime implements Runtime {
       .filter(Boolean)
       .join('\n\n');
 
-    const window: ChatMessage[] = [...conversationWindow];
-
-    const estimateTokens = (): number => {
-      const windowContentLength = window.reduce((sum, m) => sum + m.content.length, 0);
-      return (systemPrompt.length + windowContentLength) / 4 + mediaImages.length * 1000;
-    };
-
-    let trimmedMessages = 0;
-    while (estimateTokens() > config.tokenBudget && window.length > 1) {
-      window.shift();
-      trimmedMessages = trimmedMessages + 1;
-    }
+    // Summarize-before-trim (#1445 QR-010): rather than silently window.shift()-ing
+    // the oldest turns once over budget, collect the contiguous overflow and
+    // summarize it in one cheap LLM call, prepending the bounded summary as a
+    // synthetic turn. Config-gated (config.workingMemorySummarization, default
+    // true) with a deterministic-marker fallback on failure or when disabled —
+    // there is never silent, untraceable loss either way.
+    const trimResult = await summarizeWindowBeforeTrim([...conversationWindow], {
+      tokenBudget: config.tokenBudget,
+      systemPromptLength: systemPrompt.length,
+      mediaTokenEstimate: mediaImages.length * 1000,
+      summarizationEnabled: config.workingMemorySummarization,
+      provider: this.primaryProvider,
+      resolveSummarizationModel: () => resolveModelRole(config.models.validation),
+      traceId,
+    });
+    const window: ChatMessage[] = trimResult.window;
+    const trimmedMessages = trimResult.trimmedMessages;
 
     if (trimmedMessages > 0) {
       log.info(
-        { traceId, trimmedMessages, estimatedTokens: estimateTokens() },
+        {
+          traceId,
+          trimmedMessages,
+          estimatedTokens: trimResult.estimatedTokens,
+          summarized: trimResult.summarized,
+        },
         'token budget: trimmed messages from window',
       );
     }
