@@ -207,7 +207,7 @@ describe('parseAdminCommand -- group positive', () => {
 describe('parseAdminCommand -- negative', () => {
   it('returns null for no phone', () => { expect(parseAdminCommand('ALLOW')).toBeNull(); });
   it('returns null for empty string', () => { expect(parseAdminCommand('')).toBeNull(); });
-  it('returns null for unknown command', () => { expect(parseAdminCommand('GRANT 123')).toBeNull(); });
+  it('returns null for unknown command', () => { expect(parseAdminCommand('REVOKE 123')).toBeNull(); });
   it('returns null for non-digits in phone', () => { expect(parseAdminCommand('ALLOW +1-518')).toBeNull(); });
   it('returns null for random text', () => { expect(parseAdminCommand('hello world')).toBeNull(); });
   it('returns null for GROUP with no jid', () => { expect(parseAdminCommand('ALLOW GROUP')).toBeNull(); });
@@ -278,6 +278,58 @@ describe('parseAdminCommand -- fallback negative', () => {
 
   it('returns null for FALLBACK MAYBE (unrecognised sub-command)', () => {
     expect(parseAdminCommand('FALLBACK MAYBE')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAdminCommand -- grant positive
+// ---------------------------------------------------------------------------
+
+describe('parseAdminCommand -- grant positive', () => {
+  it('parses GRANT <group> (arm, no duration)', () => {
+    expect(parseAdminCommand('GRANT camera')).toEqual({ action: 'grant', sub: 'arm', group: 'camera' });
+  });
+
+  it('parses grant camera 30m (minutes)', () => {
+    expect(parseAdminCommand('grant camera 30m')).toEqual({ action: 'grant', sub: 'arm', group: 'camera', durationMs: 30 * 60_000 });
+  });
+
+  it('parses Grant Writes 2h (hours, case-insensitive, group lowercased)', () => {
+    expect(parseAdminCommand('Grant Writes 2h')).toEqual({ action: 'grant', sub: 'arm', group: 'writes', durationMs: 2 * 3_600_000 });
+  });
+
+  it('parses GRANT DISARM as control, NOT arming a group named "disarm"', () => {
+    expect(parseAdminCommand('GRANT DISARM')).toEqual({ action: 'grant', sub: 'disarm' });
+  });
+
+  it('parses grant status (lowercase)', () => {
+    expect(parseAdminCommand('grant status')).toEqual({ action: 'grant', sub: 'status' });
+  });
+
+  it('parses GRANT HELP', () => {
+    expect(parseAdminCommand('GRANT HELP')).toEqual({ action: 'grant', sub: 'help' });
+  });
+
+  it('parses bare GRANT as help', () => {
+    expect(parseAdminCommand('GRANT')).toEqual({ action: 'grant', sub: 'help' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAdminCommand -- grant negative
+// ---------------------------------------------------------------------------
+
+describe('parseAdminCommand -- grant negative', () => {
+  it('returns null for GRANT camera 0m (zero is not a positive integer)', () => {
+    expect(parseAdminCommand('GRANT camera 0m')).toBeNull();
+  });
+
+  it('returns null for GRANT camera 5d (unsupported unit)', () => {
+    expect(parseAdminCommand('GRANT camera 5d')).toBeNull();
+  });
+
+  it('returns null for a multi-word tail (grant me access)', () => {
+    expect(parseAdminCommand('grant me access')).toBeNull();
   });
 });
 
