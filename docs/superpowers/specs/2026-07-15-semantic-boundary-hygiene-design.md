@@ -137,7 +137,8 @@ deadline, and feedback-volume cases have executable unsafe and safe controls.
   old/new tree modes where those can change behavior.
 - **SBH-018 — Bounded deterministic feedback:** Findings, evidence arrays, artifacts, corrections,
   tests, sources, JSON, and human output have deterministic cardinality and byte bounds. Overflow is
-  an explicit `inconclusive` finding with counts and digests, never silent truncation or log flooding.
+  an explicit `inconclusive` finding with bounded structural counts and a descriptor digest, never
+  silent truncation, unbounded rejected-content hashing, or log flooding.
 - **SBH-019 — Corrective feedback quality:** Feedback completeness requires an observed state,
   expected invariant, consequence, actionable correction, unsafe and neighboring-safe controls,
   verification command, evidence source, and visible limitations. Nonempty placeholders do not pass.
@@ -319,37 +320,57 @@ presence.
 
 ## Contextual Feedback Contract
 
-Every finding is represented as a `BoundaryFinding` and every invocation emits one
-`BoundaryReceipt`.
+Stored schema-1 findings and receipts use `BoundaryFindingV1` and `BoundaryReceiptV1`; current
+production moves to the versioned v2 contracts below.
 
 ```ts
 type BoundaryDecision = 'pass' | 'warn' | 'block' | 'inconclusive';
+type BoundaryActionV1 = 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'open-issue';
 
-interface BoundaryFinding {
+interface BoundaryFindingV1 {
   ruleId: string;
-  decision: BoundaryDecision;
-  action: 'commit' | 'push' | 'open-pr' | 'reopen-pr' | 'update-pr' | 'open-issue' | 'merge' | 'tag';
+  decision: Exclude<BoundaryDecision, 'pass'>;
+  action: BoundaryActionV1;
   summary: string;
   why: string;
   observed: Array<{ label: string; value: string }>;
-  matchedArtifacts: Array<{ kind: 'pr' | 'issue'; number: number; url: string; state: string }>;
-  disposition?: string;
+  matchedArtifacts: Array<{
+    kind: 'pull-request' | 'issue' | 'commit' | 'path';
+    repository: string;
+    id: string;
+    url?: string;
+    state?: string;
+    fingerprintSha256?: string;
+  }>;
   correction: string[];
   rerun: string;
   sourceRefs: string[];
 }
 
-interface BoundaryReceipt {
+interface BoundaryReceiptV1 {
   schemaVersion: 1;
-  repository: string;
+  repository: 'LucasQuiles/WhatSoup';
   invocation: string;
+  action?: BoundaryActionV1;
+  correlationIdSha256?: string;
+  enforcementMode: 'shadow' | 'enforce';
   decision: BoundaryDecision;
-  base: Record<string, string | number | null>;
+  base: {
+    headOid: string | null;
+    baseOid: string | null;
+    mergeBaseOid: string | null;
+    evidenceSource: string;
+  };
   fingerprints: Record<string, string | null>;
-  findings: BoundaryFinding[];
+  findings: BoundaryFindingV1[];
   limitations: string[];
 }
 ```
+
+This is the exact stored schema-1 compatibility contract observed in the current implementation;
+it is not the ten-action schema-2 target model below. In particular, schema 1 never admitted
+`update-pr`, `merge`, `tag`, `release`, or `config-write`. Those actions begin at schema 2 and a
+schema-1 reader must reject them rather than retroactively widening historical bytes.
 
 Human rendering on warning/block/inconclusive follows this order:
 
@@ -377,7 +398,7 @@ findings, but it may not create the blocking verdict.
 
 ```ts
 type BoundaryActionV2 =
-  | BoundaryAction
+  | BoundaryActionV1
   | 'update-pr'
   | 'merge'
   | 'tag'
@@ -393,6 +414,21 @@ type EvidenceState =
   | 'unknown';
 
 type RuleDisposition = 'shadow' | 'warning' | 'block-candidate';
+
+interface BoundaryCommand {
+  command: string;
+  args: string[];
+}
+
+interface BoundaryCorrectionStep {
+  operation: 'edit' | 'reuse' | 'remove' | 'refresh' | 'split' | 'retry';
+  target: string;
+  expected: string;
+}
+
+interface BoundaryVerificationStep extends BoundaryCommand {
+  expected: string;
+}
 
 interface RuleContext {
   action: BoundaryActionV2;
@@ -423,18 +459,26 @@ interface RuleEvaluation {
   observed: BoundaryEvidenceRecord[];
   expected: string[];
   impact: string[];
-  correction: string[];
-  verification: string[];
+  correction: BoundaryCorrectionStep[];
+  verification: BoundaryVerificationStep[];
   limitations: string[];
 }
 
-interface BoundaryFindingV2 extends BoundaryFinding {
+interface BoundaryFindingV2 extends Omit<
+  BoundaryFindingV1,
+  'action' | 'correction' | 'rerun' | 'sourceRefs'
+> {
+  action: BoundaryActionV2;
   ruleVersion: number;
   evidenceState: EvidenceState;
   expected: string[];
   impact: string[];
   safeControls: string[];
-  verification: string[];
+  correction: BoundaryCorrectionStep[];
+  verification: BoundaryVerificationStep[];
+  rerun: BoundaryCommand;
+  rerunPurpose: 'integration-boundary' | 'focused-family-replay';
+  sourceRefs: string[];
   limitations: string[];
   findingDigestSha256: string;
 }
@@ -504,22 +548,48 @@ The existing `correlationIdSha256` remains a grouping key; it is not promoted in
 attestation. A versioned receipt extension adds:
 
 ```ts
-interface BoundaryReceiptV2 extends Omit<BoundaryReceipt, 'schemaVersion'> {
+interface BoundaryReceiptV2 extends Omit<
+  BoundaryReceiptV1,
+  'schemaVersion' | 'action' | 'correlationIdSha256' | 'findings'
+> {
   schemaVersion: 2;
+  action: BoundaryActionV2;
   target: { repository: string; actionTarget: string; headOid: string | null };
   observedAt: string;
   validUntil: string | null;
+  correlationIdSha256: string;
   ruleCatalogDigestSha256: string;
   evidenceDigestSha256: string;
   findings: BoundaryFindingV2[];
   overflow: null | {
-    rejectedFindingCount: number;
-    rejectedEvidenceCount: number;
-    rejectedByteCount: number;
-    rejectedEvidenceDigestSha256: string;
+    reason: 'boundary.evidence-volume-exceeded';
+    inputCounts: {
+      findings: number;
+      observed: number;
+      artifacts: number;
+      limitations: number;
+      fingerprints: number;
+      corrections: number;
+      verification: number;
+      sources: number;
+      canonicalRecords: number;
+    };
+    rejectedBytes: number | null;
+    descriptorDigestSha256: string;
+    digestCoverage: 'bounded-structural-descriptor';
   };
 }
 ```
+
+Schema-2 target identity separates the mutation destination from the candidate commit. Closed
+forms are `commit:<oid>`, `ref:<full-ref>`, `pr-create:<base-ref>..<head-ref>`, `pr:<number>`,
+`task:<digest>`, `tag:<full-tag-ref>`, `release:<full-tag-ref>`, and `config:<digest>` for their
+corresponding actions. Every repository action other than config-write also carries `headOid`; two
+actions against different refs, PRs, tasks, tags, or releases must not share target/evidence
+identity merely because the candidate head is the same. `unresolved:<action>` with a null head is
+reserved for internally built diagnostic receipts and is never a valid producer-supplied target.
+Candidate and commit-target Git OIDs are exactly lowercase 40- or 64-hex values, supporting both
+repository object formats without accepting uppercase or arbitrary digest widths.
 
 `evidenceDigestSha256` covers the canonical target, identities, observation times, evidence states,
 limitations, rule IDs and versions, and all retained observation values. A head, target, observation,
@@ -549,12 +619,20 @@ no recovery guidance. Generic passes name their actual invocation and action ins
 saying `semantic quality`.
 
 Initial receipt construction limits are policy constants with direct boundary tests: no more than
-128 canonical findings, 64 observations per finding, 16 matched artifacts, eight corrections,
+128 canonical findings, 64 observations per finding, 16 matched artifacts, four corrections,
 eight verification steps, 16 source references, or 1 MiB of JSON. Human rendering groups repeated
 guidance, shows at most 12 detailed findings, and stays within 64 KiB; it reports every omitted
 group/count and points to the bounded JSON receipt and evidence digest. Input beyond the canonical
 JSON cardinality or byte budget is rejected before semantic aggregation and becomes
-`boundary.evidence-volume-exceeded:inconclusive` with counts and a streaming digest. Human
+`boundary.evidence-volume-exceeded:inconclusive` with bounded structural counts, a known rejected
+byte count when admission can determine it safely, and a descriptor digest. The descriptor is
+content-independent: it covers only fixed counters/types, sanitized field-path class, scalar
+UTF-16 code-unit count and applicable limit, and rejection reason. It does not
+traverse, retain, or hash a rejected scalar prefix, secret/local reference, or the full rejected
+content. Target identity remains bound by the outer receipt's `evidenceDigestSha256`, not this
+partial overflow descriptor. `digestCoverage` therefore remains the literal
+`bounded-structural-descriptor`, and `rejectedBytes` is `null` when determining it would require an
+unbounded second pass. Human
 summarization alone does not change the semantic decision because the retained JSON evidence remains
 complete. These initial numbers accommodate the measured 45-finding current-head run while rejecting
 the 200- and 1,000-finding stress cases. They are calibration values, not permanent doctrine;
@@ -715,7 +793,7 @@ has separately been authorized.
 | `boundary.evidence-incomplete` | `warn + limitation` exited zero; limitations alongside findings were hidden | Relevant incompleteness outranks warn; always render limitations and recovery guidance |
 | `boundary.receipt-evidence-unbound` | Correlation identity is unchanged when evidence source/limitations change | Add a separate digest over target, observations, limitations, and rule versions |
 | `boundary.feedback-contract-incomplete` | Empty/generic evidence and “fix it” satisfy structural completeness | Require expected invariant, consequence, controls, verification, and meaningful fields |
-| `boundary.evidence-volume-exceeded` | Ordinary output reached 57 KB; synthetic output reached 20–85 MB | Reject over-budget input as bounded inconclusive evidence with counts/digest |
+| `boundary.evidence-volume-exceeded` | Ordinary output reached 57 KB; synthetic output reached 20–85 MB | Reject over-budget input as bounded inconclusive evidence with structural counts and an explicitly partial descriptor digest; never hash rejected content without bounds |
 | `boundary.finding-identity-conflict` | Duplicate rule IDs are input-order-dependent with one correlation ID | Reject duplicate finding identities or sort by a full canonical evidence key |
 | `boundary.renderer-action-mismatch` | A generic history pass renders `PASS semantic quality` | Render the actual invocation, action, target, and exact identity |
 | `boundary.provider-deadline-unowned` | A provider ignoring `AbortSignal` remains pending | Enforce an owned deadline/watchdog outside cooperative cancellation |
@@ -835,6 +913,9 @@ assert both decision and complete rendered guidance. At minimum, the next plan i
   oversized arrays;
 - deterministic repeated runs, duplicate finding identities, JSON/human semantic equivalence, and
   exact receipt digest invalidation when head/evidence/rule version changes;
+- overflow admission at the exact cardinality/byte boundary, one-over rejection without reading a
+  hostile tail, stable bounded-descriptor identity, `rejectedBytes: null` when total size is unsafe
+  to determine, and proof that rejected secret/local-path content is neither retained nor hashed;
 - providers that honor cancellation, throw timeout, and ignore cancellation under an owned
   watchdog.
 
