@@ -138,17 +138,20 @@ function makeMessenger(): Messenger {
 
 interface RuntimeOverrides {
   agentProvider?: string;
+  agentProviderConfig?: Record<string, unknown>;
   agentFallbackProvider?: string;
   agentFallbackModel?: string;
+  model?: string;
 }
 
 function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = overrides.agentProvider ?? 'claude-cli';
+  config['agentProviderConfig'] = overrides.agentProviderConfig;
   config['agentFallbackProvider'] = overrides.agentFallbackProvider;
   config['agentFallbackModel'] = overrides.agentFallbackModel;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
-    model: 'claude-opus-4-8',
+    model: overrides.model ?? 'claude-opus-4-8',
   });
 }
 
@@ -230,6 +233,53 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
       'minimax/MiniMax-M2',
       expectedEnv,
     );
+  });
+
+  it('aligns same-provider custom-endpoint preflight with the OpenCode fallback session lane', async () => {
+    const runtime = makeRuntime({
+      agentProvider: 'opencode-cli',
+      agentProviderConfig: {
+        baseUrl: 'https://primary-openai.example/v1',
+        apiKeyService: 'openai',
+        executionProfile: 'whatsoup-headless',
+      },
+      model: 'openai/gpt-5.4',
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2',
+    });
+
+    fbView(runtime).activateProviderFallback(null);
+
+    await vi.waitFor(() => {
+      expect(probeModelCatalogMock).toHaveBeenCalled();
+    }, { interval: 0 });
+    const probeEnv = probeFallbackBinaryMock.mock.calls[0]?.[1];
+    expect(probeEnv).toHaveProperty(
+      'MINIMAX_API_KEY',
+      'dummy-key-for-model-preflight-tests',
+    );
+    expect(probeEnv).not.toHaveProperty('OPENAI_API_KEY');
+    expect(Object.keys(probeEnv ?? {}).filter((key) => key.endsWith('_API_KEY'))).toEqual([
+      'MINIMAX_API_KEY',
+    ]);
+
+    type SessionFactoryView = {
+      createSessionManager(opts: {
+        chatJid: string;
+        cwd: string | undefined;
+        onEvent: () => void;
+        onCrash: () => void;
+        notifyUser: () => void;
+      }): { providerConfig: Record<string, unknown> | undefined };
+    };
+    const session = (runtime as unknown as SessionFactoryView).createSessionManager({
+      chatJid: 'preflight-lane@s.whatsapp.net',
+      cwd: undefined,
+      onEvent: vi.fn(),
+      onCrash: vi.fn(),
+      notifyUser: vi.fn(),
+    });
+    expect(session.providerConfig).toEqual({ executionProfile: 'whatsoup-headless' });
   });
 
   it('surfaces an unmapped OpenCode model as a preflight config error without probing', () => {

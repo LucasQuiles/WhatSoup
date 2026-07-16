@@ -6794,11 +6794,6 @@ export class AgentRuntime implements Runtime {
     if (route.source !== 'preference' || route.provider === this.agentProvider) {
       return this.sessionProviderConfig();
     }
-    if (route.provider === 'opencode-cli') {
-      if (!this.agentProviderConfig) return undefined;
-      const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
-      return rest;
-    }
     // Match the fallback path (effectiveProviderConfig): a provider with no
     // config of its own inherits the agent's providerConfig — including the
     // budget cap — instead of spawning with providerConfig=undefined (R2).
@@ -7645,7 +7640,6 @@ export class AgentRuntime implements Runtime {
   private get effectiveProviderConfig(): Record<string, unknown> | undefined {
     const fallbackEntry = this.effectiveFallbackEntry;
     if (!fallbackEntry) return this.agentProviderConfig;
-    if (fallbackEntry.provider === 'opencode-cli') return this.agentProviderConfig;
     return fallbackProviderConfigFor(fallbackEntry.provider, this.agentProvider, this.agentProviderConfig) ?? this.agentProviderConfig;
   }
 
@@ -8959,24 +8953,13 @@ export class AgentRuntime implements Runtime {
   /**
    * providerConfig handed to a new SessionManager.
    *
-   * The custom-endpoint fields (`baseUrl`/`apiKeyService`) belong to the
-   * PRIMARY provider+model: an opencode session serving a fallback entry must
-   * not inherit them, or the custom-endpoint argv contract (omit `-m` when a
-   * baseUrl is configured) would drop the entry's model and re-route the turn
-   * to the primary's endpoint block — or to opencode's default model when no
-   * block was written for the entry. Every other providerConfig key (budget,
-   * model, …) keeps applying to all sessions, and managed-loop API fallback
-   * sessions keep full inheritance (same-provider API fallback deliberately
-   * honors the primary's endpoint and apiKeyService).
+   * Fallback execution config is selected centrally by
+   * `fallbackProviderConfigFor`: OpenCode drops the primary route's custom
+   * endpoint fields, while managed-loop API fallbacks retain them. Primary
+   * sessions receive the configured providerConfig unchanged.
    */
   private sessionProviderConfig(): Record<string, unknown> | undefined {
-    const selected = this.effectiveProviderConfig;
-    if (!selected) return undefined;
-    if (this.effectiveFallbackEntry === null || this.effectiveProvider !== 'opencode-cli') {
-      return selected;
-    }
-    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = selected;
-    return rest;
+    return this.effectiveProviderConfig;
   }
 
 
