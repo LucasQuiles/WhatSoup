@@ -1,6 +1,6 @@
 # Semantic Boundary Hygiene Implementation Notes
 
-**Status:** Active — PR A Tasks 1-4 committed; Task 5 structural/executable decision-poll work in progress
+**Status:** Completed — PR A implemented locally in shadow mode; enforcement promotion deferred
 **Date:** 2026-07-15
 **Owner:** Lucas Quiles
 **Branch:** `experiment/jul15-semantic-boundary-eval`
@@ -23,6 +23,14 @@ hook, workflow, required check, or ruleset currently enforces semantic hygiene.
 | `1f49e9984ce1cfd85265b3beb9d161d080931f9f` | Locked 40-case corpus and baseline | Baseline labels fixed before candidate implementation |
 | `b8d5d02e60883231be6e3151d38025cc076204a6` | Candidate evaluator | AST reachability, policy decisions, and structured findings |
 | `29a2d194914a3b2616532bfe77ca94484f9910a2` | Post-freeze 18-case holdout | Adversarial cases added without changing candidate logic |
+| `095b6ebd0` | PR A plan | Approved task order, interfaces, verification, and commit boundaries |
+| `44a049e8e` | Semantic graph | Exact committed-tree reader and runtime reachability graph |
+| `a015f6ab8` | Semantic policy | Delta-aware module and export ownership classification |
+| `727eabf39` | Semantic receipt | Stable receipt schema, shadow/enforce exit semantics, and CLI |
+| `791c33922` | Guard proof | Semantic companion-test proof with negative controls |
+| `dc6c16bb9` | Decision-poll proof | AST relationships and bounded executable hook probes |
+| `64f93e5a4` | Orphan removal | Removed the unowned `emitDelegationReceipt` export after exact-tree proof |
+| `fdd7612ea` | Shadow composition | Shared evaluator/production engine, local gate, and Node-24 CI summary |
 
 The experiment result log is `experiment-results.tsv` in the isolated worktree. It is intentionally
 untracked under the experiment protocol. The committed JSON corpora are the reproducible inputs:
@@ -176,20 +184,89 @@ Not authorized without a new explicit request naming the action and target:
 - rerun or cancel a workflow;
 - mutate an external artifact producer or host installation.
 
-## Current Verification Record
+## PR A Verification Record
 
-Before this planning pass, fresh experiment verification produced:
+The final focused verification used the exact Task 8 command under `loadgate`:
 
-- evaluator tests: 6/6 passed;
-- `typecheck:scripts`: exit 0;
-- `typecheck:all`: exit 0;
-- locked candidate: 40/40, zero false blocks, zero missed blockers;
-- frozen holdout: 18/18, zero false blocks, zero missed blockers.
+- nine test files passed, 247/247 tests passed, exit 0;
+- `typecheck:scripts` exited 0;
+- `typecheck:all` exited 0;
+- the test runner emitted the repository's pre-existing esbuild/Oxc configuration warning; no test
+  result was masked;
+- direct guard execution reported 18/18 guard scripts with a wired companion test;
+- direct decision-poll guard execution exited 0 with no finding;
+- test-integrity scans of every changed semantic test file reported no findings;
+- the frozen baseline remained 13/40 with 19 missed block cases and zero false blocks;
+- the candidate remained 40/40 with zero missed block cases and zero false blocks;
+- the post-freeze holdout remained 18/18 with zero missed block cases and zero false blocks.
 
-The complete release suite was not rerun for the experiment changes. An earlier release attempt was
-interrupted during extreme shared-host load and remains inconclusive. Documentation completion must
-be verified with publication, work-index, doc-drift, and repository hygiene guards; production
-implementation later requires the branch gate specified in Task 8.
+The complete `verify:push:branch` command then ran under `loadgate` and exited 0. Its composed test
+sets passed 39 files / 740 tests, 14 design-guard files / 182 tests, and 87 tokenomics tests; console
+lint and the production console build also completed successfully. Test-integrity reported six
+known baseline findings and zero new or drifted findings. The import-boundary inventory improved
+from 32 to 31 grandfathered violations. The fitness lane reported 202 non-blocking warnings and
+zero errors. Design regression reported 13 passing blockers and seven report-only warnings.
+
+Two limitations remain visible in that gate: ARC binding content comparison was skipped because the
+sibling `agent-runtime-protocol` repository was unreachable, although the vendored SHA pin matched;
+and safeguard diagnostics could not calculate ahead/behind state because this branch has no
+upstream. Neither condition was masked as a clean check. No release suite, workflow run,
+required-check change, or remote mutation is claimed by this packet.
+
+## Shadow Inventory at `fdd7612ea`
+
+The production shadow command was pinned to head
+`fdd7612ea3555f3a89784df3614247078b3bf26a` and base
+`a36b52e3f15393509078cd3e693c368567082f1a`; Git resolved merge base
+`043c531e3dae51635dc60a5a85238e866ccbe291`. Its receipt decision was `warn` and its process exit
+was 0, as required for shadow mode.
+
+| Inventory surface | Observed result |
+|---|---|
+| Added/renamed would-block findings | 0 |
+| Modified unreachable-module warnings | 0 |
+| Full-tree export-ownership warnings | 1 aggregate finding: 115 exports across 52 reachable modules |
+| Semantic companion-test gaps | 0; 18/18 registered guards had wired companion tests |
+| Decision-poll structural/executable findings | 0 |
+| Frozen-corpus false-block reviews | 0 across 40 locked and 18 holdout cases |
+| Correction/repeat evidence | PR #1835 changed from an unreachable old head to a reachable current head; the locally cited `emitDelegationReceipt` export was removed and did not recur in the final inventory |
+
+The correction observations show that the detector can distinguish a cited defect from its repaired
+revision. They are not a controlled measurement of whether verbose feedback improves an agent's
+next attempt. No feedback-effectiveness claim is made.
+
+## Local Timing Observations
+
+Ten Node processes evaluated the same immutable head/base under separate `loadgate` admissions.
+The repository and Git object store had already been exercised, so every observation is classified
+as object-cache warm and process cold. `real` is `/usr/bin/time -p` wall time; load is the host's
+1/5/15-minute load average immediately before each run.
+
+| Run | Real seconds | Host load | Cache state | Exit |
+|---:|---:|---|---|---:|
+| 1 | 6.98 | 6.73 / 9.28 / 10.87 | object warm; process cold | 0 |
+| 2 | 8.18 | 6.31 / 9.11 / 10.79 | object warm; process cold | 0 |
+| 3 | 7.65 | 6.52 / 9.11 / 10.77 | object warm; process cold | 0 |
+| 4 | 7.25 | 7.67 / 9.27 / 10.81 | object warm; process cold | 0 |
+| 5 | 7.01 | 7.69 / 9.25 / 10.80 | object warm; process cold | 0 |
+| 6 | 6.93 | 7.52 / 9.16 / 10.74 | object warm; process cold | 0 |
+| 7 | 6.96 | 7.40 / 9.10 / 10.72 | object warm; process cold | 0 |
+| 8 | 6.84 | 7.80 / 9.13 / 10.71 | object warm; process cold | 0 |
+| 9 | 8.50 | 7.81 / 9.11 / 10.69 | object warm; process cold | 0 |
+| 10 | 6.87 | 7.47 / 9.00 / 10.63 | object warm; process cold | 0 |
+
+The local warm-cache median was **7.00 seconds** and the nearest-rank p95 was **8.50 seconds**.
+A defensible cold-object-cache run was unavailable after the repository had already been traversed.
+No CI run was authorized or observed, so CI median and p95 remain unknown. These gaps prohibit
+setting a production timeout from this packet.
+
+## Promotion Decision
+
+PR A remains shadow-only. The current full-tree warning is useful inventory but too broad for a
+blocking boundary: 115 historical exports require ownership review, cold-cache and CI latency are
+unknown, and agent-correction effectiveness has not been controlled. `verify:semantic` remains a
+manual enforce-mode adapter; `verify:semantic:shadow` is the only composed adapter. Upstream hash,
+duplicate-history, durable disposition, and external-producer checks remain PR B work.
 
 ## Risks and Unknowns
 
@@ -207,10 +284,11 @@ implementation later requires the branch gate specified in Task 8.
 - This Codex session has no tmup tool. No SDLC runner, sentinel, or oracle receipt exists for this
   documentation pass; lead-only file inspection and deterministic guards are the available proof.
 
-## Execution Entry
+## Next Authorized Tranche
 
-The next implementation session starts with Task 1 of
-`docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md`. Before editing code, confirm the
-base branch and worktree state, preserve the experiment commits, and run the Task 1 failing test.
-If implementation moves to a new branch, compare the branches with `git range-diff` and
-`git cherry -v` before treating either branch as superseded. Do not stage `experiment-results.tsv`.
+The next implementation tranche is not implicitly authorized by PR A. If the owner proceeds with
+PR B, begin from the specification's upstream hash and duplicate-history provider boundaries, keep
+provider failures explicit and bounded, and repeat the frozen-case/holdout method before composing
+any blocker. Preserve `experiment-results.tsv` as an untracked experiment log. If implementation
+moves to a new branch, use `git range-diff` and `git cherry -v` before treating either branch as
+superseded.
