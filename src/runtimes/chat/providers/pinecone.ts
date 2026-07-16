@@ -421,6 +421,7 @@ export class PineconeMemory {
     query: string,
     filters: Record<string, unknown>,
     topK: number,
+    traceId?: string,
   ): Promise<PineconeSearchDetails> {
     if (isBreakerOpen('search')) {
       logger.warn('pinecone search circuit breaker open — skipping');
@@ -448,7 +449,14 @@ export class PineconeMemory {
       const results = (response.result.hits ?? []).map(fromPineconeHit);
       const durationMs = Date.now() - startMs;
       logger.info(
-        { topScores: results.slice(0, 3).map((r) => r.score), durationMs },
+        {
+          topScores: results.slice(0, 3).map((r) => r.score),
+          // QR-006: candidate IDs alongside scores — bounded to 10 so a
+          // large candidate set can't blow up log volume.
+          ids: results.slice(0, 10).map((r) => r.id),
+          durationMs,
+          ...(traceId ? { traceId } : {}),
+        },
         'Pinecone search complete',
       );
       trackSuccess('search');
@@ -461,7 +469,13 @@ export class PineconeMemory {
         const results = (response.result.hits ?? []).map(fromPineconeHit);
         const durationMs = Date.now() - startMs;
         logger.info(
-          { topScores: results.slice(0, 3).map((r) => r.score), durationMs, retried: true },
+          {
+            topScores: results.slice(0, 3).map((r) => r.score),
+            ids: results.slice(0, 10).map((r) => r.id),
+            durationMs,
+            retried: true,
+            ...(traceId ? { traceId } : {}),
+          },
           'Pinecone search complete (after retry)',
         );
         trackSuccess('search');
@@ -491,8 +505,9 @@ export class PineconeMemory {
     query: string,
     filters: Record<string, unknown>,
     topK: number,
+    traceId?: string,
   ): Promise<PineconeSearchDetails> {
-    const details = await this._searchCoreDetailed(query, filters, topK);
+    const details = await this._searchCoreDetailed(query, filters, topK, traceId);
     return {
       ...details,
       results: applyDecay(details.results, config.recencyHalfLifeDays, config.maxAgeDays),
@@ -503,8 +518,9 @@ export class PineconeMemory {
     query: string,
     filters: Record<string, unknown>,
     topK: number,
+    traceId?: string,
   ): Promise<SearchResult[]> {
-    return (await this.searchDetailed(query, filters, topK)).results;
+    return (await this.searchDetailed(query, filters, topK, traceId)).results;
   }
 
   private searchByField(
@@ -512,27 +528,28 @@ export class PineconeMemory {
     field: string,
     value: string,
     topK: number,
+    traceId?: string,
   ): Promise<SearchResult[]> {
-    return this.search(query, { [field]: { $eq: value } }, topK);
+    return this.search(query, { [field]: { $eq: value } }, topK, traceId);
   }
 
-  async searchForChat(chatJid: string, query: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'chat_jid', chatJid, config.pineconeContextTopK);
+  async searchForChat(chatJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
+    return this.searchByField(query, 'chat_jid', chatJid, config.pineconeContextTopK, traceId);
   }
 
-  async searchForSender(senderJid: string, query: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'sender_jid', senderJid, config.pineconeSenderTopK);
+  async searchForSender(senderJid: string, query: string, traceId?: string): Promise<SearchResult[]> {
+    return this.searchByField(query, 'sender_jid', senderJid, config.pineconeSenderTopK, traceId);
   }
 
-  async searchSelfFacts(query: string): Promise<SearchResult[]> {
-    return this.searchByField(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK);
+  async searchSelfFacts(query: string, traceId?: string): Promise<SearchResult[]> {
+    return this.searchByField(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK, traceId);
   }
 
-  async searchEntities(query: string): Promise<EntitySearchResult[]> {
-    return (await this.searchEntitiesDetailed(query)).results;
+  async searchEntities(query: string, traceId?: string): Promise<EntitySearchResult[]> {
+    return (await this.searchEntitiesDetailed(query, traceId)).results;
   }
 
-  async searchEntitiesDetailed(query: string): Promise<PineconeEntitySearchDetails> {
+  async searchEntitiesDetailed(query: string, traceId?: string): Promise<PineconeEntitySearchDetails> {
     if (isBreakerOpen('searchEntities')) {
       logger.warn('pinecone searchEntities circuit breaker open — skipping');
       return { results: [], status: 'breaker_open' };
@@ -624,7 +641,15 @@ export class PineconeMemory {
 
       const durationMs = Date.now() - startMs;
       logger.info(
-        { topScores: capped.slice(0, 3).map((r) => r.score), total: capped.length, durationMs },
+        {
+          topScores: capped.slice(0, 3).map((r) => r.score),
+          // QR-006: candidate IDs alongside scores — bounded to 10 so a
+          // large candidate set can't blow up log volume.
+          ids: capped.slice(0, 10).map((r) => r.id),
+          total: capped.length,
+          durationMs,
+          ...(traceId ? { traceId } : {}),
+        },
         'Pinecone entity search complete',
       );
       trackSuccess('searchEntities');

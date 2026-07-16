@@ -1,8 +1,23 @@
 import { describe, it, expect, vi } from 'vitest';
-import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
-import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { isToolErrorPayload } from '../../../src/mcp/types.ts';
 import { PineconeMemory, type MemoryRecord } from '../../../src/runtimes/chat/providers/pinecone.ts';
+
+// Hoisted so the SAME mock object backs every createChildLogger() call —
+// memory-write.ts calls it once at module load, and QR-006 tests need a
+// stable reference to assert on the log calls it captures.
+const mockMemoryWriteLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => mockMemoryWriteLogger,
+}));
+
+import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
+import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 
 function setup(opts: { upsert?: (r: MemoryRecord[]) => Promise<void> } = {}) {
   const tools: ToolDeclaration[] = [];
@@ -289,5 +304,38 @@ describe('memory_write — conversation-bound sessions (per-chat actor socket)',
     );
     expect(isToolErrorPayload(res)).toBe(true);
     expect(upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('memory_write tool — trace-grade logging (QR-006)', () => {
+  it('logs a success entry with the written record id after upsert succeeds', async () => {
+    mockMemoryWriteLogger.info.mockClear();
+    const { tool } = setup();
+
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'Phil prefers email over calls', memory_type: 'preference' },
+      chatSession(),
+    );
+    const writtenId = (res as { id: string }).id;
+
+    expect(mockMemoryWriteLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ id: writtenId }),
+      expect.stringContaining('memory_write'),
+    );
+  });
+
+  it('does NOT emit a success log when the upsert fails (failure path still only warns)', async () => {
+    mockMemoryWriteLogger.info.mockClear();
+    mockMemoryWriteLogger.warn.mockClear();
+    const { tool } = setup({ upsert: async () => { throw new Error('boom'); } });
+
+    const res = await tool.handler(
+      { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact' },
+      chatSession(),
+    );
+
+    expect(isToolErrorPayload(res)).toBe(true);
+    expect(mockMemoryWriteLogger.info).not.toHaveBeenCalled();
+    expect(mockMemoryWriteLogger.warn).toHaveBeenCalled();
   });
 });
