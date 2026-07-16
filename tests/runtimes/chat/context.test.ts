@@ -17,13 +17,18 @@ vi.mock('../../../src/config.ts', () => ({
     },
   },
 }));
+// Hoisted so the SAME mock object backs every createChildLogger() call —
+// context.ts calls it once at module load, and tests need a stable
+// reference to assert on the log calls it captures (QR-006).
+const mockContextLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockContextLogger,
 }));
 
 import * as configModule from '../../../src/config.ts';
@@ -597,5 +602,104 @@ describe('loadContext — entity mode', () => {
     // Blank message text short-circuits before hitting the entity branch
     expect(result).toBe('');
     expect(pinecone.searchEntities).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QR-006: trace-grade read-path logging — candidate IDs + threaded traceId
+// ---------------------------------------------------------------------------
+
+describe('loadContext — trace-grade logging (QR-006, memory mode)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('logs candidate ids alongside scores, bounded to 10', async () => {
+    const chatResults = Array.from({ length: 8 }, (_, i) => makeResult(`chat-${i}`, `chat fact ${i}`));
+    const senderResults = Array.from({ length: 8 }, (_, i) => makeResult(`sender-${i}`, `sender fact ${i}`));
+    const pinecone = makeMockPinecone(chatResults, senderResults);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
+
+    const expectedIds = [...chatResults, ...senderResults].slice(0, 10).map((r) => r.id);
+    expect(mockContextLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ candidateIds: expectedIds }),
+      'context retrieval complete',
+    );
+    const [fields] = mockContextLogger.info.mock.calls[0];
+    expect(fields.candidateIds).toHaveLength(10);
+  });
+
+  it('threads a supplied traceId into the completion log and down to each search call', async () => {
+    const pinecone = makeMockPinecone([makeResult('r1', 'chat fact')], []);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query', 'trace-abc123');
+
+    expect(mockContextLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ traceId: 'trace-abc123' }),
+      'context retrieval complete',
+    );
+    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query', 'trace-abc123');
+    expect(pinecone.searchForSender).toHaveBeenCalledWith('alice@s.whatsapp.net', 'query', 'trace-abc123');
+    expect(pinecone.searchSelfFacts).toHaveBeenCalledWith('query', 'trace-abc123');
+  });
+
+  it('omits traceId from the completion log and search calls when not supplied', async () => {
+    const pinecone = makeMockPinecone([makeResult('r1', 'chat fact')], []);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'query');
+
+    const [fields] = mockContextLogger.info.mock.calls[0];
+    expect(fields).not.toHaveProperty('traceId');
+    // Existing (pre-QR-006) callers keep the exact 2-arg call shape.
+    expect(pinecone.searchForChat).toHaveBeenCalledWith('chat@g.us', 'query');
+  });
+});
+
+describe('loadContext — trace-grade logging (QR-006, entity mode)', () => {
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mutableConfig.pineconeSearchMode = 'entity';
+  });
+
+  afterEach(() => {
+    mutableConfig.pineconeSearchMode = 'memory';
+  });
+
+  it('logs entity candidate ids, bounded to 10', async () => {
+    const entityResults = Array.from({ length: 12 }, (_, i) =>
+      makeEntityResult(`ent-${i}`, 'building', `Building ${i}`),
+    );
+    const pinecone = makeMockPineconeWithEntity(entityResults);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find building');
+
+    const [fields] = mockContextLogger.info.mock.calls[0];
+    expect(fields.entityIds).toEqual(entityResults.slice(0, 10).map((r) => r.id));
+    expect(fields.entityIds).toHaveLength(10);
+  });
+
+  it('threads a supplied traceId into the entity completion log and to searchEntities', async () => {
+    const pinecone = makeMockPineconeWithEntity([]);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice', 'trace-entity-1');
+
+    expect(mockContextLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ traceId: 'trace-entity-1' }),
+      'entity context retrieval complete',
+    );
+    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice', 'trace-entity-1');
+  });
+
+  it('omits traceId from the entity log and searchEntities call when not supplied', async () => {
+    const pinecone = makeMockPineconeWithEntity([]);
+
+    await loadContext(pinecone as any, 'chat@g.us', 'alice@s.whatsapp.net', 'find invoice');
+
+    const [fields] = mockContextLogger.info.mock.calls[0];
+    expect(fields).not.toHaveProperty('traceId');
+    expect(pinecone.searchEntities).toHaveBeenCalledWith('find invoice');
   });
 });

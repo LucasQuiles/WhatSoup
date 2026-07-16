@@ -88,6 +88,7 @@ const CHAT_JID = '1555000099@s.whatsapp.net';
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),

@@ -322,6 +322,72 @@ describe('PineconeMemory', () => {
       }
     });
 
+    // ── QR-006: trace-grade logging — candidate ids + threaded traceId ──────
+
+    it('search success log includes candidate ids, bounded to 10', async () => {
+      const hits = Array.from({ length: 15 }, (_, i) => makePineconeHit(`hit-${i}`, 0.9 - i * 0.01));
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits } });
+
+      await memory.search('query', {}, 15);
+
+      const [fields] = mockPineconeLogger.info.mock.calls[0];
+      expect(fields.ids).toEqual(hits.slice(0, 10).map((h) => h._id));
+      expect(fields.ids).toHaveLength(10);
+    });
+
+    it('search success log threads a supplied traceId', async () => {
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('hit-1', 0.9)] } });
+
+      await memory.searchDetailed('query', {}, 5, 'trace-xyz');
+
+      expect(mockPineconeLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ traceId: 'trace-xyz' }),
+        'Pinecone search complete',
+      );
+    });
+
+    it('search success log omits traceId when not supplied', async () => {
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('hit-1', 0.9)] } });
+
+      await memory.search('query', {}, 5);
+
+      const [fields] = mockPineconeLogger.info.mock.calls[0];
+      expect(fields).not.toHaveProperty('traceId');
+    });
+
+    it('search retry-success log includes candidate ids and threaded traceId', async () => {
+      mockSearchRecords.mockRejectedValueOnce(new Error('transient'));
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('retry-hit', 0.81)] } });
+
+      await memory.searchDetailed('query', {}, 5, 'trace-retry');
+
+      expect(mockPineconeLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ ids: ['retry-hit'], traceId: 'trace-retry', retried: true }),
+        'Pinecone search complete (after retry)',
+      );
+    });
+
+    it('searchForChat threads a supplied traceId into the completion log without altering the SDK call', async () => {
+      mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makePineconeHit('chat-hit', 0.91)] } });
+
+      await memory.searchForChat('chat-42@g.us', 'query', 'trace-chat-1');
+
+      expect(mockSearchRecords.mock.calls).toEqual([[
+        {
+          query: {
+            topK: 10,
+            inputs: { text: 'query' },
+            filter: { chat_jid: { $eq: 'chat-42@g.us' } },
+          },
+          fields: ['*'],
+        },
+      ]]);
+      expect(mockPineconeLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ traceId: 'trace-chat-1' }),
+        'Pinecone search complete',
+      );
+    });
+
     it('returns empty array when hits is empty', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
       const results = await memory.search('nothing', {}, 5);
@@ -1025,6 +1091,41 @@ describe('entity mode', () => {
     expect(details.status).toBe('ok');
     expect(details.retried).toBe(true);
     expect(details.results.map((r) => r.id)).toEqual(['entity-retry-hit']);
+  });
+
+  // ── QR-006: trace-grade logging — candidate ids + threaded traceId ────────
+
+  it('searchEntitiesDetailed success log includes candidate ids, bounded to 10', async () => {
+    const hits = Array.from({ length: 12 }, (_, i) =>
+      makeEntityHit(`ent-${i}`, 0.9 - i * 0.01, { entity_type: 'building' }),
+    );
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits } });
+
+    await memory.searchEntitiesDetailed('query');
+
+    const [fields] = mockPineconeLogger.info.mock.calls[0];
+    expect(fields.ids).toEqual(hits.slice(0, 10).map((h) => h._id));
+    expect(fields.ids).toHaveLength(10);
+  });
+
+  it('searchEntitiesDetailed success log threads a supplied traceId', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makeEntityHit('ent-1', 0.9)] } });
+
+    await memory.searchEntitiesDetailed('query', 'trace-entity-99');
+
+    expect(mockPineconeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ traceId: 'trace-entity-99' }),
+      'Pinecone entity search complete',
+    );
+  });
+
+  it('searchEntitiesDetailed success log omits traceId when not supplied', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [makeEntityHit('ent-1', 0.9)] } });
+
+    await memory.searchEntitiesDetailed('query');
+
+    const [fields] = mockPineconeLogger.info.mock.calls[0];
+    expect(fields).not.toHaveProperty('traceId');
   });
 
   // ── fromPineconeHitEntity — field mapping ──────────────────────────────────

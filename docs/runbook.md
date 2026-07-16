@@ -352,9 +352,68 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 |--------|-----------|---------|
 | `healthy` | 200 | WhatsApp connected, enrichment fresh, no degraded state |
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
-| `unhealthy` | 503 | WhatsApp disconnected. Messages cannot be received or sent. |
+| `unhealthy` | 503 | WhatsApp is disconnected or a runtime-global safety condition, such as database compatibility loss, blocks safe message processing. |
 
 **Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
+
+### Database Compatibility Startup Classification
+
+A valid database compatibility drain is distinct from an ordinary WhatsApp
+outage or a transient process crash. Its read-only `GET /health` response is
+HTTP 503 with `service_mode: "inspection_only"` and a `startup_block.code` of
+`future_schema` or `engine_recovery_required`. The response also reports
+`operator_action_required: true`. In this state WhatsApp has not started,
+database writes are disabled, and provider and synthetic-turn admission remain
+blocked. The watchdog intentionally does not restart a valid inspection-only
+drain.
+
+If a running Chat process observes a database compatibility rejection in its
+queue or a guarded background provider after startup, its normal health body
+first becomes HTTP 503 and exposes only
+`runtime.chat.database_compatibility.reason`, `observed_migration`, and
+`required_migration`. The runtime stops enrichment and memory consolidation,
+and an in-flight enrichment poller performs no post-provider writes. It rejects
+later Chat admission and does not write a terminal marker through the now
+read-only database handle.
+
+The launchd health watchdog can perform one transition restart into the startup
+classification above. systemd `Restart=on-failure` does not react to HTTP `503`;
+on systemd, a controlled operator restart is required. After that approved
+transition, a valid drain is held without a restart loop and a stable invalid
+artifact exits 78.
+
+Preserve the database artifact and collect only read-only health, service-exit,
+and log evidence. Diagnose whether the artifact requires a compatible newer
+binary or engine recovery; do not infer that the instance is merely
+disconnected. Do not use `reset-failed`, repeated restarts, or a downgrade to a
+pre-guard binary. Any live restart, rollback, repair, replacement, or database
+mutation requires explicit approval before it is attempted.
+
+Some stable startup rejections do not enter the inspection-only health server.
+An invalid schema, unsafe database identity, non-writable canonical database
+artifact, or permanent inspection-health bind failure exits with status 78.
+The systemd unit's `RestartPreventExitStatus=78` prevents a backoff loop; use
+the logs and service exit evidence to identify the specific reason. Exit 78 is
+not a universal database-error classification: `database_identity_changed` and
+other genuinely transient startup failures remain exit 1 and retryable by the
+service manager.
+
+File-backed startup also requires the immediate database parent to be one
+canonical directory owned by the runtime user whose mode bits grant no group or
+other access (normally mode `0700`). Every ancestor is identity-bound across
+`lstat`/`realpath`/`stat`, must be controlled by the runtime user or root, and
+must deny group/other entry replacement unless sticky-bit rules protect the
+runtime-owned child. Exclusive creation attests the new inode through its
+still-open descriptor, and later pathname/device/inode checks reject ordinary
+replacement races before schema writes.
+
+This boundary enforces UID and POSIX mode/sticky-bit metadata. ACL-mediated
+external mutation must be prevented operationally and is outside the claim. It
+also does not claim defense against a privileged or same-UID process performing
+precisely timed rename-and-restore attacks: Node 24 opens the main database and
+its rollback/WAL/SHM sidecars by pathname, so closing those threats requires a
+native SQLite VFS or broker. A parent/ancestor trust rejection is stable and
+exits 78; repair the directory boundary instead of restart-looping the service.
 
 ### Quick Health Check
 

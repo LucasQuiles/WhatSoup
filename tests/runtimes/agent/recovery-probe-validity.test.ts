@@ -116,7 +116,10 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 function makeDb(): Database {
-  return { raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() } } as unknown as Database;
+  return {
+    assertWritableCompatibility: vi.fn(),
+    raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() },
+  } as unknown as Database;
 }
 function makeMessenger(): Messenger {
   return {

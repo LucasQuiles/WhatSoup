@@ -44,7 +44,8 @@ function writeExecutable(filePath: string, contents: string): void {
  *
  * When called with `-p 'process.versions.node.split(".")[0]'` the binary
  * prints `majorStr`. When called with `--version` it prints `v<majorStr>.0.0`.
- * When called with any other arguments it prints `gate-passed` and exits 0.
+ * When called for the database compatibility check it prints `ready`. When
+ * called with any other arguments it prints `gate-passed` and exits 0.
  *
  * @param binDir  Directory to write the `node` file into.
  * @param majorStr  Major version number to report (as string, e.g. "20").
@@ -68,6 +69,10 @@ function writeFakeNode(
     'done',
     'if [ "${1:-}" = "--version" ]; then',
     `  printf 'v${majorStr}.0.0\\n'`,
+    '  exit 0',
+    'fi',
+    'if [[ "$*" == *"database-compatibility-bootstrap.ts"* && "$*" == *"--check"* ]]; then',
+    "  printf 'ready\\n'",
     '  exit 0',
     'fi',
     'if [ "${1:-}" = "-e" ]; then',

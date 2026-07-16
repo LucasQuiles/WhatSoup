@@ -16,7 +16,9 @@ import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import { OUTBOUND_GOVERNOR_SHED_LOG } from '../../../src/transport/outbound-governor.ts';
 import type { LLMProvider } from '../../../src/runtimes/chat/providers/types.ts';
 import type { Database } from '../../../src/core/database.ts';
+import { DatabaseCompatibilityError } from '../../../src/core/database-compatibility.ts';
 import type { PineconeMemory } from '../../../src/runtimes/chat/providers/pinecone.ts';
+import { withDatabaseCompatibility } from '../../../src/runtimes/chat/providers/database-compatibility.ts';
 
 // ---------------------------------------------------------------------------
 // Queue drain helpers — must be defined before vi.mock calls so that
@@ -65,6 +67,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
 
 vi.mock('../../../src/runtimes/chat/rate-limits-db.ts', () => ({
   recordResponse: vi.fn(),
+  recordAttempt: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({
@@ -118,10 +121,11 @@ import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { loadContext } from '../../../src/runtimes/chat/context.ts';
 import { storeMessageIfNew } from '../../../src/core/messages.ts';
-import { recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
+import { recordAttempt, recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
 import { ChatRuntime } from '../../../src/runtimes/chat/runtime.ts';
 import { jitteredDelay } from '../../../src/core/retry.ts';
+import * as configModule from '../../../src/config.ts';
 
 // ---------------------------------------------------------------------------
 // Logger mock accessors (globalThis storage avoids vi.mock hoisting issue)
@@ -154,6 +158,7 @@ const mockCheckRateLimit = vi.mocked(checkRateLimit);
 const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
 const mockLoadContext = vi.mocked(loadContext);
 const mockStoreMessage = vi.mocked(storeMessageIfNew);
+const mockRecordAttempt = vi.mocked(recordAttempt);
 const mockRecordResponse = vi.mocked(recordResponse);
 const mockProcessMedia = vi.mocked(processMedia);
 
@@ -170,6 +175,7 @@ function makeMessenger(): Messenger & { sendMessage: ReturnType<typeof vi.fn> } 
 
 function makeDb() {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       exec: vi.fn(),
       prepare: vi.fn().mockReturnValue({
@@ -250,6 +256,22 @@ function makeHandler() {
   const fallback = makeFallbackProvider();
   const handler = new ChatRuntime(db, messenger, pinecone, primary, fallback);
   return { handler, db, messenger, pinecone, primary, fallback };
+}
+
+function makeCompatibilityGuardedHandler() {
+  const db = makeDb();
+  const messenger = makeMessenger();
+  const pinecone = makePinecone();
+  const primary = makePrimaryProvider();
+  const fallback = makeFallbackProvider();
+  const handler = new ChatRuntime(
+    db,
+    messenger,
+    pinecone,
+    withDatabaseCompatibility(db, primary),
+    withDatabaseCompatibility(db, fallback),
+  );
+  return { handler, db, messenger, primary, fallback };
 }
 
 /**
@@ -811,17 +833,45 @@ describe('Media processing', () => {
     await handleAndDrain(handler, makeIncomingMessage({ contentType: 'audio' }));
 
     // loadContext uses the processed content
+    // QR-006: 5th arg is the per-message traceId, threaded through so
+    // the read path's logs correlate with the rest of the request.
     expect(mockLoadContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
       expect.any(String),
       processedContent,
+      expect.any(String),
     );
 
     // LLM request uses processed content
     const request = vi.mocked(primary.generate).mock.calls[0][0];
     const lastMsg = request.messages[request.messages.length - 1];
     expect(lastMsg.content).toContain(processedContent);
+  });
+
+  it('QR-006: loadContext receives the SAME traceId used for this message\'s other request-scoped logs', async () => {
+    const { handler } = makeHandler();
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    // "rate limit check passed" is logged early in processMessage() with the
+    // per-message traceId generated in handleMessage() — reuse it as the
+    // ground truth for what loadContext should have received.
+    const rateLimitLog = mockLogInfo().mock.calls.find(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('rate limit check passed'),
+    );
+    expect(rateLimitLog).toBeDefined();
+    const traceId = (rateLimitLog![0] as { traceId: string }).traceId;
+    expect(typeof traceId).toBe('string');
+    expect(traceId.length).toBeGreaterThan(0);
+
+    expect(mockLoadContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      traceId,
+    );
   });
 
   it('DB content updated when processMedia returns different content than original', async () => {
@@ -962,6 +1012,60 @@ describe('LLM retry jitter (B05)', () => {
 // ===========================================================================
 
 describe('Runtime interface', () => {
+  it('queued processing latches compatibility before rate-limit, media, attempt, or provider work', async () => {
+    const { handler, db, messenger, primary, fallback } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    const rejection = new DatabaseCompatibilityError(
+      'future_schema',
+      'database compatibility drained',
+      undefined,
+      45,
+    );
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+
+    await expect(handleAndDrain(handler, makeIncomingMessage({ inboundSeq: 73 })))
+      .resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockEnrichmentPollerStop()).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+    expect(handler.getHealthSnapshot()).toMatchObject({
+      status: 'unhealthy',
+      details: {
+        databaseCompatibility: {
+          reason: 'future_schema',
+          observedMigration: 45,
+        },
+      },
+    });
+    await expect(handler.handleMessage(makeIncomingMessage({ messageId: 'msg-after-latch' })))
+      .rejects.toBe(rejection);
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(mockCheckRateLimit).not.toHaveBeenCalled();
+    expect(mockProcessMedia).not.toHaveBeenCalled();
+    expect(mockRecordAttempt).not.toHaveBeenCalled();
+    expect(primary.generate).not.toHaveBeenCalled();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('start() rejects before schema initialization when database compatibility is drained', async () => {
+    const { handler, db } = makeHandler();
+    const rejection = new Error('database compatibility drained');
+    vi.mocked(db.assertWritableCompatibility).mockImplementation(() => {
+      throw rejection;
+    });
+
+    await expect(handler.start()).rejects.toBe(rejection);
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(1);
+    expect(db.raw.exec).not.toHaveBeenCalled();
+    expect(mockEnrichmentPollerStart()).not.toHaveBeenCalled();
+  });
+
   it('start() resolves without error', async () => {
     const { handler } = makeHandler();
     await expect(handler.start()).resolves.toBeUndefined();
@@ -1398,6 +1502,100 @@ describe('WhatSoupError non-retryable paths', () => {
   });
 });
 
+describe('Database compatibility provider rejection', () => {
+  function rejection(): DatabaseCompatibilityError<'future_schema'> {
+    return new DatabaseCompatibilityError('future_schema', 'schema advanced during the turn');
+  }
+
+  it('latches the first primary compatibility rejection without retry, fallback, alert, or outage reply', async () => {
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(2);
+    expect(primary.generate).not.toHaveBeenCalled();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a primary-retry compatibility rejection without fallback or outage handling', async () => {
+    vi.useFakeTimers();
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValueOnce(new Error('transient primary failure'));
+
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+    await vi.runAllTimersAsync();
+    await completion;
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(3);
+    expect(primary.generate).toHaveBeenCalledOnce();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a bad-request fallback compatibility rejection without alerting or outage reply', async () => {
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('bad request', 'LLM_BAD_REQUEST'),
+    );
+
+    await expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(3);
+    expect(primary.generate).toHaveBeenCalledOnce();
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('latches a terminal fallback compatibility rejection without alerting or outage reply', async () => {
+    vi.useFakeTimers();
+    const { handler, db, messenger, primary, fallback } = makeCompatibilityGuardedHandler();
+    const error = rejection();
+    // Sequence: [0] processMessage()'s pre-turn compat gate (runtime.ts entry
+    // check, shared by every test in this describe block — see the sibling
+    // tests above), then per primary attempt a before-check + finally-check
+    // pair from withDatabaseCompatibility (database-compatibility.ts). Two
+    // primary attempts (initial + retry) means 1 + 2*2 = 5 assert calls before
+    // the terminal rejection latches from the SECOND attempt's finally-check —
+    // i.e. after both primary attempts have genuinely run, not from a
+    // before-check that preempts the second attempt's generate() call.
+    vi.mocked(db.assertWritableCompatibility)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw error; });
+    vi.mocked(primary.generate).mockRejectedValue(new Error('transient primary failure'));
+
+    const completion = expect(handleAndDrain(handler, makeIncomingMessage())).resolves.toBeUndefined();
+    await vi.runAllTimersAsync();
+    await completion;
+
+    expect(db.assertWritableCompatibility).toHaveBeenCalledTimes(5);
+    expect(primary.generate).toHaveBeenCalledTimes(2);
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 // ===========================================================================
 // getHealthSnapshot degraded status paths
 // ===========================================================================
@@ -1534,37 +1732,135 @@ describe('Group chat sender label', () => {
 // ===========================================================================
 
 describe('Token budget trimming', () => {
-  it('large window trimmed to stay within token budget — trimmedMessages logged', async () => {
-    const { handler, primary } = makeHandler();
-
-    // Build a conversation window that exceeds the token budget.
-    // config.tokenBudget is typically 100000 tokens; 4 chars ≈ 1 token.
-    // Use enough content to exceed the budget.
-    const longContent = 'x'.repeat(200_000); // ~50k tokens each
-    const bigWindow = [
+  // Build a conversation window that exceeds the token budget.
+  // config.tokenBudget is typically 100000 tokens; 4 chars ≈ 1 token.
+  const longContent = 'x'.repeat(200_000); // ~50k tokens each
+  function bigWindow() {
+    return [
       { role: 'user' as const, content: longContent },
       { role: 'assistant' as const, content: longContent },
       { role: 'user' as const, content: longContent },
       { role: 'assistant' as const, content: longContent },
     ];
-    mockLoadConversationWindow.mockReturnValue(bigWindow);
+  }
+
+  // #1445 QR-010 — summarize-before-trim replaced the silent FIFO drop.
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+
+  afterEach(() => {
+    mutableConfig.workingMemorySummarization = true;
+  });
+
+  it('over budget + summarization enabled (default): one summarization call, then the conversation call — summary prepended, trimmedMessages logged', async () => {
+    const { handler, primary } = makeHandler();
+    mockLoadConversationWindow.mockReturnValue(bigWindow());
     mockProcessMedia.mockResolvedValue({ content: 'final message', images: [] });
 
     await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
 
-    // Window must have been trimmed — messages removed from the front
-    const request = vi.mocked(primary.generate).mock.calls[0][0];
-    // Original window had 4 messages + 1 current = 5; after trimming it must be fewer
-    expect(request.messages.length).toBeLessThan(5);
+    // Two primary.generate calls: one cheap summarization call over the overflow
+    // turns, then the real conversation call — never one call per dropped turn.
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(2);
 
-    // Log must show trim occurred with a positive trimmedMessages count
+    const summarizationRequest = vi.mocked(primary.generate).mock.calls[0][0];
+    const conversationRequest = vi.mocked(primary.generate).mock.calls[1][0];
+
+    // The conversation request is the one actually sent to the user-facing
+    // model — it must have been trimmed down from 4 window turns + 1 current.
+    expect(conversationRequest.messages.length).toBeLessThan(5);
+    // The summary is prepended as a synthetic, labeled turn (not silently dropped).
+    expect(conversationRequest.messages[0].content).toContain('[earlier conversation summary]');
+    // The last message is always the current, real incoming turn — untouched.
+    expect(conversationRequest.messages[conversationRequest.messages.length - 1].content).toContain('final message');
+
+    // The summarization call itself only carries the overflow turns, not the
+    // whole window and not the current message.
+    expect(summarizationRequest.messages).toHaveLength(1);
+    expect(summarizationRequest.messages[0].content).not.toContain('final message');
+
+    // Log must show trim occurred with a positive trimmedMessages count and
+    // record that summarization (not the marker fallback) was used.
     const trimLog = mockLogInfo().mock.calls.find(
       (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('token budget'),
     );
-    // Confirm the log entry exists and has the right shape before asserting values
     expect(trimLog).toHaveLength(2); // [meta, message]
     expect((trimLog![0] as any).trimmedMessages).toBeGreaterThan(0);
     expect((trimLog![0] as any).estimatedTokens).toBeGreaterThan(0);
+    expect((trimLog![0] as any).summarized).toBe(true);
+  });
+
+  it('over budget + summarization disabled: deterministic marker used, no summarization call, user turn still proceeds', async () => {
+    mutableConfig.workingMemorySummarization = false;
+    const { handler, primary, messenger } = makeHandler();
+    mockLoadConversationWindow.mockReturnValue(bigWindow());
+    mockProcessMedia.mockResolvedValue({ content: 'final message', images: [] });
+
+    await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
+
+    // Only the real conversation call — no side summarization call at all.
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(1);
+
+    const conversationRequest = vi.mocked(primary.generate).mock.calls[0][0];
+    expect(conversationRequest.messages[0].content).toMatch(/^\[\d+ earlier turns omitted\]$/);
+
+    // The user still gets a reply — disabling summarization never fails the turn.
+    expect(messenger.sendMessage).toHaveBeenCalled();
+
+    const trimLog = mockLogInfo().mock.calls.find(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('token budget'),
+    );
+    expect((trimLog![0] as any).summarized).toBe(false);
+  });
+
+  it('over budget + summarization LLM call fails: falls back to marker, user turn still proceeds', async () => {
+    const { handler, primary, fallback, messenger } = makeHandler();
+    mockLoadConversationWindow.mockReturnValue(bigWindow());
+    mockProcessMedia.mockResolvedValue({ content: 'final message', images: [] });
+    // First call (summarization) rejects; second call (the real conversation
+    // request) must still succeed — summarization failure never fails the user's turn.
+    vi.mocked(primary.generate)
+      .mockRejectedValueOnce(new Error('summarization provider unavailable'))
+      .mockResolvedValueOnce({
+        content: 'hey whats up',
+        inputTokens: 100,
+        outputTokens: 10,
+        model: 'claude-opus-4-6',
+        durationMs: 500,
+      });
+
+    await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
+
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(2);
+    const conversationRequest = vi.mocked(primary.generate).mock.calls[1][0];
+    expect(conversationRequest.messages[0].content).toMatch(/^\[\d+ earlier turns omitted\]$/);
+
+    // Fallback (used only when primary fails outright) must never be invoked —
+    // the summarization failure was absorbed internally, primary still answered.
+    expect(vi.mocked(fallback.generate)).not.toHaveBeenCalled();
+    expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
+  });
+
+  it('under budget: no summarization call, window passed through untouched', async () => {
+    const { handler, primary } = makeHandler();
+    mockLoadConversationWindow.mockReturnValue([
+      { role: 'user' as const, content: 'short earlier message' },
+    ]);
+    mockProcessMedia.mockResolvedValue({ content: 'final message', images: [] });
+
+    await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
+
+    // No trim log at all — nothing was trimmed.
+    const trimLog = mockLogInfo().mock.calls.find(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('token budget'),
+    );
+    expect(trimLog).toBeUndefined();
+
+    // Exactly one call — the real conversation call. No side summarization call —
+    // and the intact under-budget window reaches the provider verbatim.
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledTimes(1);
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    expect(request.messages).toHaveLength(2); // earlier message + current message
+    expect(request.messages[0].content).toBe('short earlier message');
   });
 });
 

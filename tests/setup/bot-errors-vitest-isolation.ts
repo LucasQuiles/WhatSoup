@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import {
   chmodSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -38,7 +39,9 @@ const tempRoot = realpathSync('/tmp');
 const isolatedHome = mkdtempSync(join(tempRoot, 'ws-vh-'));
 const ownershipToken = randomUUID();
 const ownershipMarker = join(isolatedHome, '.whatsoup-vitest-home');
+const isolatedTmpdir = join(isolatedHome, 'tmp');
 chmodSync(isolatedHome, 0o700);
+mkdirSync(isolatedTmpdir, { mode: 0o700 });
 writeFileSync(ownershipMarker, ownershipToken, { mode: 0o600 });
 
 afterAll(() => {
@@ -60,6 +63,7 @@ afterAll(() => {
 process.env['WHATSOUP_VITEST_HOME'] = isolatedHome;
 process.env['WHATSOUP_VITEST_TEMP_ROOT'] = tempRoot;
 process.env['HOME'] = isolatedHome;
+process.env['TMPDIR'] = isolatedTmpdir;
 process.env['XDG_CONFIG_HOME'] = join(isolatedHome, '.config');
 process.env['XDG_DATA_HOME'] = join(isolatedHome, '.local', 'share');
 process.env['XDG_STATE_HOME'] = join(isolatedHome, '.local', 'state');

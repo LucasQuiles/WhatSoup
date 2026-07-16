@@ -189,6 +189,7 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 
 function makeDb(): Database {
   return {
+    assertWritableCompatibility: vi.fn(),
     raw: {
       prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
       exec: vi.fn(),

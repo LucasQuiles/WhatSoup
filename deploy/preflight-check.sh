@@ -51,6 +51,19 @@ if [ ! -f "$MAIN_TS" ]; then
   exit 1
 fi
 SESSION_TS="$REPO_ROOT/src/runtimes/agent/session.ts"
+DATABASE_BOOTSTRAP_TS="$REPO_ROOT/src/database-compatibility-bootstrap.ts"
+if [ -L "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: unsafe entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -e "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: required entrypoint not found: $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
+if [ ! -f "$DATABASE_BOOTSTRAP_TS" ]; then
+  echo "PREFLIGHT-ERROR: unsafe entrypoint (must be a regular non-symlink file): $DATABASE_BOOTSTRAP_TS" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROBE_TS="$SCRIPT_DIR/preflight-probe.ts"
@@ -127,12 +140,15 @@ PROBE_TARGETS=("$MAIN_TS")
 if [ -f "$SESSION_TS" ]; then
   PROBE_TARGETS+=("$SESSION_TS")
 fi
+PROBE_TARGETS+=("$DATABASE_BOOTSTRAP_TS")
 
 set +e
 probe_out="$(
   WHATSOUP_CONFIG_DIR="$PROBE_TMP/config" \
   WHATSOUP_DATA_DIR="$PROBE_TMP/data" \
   WHATSOUP_STATE_DIR="$PROBE_TMP/state" \
+  WHATSOUP_PREFLIGHT_IMPORT_ONLY=1 \
+  WHATSOUP_PREFLIGHT_IMPORT_SENTINEL=restart-safety-link-probe-v1 \
   "$NODE" \
     --disable-warning=ExperimentalWarning \
     --experimental-strip-types \

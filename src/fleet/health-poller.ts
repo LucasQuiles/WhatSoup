@@ -174,7 +174,102 @@ function evidenceField(name: string, value: unknown): string {
   return `${name}=${String(value)}`;
 }
 
-function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshotClassification {
+function classifyDatabaseInspectionHealth(
+  health: Record<string, unknown>,
+  httpStatus: number | undefined,
+  expectedInstanceName: string,
+): HealthSnapshotClassification | null {
+  if (health.service_mode !== 'inspection_only') return null;
+
+  const startupBlock = asRecord(health.startup_block);
+  const instance = asRecord(health.instance);
+  const sqlite = asRecord(health.sqlite);
+  const admission = asRecord(health.admission);
+  const runtime = asRecord(health.runtime);
+  const runtimeAgent = asRecord(runtime?.agent);
+  const whatsapp = asRecord(health.whatsapp);
+  const connection = asRecord(whatsapp?.connection);
+  const code = stringValue(startupBlock?.code);
+  const generatedAt = stringValue(health.generated_at);
+  const generatedAtMs = generatedAt === null ? Number.NaN : Date.parse(generatedAt);
+  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const latest = sqlite?.schema_migration_latest;
+  const required = positiveIntegerValue(sqlite?.schema_migration_required);
+  const futureLatest = nonNegativeIntegerValue(latest);
+  const supportedCode = code === 'future_schema' || code === 'engine_recovery_required';
+  const latestIsValid = code === 'future_schema'
+    ? futureLatest !== null && required !== null && futureLatest > required
+    : latest === null;
+
+  if (
+    (httpStatus !== undefined && httpStatus !== 503)
+    || health.status !== 'unhealthy'
+    || !Number.isFinite(generatedAtMs)
+    || generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS
+    || generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
+    || instance?.name !== expectedInstanceName
+    || positiveIntegerValue(instance?.pid) === null
+    || instance?.mode !== 'inspection_only'
+    || instance?.socket_path !== null
+    || !supportedCode
+    || startupBlock?.retryable !== false
+    || startupBlock?.operator_action_required !== true
+    || sqlite?.compatibility !== code
+    || sqlite?.schema_ready !== false
+    || sqlite?.database_writes_allowed !== false
+    || sqlite?.sql_inspection_available !== (code === 'future_schema')
+    || sqlite?.artifact_inspection_available !== true
+    || !latestIsValid
+    || required === null
+    || admission?.provider_turns !== 'blocked'
+    || admission?.synthetic_turns !== 'blocked'
+    || runtimeAgent?.started !== false
+    || runtimeAgent?.admission !== 'blocked'
+    || runtimeAgent?.reason !== code
+    || !Object.hasOwn(health, 'durability')
+    || health.durability !== null
+    || whatsapp?.connected !== false
+    || whatsapp?.account_jid !== 'not connected'
+    || connection?.state !== 'not_started'
+    || connection?.reconnect_phase !== null
+    || connection?.reconnect_attempts !== 0
+    || connection?.last_disconnect_reason !== 'startup_schema_gate'
+    || connection?.last_status_code !== null
+    || connection?.auth_failure_class !== 'none'
+  ) {
+    return null;
+  }
+
+  return {
+    status: 'degraded',
+    confidence: 'confirmed',
+    reason: code === 'future_schema'
+      ? 'database_future_schema'
+      : 'database_engine_recovery_required',
+    evidence: [
+      'service_mode=inspection_only',
+      `startup_block_code=${code}`,
+      evidenceField('schema_migration_latest', latest),
+      `schema_migration_required=${required}`,
+      'database_writes_allowed=false',
+      'provider_turns=blocked',
+      'synthetic_turns=blocked',
+    ],
+  };
+}
+
+function classifyHealthSnapshot(
+  health: Record<string, unknown>,
+  expectedInstanceName: string,
+  httpStatus?: number,
+): HealthSnapshotClassification {
+  const databaseInspection = classifyDatabaseInspectionHealth(
+    health,
+    httpStatus,
+    expectedInstanceName,
+  );
+  if (databaseInspection !== null) return databaseInspection;
+
   const healthStatus = stringValue(health.status);
   const generatedAtRaw = health.generated_at;
   const generatedAtMs = typeof generatedAtRaw === 'string' && generatedAtRaw.trim() !== ''
@@ -612,7 +707,7 @@ export class HealthPoller {
         // itself.
         try {
           const health = this.getSelfHealth();
-          const classification = classifyHealthSnapshot(health);
+          const classification = classifyHealthSnapshot(health, name);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
             return;
@@ -653,12 +748,14 @@ export class HealthPoller {
         }
 
         let health: Record<string, unknown>;
+        let responseStatus: number | undefined;
         try {
           const res = await fetch(`http://127.0.0.1:${inst.healthPort}/health`, {
             signal: controller.signal,
             headers,
           });
           reached = true;
+          responseStatus = res.status;
 
           if (!res.ok) {
             const failureHealth = await this.readHealthBody(res);
@@ -680,7 +777,7 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
-              const classification = classifyHealthSnapshot(failureHealth);
+              const classification = classifyHealthSnapshot(failureHealth, name, res.status);
               if (
                 isNonOnlineClassification(classification) &&
                 classification.reason !== 'health_body_unrecognized' &&
@@ -701,7 +798,7 @@ export class HealthPoller {
         }
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
-        const classification = classifyHealthSnapshot(health);
+        const classification = classifyHealthSnapshot(health, name, responseStatus);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
 
